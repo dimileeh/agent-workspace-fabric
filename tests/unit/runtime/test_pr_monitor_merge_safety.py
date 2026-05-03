@@ -736,10 +736,21 @@ async def test_auto_merge_does_not_duplicate_active_monitor_recovery(
             workspace_id=seed.workspace_id,
         )
 
-    assert terminal is True
+    assert terminal is False
+    assert sleep_fn.calls == [60]
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    assert len(operations) == 1
-    assert operations[0].payload == {
+    recovery_operations = [
+        op for op in operations if op.type == OperationType.validate.value
+    ]
+    wait_operations = [
+        op
+        for op in operations
+        if op.type == OperationType.monitor_state.value
+        and op.payload.get("reason_code") == "RECOVERY_IN_PROGRESS"
+    ]
+    assert len(recovery_operations) == 1
+    assert len(wait_operations) == 1
+    assert recovery_operations[0].payload == {
         "owner": "pr_monitor",
         "source": "pr_monitor",
         "reason": "Required validation tier has not passed for this merge candidate.",
@@ -747,6 +758,18 @@ async def test_auto_merge_does_not_duplicate_active_monitor_recovery(
         "stale_reason": "validation_insufficient_tier",
         "requested_action": "validate",
         "recovery_mode": "validate_only",
+    }
+    assert recovery_operations[0].status == OperationStatus.pending.value
+    assert wait_operations[0].status == OperationStatus.succeeded.value
+    assert wait_operations[0].payload["action"] == "recovery_wait"
+    assert wait_operations[0].payload["requested_action"] == "validate"
+    assert wait_operations[0].payload["wait_seconds"] == 60
+    assert wait_operations[0].payload["recovery_mode"] == "validate_only"
+    assert wait_operations[0].payload["stale_reason"] == "validation_insufficient_tier"
+    assert wait_operations[0].result == {
+        "status": "succeeded",
+        "outcome": "wait_elapsed",
+        "slept_seconds": 60,
     }
 
 

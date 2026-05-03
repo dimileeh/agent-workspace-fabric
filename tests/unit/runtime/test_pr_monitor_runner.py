@@ -26,7 +26,13 @@ from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.base import Base
-from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    WorkspaceStatus,
+)
 from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON, Operation, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -2126,16 +2132,19 @@ async def test_validation_recovery_dispatch_is_idempotent_for_duplicate_tick_rep
         pr_number=pr_number,
         head_sha=head_sha,
     )
+    replay_sleep = RecordedSleep()
     replay_terminal = await _dispatch_merge_recovery(
         factory=factory,
         tmp_path=tmp_path,
         workspace_id=workspace_id,
         pr_number=pr_number,
         head_sha=head_sha,
+        sleep_fn=replay_sleep,
     )
 
     assert first_terminal is True
-    assert replay_terminal is True
+    assert replay_terminal is False
+    assert replay_sleep.calls == [60]
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
@@ -2145,10 +2154,31 @@ async def test_validation_recovery_dispatch_is_idempotent_for_duplicate_tick_rep
             for event in workspace.events
             if event.event_type == "monitor.recovery_dispatched"
         ]
-    assert len(operations) == 1
-    assert operations[0].idempotency_key is not None
-    assert operations[0].idempotency_key.startswith("pr_monitor:validate_only:")
-    assert len(operations[0].idempotency_key) <= 128
+    recovery_operations = [
+        op for op in operations if op.type == OperationType.validate.value
+    ]
+    wait_operations = [
+        op
+        for op in operations
+        if op.type == OperationType.monitor_state.value
+        and op.payload.get("reason_code") == "RECOVERY_IN_PROGRESS"
+    ]
+    assert len(recovery_operations) == 1
+    assert len(wait_operations) == 1
+    assert recovery_operations[0].idempotency_key is not None
+    assert recovery_operations[0].idempotency_key.startswith("pr_monitor:validate_only:")
+    assert len(recovery_operations[0].idempotency_key) <= 128
+    assert wait_operations[0].status == OperationStatus.succeeded.value
+    assert wait_operations[0].payload["action"] == "recovery_wait"
+    assert wait_operations[0].payload["requested_action"] == "validate"
+    assert wait_operations[0].payload["wait_seconds"] == 60
+    assert wait_operations[0].payload["recovery_mode"] == "validate_only"
+    assert wait_operations[0].payload["stale_reason"] == "validation_insufficient_tier"
+    assert wait_operations[0].result == {
+        "status": "succeeded",
+        "outcome": "wait_elapsed",
+        "slept_seconds": 60,
+    }
     assert len(recovery_events) == 1
 
 
