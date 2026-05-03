@@ -37,6 +37,8 @@ from awf.api.schemas import (
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.profiles.resolver import ProfileResolutionError
+from awf.service import config as service_config
+from awf.service import provider_readiness as provider_readiness_service
 from awf.service.artifacts import (
     DEFAULT_ARTIFACT_LIST_LIMIT,
     MAX_ARTIFACT_LIST_LIMIT,
@@ -1254,9 +1256,7 @@ async def _provided_health(
 
 
 def _redact_sensitive_payload(payload: dict[str, Any], settings: Settings) -> dict[str, Any]:
-    from awf.service.config import resolve_service_settings
-
-    service_settings = resolve_service_settings(settings)
+    service_settings = service_config.resolve_service_settings(settings)
     redacted = _redact_sensitive_value(payload, settings, service_settings=service_settings)
     return redacted if isinstance(redacted, dict) else {}
 
@@ -1291,13 +1291,11 @@ def _redact_sensitive_text(
     *,
     service_settings: ServiceSettings,
 ) -> str:
-    from awf.service.provider_readiness import redact_launch_preflight_text
-
     redacted = value
     for secret in (settings.api_token, settings.github_token):
         if secret and len(secret) >= 4:
             redacted = redacted.replace(secret, "<redacted>")
-    return redact_launch_preflight_text(service_settings, redacted)
+    return provider_readiness_service.redact_launch_preflight_text(service_settings, redacted)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
