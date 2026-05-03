@@ -75,7 +75,6 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_b8f4de29ba874a3092f1b7f6` | _pending_ | running | Replaces destroyed red-baseline `ws_f59bc95ca0d24c4c8d9144ab`; implementation adds bounded read-tool contracts, empty-state parity, secret/artifact safety regressions, and parity-doc reconciliation. |
 
 ### Reschedule Required Slices
 
@@ -94,6 +93,7 @@ not listed here.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_b8f4de29ba874a3092f1b7f6` | [#191](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/191) | merged | Codex `gpt-5.5`; first Linux-machine completed AWF workspace. Recovered after local false `PLAN_ONLY_OUTPUT` fix, then AWF validated 4,089 tests with 99.03% coverage and merged PR #191 on 2026-05-03. |
 | P1 MCP And Project Onboarding Client Parity | Local control-plane UID/GID strategy | `ws_add274bc03eb49c28a00dd3d` | [#186](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/186) | merged | Manually salvaged 2026-05-03: dropped the out-of-scope workflow edit, addressed the image-missing review inside the integration test, force-pushed cleaned head `655ad145`, requested AWF remonitor, and PR merged 2026-05-03. |
 | P1 MCP And Project Onboarding Client Parity | Launch-time provider readiness preflight | `ws_6dcca29a9a4e47cd89e0c8c7` | [#189](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/189) | merged | Codex `gpt-5.5`; recovered on 2026-05-03 after local AWF monitor fix `ebfad0a` stopped active-recovery remonitor loops and operator remonitor cancelled stale monitor recovery op `op_4daeba7e12904635a68bd8ea`. AWF synced base, revalidated, waited non-check reviewer settle, and merged PR #189 at `3f938345`. |
 | P1 MCP And Project Onboarding Client Parity | First-run smoke workspace command | `ws_cd491b1fdb514174974ed549` | [#188](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/188) | merged | OpenCode/Ollama `deepseek-v4-pro:cloud`; validate-only recovery completed, AWF monitored checks/comments/merge gates, and PR merged 2026-05-03. |
