@@ -5,7 +5,7 @@ import pytest
 
 from awf.service.doctor.reasons import _REASON_TEXT
 
-CATALOG_PATH = Path("docs/REASON_CATALOG.md")
+CATALOG_PATH = Path(__file__).parent.parent.parent.parent / "docs" / "REASON_CATALOG.md"
 
 ALLOWLIST = {
     # Reason codes that are intentionally omitted from the public catalog.
