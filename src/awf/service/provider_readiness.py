@@ -256,6 +256,7 @@ def selected_provider_readiness_preflight(
     )
     probe = _selected_launch_probe(
         provider,
+        settings=settings,
         provider_result=provider_result,
         model=identity.model,
         environ=env,
@@ -405,6 +406,7 @@ def _check_provider_readiness(
 def _selected_launch_probe(
     provider: ProviderName,
     *,
+    settings: ServiceSettings,
     provider_result: Mapping[str, Any],
     model: str | None,
     environ: Mapping[str, str],
@@ -414,30 +416,20 @@ def _selected_launch_probe(
 ) -> dict[str, Any]:
     if not provider_result.get("ok") or not model:
         return {"status": "skipped"}
-    if provider == "claude_code":
-        return _probe_cli_auth_status(
-            provider_label="Claude Code",
-            args=["claude", "auth", "status"],
-            failure_reason="CLAUDE_AUTH_PROBE_FAILED",
-            timeout_reason="CLAUDE_AUTH_PROBE_TIMEOUT",
-            missing_reason="CLAUDE_CLI_NOT_FOUND",
-            error_reason="CLAUDE_AUTH_PROBE_ERROR",
+    executable = _agent_runtime_cli_executable(provider)
+    if executable is not None:
+        runtime_probe = _probe_agent_runtime_cli(
+            settings,
+            executable=executable,
+            provider=provider,
             environ=environ,
             run_subprocess=run_subprocess,
             secrets=secrets,
         )
-    if provider == "gemini":
-        return _probe_cli_auth_status(
-            provider_label="Gemini",
-            args=["gemini", "auth", "status"],
-            failure_reason="GEMINI_AUTH_PROBE_FAILED",
-            timeout_reason="GEMINI_AUTH_PROBE_TIMEOUT",
-            missing_reason="GEMINI_CLI_NOT_FOUND",
-            error_reason="GEMINI_AUTH_PROBE_ERROR",
-            environ=environ,
-            run_subprocess=run_subprocess,
-            secrets=secrets,
-        )
+        if runtime_probe.get("status") != "ok":
+            return runtime_probe
+        if provider in {"codex", "claude_code", "gemini"}:
+            return runtime_probe
     if provider == "opencode":
         return _probe_ollama_model(
             _ollama_tags_urls(environ),
@@ -446,6 +438,108 @@ def _selected_launch_probe(
             secrets=secrets,
         )
     return {"status": "unavailable", "reason_code": "PROVIDER_PROBE_UNAVAILABLE"}
+
+
+def _agent_runtime_cli_executable(provider: ProviderName) -> str | None:
+    return {
+        "codex": "codex",
+        "claude_code": "claude",
+        "gemini": "gemini",
+        "opencode": "opencode",
+    }.get(provider)
+
+
+def _agent_runtime_cli_reason_prefix(provider: ProviderName) -> str:
+    return {
+        "codex": "CODEX",
+        "claude_code": "CLAUDE",
+        "gemini": "GEMINI",
+        "opencode": "OPENCODE",
+    }.get(provider, "PROVIDER")
+
+
+def _probe_agent_runtime_cli(
+    settings: ServiceSettings,
+    *,
+    executable: str,
+    provider: ProviderName,
+    environ: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    reason_prefix = _agent_runtime_cli_reason_prefix(provider)
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        settings.agent_runtime_image,
+        "-lc",
+        f"command -v {executable}",
+    ]
+    try:
+        result = run_subprocess(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_PROVIDER_PROBE_TIMEOUT_SECONDS,
+            env=environ,
+        )
+    except FileNotFoundError:
+        return {
+            "status": "fail",
+            "reason_code": "DOCKER_CLI_NOT_FOUND",
+            "message": (
+                "Docker CLI was not found while probing the configured agent runtime image."
+            ),
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "fail",
+            "reason_code": f"{reason_prefix}_RUNTIME_CLI_PROBE_TIMEOUT",
+            "message": (
+                f"Agent runtime CLI probe for {executable!r} exceeded "
+                f"{_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
+            ),
+        }
+    except Exception as exc:
+        _log_redacted_exception(
+            "provider_readiness.agent_runtime_cli_probe_exception",
+            exc,
+            secrets,
+        )
+        detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
+        return {
+            "status": "fail",
+            "reason_code": f"{reason_prefix}_RUNTIME_CLI_PROBE_ERROR",
+            "message": "Agent runtime CLI probe failed before completion.",
+            "detail": detail,
+        }
+
+    if result.returncode == 0:
+        return {
+            "status": "ok",
+            "reason_code": f"{reason_prefix}_RUNTIME_CLI_AVAILABLE",
+            "detail": _redact(_truncate(result.stdout.strip()), secrets)
+            if result.stdout.strip()
+            else None,
+        }
+
+    detail = _redact(
+        _truncate(result.stderr or result.stdout or f"{executable} was not found"),
+        secrets,
+    )
+    return {
+        "status": "fail",
+        "reason_code": f"{reason_prefix}_RUNTIME_CLI_NOT_FOUND",
+        "message": (
+            f"The configured agent runtime image {settings.agent_runtime_image!r} "
+            f"does not expose the {executable!r} CLI required by provider {provider!r}."
+        ),
+        "detail": detail,
+    }
 
 
 def _probe_cli_auth_status(

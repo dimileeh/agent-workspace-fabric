@@ -65,6 +65,23 @@ def _ollama_ok(url: str, *, timeout: float) -> Any:
     raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
 
+def _runtime_cli_ok(expected_executable: str) -> Any:
+    def _run(args: list[str], **_kwargs: object) -> Any:
+        assert args == [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            f"command -v {expected_executable}",
+        ]
+        return _completed(stdout=f"/usr/bin/{expected_executable}\n")
+
+    return _run
+
+
 @pytest.mark.unit
 def test_provider_readiness_validates_aliases_and_rejects_unknown() -> None:
     assert validate_provider_names(["claude", "opencode", "codex", "docker", ""]) == {
@@ -153,7 +170,18 @@ def test_selected_provider_preflight_checks_only_selected_provider(tmp_path: Pat
 
     assert result["provider"] == "codex"
     assert result["readiness_status"] == "ready"
-    assert subprocess_calls == []
+    assert subprocess_calls == [
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v codex",
+        ]
+    ]
     assert http_urls == []
 
 
@@ -220,7 +248,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         return _completed(stdout="authenticated\n")
 
     cases = [
-        ("codex", "codex", "gpt-custom", "unavailable"),
+        ("codex", "codex", "gpt-custom", "ok"),
         ("claude_code", "claude_code", "claude-opus-4-7", "ok"),
         ("gemini", "gemini", "gemini-3.1-pro-preview", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
@@ -242,8 +270,46 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         assert result["probe_status"] == expected_probe_status
         assert result["blocks_launch"] is False
 
-    assert ["claude", "auth", "status"] in probe_calls
-    assert ["gemini", "auth", "status"] in probe_calls
+    assert [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        "awf-agent-runtime:latest",
+        "-lc",
+        "command -v codex",
+    ] in probe_calls
+    assert [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        "awf-agent-runtime:latest",
+        "-lc",
+        "command -v claude",
+    ] in probe_calls
+    assert [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        "awf-agent-runtime:latest",
+        "-lc",
+        "command -v gemini",
+    ] in probe_calls
+    assert [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        "awf-agent-runtime:latest",
+        "-lc",
+        "command -v opencode",
+    ] in probe_calls
 
 
 @pytest.mark.unit
@@ -271,7 +337,7 @@ def test_selected_opencode_preflight_requires_selected_ollama_model(
         agent="opencode",
         task_policy={"agent_model": "ollama/kimi-k2.6:cloud"},
         environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
-        run_subprocess=_unexpected_subprocess,
+        run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
 
@@ -297,9 +363,18 @@ def test_selected_claude_preflight_requires_usable_non_secret_probe(
     token = "sk-ant-stale-oauth-secret"
 
     def _run(args: list[str], **kwargs: object) -> Any:
-        assert args == ["claude", "auth", "status"]
+        assert args == [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v claude",
+        ]
         assert kwargs["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == token
-        return _completed(returncode=1, stderr=f"expired token {token}")
+        return _completed(returncode=1, stderr=f"missing cli with token {token}")
 
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
@@ -311,7 +386,7 @@ def test_selected_claude_preflight_requires_usable_non_secret_probe(
 
     assert result["auth_status"] == "ok"
     assert result["probe_status"] == "fail"
-    assert result["reason_code"] == "CLAUDE_AUTH_PROBE_FAILED"
+    assert result["reason_code"] == "CLAUDE_RUNTIME_CLI_NOT_FOUND"
     assert result["blocks_launch"] is True
     serialized = json.dumps(result, sort_keys=True)
     assert token not in serialized
@@ -381,9 +456,18 @@ def test_selected_gemini_preflight_requires_usable_non_secret_probe(
     token = "AIzaGeminiProbeSecret"
 
     def _run(args: list[str], **kwargs: object) -> Any:
-        assert args == ["gemini", "auth", "status"]
+        assert args == [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v gemini",
+        ]
         assert kwargs["env"]["GEMINI_API_KEY"] == token
-        return _completed(returncode=1, stdout=f"account rejected {token}")
+        return _completed(returncode=1, stdout=f"missing cli with token {token}")
 
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
@@ -395,12 +479,79 @@ def test_selected_gemini_preflight_requires_usable_non_secret_probe(
 
     assert result["auth_status"] == "ok"
     assert result["probe_status"] == "fail"
-    assert result["reason_code"] == "GEMINI_AUTH_PROBE_FAILED"
+    assert result["reason_code"] == "GEMINI_RUNTIME_CLI_NOT_FOUND"
     assert result["blocks_launch"] is True
     serialized = json.dumps(result, sort_keys=True)
     assert token not in serialized
     assert "gemini_file_secret" not in serialized
     assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
+def test_selected_gemini_preflight_uses_agent_runtime_cli_not_api_cli(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".gemini").mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> Any:
+        calls.append(args)
+        if args[0] == "gemini":
+            raise FileNotFoundError("api container gemini is absent")
+        return _completed(stdout="/usr/bin/gemini\n")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="gemini",
+        task_policy={},
+        environ={},
+        run_subprocess=_run,
+    )
+
+    assert result["provider"] == "gemini"
+    assert result["readiness_status"] == "ready"
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["blocks_launch"] is False
+    assert calls == [
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            "awf-agent-runtime:latest",
+            "-lc",
+            "command -v gemini",
+        ]
+    ]
+
+
+@pytest.mark.unit
+def test_selected_codex_preflight_blocks_when_runtime_cli_missing(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "auth.json").write_text('{"token":"codex_file_secret"}')
+
+    def _run(args: list[str], **_kwargs: object) -> Any:
+        assert args[-1] == "command -v codex"
+        return _completed(returncode=1, stderr="codex: not found")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="codex",
+        task_policy={},
+        environ={},
+        run_subprocess=_run,
+    )
+
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "CODEX_RUNTIME_CLI_NOT_FOUND"
+    assert result["blocks_launch"] is True
 
 
 @pytest.mark.unit
