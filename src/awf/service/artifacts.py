@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.schemas import WorkspaceArtifactListResponse, WorkspaceArtifactResponse
 from awf.common.config import get_settings
 from awf.db.repositories import WorkspaceRepository
+from awf.service.bounded_list import paginate_bounded_list
 
 DEFAULT_ARTIFACT_LIST_LIMIT = 50
 MAX_ARTIFACT_LIST_LIMIT = 500
@@ -59,6 +60,7 @@ async def list_workspace_artifacts_metadata(
     workspace_id: str,
     work_dir: str | Path | None = None,
     limit: int = DEFAULT_ARTIFACT_LIST_LIMIT,
+    cursor: str | None = None,
 ) -> WorkspaceArtifactListResponse | None:
     """Return safe artifact metadata for one workspace, or ``None`` if missing."""
 
@@ -66,14 +68,18 @@ async def list_workspace_artifacts_metadata(
         return None
     artifact_dir = _workspace_artifact_dir(workspace_id, work_dir=work_dir)
     items = await asyncio.to_thread(_list_artifacts, workspace_id, artifact_dir)
-    bounded_limit = _bounded_limit(limit)
-    page_items = items[:bounded_limit]
+    page = paginate_bounded_list(
+        items,
+        limit=limit,
+        max_limit=MAX_ARTIFACT_LIST_LIMIT,
+        cursor=cursor,
+    )
     return WorkspaceArtifactListResponse(
-        items=page_items,
-        next_cursor=None,
-        has_more=len(items) > bounded_limit,
-        limit=bounded_limit,
-        cursor=None,
+        items=page.items,
+        next_cursor=page.next_cursor,
+        has_more=page.has_more,
+        limit=page.limit,
+        cursor=page.cursor,
     )
 
 
@@ -128,10 +134,6 @@ def list_artifacts(workspace_id: str, artifact_dir: Path) -> list[ArtifactMetada
 
 def _list_artifacts(workspace_id: str, artifact_dir: Path) -> list[WorkspaceArtifactResponse]:
     return [_artifact_response(item) for item in list_artifacts(workspace_id, artifact_dir)]
-
-
-def _bounded_limit(limit: int) -> int:
-    return max(1, min(limit, MAX_ARTIFACT_LIST_LIMIT))
 
 
 def _artifact_response(item: ArtifactMetadata) -> WorkspaceArtifactResponse:

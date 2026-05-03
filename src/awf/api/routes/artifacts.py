@@ -24,6 +24,7 @@ from awf.service.artifacts import (
     get_downloadable_artifact,
     list_workspace_artifacts_metadata,
 )
+from awf.service.bounded_list import InvalidBoundedListCursorError
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/artifacts", tags=["artifacts"])
 
@@ -56,13 +57,24 @@ async def list_workspace_artifacts(
             description="Maximum artifact metadata records to return.",
         ),
     ] = DEFAULT_ARTIFACT_LIST_LIMIT,
+    cursor: Annotated[str | None, Query(max_length=64)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceArtifactListResponse:
-    response = await list_workspace_artifacts_metadata(
-        session,
-        workspace_id=workspace_id,
-        limit=limit,
-    )
+    try:
+        response = await list_workspace_artifacts_metadata(
+            session,
+            workspace_id=workspace_id,
+            limit=limit,
+            cursor=cursor,
+        )
+    except InvalidBoundedListCursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_CURSOR",
+                "message": "Invalid artifact list cursor.",
+            },
+        ) from exc
     if response is None:
         raise _workspace_not_found(workspace_id)
     return response

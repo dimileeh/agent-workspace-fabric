@@ -30,6 +30,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.profiles.models import WorkspaceProfile
+from awf.service.bounded_list import paginate_bounded_list
 
 _LABEL_RE = re.compile(r"^(?P<index>\d+)_(?P<phase>[A-Za-z][A-Za-z0-9_-]*)$")
 _LEGACY_LABEL_RE = re.compile(r"^cmd_(?P<index>\d+)$")
@@ -68,6 +69,7 @@ async def list_validation_provenance_response(
     *,
     workspace_id: str,
     limit: int = DEFAULT_VALIDATION_PROVENANCE_LIMIT,
+    cursor: str | None = None,
 ) -> ValidationProvenanceListResponse | None:
     workspace = await WorkspaceRepository(session).get(workspace_id)
     if workspace is None:
@@ -84,19 +86,19 @@ async def list_validation_provenance_response(
         )
     else:
         items = _build_validation_items(workspace, streams)
-    bounded_limit = _bounded_limit(limit)
-    page_items = items[:bounded_limit]
-    return ValidationProvenanceListResponse(
-        items=page_items,
-        next_cursor=None,
-        has_more=len(items) > bounded_limit,
-        limit=bounded_limit,
-        cursor=None,
+    page = paginate_bounded_list(
+        items,
+        limit=limit,
+        max_limit=MAX_VALIDATION_PROVENANCE_LIMIT,
+        cursor=cursor,
     )
-
-
-def _bounded_limit(limit: int) -> int:
-    return max(1, min(limit, MAX_VALIDATION_PROVENANCE_LIMIT))
+    return ValidationProvenanceListResponse(
+        items=page.items,
+        next_cursor=page.next_cursor,
+        has_more=page.has_more,
+        limit=page.limit,
+        cursor=page.cursor,
+    )
 
 
 @dataclass

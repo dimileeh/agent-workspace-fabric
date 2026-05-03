@@ -20,6 +20,8 @@ from awf.db.enums import AgentRuntime, OperationStatus, OperationType, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    StaleReasonCreate,
+    StaleReasonRepository,
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceRepository,
@@ -423,6 +425,72 @@ class TestWorkspaceStaleReasonsEndpoint:
         assert [item["reason_code"] for item in items] == ["STALE_OVERLAP"]
         assert items[0]["status"] == "resolved"
         assert items[0]["resolved_at"] is not None
+
+    @pytest.mark.unit
+    async def test_workspace_stale_reasons_next_cursor_fetches_second_page(
+        self,
+        client: AsyncClient,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        workspace_id, attempt_id, candidate_id = await _seed_candidate(
+            factory,
+            pr_url="https://github.com/example/svc/pull/379",
+            pr_number=379,
+            branch_name="awf/stale-pagination",
+        )
+
+        async with factory() as session:
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(attempt_id)
+            assert candidate is not None
+            assert candidate.id == candidate_id
+            await StaleReasonRepository(session).replace_active_findings(
+                workspace_id=workspace_id,
+                candidate_id=candidate_id,
+                attempt_id=attempt_id,
+                task_id=candidate.task_id,
+                findings=[
+                    StaleReasonCreate(
+                        reason_code="STALE_DEPENDENCY",
+                        trigger_type="dependency_changed",
+                        trigger_ref="uv.lock",
+                        explanation="Dependency manifest changed on target branch.",
+                    ),
+                    StaleReasonCreate(
+                        reason_code="STALE_SCHEMA",
+                        trigger_type="schema_changed",
+                        trigger_ref="migrations/versions/new.py",
+                        explanation="Schema lineage changed on target branch.",
+                    ),
+                ],
+            )
+            await session.commit()
+
+        first_response = await client.get(
+            f"/v1/workspaces/{workspace_id}/stale-reasons",
+            params={"limit": 1},
+        )
+
+        assert first_response.status_code == 200
+        first_page = first_response.json()
+        assert len(first_page["items"]) == 1
+        assert first_page["has_more"] is True
+        assert first_page["next_cursor"] is not None
+
+        second_response = await client.get(
+            f"/v1/workspaces/{workspace_id}/stale-reasons",
+            params={"limit": 1, "cursor": first_page["next_cursor"]},
+        )
+
+        assert second_response.status_code == 200
+        second_page = second_response.json()
+        assert len(second_page["items"]) == 1
+        assert {
+            first_page["items"][0]["reason_code"],
+            second_page["items"][0]["reason_code"],
+        } == {"STALE_DEPENDENCY", "STALE_SCHEMA"}
+        assert second_page["has_more"] is False
+        assert second_page["next_cursor"] is None
+        assert second_page["cursor"] == first_page["next_cursor"]
 
     @pytest.mark.unit
     async def test_workspace_stale_reasons_endpoint_returns_empty_for_unknown_workspace(

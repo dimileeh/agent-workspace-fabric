@@ -23,6 +23,7 @@ from awf.api.schemas import (
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
+from awf.service.bounded_list import paginate_bounded_list
 from awf.service.coordination import coordination_warnings_from_task_policy
 from awf.service.profile_metadata import network_posture_from_profile_snapshot
 from awf.service.provider_recovery import (
@@ -250,6 +251,7 @@ async def list_workspace_stale_reasons_response(
     workspace_id: str,
     include_resolved: bool = False,
     limit: int = DEFAULT_STALE_REASON_LIMIT,
+    cursor: str | None = None,
 ) -> StaleReasonListResponse | None:
     if not await WorkspaceRepository(session).exists(workspace_id):
         return None
@@ -259,19 +261,19 @@ async def list_workspace_stale_reasons_response(
         if include_resolved
         else await stale_repo.list_active_for_workspace(workspace_id)
     )
-    bounded_limit = _bounded_stale_reason_limit(limit)
-    page_rows = rows[:bounded_limit]
-    return StaleReasonListResponse(
-        items=[StaleReasonResponse.model_validate(row) for row in page_rows],
-        next_cursor=None,
-        has_more=len(rows) > bounded_limit,
-        limit=bounded_limit,
-        cursor=None,
+    page = paginate_bounded_list(
+        rows,
+        limit=limit,
+        max_limit=MAX_STALE_REASON_LIMIT,
+        cursor=cursor,
     )
-
-
-def _bounded_stale_reason_limit(limit: int) -> int:
-    return max(1, min(limit, MAX_STALE_REASON_LIMIT))
+    return StaleReasonListResponse(
+        items=[StaleReasonResponse.model_validate(row) for row in page.items],
+        next_cursor=page.next_cursor,
+        has_more=page.has_more,
+        limit=page.limit,
+        cursor=page.cursor,
+    )
 
 
 def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:

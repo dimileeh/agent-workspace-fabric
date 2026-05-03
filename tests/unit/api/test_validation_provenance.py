@@ -1364,6 +1364,69 @@ async def test_validation_route_function_returns_persisted_run_items(
 
 
 @pytest.mark.unit
+async def test_validation_provenance_next_cursor_fetches_second_page(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _insert_validation_run(
+        engine,
+        run_id="vr_page_000000000001",
+        workspace_id=workspace_id,
+        commands=[
+            {
+                "phase": "setup",
+                "command_index": 1,
+                "command": "uv sync",
+                "stream_ids": {},
+            }
+        ],
+        started_at=datetime(2026, 4, 26, 13, 0, tzinfo=UTC),
+    )
+    await _insert_validation_run(
+        engine,
+        run_id="vr_page_000000000002",
+        workspace_id=workspace_id,
+        commands=[
+            {
+                "phase": "validate",
+                "command_index": 1,
+                "command": "pytest -q",
+                "stream_ids": {},
+            }
+        ],
+        started_at=datetime(2026, 4, 26, 13, 1, tzinfo=UTC),
+    )
+
+    first_response = await client.get(
+        f"/v1/workspaces/{workspace_id}/validation",
+        params={"limit": 1},
+    )
+
+    assert first_response.status_code == 200
+    first_page = first_response.json()
+    assert [item["validation_run_id"] for item in first_page["items"]] == [
+        "vr_page_000000000001"
+    ]
+    assert first_page["has_more"] is True
+    assert first_page["next_cursor"] is not None
+
+    second_response = await client.get(
+        f"/v1/workspaces/{workspace_id}/validation",
+        params={"limit": 1, "cursor": first_page["next_cursor"]},
+    )
+
+    assert second_response.status_code == 200
+    second_page = second_response.json()
+    assert [item["validation_run_id"] for item in second_page["items"]] == [
+        "vr_page_000000000002"
+    ]
+    assert second_page["has_more"] is False
+    assert second_page["next_cursor"] is None
+    assert second_page["cursor"] == first_page["next_cursor"]
+
+
+@pytest.mark.unit
 def test_current_target_head_sha_skips_newer_candidates_without_head_sha() -> None:
     newer_without_head = type(
         "Candidate",

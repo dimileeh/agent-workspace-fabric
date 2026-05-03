@@ -212,6 +212,45 @@ class TestWorkspaceArtifacts:
         datetime.fromisoformat(stdout_item["modified_at"])
 
     @pytest.mark.unit
+    async def test_artifact_list_next_cursor_fetches_second_page(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        work_dir, headers = _configure_artifact_api(monkeypatch, tmp_path)
+        artifact_dir = work_dir / "artifacts" / workspace_id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "a.txt").write_text("alpha\n", encoding="utf-8")
+        (artifact_dir / "b.txt").write_text("beta\n", encoding="utf-8")
+
+        first_response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            params={"limit": 1},
+            headers=headers,
+        )
+
+        assert first_response.status_code == 200
+        first_page = first_response.json()
+        assert [item["relative_path"] for item in first_page["items"]] == ["a.txt"]
+        assert first_page["has_more"] is True
+        assert first_page["next_cursor"] is not None
+
+        second_response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            params={"limit": 1, "cursor": first_page["next_cursor"]},
+            headers=headers,
+        )
+
+        assert second_response.status_code == 200
+        second_page = second_response.json()
+        assert [item["relative_path"] for item in second_page["items"]] == ["b.txt"]
+        assert second_page["has_more"] is False
+        assert second_page["next_cursor"] is None
+        assert second_page["cursor"] == first_page["next_cursor"]
+
+    @pytest.mark.unit
     async def test_download_artifact_serves_bytes_and_headers(
         self,
         client: AsyncClient,

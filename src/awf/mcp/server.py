@@ -42,6 +42,7 @@ from awf.service.artifacts import (
     MAX_ARTIFACT_LIST_LIMIT,
     list_workspace_artifacts_metadata,
 )
+from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
@@ -556,14 +557,19 @@ def build_mcp_server(
             le=MAX_VALIDATION_PROVENANCE_LIMIT,
             description="Maximum validation provenance records to return.",
         ),
+        cursor: str | None = Field(default=None, max_length=64),
     ) -> CallToolResult:
         """Read-only operator observability: list validation provenance for a workspace."""
         async with service.session_factory() as session:
-            response = await list_validation_provenance_response(
-                session,
-                workspace_id=workspace_id,
-                limit=limit,
-            )
+            try:
+                response = await list_validation_provenance_response(
+                    session,
+                    workspace_id=workspace_id,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            except InvalidBoundedListCursorError:
+                return _error_result("INVALID_CURSOR", "Invalid validation provenance cursor.")
             if response is None:
                 return _null_tool_result()
         return _tool_result(response.model_dump(mode="json"))
@@ -578,15 +584,20 @@ def build_mcp_server(
             le=MAX_STALE_REASON_LIMIT,
             description="Maximum stale reason records to return.",
         ),
+        cursor: str | None = Field(default=None, max_length=64),
     ) -> CallToolResult:
         """Read-only operator observability: list structured workspace stale reasons."""
         async with service.session_factory() as session:
-            response = await list_workspace_stale_reasons_response(
-                session,
-                workspace_id=workspace_id,
-                include_resolved=include_resolved,
-                limit=limit,
-            )
+            try:
+                response = await list_workspace_stale_reasons_response(
+                    session,
+                    workspace_id=workspace_id,
+                    include_resolved=include_resolved,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            except InvalidBoundedListCursorError:
+                return _error_result("INVALID_CURSOR", "Invalid stale reason cursor.")
             if response is None:
                 return _null_tool_result()
         return _tool_result(response.model_dump(mode="json"))
@@ -600,15 +611,20 @@ def build_mcp_server(
             le=MAX_ARTIFACT_LIST_LIMIT,
             description="Maximum artifact metadata records to return.",
         ),
+        cursor: str | None = Field(default=None, max_length=64),
     ) -> CallToolResult:
         """Read-only operator observability: list workspace artifact metadata only."""
         async with service.session_factory() as session:
-            response = await list_workspace_artifacts_metadata(
-                session,
-                workspace_id=workspace_id,
-                work_dir=settings_value.work_dir,
-                limit=limit,
-            )
+            try:
+                response = await list_workspace_artifacts_metadata(
+                    session,
+                    workspace_id=workspace_id,
+                    work_dir=settings_value.work_dir,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            except InvalidBoundedListCursorError:
+                return _error_result("INVALID_CURSOR", "Invalid artifact list cursor.")
             if response is None:
                 return _null_tool_result()
         return _tool_result(response.model_dump(mode="json"))
