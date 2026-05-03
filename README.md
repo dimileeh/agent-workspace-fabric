@@ -788,6 +788,29 @@ docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
 docker compose -f docker/compose/local-service.yml up --build
 ```
 
+On Linux, host Ollama is often bound only to `127.0.0.1:11434`, which Docker
+containers cannot reach through `host.docker.internal`. AWF includes a
+Linux-only optional `ollama-bridge` Compose profile that binds a host-network
+socat listener on the Docker bridge address and forwards it to host-local
+Ollama. It is disabled by default and is not needed on macOS Docker Desktop.
+
+```bash
+cat >> docker/compose/.env <<'EOF'
+COMPOSE_PROFILES=ollama-bridge
+AWF_OPENCODE_OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+OLLAMA_HOST=http://host.docker.internal:11434
+AWF_OLLAMA_BRIDGE_BIND_ADDRESS=172.17.0.1
+AWF_OLLAMA_BRIDGE_LISTEN_PORT=11434
+AWF_OLLAMA_BRIDGE_TARGET_HOST=127.0.0.1
+AWF_OLLAMA_BRIDGE_TARGET_PORT=11434
+EOF
+uv run --python 3.12 --extra dev awf service bootstrap --provider opencode
+```
+
+If your Docker host gateway is not `172.17.0.1`, set
+`AWF_OLLAMA_BRIDGE_BIND_ADDRESS` to the address that
+`host.docker.internal:host-gateway` resolves to for local containers.
+
 Inspect the service and logs from another terminal:
 
 ```bash
@@ -1316,6 +1339,8 @@ OPENAI_API_KEY=<optional Codex env auth>
 ANTHROPIC_API_KEY=<optional Claude env auth>
 GEMINI_API_KEY=<optional Gemini env auth>
 AWF_OPENCODE_OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+COMPOSE_PROFILES=ollama-bridge
+AWF_OLLAMA_BRIDGE_BIND_ADDRESS=172.17.0.1
 AWF_AGENT_WALL_TIMEOUT_SECONDS=7200
 AWF_AGENT_IDLE_TIMEOUT_SECONDS=900
 AWF_COMPLETED_WORKSPACE_RETENTION_HOURS=168

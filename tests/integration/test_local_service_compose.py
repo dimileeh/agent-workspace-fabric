@@ -18,7 +18,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     data = yaml.safe_load(compose_path.read_text())
     services = data["services"]
 
-    assert {"postgres", "migrate", "api", "worker"}.issubset(services)
+    assert {"postgres", "migrate", "api", "worker", "ollama-bridge"}.issubset(services)
 
     for service_name in ("migrate", "api", "worker"):
         assert services[service_name]["image"] == "awf-control-plane:local"
@@ -106,3 +106,12 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         depends_on = services[service_name]["depends_on"]
         assert depends_on["postgres"]["condition"] == "service_healthy"
         assert depends_on["migrate"]["condition"] == "service_completed_successfully"
+
+    bridge = services["ollama-bridge"]
+    assert bridge["profiles"] == ["ollama-bridge"]
+    assert bridge["image"] == "alpine/socat:1.8.0.3"
+    assert bridge["network_mode"] == "host"
+    assert bridge["command"] == [
+        "TCP-LISTEN:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434},bind=${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1},fork,reuseaddr",
+        "TCP:${AWF_OLLAMA_BRIDGE_TARGET_HOST:-127.0.0.1}:${AWF_OLLAMA_BRIDGE_TARGET_PORT:-11434}",
+    ]

@@ -167,6 +167,45 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_bootstrap_starts_optional_ollama_bridge_when_profile_enabled(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+            provider_environ={"COMPOSE_PROFILES": "metrics,ollama-bridge"},
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert [
+        "docker",
+        "compose",
+        "-f",
+        "docker/compose/local-service.yml",
+        "up",
+        "-d",
+        "--build",
+        "ollama-bridge",
+    ] in calls
+
+
+@pytest.mark.unit
 def test_bootstrap_success_payload_includes_stage_output(tmp_path: Path) -> None:
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if args[-1] == "migrate":

@@ -128,5 +128,15 @@ services:
         condition: service_completed_successfully
     command: sh -c "awf worker"
 
+  ollama-bridge:
+    profiles:
+      - ollama-bridge
+    image: alpine/socat:1.8.0.3
+    network_mode: host
+    command:
+      - "TCP-LISTEN:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434},bind=${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1},fork,reuseaddr"
+      - "TCP:${AWF_OLLAMA_BRIDGE_TARGET_HOST:-127.0.0.1}:${AWF_OLLAMA_BRIDGE_TARGET_PORT:-11434}"
+    restart: unless-stopped
+
 volumes:
   awf-postgres-data:

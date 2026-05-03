@@ -170,11 +170,13 @@ async def run_service_bootstrap(
     runner = run_subprocess or _run_subprocess
     collector = status_collector or collect_service_status
     completed: list[ServiceBootstrapStageResult] = []
+    service_env = local_service_environ() if provider_environ is None else provider_environ
 
     for stage in _bootstrap_stages(
         settings,
         options=resolved_options,
         compose_file=compose_file,
+        environ=service_env,
     ):
         completed.append(await asyncio.to_thread(_run_stage, stage, run_subprocess=runner))
 
@@ -184,9 +186,7 @@ async def run_service_bootstrap(
         status_collector=collector,
         sleep=sleep,
         monotonic=monotonic,
-        provider_environ=local_service_environ()
-        if provider_environ is None
-        else provider_environ,
+        provider_environ=service_env,
     )
     return ServiceBootstrapResult(
         stages=tuple(completed),
@@ -199,6 +199,7 @@ def _bootstrap_stages(
     *,
     options: ServiceBootstrapOptions,
     compose_file: Path,
+    environ: Mapping[str, str] | None = None,
 ) -> tuple[_BootstrapStage, ...]:
     stages: list[_BootstrapStage] = []
     if not options.skip_agent_runtime_build:
@@ -224,6 +225,16 @@ def _bootstrap_stages(
                 "postgres",
                 (*compose, "up", "-d", "--build", "postgres"),
             ),
+            *(
+                [
+                    _BootstrapStage(
+                        "ollama_bridge",
+                        (*compose, "up", "-d", "--build", "ollama-bridge"),
+                    )
+                ]
+                if _compose_profile_enabled(environ or {}, "ollama-bridge")
+                else []
+            ),
             _BootstrapStage(
                 "migrate",
                 (*compose, "up", "--build", "--force-recreate", "migrate"),
@@ -235,6 +246,16 @@ def _bootstrap_stages(
         ]
     )
     return tuple(stages)
+
+
+def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
+    raw = environ.get("COMPOSE_PROFILES", "")
+    return profile in {
+        item.strip()
+        for chunk in raw.split(",")
+        for item in chunk.split()
+        if item.strip()
+    }
 
 
 def _run_stage(

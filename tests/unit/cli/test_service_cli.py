@@ -584,6 +584,15 @@ def test_readme_documents_service_bootstrap_command() -> None:
 
 
 @pytest.mark.unit
+def test_readme_documents_optional_ollama_bridge_profile() -> None:
+    readme = Path("README.md").read_text()
+
+    assert "COMPOSE_PROFILES=ollama-bridge" in readme
+    assert "AWF_OLLAMA_BRIDGE_BIND_ADDRESS" in readme
+    assert "Linux-only" in readme
+
+
+@pytest.mark.unit
 def test_readme_documents_control_plane_postgres_backup_restore() -> None:
     readme = Path("README.md").read_text()
 
