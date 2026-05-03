@@ -8,7 +8,7 @@ def test_sdk_stance_in_docs() -> None:
     """
     repo_root = Path(__file__).resolve().parent.parent.parent.parent
 
-    docs_to_check = ["README.md", "docs/REST_API_REFERENCE.md", "docs/MCP_CLIENT_PARITY.md"]
+    docs_to_check = ["README.md", "docs/CLIENT_SURFACES.md", "docs/MCP_CLIENT_PARITY.md"]
 
     expected_surfaces_phrase = "REST, CLI, and MCP are the supported client surfaces for v0.1"
     expected_warning_phrase = (
