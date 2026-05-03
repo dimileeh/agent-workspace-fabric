@@ -1181,6 +1181,20 @@ docker info
 docker compose version
 ```
 
+### Installation
+
+The recommended primary path is to install AWF as an isolated CLI tool via `uv tool`:
+
+```bash
+uv tool install aira-awf
+```
+
+If you prefer to install it into an existing environment, use:
+
+```bash
+uv pip install aira-awf
+```
+
 ### Recommended Local Bootstrap
 
 Once AWF is installed, the fastest path to a working local control plane is
@@ -1209,7 +1223,7 @@ walkthrough). The two `awf init` shapes are explicit:
 Subsequent sections describe the contributor/development setup; a fresh
 machine only needs the steps above plus a coding-agent credential.
 
-### Clone and Install
+### Contributor Setup
 
 ```bash
 git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
