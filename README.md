@@ -1200,7 +1200,8 @@ awf service status --format pretty
 After it reports success, export `AWF_GITHUB_TOKEN` so the worker can create
 PRs and use `awf init <path>` to inspect a project repository (see
 [Project Onboarding](docs/PROJECT_ONBOARDING.md) for the project-mode
-walkthrough). The two `awf init` shapes are explicit:
+walkthrough and per-provider copy-paste prompts). The two `awf init` shapes are
+explicit:
 
 - `awf init` — bootstrap AWF on this machine (Docker, state dir, `.env`,
   service stack).
