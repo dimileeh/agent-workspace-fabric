@@ -79,7 +79,7 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ### Gemini
 
 ```text
-Inspect this repository for AWF onboarding. Do not launch a workspace yet.
+Analyze this repository for AWF onboarding. Do not launch a workspace yet.
 
 1. Run `awf init .` to inspect the repo.
 2. Run `awf profile init . --write` to generate `.awf/workspace.yml`.
@@ -93,7 +93,7 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ### OpenCode
 
 ```text
-Inspect this repository for AWF onboarding. Do not launch a workspace yet.
+Use `opencode run` to inspect this repository for AWF onboarding. Do not launch a workspace yet.
 
 1. Run `awf init .` to inspect the repo.
 2. Run `awf profile init . --write` to generate `.awf/workspace.yml`.
@@ -107,7 +107,7 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ### OpenClaw
 
 ```text
-Inspect this repository for AWF onboarding. Do not launch a workspace yet.
+Inspect this repository for AWF onboarding via your OpenClaw runtime. Do not launch a workspace yet.
 
 1. Run `awf init .` to inspect the repo.
 2. Run `awf profile init . --write` to generate `.awf/workspace.yml`.
