@@ -628,7 +628,7 @@ uv run --python 3.12 --extra dev awf service status --format pretty
 If the work-dir corruption came from a partially deleted workspace, prefer
 `awf service gc` after the service is healthy instead of manually removing
 workspace state. If Postgres itself is suspect, capture a backup before any
-destructive cleanup, then use the restore flow above.
+destructive cleanup, then use the restore flow in [Control-Plane Postgres Backup And Restore](#control-plane-postgres-backup-and-restore).
 
 ## Stranded PR Watchdog
 
