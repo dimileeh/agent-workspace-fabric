@@ -12,7 +12,7 @@ def test_sdk_stance_in_docs() -> None:
 
     expected_surfaces_phrase = "REST, CLI, and MCP are the supported client surfaces for v0.1"
     expected_warning_phrase = (
-        "do not import internal"  # We can look for part of "do not import internal modules"
+        "not import internal"  # We can look for part of "do not import internal modules"
     )
 
     for doc_path in docs_to_check:
