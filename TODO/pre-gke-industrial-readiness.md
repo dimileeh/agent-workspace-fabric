@@ -75,26 +75,7 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_3eaa9350209143a799b9323b` | pending | running | OpenCode `ollama/glm-5.1:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
-| P1 Security, Secrets, And Egress Policy | Supply-chain guardrails for package installs and remote scripts | `ws_aa2a61f5148d4bfa81433715` | pending | running | OpenCode `ollama/kimi-k2.6:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
-| P1 MCP And Project Onboarding Client Parity | Define the primary install path for local Core | `ws_b79c214e57cd456aa8fe6d85` | pending | running | Codex `gpt-5.5`; selected 2026-05-03; xhigh effort. |
-| P1 MCP And Project Onboarding Client Parity | Smoke workspace command after `awf init` | `ws_e4f8833c9a0245f29c667293` | pending | running | OpenCode `ollama/deepseek-v4-pro:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
-| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_04a9d8f625294b518130246c` | pending | running | OpenCode `ollama/glm-5.1:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
-| P1 MCP And Project Onboarding Client Parity | MCP operator action tools | `ws_727392c096a64ae8be923081` | pending | running | OpenCode `ollama/kimi-k2.6:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
-| P1 MCP And Project Onboarding Client Parity | CLI command coverage aligned with REST and MCP | `ws_9b8091806b944a17aa8c035f` | pending | running | OpenCode `ollama/deepseek-v4-pro:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
-| P1 MCP And Project Onboarding Client Parity | REST / CLI / MCP alignment contract tests | `ws_a87b4e5dfb854125916b17e6` | pending | running | OpenCode `ollama/glm-5.1:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
-| P1 MCP And Project Onboarding Client Parity | Parity matrix docs/status consistency test | `ws_e35797a52aef483bbe8afc2f` | pending | running | OpenCode `ollama/kimi-k2.6:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
-| P1 MCP And Project Onboarding Client Parity | Copy-paste onboarding prompts for supported agents | `ws_2719a116bfd44d7d9229e26b` | pending | running | Codex `gpt-5.3-codex-spark`; retry of `ws_27115b2c9bfd4a8caeb0de4d` after git ownership repair; old failed workspace destroyed and DB row removed. |
-| P1 Developer Experience And Public Core Surface | Top-level Start Here quickstart | `ws_4315d5da269348cd96caca6c` | pending | running | Codex `gpt-5.5`; selected 2026-05-03; xhigh effort. |
-| P1 Developer Experience And Public Core Surface | Split README into landing and focused docs | `ws_22a6d8d6da1045e989ade541` | pending | running | Codex `gpt-5.3-codex-spark`; selected 2026-05-03; xhigh effort. |
-| P1 Developer Experience And Public Core Surface | Executable first-run DX smoke command | `ws_067afdee2917436fbe929614` | pending | running | Claude Code `claude-opus-4-7`; selected 2026-05-03; maximum effort; retried after injecting `CLAUDE_CODE_OAUTH_TOKEN` into AWF worker. |
-| P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_76484f3efdf0450e99de097b` | pending | running | Gemini `gemini-3.1-pro-preview`; selected 2026-05-03; maximum effort. |
-| P1 Developer Experience And Public Core Surface | SDK stance for Core release | `ws_56dddeb2ffdd4ed5bbfc9301` | pending | running | Gemini `gemini-3.1-pro-preview`; selected 2026-05-03; maximum effort. |
-| P1 Developer Experience And Public Core Surface | Searchable reason-code and error-code catalog | `ws_2570c27db97645b6a9a856f0` | pending | running | OpenCode `ollama/deepseek-v4-pro:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
-| P1 Developer Experience And Public Core Surface | First-time CLI help text | `ws_ff5e71ac962f491981b9f467` | pending | running | Codex `gpt-5.5`; selected 2026-05-03; xhigh effort. |
-| P1 Developer Experience And Public Core Surface | First-run troubleshooting guide | `ws_3f6878d0cd514e7fa5b555ff` | pending | running | Claude Code `claude-opus-4-7`; selected 2026-05-03; maximum effort; retried after injecting `CLAUDE_CODE_OAUTH_TOKEN` into AWF worker. |
-| P1 Developer Experience And Public Core Surface | Docs search and readability checks | `ws_87da12edd4f346b0b050dd79` | pending | running | Gemini `gemini-3.1-pro-preview`; selected 2026-05-03; maximum effort. |
-| P1 Operator Console Completion | Live workspace activity signals | `ws_fd8a47fba9854ca3946dc905` | pending | running | Claude Code `claude-opus-4-7`; selected 2026-05-03; maximum effort; retried after injecting `CLAUDE_CODE_OAUTH_TOKEN` into AWF worker. |
+| _None_ | _None_ | _None_ | _None_ | _None_ | Reconciled 2026-05-03 against the local AWF API, which reported zero active workspaces. A failed dogfood attempt from another machine had left stale `running` rows here; those rows were removed and the underlying P1 checklist items remain unchecked for future dispatch. |
 
 ### Reschedule Required Slices
 
@@ -105,7 +86,7 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| _None_ | _None_ | _None_ | _None_ | _None_ | Current reschedule-required slice was retried as `ws_2719a116bfd44d7d9229e26b`. |
+| _None_ | _None_ | _None_ | _None_ | _None_ | No active retry is recorded after reconciling the stale external dogfood ledger rows on 2026-05-03. |
 
 ### Completed Slices
 
