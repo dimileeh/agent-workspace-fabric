@@ -913,3 +913,86 @@ class TestMonitorDirtyWorktreeSalvage:
         actions = [e["action"] for e in _action_entries(captured)]
         assert actions == ["AddressComments", "Merge"]
         assert any(r.get("event") == "monitor.dirty_worktree_committed" for r in captured)
+
+    @pytest.mark.unit
+    async def test_comment_repair_gets_scope_correction_before_committing_protected_file(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+            workspace.owned_paths = ["tests/integration/**"]
+            await session.commit()
+
+        thread = thread_node(
+            tid="T_workflow",
+            author="chatgpt-codex-connector",
+            path="tests/integration/test_workspace_agent_git_in_workspace.py",
+            body=(
+                "This test silently skips when awf-agent-runtime:latest is "
+                "absent. Make the test self-sufficient or wire CI to provide "
+                "the image."
+            ),
+        )
+        worktrees_root = tmp_path / "worktrees"
+        (worktrees_root / ws_id).mkdir(parents=True)
+
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="fixed by editing CI")
+        cmd.queue_result(
+            returncode=0,
+            stdout=(
+                " M .github/workflows/ci.yml\n"
+                " M tests/integration/test_workspace_agent_git_in_workspace.py\n"
+            ),
+        )  # dirty check after first repair
+        adapter.queue(stdout="removed workflow edit; fixed test instead")
+        cmd.queue_result(
+            returncode=0,
+            stdout=" M tests/integration/test_workspace_agent_git_in_workspace.py\n",
+        )  # dirty check after scope correction
+        cmd.queue_result(returncode=0)  # git add -A
+        cmd.queue_result(returncode=1)  # git diff --cached --quiet
+        cmd.queue_result(returncode=0)  # git commit
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
+        cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve thread
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # clean PR
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge sha
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=worktrees_root,
+        )
+
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        assert len(adapter.calls) == 2
+        assert "outside this workspace's declared owned_paths" in adapter.calls[1]
+        assert ".github/workflows/ci.yml" in adapter.calls[1]
+        commit_calls = [
+            call.args
+            for call in cmd.calls
+            if len(call.args) >= 5
+            and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_workflow"]
+        ]
+        assert len(commit_calls) == 1
