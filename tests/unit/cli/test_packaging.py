@@ -19,7 +19,7 @@ def test_packaging_metadata() -> None:
 
 def test_readme_install_paths() -> None:
     """Test that the README explicitly documents the primary install paths."""
-    readme_path = Path(__file__).parents[3] / "README.md"
+    readme_path = Path(__file__).parents[3] / "docs" / "GETTING_STARTED.md"
     content = readme_path.read_text()
 
     # 3. README explicitly documents `uv tool install aira-awf` and `uv pip install aira-awf`

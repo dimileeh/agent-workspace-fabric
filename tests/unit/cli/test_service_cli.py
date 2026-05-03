@@ -563,7 +563,7 @@ def test_service_reconcile_target_invokes_target_branch_monitor(
 
 @pytest.mark.unit
 def test_readme_documents_service_logs_command() -> None:
-    readme = Path("README.md").read_text()
+    readme = Path("docs/CLI_REFERENCE.md").read_text()
 
     assert "awf service logs" in readme
     assert "docker/compose/local-service.yml" in readme
@@ -574,7 +574,7 @@ def test_readme_documents_service_logs_command() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_service_bootstrap_command() -> None:
-    readme = Path("README.md").read_text()
+    readme = Path("docs/CONCEPTS.md").read_text()
 
     assert "awf service bootstrap" in readme
     assert "uv run --python 3.12 --extra dev awf service bootstrap" in readme
@@ -585,7 +585,7 @@ def test_readme_documents_service_bootstrap_command() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_optional_ollama_bridge_profile() -> None:
-    readme = Path("README.md").read_text()
+    readme = Path("docs/CONCEPTS.md").read_text()
 
     assert "COMPOSE_PROFILES=ollama-bridge" in readme
     assert "AWF_OLLAMA_BRIDGE_BIND_ADDRESS" in readme
@@ -594,7 +594,7 @@ def test_readme_documents_optional_ollama_bridge_profile() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_control_plane_postgres_backup_restore() -> None:
-    readme = Path("README.md").read_text()
+    readme = Path("docs/CONCEPTS.md").read_text()
 
     assert "### Control-Plane Postgres Backup And Restore" in readme
     assert "AWF control-plane database" in readme
@@ -608,7 +608,7 @@ def test_readme_documents_control_plane_postgres_backup_restore() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_local_service_upgrade_and_image_versioning() -> None:
-    readme = Path("README.md").read_text()
+    readme = Path("docs/CONCEPTS.md").read_text()
 
     assert "### Local Service Image Versioning" in readme
     assert "### Local Service Upgrade" in readme
@@ -623,7 +623,7 @@ def test_readme_documents_local_service_upgrade_and_image_versioning() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_rollback_and_migration_handling() -> None:
-    readme = Path("README.md").read_text()
+    readme = Path("docs/CONCEPTS.md").read_text()
 
     assert "### Local Service Rollback" in readme
     assert "pre-upgrade backup" in readme
@@ -636,7 +636,7 @@ def test_readme_documents_rollback_and_migration_handling() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_local_disaster_recovery() -> None:
-    readme = Path("README.md").read_text()
+    readme = Path("docs/CONCEPTS.md").read_text()
 
     assert "### Local Disaster Recovery" in readme
     assert "docker compose -f docker/compose/local-service.yml down --remove-orphans" in readme
@@ -649,7 +649,7 @@ def test_readme_documents_local_disaster_recovery() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_run_awf_compatibility_status() -> None:
-    readme = Path("README.md").read_text()
+    readme = Path("docs/GETTING_STARTED.md").read_text()
     normalized_readme = " ".join(readme.split())
 
     assert "`scripts/run_awf.py` is the compatibility dogfood runner" in normalized_readme
@@ -660,7 +660,7 @@ def test_readme_documents_run_awf_compatibility_status() -> None:
 
 @pytest.mark.unit
 def test_readme_documents_service_gc_command() -> None:
-    readme = Path("README.md").read_text()
+    readme = Path("docs/CLI_REFERENCE.md").read_text()
 
     assert "awf service gc" in readme
     assert "--execute" in readme
