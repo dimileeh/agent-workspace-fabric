@@ -30,14 +30,14 @@ def paginate_bounded_list[T](
     max_limit: int,
     cursor: str | None = None,
 ) -> BoundedListPage[T]:
-    bounded_limit = max(1, min(limit, max_limit))
-    offset = _decode_offset_cursor(cursor)
+    bounded_limit = bounded_list_limit(limit, max_limit)
+    offset = decode_bounded_list_cursor(cursor)
     next_offset = offset + bounded_limit
     page_items = list(items[offset:next_offset])
     has_more = len(items) > next_offset
     return BoundedListPage(
         items=page_items,
-        next_cursor=_encode_offset_cursor(next_offset) if has_more else None,
+        next_cursor=encode_bounded_list_cursor(next_offset) if has_more else None,
         has_more=has_more,
         limit=bounded_limit,
         cursor=cursor,
@@ -51,21 +51,25 @@ def paginate_bounded_iterable[T](
     max_limit: int,
     cursor: str | None = None,
 ) -> BoundedListPage[T]:
-    bounded_limit = max(1, min(limit, max_limit))
-    offset = _decode_offset_cursor(cursor)
+    bounded_limit = bounded_list_limit(limit, max_limit)
+    offset = decode_bounded_list_cursor(cursor)
     next_offset = offset + bounded_limit
     window = list(islice(items, offset, next_offset + 1))
     has_more = len(window) > bounded_limit
     return BoundedListPage(
         items=window[:bounded_limit],
-        next_cursor=_encode_offset_cursor(next_offset) if has_more else None,
+        next_cursor=encode_bounded_list_cursor(next_offset) if has_more else None,
         has_more=has_more,
         limit=bounded_limit,
         cursor=cursor,
     )
 
 
-def _encode_offset_cursor(offset: int) -> str:
+def bounded_list_limit(limit: int, max_limit: int) -> int:
+    return max(1, min(limit, max_limit))
+
+
+def encode_bounded_list_cursor(offset: int) -> str:
     payload = {"o": offset}
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -73,7 +77,7 @@ def _encode_offset_cursor(offset: int) -> str:
     return encoded.decode("ascii").rstrip("=")
 
 
-def _decode_offset_cursor(cursor: str | None) -> int:
+def decode_bounded_list_cursor(cursor: str | None) -> int:
     if cursor is None:
         return 0
     try:
