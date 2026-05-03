@@ -561,6 +561,32 @@ class TestCollectSmokeReportExceptionPaths:
         assert auth_phase["reason_code"] == "SMOKE_AUTH_UNAVAILABLE"
         assert auth_phase["status"] == "fail"
 
+    async def test_auth_status_ok_but_zero_usable_providers_is_not_ready(self, tmp_path: Path) -> None:
+        def _ok_status_no_usable(settings, *, environ=None, **kwargs):
+            return {
+                "status": "ok",
+                "strict_providers": [],
+                "providers": {
+                    "github": {"ok": False, "status": "warn", "reason": "GITHUB_TOKEN_ENV_MISSING", "message": "No token.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": []},
+                    "codex": {"ok": False, "status": "warn", "reason": "CODEX_KEY_MISSING", "message": "No key.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": []},
+                },
+                "security": {},
+            }
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_status_no_usable,
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        auth_phase = next(p for p in report["phases"] if p["name"] == "auth_readiness")
+        assert auth_phase["reason_code"] == "SMOKE_AUTH_UNAVAILABLE"
+        assert auth_phase["status"] == "fail"
+
     async def test_profile_preview_exception_returns_fail(self, tmp_path: Path) -> None:
         def _failing_preview(project):
             raise OSError("cannot read directory")

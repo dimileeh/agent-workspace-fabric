@@ -191,7 +191,7 @@ def _phase_auth_readiness(
     usable = sum(1 for p in providers.values() if p.get("ok", False))
     total = len(providers)
 
-    if auth_status == "ok":
+    if auth_status == "ok" and usable > 0:
         return {
             "name": "auth_readiness",
             "status": "ok",
