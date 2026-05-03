@@ -16,6 +16,7 @@ file targets specific error branches that need dedicated fixtures:
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import subprocess
 from collections.abc import AsyncIterator
@@ -31,7 +32,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.control.executor as executor_module
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
+from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
+from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor, _call_pr_monitor_factory
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
@@ -41,13 +44,22 @@ from awf.db.repositories import (
     TaskRepository,
     ValidationRunRepository,
     WorkspaceEventRepository,
+    WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
+from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import ValidationResult, ValidationRunner
+from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    pr_payload,
+)
 
 from .executor_paths import _test_worktree_path, _test_worktrees_root
 
@@ -83,6 +95,7 @@ def _make_executor(
     compose: Any = None,
     validation: Any = None,
     pr_creator: Any = None,
+    log_store: LogStore | None = None,
 ) -> WorkspaceExecutor:
     compose = compose or _NoopResumeCompose()
     validation = validation or ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -103,6 +116,7 @@ def _make_executor(
             },
         ),
         pr_monitor_factory=pr_monitor_factory,
+        log_store=log_store,
     )
 
 
@@ -3000,6 +3014,156 @@ class TestExecutorCoverageEdges:
             assert candidate.head_sha == "h" * 40
             assert candidate.base_sha == "b" * 40
             assert candidate.pr_url == "https://github.com/x/y/pull/42"
+
+    @pytest.mark.unit
+    async def test_adopted_sync_feature_pr_handoff_writes_monitor_log_and_redacts_reason(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "ghp_supersecretvalue123"
+
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            assert repo.slug() == "x/y"
+            assert pr_number == 42
+            return PullRequestAdoptionMetadata(
+                number=42,
+                head_ref="feature/existing",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="OPEN",
+                is_draft=False,
+                closed=False,
+                merged=False,
+                author="octocat",
+                url="https://github.com/x/y/pull/42",
+                title="feature: existing",
+            )
+
+        async with factory() as s:
+            response = await PullRequestMonitorAdoptionService(
+                s,
+                metadata_fetcher=_fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="x/y",
+                    pr_number=42,
+                    agent="claude_code",
+                    reason=f"operator retry with GH_TOKEN={secret}",
+                )
+            )
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(response.workspace_id)
+            assert ws is not None
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(ws.id)
+            assert attempt is not None
+            validation_repo = ValidationRunRepository(s)
+            run = await validation_repo.start(
+                workspace_id=ws.id,
+                attempt_id=attempt.id,
+                tier=1,
+                commands=[],
+                base_commit="b" * 40,
+                target_branch="feature/existing",
+                target_head_sha="h" * 40,
+                workspace_head_sha="h" * 40,
+                log_stream_refs={},
+            )
+            await validation_repo.finish(
+                run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            ws.branch_name = f"feature-sync/{ws.id}"
+            ws.compose_project_name = "awf_x"
+            ws.compose_file_path = str(tmp_path / "compose.yml")
+            await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+            await s.commit()
+
+        worktrees_root = tmp_path / "work" / "worktrees"
+        (worktrees_root / response.workspace_id).mkdir(parents=True, exist_ok=True)
+        fake.queue_result(returncode=0)  # git fetch origin development
+        fake.queue_result(returncode=0, stdout="0\n")  # base-behind
+        fake.queue_result(returncode=0, stdout=pr_payload(head_sha="h" * 40))
+        fake.queue_result(returncode=0)  # gh pr merge
+        fake.queue_result(returncode=0, stdout="MERGESHA\n")
+        adapter = FakeAdapter()
+        sleep_fn = RecordedSleep()
+        log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> Any:
+            return make_runner(
+                factory=factory,
+                cmd=fake,
+                adapter=adapter,
+                sleep_fn=sleep_fn,
+                worktrees_root=worktrees_root,
+                log_store=log_store,
+            )
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+            log_store=log_store,
+        )
+
+        await executor.execute(response.workspace_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(response.workspace_id)
+            assert ws is not None
+            streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws.id)
+            operations = list(
+                (
+                    await s.execute(
+                        select(Operation).where(Operation.workspace_id == ws.id)
+                    )
+                ).scalars()
+            )
+            events = list(
+                (
+                    await s.execute(
+                        select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == ws.id)
+                    )
+                ).scalars()
+            )
+
+        monitor_stream = next(stream for stream in streams if stream.stream_id == "monitor.log")
+        monitor_log = Path(monitor_stream.path).read_text()
+        durable_payloads = json.dumps(
+            {
+                "task_policy": ws.task_policy,
+                "operations": [op.payload for op in operations],
+                "operation_results": [op.result for op in operations],
+                "events": [
+                    {
+                        "event_type": event.event_type,
+                        "reason_code": event.reason_code,
+                        "payload": event.payload,
+                    }
+                    for event in events
+                ],
+                "monitor_log": monitor_log,
+            },
+            sort_keys=True,
+        )
+
+        assert monitor_stream.source == "monitor"
+        assert '"event": "monitor.start"' in monitor_log
+        assert "PR_MONITOR_ADOPTION_REQUESTED" in durable_payloads
+        assert "PR_MONITOR_ADOPTED" in durable_payloads
+        assert "MERGE" in durable_payloads
+        assert secret not in durable_payloads
+        assert "[redacted]" in durable_payloads
 
     @pytest.mark.unit
     async def test_transition_if_current_records_stale_skip_for_diverged_status(

@@ -591,7 +591,12 @@ coding agent in any project to use AWF for a feature.
   deterministic repo/PR idempotency; executor/provisioner tests cover
   no-agent/no-new-PR monitor handoff for `sync_feature_pr`; the legacy attach
   script now defaults to the supported adoption API with `--legacy-detached`
-  reserved for the old detached runner.
+  reserved for the old detached runner. Iteration 1 conformance evidence:
+  added executor/LogStore monitor-start and redaction coverage, MCP terminal
+  error-result coverage, and direct attach-script service-adoption HTTP mapping
+  coverage; on 2026-05-03, `ruff check src/awf tests/unit scripts`, `mypy
+  src/awf`, the 351-test focused adoption/touched-file suite, and the 3,461-test
+  service/api/cli/mcp/control/node/runtime/scripts unit gate all passed.
 - [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document

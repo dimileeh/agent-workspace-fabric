@@ -12,6 +12,7 @@ from awf.api.schemas import (
     PullRequestMonitorAdoptionRequest,
     PullRequestMonitorAdoptionResponse,
 )
+from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
 from awf.common.github_client import (
@@ -161,6 +162,7 @@ class PullRequestMonitorAdoptionService:
             metadata=metadata,
             request=request,
         )
+        operator_reason = _redacted_optional_text(request.reason)
         workspace_repo = WorkspaceRepository(self._session)
         workspace = await workspace_repo.create(
             repo_url=request.repo_url or repo.https_url(),
@@ -250,7 +252,7 @@ class PullRequestMonitorAdoptionService:
                 "pr_number": metadata.number,
                 "pr_url": metadata.url,
                 "auto_merge": request.auto_merge,
-                "reason": request.reason,
+                "reason": operator_reason,
             },
         )
         await workspace_repo.add_event(
@@ -267,7 +269,7 @@ class PullRequestMonitorAdoptionService:
                 "head_sha": metadata.head_sha,
                 "base_sha": metadata.base_sha,
                 "auto_merge": request.auto_merge,
-                "reason": request.reason,
+                "reason": operator_reason,
             },
         )
         await self._session.flush()
@@ -400,7 +402,7 @@ def _adoption_task_policy(
             "is_draft": metadata.is_draft,
             "author": metadata.author,
             "title": metadata.title,
-            "operator_reason": request.reason,
+            "operator_reason": _redacted_optional_text(request.reason),
             "source": "existing_github_pr",
         },
     }
@@ -464,6 +466,10 @@ def _adoption_policy(workspace: Workspace) -> Mapping[str, Any]:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _redacted_optional_text(value: str | None) -> str | None:
+    return redact_audit_text(value) if value else None
 
 
 def _metadata_error_status_code(reason_code: str) -> int:

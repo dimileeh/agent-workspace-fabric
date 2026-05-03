@@ -293,6 +293,48 @@ class TestToolRegistration:
         assert payload["auto_merge"] is False
 
     @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_returns_terminal_pr_error_result(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            assert repo.slug() == "dimileeh/aira-web"
+            assert pr_number == 277
+            return PullRequestAdoptionMetadata(
+                number=277,
+                head_ref="feature/ready",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="MERGED",
+                is_draft=False,
+                closed=True,
+                merged=True,
+                author="octocat",
+                url="https://github.com/dimileeh/aira-web/pull/277",
+                title="feature: ready",
+            )
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, pr_adoption_metadata_fetcher=_fetcher)
+        )
+
+        result = await mcp.call_tool(
+            "awf_adopt_pull_request_monitor",
+            {"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "PR_ALREADY_MERGED"
+        assert "already merged" in result.structuredContent["message"]
+
+    @pytest.mark.unit
     async def test_operator_parity_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]
         tools = {tool.name: tool for tool in await mcp.list_tools()}
 

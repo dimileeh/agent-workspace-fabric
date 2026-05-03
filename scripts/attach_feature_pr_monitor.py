@@ -14,16 +14,15 @@ common feature-PR case:
 
 Behaviour:
 
-  1. Resolve the PR's metadata via ``gh pr view`` (head branch,
-     base branch, state). Refuse closed/merged PRs — nothing for
-     the monitor to do there.
-  2. Write a deterministic task spec JSON to
-     ``<work_dir>/feature-pr-specs/<slug>-feature-pr<N>.json``.
-  3. If a ``run_awf.py`` process is already driving that spec,
-     exit 0 without re-spawning (idempotency).
-  4. Otherwise, ``Popen`` ``run_awf.py --config <spec> --work-dir <dir>``
-     and detach. The monitor runs in its own process group so this
-     script can exit cleanly while the monitor lives.
+  1. By default, call the supported AWF API endpoint
+     ``POST /v1/workspaces/adopt-pr``. The control plane resolves PR metadata,
+     rejects closed/merged PRs, creates or attaches the service-managed
+     workspace, and owns monitor idempotency.
+  2. The old detached ``run_awf.py`` path remains available only with
+     ``--legacy-detached`` for older recovery playbooks. In that mode this
+     script writes a deterministic task spec JSON to
+     ``<work_dir>/feature-pr-specs/<slug>-feature-pr<N>.json`` and uses the
+     historical process-grep/file-lock idempotency guard.
 
 Exit codes:
   0 — spec written + monitor spawned (or no-op because a monitor was
