@@ -1880,7 +1880,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
-            runtime_inspector=_HealthyRuntimeInspector(),
+            runtime_inspector=_RaisingRuntimeInspector(Exception("bypass-stale-execution")),
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,
@@ -1891,7 +1891,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
-            runtime_inspector=_HealthyRuntimeInspector(),
+            runtime_inspector=_RaisingRuntimeInspector(Exception("bypass-stale-execution")),
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,
