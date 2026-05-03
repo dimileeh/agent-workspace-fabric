@@ -79,7 +79,7 @@ async def collect_smoke_report(
             }
         )
         overall.append("fail")
-        phases.append(_phase_pr_monitor(mocked_local))
+        phases.append(_phase_pr_monitor(mocked_local, settings))
         overall.append(phases[-1]["status"])
         resolved_config = _resolve_config(settings, config_resolver)
         console_phase, console_links = _phase_console_links(resolved_config)
@@ -109,7 +109,7 @@ async def collect_smoke_report(
     phases.append(_phase_workspace_request(profile_preview_obj, effective_project))
     overall.append(phases[-1]["status"])
 
-    phases.append(_phase_pr_monitor(mocked_local))
+    phases.append(_phase_pr_monitor(mocked_local, settings))
     overall.append(phases[-1]["status"])
 
     resolved_config = _resolve_config(settings, config_resolver)
@@ -364,7 +364,10 @@ def _phase_workspace_request(
     }
 
 
-def _phase_pr_monitor(mocked_local: bool) -> dict[str, Any]:
+def _phase_pr_monitor(
+    mocked_local: bool,
+    settings: ServiceSettings,
+) -> dict[str, Any]:
     if mocked_local:
         return {
             "name": "pr_monitor",
@@ -374,6 +377,18 @@ def _phase_pr_monitor(mocked_local: bool) -> dict[str, Any]:
             "evidence": {"mode": "mocked_local"},
             "action": "For live PR creation, omit --mocked-local and ensure GitHub credentials are configured.",
         }
+
+    token = settings.github_token
+    if token is not None and isinstance(token, str) and len(token.strip()) > 0:
+        return {
+            "name": "pr_monitor",
+            "status": "ok",
+            "reason_code": "SMOKE_PR_READY",
+            "message": "PR creation and monitoring path is available with configured GitHub credentials.",
+            "evidence": {"mode": "live", "github_token_configured": True},
+            "action": "No action required.",
+        }
+
     return {
         "name": "pr_monitor",
         "status": "warn",

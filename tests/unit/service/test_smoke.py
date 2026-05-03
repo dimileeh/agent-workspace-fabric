@@ -17,12 +17,12 @@ from awf.service.smoke import (
 )
 
 
-def _settings() -> SimpleNamespace:
+def _settings(github_token: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         api_base_url="http://localhost:8000",
         console_url=None,
         database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
-        github_token=None,
+        github_token=github_token,
     )
 
 
@@ -145,6 +145,25 @@ class TestCollectSmokeReportLiveMode:
 
         assert report["console_links"]["ui"] == "http://localhost:3000"
         assert report["console_links"]["api_docs"] == "http://localhost:8000/docs"
+
+    async def test_all_phases_ok_when_github_token_configured(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+        (tmp_path / "alembic.ini").write_text("[alembic]\n")
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(github_token="ghp_test_token"),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        pr_phase = next(p for p in report["phases"] if p["name"] == "pr_monitor")
+        assert pr_phase["status"] == "ok"
+        assert pr_phase["reason_code"] == "SMOKE_PR_READY"
+        assert report["status"] == "ok"
 
     async def test_service_unreachable_produces_fail_phase_with_action(self, tmp_path: Path) -> None:
         async def _unreachable_service(settings, *, http_client=None):
