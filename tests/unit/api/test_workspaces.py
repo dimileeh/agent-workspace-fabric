@@ -988,6 +988,57 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         assert json.loads(conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
+    async def test_v2_rejects_external_id_reuse_for_different_scope(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        first_payload = _v2_body(title="docs slice", owned_paths=["docs/**"])
+        first_payload["task"]["external_id"] = "WAVE-1"  # type: ignore[index]
+        second_payload = _v2_body(
+            title="api slice",
+            owned_paths=["src/awf/api/**"],
+        )
+        second_payload["task"]["external_id"] = "WAVE-1"  # type: ignore[index]
+
+        first = await client.post("/v2/workspaces", json=first_payload)
+        second = await client.post("/v2/workspaces", json=second_payload)
+
+        assert first.status_code == 202
+        assert second.status_code == 409
+        assert second.json() == {
+            "error_code": "TASK_EXTERNAL_ID_CONFLICT",
+            "message": (
+                "Task external_id is already associated with a different "
+                "repo/base/task-class/owned-path scope; use a unique "
+                "external_id for this backlog slice or retry the original scope."
+            ),
+            "detail": {"external_id": "WAVE-1"},
+        }
+
+    @pytest.mark.unit
+    async def test_v2_rejects_external_id_reuse_for_different_title(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        first_payload = _v2_body(
+            title="docs(onboarding): add prompts",
+            owned_paths=["docs/**", "README.md"],
+        )
+        first_payload["task"]["external_id"] = "WAVE-1"  # type: ignore[index]
+        second_payload = _v2_body(
+            title="docs(install): document install flow",
+            owned_paths=["docs/**", "README.md"],
+        )
+        second_payload["task"]["external_id"] = "WAVE-1"  # type: ignore[index]
+
+        first = await client.post("/v2/workspaces", json=first_payload)
+        second = await client.post("/v2/workspaces", json=second_payload)
+
+        assert first.status_code == 202
+        assert second.status_code == 409
+        assert second.json()["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"
+
+    @pytest.mark.unit
     async def test_v2_invalid_profile_ref_returns_structured_422(
         self,
         client: AsyncClient,
