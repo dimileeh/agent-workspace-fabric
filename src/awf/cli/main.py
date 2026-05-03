@@ -766,8 +766,8 @@ def service_doctor(
 @service_app.command("readiness")
 def service_readiness(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
-    demo_path: Path = typer.Option(
-        Path(__file__).resolve().parents[3] / "examples" / "awf-core-demo",
+    demo_path: Path | None = typer.Option(
+        None,
         "--demo-path",
         help="Path to the maintained AWF Core golden-path demo project.",
     ),
@@ -813,7 +813,7 @@ def service_readiness(
     """Run the executable local AWF Core release-readiness gate."""
     from awf.service.config import resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
-    from awf.service.readiness import collect_core_readiness_report
+    from awf.service.readiness import DEFAULT_DEMO_PATH, collect_core_readiness_report
 
     try:
         strict_providers = validate_provider_names(provider)
@@ -824,7 +824,7 @@ def service_readiness(
     report = asyncio.run(
         collect_core_readiness_report(
             settings=resolve_service_settings(),
-            demo_path=demo_path,
+            demo_path=demo_path if demo_path is not None else DEFAULT_DEMO_PATH,
             failure_window_hours=failure_window_hours,
             slo_window_hours=slo_window_hours,
             strict_providers=frozenset(strict_providers),
@@ -1432,8 +1432,8 @@ def smoke_run(
         "--mocked-local",
         help="Run in mocked-local mode without live external services.",
     ),
-    demo_path: Path = typer.Option(
-        Path(__file__).resolve().parents[3] / "examples" / "awf-core-demo",
+    demo_path: Path | None = typer.Option(
+        None,
         "--demo-path",
         help="Fallback project path when --project has no profile.",
     ),
@@ -1443,7 +1443,7 @@ def smoke_run(
     from awf.service.smoke import collect_smoke_report
 
     resolved = project.expanduser().resolve()
-    resolved_demo = demo_path.expanduser().resolve()
+    resolved_demo = demo_path.expanduser().resolve() if demo_path is not None else None
     settings = resolve_service_settings()
 
     report = asyncio.run(
