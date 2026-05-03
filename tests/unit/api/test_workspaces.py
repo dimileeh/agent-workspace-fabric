@@ -917,6 +917,45 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         assert replay.json()["workspace_id"] == first.json()["workspace_id"]
 
     @pytest.mark.unit
+    async def test_idempotent_replay_rejects_changed_literal_redacted_reason(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
+            tmp_path
+        )
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": (
+                    "operator typed <redacted> manually"
+                ),
+            },
+        }
+        replay_payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": (
+                    "operator typed changed text manually"
+                ),
+            },
+        }
+        headers = {"Idempotency-Key": "provider-readiness-literal-redacted-conflict"}
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        replay = await client.post(
+            "/v2/workspaces", json=replay_payload, headers=headers
+        )
+
+        assert first.status_code == 202
+        assert replay.status_code == 409
+        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
     async def test_idempotent_replay_accepts_redacted_override_reason_after_secret_rotation(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],

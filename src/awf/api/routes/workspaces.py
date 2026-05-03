@@ -604,10 +604,14 @@ def _task_provider_readiness_override_matches(
     payload: WorkspaceCreateV2Request,
 ) -> bool:
     stored_override, stored_reason = _stored_task_provider_readiness_override(existing)
+    stored_redaction_parts = _stored_task_provider_readiness_override_redaction_parts(
+        existing
+    )
     requested_override, requested_reason = _requested_provider_readiness_override(payload)
     return stored_override == requested_override and _override_reasons_match(
         stored_reason,
         requested_reason,
+        stored_redaction_parts=stored_redaction_parts,
     )
 
 
@@ -621,18 +625,32 @@ def _normalized_provider_readiness_override_reason(reason: str | None) -> str | 
 def _override_reasons_match(
     stored_reason: str | None,
     requested_reason: str | None,
+    *,
+    stored_redaction_parts: list[str] | None = None,
 ) -> bool:
     if stored_reason == requested_reason:
         return True
     if stored_reason is None or requested_reason is None:
         return False
-    if _REDACTED_TEXT not in stored_reason:
+    if stored_redaction_parts is None:
         return False
 
     # Stored preflight snapshots are redacted at create time. Treat those
-    # redacted spans as stable wildcards so replays do not depend on today's
-    # service secret set after token rotation.
-    pattern = ".+".join(
-        re.escape(part) for part in stored_reason.split(_REDACTED_TEXT)
-    )
+    # actual redacted spans as stable wildcards so replays do not depend on
+    # today's service secret set after token rotation.
+    if _REDACTED_TEXT.join(stored_redaction_parts) != stored_reason:
+        return False
+    pattern = ".+".join(re.escape(part) for part in stored_redaction_parts)
     return re.fullmatch(pattern, requested_reason, flags=re.DOTALL) is not None
+
+
+def _stored_task_provider_readiness_override_redaction_parts(
+    existing: Workspace,
+) -> list[str] | None:
+    preflight = workspace_provider_readiness_preflight(existing)
+    if preflight is None:
+        return None
+    parts = preflight.get("override_reason_redaction_parts")
+    if not isinstance(parts, list) or len(parts) < 2:
+        return None
+    return cast(list[str], parts) if all(isinstance(part, str) for part in parts) else None
