@@ -1876,11 +1876,14 @@ class TestRunOnceExecution:
                 raise AssertionError(f"unexpected monitor resume for {workspace_id}")
 
         executor = _ClaimingExecutor()
+        inspector = _RecordingRuntimeInspector(
+            {f"awf_{ready_id}": RuntimeSnapshot(stack_state="unavailable", reason="bypass")}
+        )
         worker_a = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
-            runtime_inspector=_RaisingRuntimeInspector(RuntimeError("bypass-stale-execution")),
+            runtime_inspector=inspector,
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,
@@ -1891,7 +1894,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
-            runtime_inspector=_RaisingRuntimeInspector(RuntimeError("bypass-stale-execution")),
+            runtime_inspector=inspector,
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,
