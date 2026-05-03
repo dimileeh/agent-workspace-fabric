@@ -76,9 +76,9 @@ Status values:
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
 | P1 MCP And Project Onboarding Client Parity | Launch-time provider readiness preflight | `ws_6dcca29a9a4e47cd89e0c8c7` | [#189](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/189) | validating | Codex `gpt-5.5`; highest-risk provider/auth readiness slice with REST/CLI/MCP/console/event surfaces. |
-| P1 MCP And Project Onboarding Client Parity | Local control-plane UID/GID strategy | `ws_add274bc03eb49c28a00dd3d` | [#186](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/186) | monitoring_pr | Claude Code `claude-opus-4-7`; documents Linux/macOS ownership strategy and adds git status/add/commit regression coverage. |
-| P1 MCP And Project Onboarding Client Parity | Copy-paste agent onboarding prompts | `ws_55479d5e2367490184a947ea` | [#185](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/185) | monitoring_pr | OpenCode/Ollama `kimi-k2.6:cloud`; adds first-time evaluator prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw. |
-| P1 MCP And Project Onboarding Client Parity | First-run smoke workspace command | `ws_cd491b1fdb514174974ed549` | [#188](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/188) | monitoring_pr | OpenCode/Ollama `deepseek-v4-pro:cloud`; adds a CLI smoke command proving local service/profile/auth/validation/PR or mocked PR path. |
+| P1 MCP And Project Onboarding Client Parity | Local control-plane UID/GID strategy | `ws_add274bc03eb49c28a00dd3d` | [#186](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/186) | monitoring_pr | Manually salvaged 2026-05-03: dropped the out-of-scope workflow edit, addressed the image-missing review inside the integration test, force-pushed cleaned head `655ad145`, and requested AWF remonitor. |
+| P1 MCP And Project Onboarding Client Parity | Copy-paste agent onboarding prompts | `ws_55479d5e2367490184a947ea` | [#185](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/185) | validating | OpenCode/Ollama `kimi-k2.6:cloud`; validate-only recovery is refreshing required validation after the candidate provenance repair. |
+| P1 MCP And Project Onboarding Client Parity | First-run smoke workspace command | `ws_cd491b1fdb514174974ed549` | [#188](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/188) | validating | OpenCode/Ollama `deepseek-v4-pro:cloud`; validate-only recovery is refreshing required validation after PR monitor gating. |
 
 ### Reschedule Required Slices
 
@@ -545,7 +545,7 @@ coding agent in any project to use AWF for a feature.
 - [x] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
 - [x] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
 - [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
-- [x] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
+- [ ] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
 - [x] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
 - [x] Convert the parity matrix into an implementation driver: every surface marked
   missing or partial must map to a concrete P1 implementation issue/slice, with

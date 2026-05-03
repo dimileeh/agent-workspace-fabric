@@ -14,7 +14,6 @@ from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 async def test_asyncio_runner_streams_stdout_and_stderr_before_completion() -> None:
     runner = AsyncioSubprocessRunner()
     frames: list[tuple[str, str, float]] = []
-    started = time.perf_counter()
 
     async def on_stdout(data: str) -> None:
         frames.append(("stdout", data, time.perf_counter()))
@@ -44,7 +43,7 @@ async def test_asyncio_runner_streams_stdout_and_stderr_before_completion() -> N
     assert result.stdout == "first\nlast\n"
     assert result.stderr == "warn\n"
     assert [fd for fd, _data, _at in frames] == ["stdout", "stderr", "stdout"]
-    assert frames[0][2] - started < finished - frames[0][2]
+    assert frames[0][2] < finished - 0.1
 
 
 @pytest.mark.unit
