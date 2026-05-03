@@ -447,7 +447,6 @@ def _default_config_resolver(settings: ServiceSettings) -> dict[str, Any]:
     result: dict[str, Any] = {
         "api_base_url": settings.api_base_url,
     }
-    console_url = getattr(settings, "console_url", None)
-    if console_url is not None:
-        result["console_url"] = console_url
+    if settings.console_url is not None:
+        result["console_url"] = settings.console_url
     return result

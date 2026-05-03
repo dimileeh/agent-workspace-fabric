@@ -28,6 +28,7 @@ class ServiceSettings:
     service_name: str
     env: str
     api_base_url: str
+    console_url: str | None = None
     database_url: str
     docker_host: str
     agent_runtime_image: str
@@ -85,6 +86,7 @@ def resolve_service_settings(
         service_name=settings.service_name,
         env=settings.env,
         api_base_url=settings.api_base_url,
+        console_url=settings.console_url,
         database_url=database_url,
         docker_host=settings.docker_host,
         agent_runtime_image=settings.agent_runtime_image,

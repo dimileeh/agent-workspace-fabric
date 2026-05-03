@@ -20,6 +20,7 @@ from awf.service.smoke import (
 def _settings() -> SimpleNamespace:
     return SimpleNamespace(
         api_base_url="http://localhost:8000",
+        console_url=None,
         database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
         github_token=None,
     )
