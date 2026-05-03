@@ -80,8 +80,9 @@ Status values:
 
 These slices are not done. Do not count them as completed, and do not skip them
 when selecting the next wave after active PR-monitor slices complete and the
-local service has been pulled/rebuilt/restarted. If PR #161 merges, do not
-reschedule its corresponding slice.
+local service has been pulled/rebuilt/restarted. The `awf init` / smoke guidance
+slice from PR #161 has merged and is recorded under Completed Slices, so it is
+not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
@@ -199,30 +200,9 @@ reschedule its corresponding slice.
 
 ### Failed / Superseded Slices
 
-| TODO area | Slice | Workspace | Status | Resolution |
-| --- | --- | --- | --- | --- |
-| P0 Validation Tier Provenance As Merge Policy | Validation freshness merge gate via Gemma | `ws_3907d2f78ba54f9293c9835c` | superseded | Failed validation; superseded by Codex workspace `ws_261f800d38ed4d65acb60df7` / PR #95. |
-| P0 Reliability, Cleanup, And SLOs | Recovery cleanup and stuck-state SLO metrics via DeepSeek | `ws_15fcdd21401d4d0495747d03` | superseded | Agent failed planning artifact requirement; superseded by GLM workspace `ws_3c3d5b6f539245ec84f36d2e` / PR #93. |
-| P0 Validation Tier Provenance As Merge Policy | Validation freshness merge gate via Gemma | `ws_6996faf0ee44439595403171` | superseded | Failed validation; superseded by Codex workspace `ws_261f800d38ed4d65acb60df7` / PR #95. |
-| P0 Merge Safety And PR Monitor Correctness | Manual-merge monitor waits for observed human merge before completion | `ws_f1f2e2ff3de14f34ae1dcccd` | superseded | Failed profile resolution because local AWF service image was older than merged profile schema from PR #97; service was rebuilt and retried as `ws_f9644d6f9c904c42ae964035`. |
-| P0 Reliability, Cleanup, And SLOs | Orphan AWF resource detection and cleanup readiness reporting | `ws_04560f5cfd914095b357cdcb` | failed | PR [#98](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/98) repeatedly hit monitor-driven stale rebase recovery; local AWF now has a rebase-recovery fix, and the slice was retried as `ws_5605c5ca71c942d999f5b78f`. |
-| P0 Operation And Recovery Truth | Persist operation audit details and log stream references | `ws_83f4e614951446cf883f5c09` | failed | PR [#101](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/101) merged, so no feature retry is needed; the workspace failure exposed the stale-rebase recovery bug fixed locally before service rebuild. |
-| P1 API Contract Completion | External operator callback subscriptions | `ws_0e2fc82ece7541659287e063` | failed | Agent produced local commits and passed validation/coverage, but exhausted the Plan -> Execute -> Compare iteration budget with one remaining conformance gap: event type validation was prefix-based and still allowed internal-looking namespaced event types such as `workspace.internal_secret`. Recover by redispatching a narrow callback hardening/completion slice or salvaging the preserved worktree branch. |
-| P1 Security, Secrets, And Egress Policy | Prompt-injection boundary controls for external evidence | `ws_e3ca2c9f7f8d4f0181890173` | superseded | No-work infrastructure failure during provisioning: worker attempted to recursively `chown` the shared bare git mirror and failed on a host-mounted git object file before any agent ran. Fixed locally by preparing only the editable worktree for the agent user; retried as `ws_738700a49275436b9b96ec7e`. |
-| P1 MCP And Project Onboarding Client Parity | One-command `awf init` local bootstrap | `ws_c377ab4f6b6b452196ac7097` | superseded | No-work mirror `chown` provisioning failure; retried as `ws_0da5b57348cb49d198db9ee2`. |
-| P1 MCP And Project Onboarding Client Parity | API / CLI / MCP parity implementation driver | `ws_c6ad9ca557d441e881329388` | superseded | No-work mirror `chown` provisioning failure; retried as `ws_f4f5d0934e5f45c1ba0d7998`. |
-| P1 Operator Console Completion | Agent and exact model workspace filters | `ws_a0f41e0ed1154727b9a35f16` | superseded | No-work mirror `chown` provisioning failure; retried as `ws_0e5f80c0f2be464db625c766`. |
-| P1 Security, Secrets, And Egress Policy | Restricted egress allowlist templates | `ws_b0db737f56e64894a53ad640` | superseded | No-work mirror `chown` provisioning failure; retried as `ws_acf536de3fe3434699bee650`. |
-| P1 MCP And Project Onboarding Client Parity | Launch-time provider readiness preflight | `ws_3839bcb384944623b1ff6d64` | superseded | No-work infrastructure failure during provisioning: the shared bare git mirror contained a host object file missing Docker Desktop ownership metadata, so the worker saw it as unwritable `root:root` and failed recursive ownership repair before checkout. Quarantined the broken mirror cache on 2026-05-03; retry `ws_6dcca29a9a4e47cd89e0c8c7` landed PR #189. |
-| P1 MCP And Project Onboarding Client Parity | Define the primary install path for local Core | `ws_3426e9258cb54b3d91627956` | superseded | Same no-work mirror permission failure as `ws_3839bcb384944623b1ff6d64`; no PR or useful work produced. Retry is active as `ws_9e695c9961bb45f9a9b1ff8b`. |
-| P0 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification via Gemini 3.1 | `ws_033d1772828042c9afa6a491` | failed | No-work Gemini auth failure: container had copied `~/.gemini` files but no Gemini/Google auth env; Gemini CLI 0.39.1 selected API-key auth and exited 41 `AGENT_AUTH_FAILED` requiring `GEMINI_API_KEY`. |
-| P0 Provider Resilience And Automated Fallback Recovery | Duplicate full retry spawned from live PR monitor | `ws_46a6c903fc7c42098a63edad` | destroyed | Duplicate retry of active workspace `ws_52d8415a02424c4aa4730fa1` / PR #169 after `AGENT_IDLE_TIMEOUT`; no PR or useful work produced. Destroyed manually and tracked as urgent P0 regression under provider recovery. |
-| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_927647b0535242c58879f7b8` | failed | Same no-work Gemini auth failure as `ws_033d1772828042c9afa6a491`; retry only after Gemini container auth/readiness is fixed or with a different provider/model. |
-| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_8210d159580747f88c691ef5` | superseded | Gemini produced a useful local commit but did so during AWF's planning-only phase, touching `src/awf/cli/main.py` and `tests/unit/cli/test_init.py` before execution was allowed. AWF correctly failed the workspace for planning scope violation; retried fresh with Codex Spark as `ws_8c9f0ae88d5c477aac382158`. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via Gemini | `ws_19b11c564c3343c0965eee45` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_5031649e68b34b108f23782b`. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via OpenCode GLM | `ws_5031649e68b34b108f23782b` | superseded | Made a local implementation commit and passed broad service/db/api validation, but stalled during conformance JSON generation after a misleading narrow-subset coverage failure; operator stopped it and restarted from scratch with Codex `gpt-5.3-codex-spark` as `ws_05365f752ad742abb7c134af`. |
-| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools via Gemini | `ws_7c8ec611a3d14b6cb4612344` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_1e79f6b47faf44d0bf8de3f0`. |
-| P1 Operator Console Completion | Security and egress status panels via Gemini | `ws_8a8b09feb61d4af188473bd6` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_ac64156e08454928985982eb`. |
+No retained rows. Historical superseded/no-work/failed attempts were removed
+after confirming the intended slices either landed in the Completed Slices
+ledger or are tracked as unfinished under Reschedule Required Slices.
 
 ## Foundations Already In Place
 
@@ -548,8 +528,8 @@ coding agent in any project to use AWF for a feature.
 - [x] Define the primary install path: package-manager install such as `uv tool install aira-awf`/`uv pip install aira-awf`, with git clone as the contributor path.
 - [x] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
 - [x] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
-- [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
-- [ ] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
+- [x] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
+- [x] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
 - [x] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
 - [x] Convert the parity matrix into an implementation driver: every surface marked
   missing or partial must map to a concrete P1 implementation issue/slice, with
