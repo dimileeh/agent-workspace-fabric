@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
+import traceback
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +35,7 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
 _GITHUB_TIMEOUT_SECONDS = 5.0
 _HTTP_TIMEOUT_SECONDS = 2.0
 _PROVIDER_PROBE_TIMEOUT_SECONDS = 5.0
+_TRACEBACK_LOG_LIMIT = 4000
 _REDACTION = "<redacted>"
 _CODEX_AUTH_FILES = ("auth.json", "config.toml", "installation_id")
 _OLLAMA_AUTH_FILES = ("config.json", "id_ed25519", "id_ed25519.pub")
@@ -102,6 +105,7 @@ _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.gemini: "gemini",
     AgentRuntime.opencode: "opencode",
 }
+_log = logging.getLogger(__name__)
 
 
 class CompletedProcessLike(Protocol):
@@ -434,6 +438,11 @@ def _probe_cli_auth_status(
             ),
         }
     except Exception as exc:
+        _log_redacted_exception(
+            "provider_readiness.cli_auth_probe_exception",
+            exc,
+            secrets,
+        )
         detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
         return {
             "status": "fail",
@@ -707,6 +716,11 @@ def _check_github(
             warnings=token_warnings,
         )
     except Exception as exc:
+        _log_redacted_exception(
+            "provider_readiness.github_auth_check_exception",
+            exc,
+            secrets,
+        )
         return _provider_result(
             ok=False,
             strict=strict,
@@ -1461,6 +1475,22 @@ def _redact(value: str, secrets: frozenset[str]) -> str:
     return _TOKEN_RE.sub(_REDACTION, redacted)
 
 
+def _log_redacted_exception(
+    event: str,
+    exc: Exception,
+    secrets: frozenset[str],
+) -> None:
+    detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
+    trace = _redact(
+        _truncate(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            limit=_TRACEBACK_LOG_LIMIT,
+        ),
+        secrets,
+    )
+    _log.error("%s: %s\n%s", event, detail, trace)
+
+
 def _truncate(value: str, *, limit: int = 240) -> str:
     stripped = value.strip()
     if len(stripped) <= limit:
@@ -1512,6 +1542,11 @@ def _probe_ollama(
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
         except Exception as exc:
+            _log_redacted_exception(
+                "provider_readiness.ollama_probe_exception",
+                exc,
+                secrets,
+            )
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
             continue
@@ -1543,6 +1578,11 @@ def _probe_ollama_model(
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
         except Exception as exc:
+            _log_redacted_exception(
+                "provider_readiness.ollama_model_probe_exception",
+                exc,
+                secrets,
+            )
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
             continue

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -1158,7 +1159,12 @@ def test_provider_readiness_github_auth_timeout(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_provider_readiness_github_runner_exception_is_redacted(tmp_path: Path) -> None:
+def test_provider_readiness_github_runner_exception_is_redacted(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+
     def _run(_args: list[str], **_kwargs: object) -> Any:
         raise RuntimeError("transport failed for ghp_exception_secret")
 
@@ -1173,6 +1179,10 @@ def test_provider_readiness_github_runner_exception_is_redacted(tmp_path: Path) 
     serialized = json.dumps(payload, sort_keys=True)
     assert "ghp_exception_secret" not in serialized
     assert "<redacted>" in serialized
+    assert "provider_readiness.github_auth_check_exception" in caplog.text
+    assert "RuntimeError: transport failed for <redacted>" in caplog.text
+    assert "Traceback" in caplog.text
+    assert "ghp_exception_secret" not in caplog.text
 
 
 @pytest.mark.unit
