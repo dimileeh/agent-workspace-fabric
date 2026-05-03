@@ -43,7 +43,7 @@ async def test_asyncio_runner_streams_stdout_and_stderr_before_completion() -> N
     assert result.stdout == "first\nlast\n"
     assert result.stderr == "warn\n"
     assert [fd for fd, _data, _at in frames] == ["stdout", "stderr", "stdout"]
-    assert frames[0][2] < finished
+    assert frames[0][2] < finished - 0.1
 
 
 @pytest.mark.unit
