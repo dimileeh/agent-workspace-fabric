@@ -50,8 +50,8 @@ uv pip install aira-awf
 For contributors who want to modify AWF itself:
 
 ```bash
-git clone git@github.com:aira/awf.git
-cd awf
+git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
+cd aira-agent-workspace-fabric
 uv sync
 ```
 
