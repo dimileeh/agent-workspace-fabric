@@ -33,10 +33,9 @@ Before running the commands below, ensure your system has the following installe
    ```text
    AWF init: local service bootstrap
      state directory: /home/user/.awf/service
-     created: false
-     kept existing .env
+     created: true
+     wrote .env from .env.example
      bootstrap status: ok
-
    Next steps:
      - export AWF_GITHUB_TOKEN="$(gh auth token)" so the worker can create PRs.
      - Run `awf service status --format pretty` to verify readiness.
