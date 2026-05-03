@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+from heapq import heappop, heappush
+from itertools import count
 from os import stat_result
 from pathlib import Path
 
@@ -15,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.schemas import WorkspaceArtifactListResponse, WorkspaceArtifactResponse
 from awf.common.config import get_settings
 from awf.db.repositories import WorkspaceRepository
-from awf.service.bounded_list import paginate_bounded_list
+from awf.service.bounded_list import BoundedListPage, paginate_bounded_iterable
 
 DEFAULT_ARTIFACT_LIST_LIMIT = 50
 MAX_ARTIFACT_LIST_LIMIT = 500
@@ -67,12 +70,12 @@ async def list_workspace_artifacts_metadata(
     if not await WorkspaceRepository(session).exists(workspace_id):
         return None
     artifact_dir = _workspace_artifact_dir(workspace_id, work_dir=work_dir)
-    items = await asyncio.to_thread(_list_artifacts, workspace_id, artifact_dir)
-    page = paginate_bounded_list(
-        items,
-        limit=limit,
-        max_limit=MAX_ARTIFACT_LIST_LIMIT,
-        cursor=cursor,
+    page = await asyncio.to_thread(
+        _list_artifacts_page,
+        workspace_id,
+        artifact_dir,
+        limit,
+        cursor,
     )
     return WorkspaceArtifactListResponse(
         items=page.items,
@@ -99,41 +102,86 @@ def _workspace_artifact_dir(
 
 def list_artifacts(workspace_id: str, artifact_dir: Path) -> list[ArtifactMetadata]:
     """List regular, non-symlink files below a managed artifact root."""
+
+    return list(_iter_artifacts(workspace_id, artifact_dir))
+
+
+def _iter_artifacts(workspace_id: str, artifact_dir: Path) -> Iterator[ArtifactMetadata]:
     try:
         root = _resolve_artifact_root(artifact_dir)
     except ArtifactNotFoundError:
-        return []
+        return
 
-    items: list[ArtifactMetadata] = []
-    try:
-        walker = artifact_dir.walk(follow_symlinks=False)
-    except OSError:
-        return []
-
-    for directory, dirnames, filenames in walker:
-        dirnames[:] = [
-            dirname
-            for dirname in sorted(dirnames)
-            if not _is_symlink(directory / dirname)
-        ]
-        for filename in sorted(filenames):
-            candidate = directory / filename
+    pending: list[tuple[str, int, Path, bool]] = []
+    sequence = count()
+    _push_artifact_directory_entries(pending, sequence, artifact_dir, artifact_dir)
+    while pending:
+        _, _, candidate, is_directory = heappop(pending)
+        if is_directory:
             try:
                 if candidate.is_symlink():
                     continue
-                resolved = candidate.resolve(strict=True)
-                if not resolved.is_relative_to(root) or not resolved.is_file():
+                resolved_directory = candidate.resolve(strict=True)
+                if (
+                    not resolved_directory.is_relative_to(root)
+                    or not resolved_directory.is_dir()
+                ):
                     continue
-                stat = resolved.stat()
             except OSError:
                 continue
-            relative_path = candidate.relative_to(artifact_dir).as_posix()
-            items.append(_metadata_from_stat(workspace_id, relative_path, resolved, stat))
-    return sorted(items, key=lambda item: item.relative_path)
+            _push_artifact_directory_entries(pending, sequence, artifact_dir, candidate)
+            continue
+        try:
+            if candidate.is_symlink():
+                continue
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_relative_to(root) or not resolved.is_file():
+                continue
+            stat = resolved.stat()
+        except OSError:
+            continue
+        relative_path = candidate.relative_to(artifact_dir).as_posix()
+        yield _metadata_from_stat(workspace_id, relative_path, resolved, stat)
 
 
 def _list_artifacts(workspace_id: str, artifact_dir: Path) -> list[WorkspaceArtifactResponse]:
     return [_artifact_response(item) for item in list_artifacts(workspace_id, artifact_dir)]
+
+
+def _list_artifacts_page(
+    workspace_id: str,
+    artifact_dir: Path,
+    limit: int,
+    cursor: str | None,
+) -> BoundedListPage[WorkspaceArtifactResponse]:
+    return paginate_bounded_iterable(
+        (_artifact_response(item) for item in _iter_artifacts(workspace_id, artifact_dir)),
+        limit=limit,
+        max_limit=MAX_ARTIFACT_LIST_LIMIT,
+        cursor=cursor,
+    )
+
+
+def _push_artifact_directory_entries(
+    pending: list[tuple[str, int, Path, bool]],
+    sequence: Iterator[int],
+    artifact_dir: Path,
+    directory: Path,
+) -> None:
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for candidate in entries:
+        try:
+            if candidate.is_symlink():
+                continue
+            is_directory = candidate.is_dir()
+        except OSError:
+            continue
+        relative_path = candidate.relative_to(artifact_dir).as_posix()
+        sort_key = f"{relative_path}/" if is_directory else relative_path
+        heappush(pending, (sort_key, next(sequence), candidate, is_directory))
 
 
 def _artifact_response(item: ArtifactMetadata) -> WorkspaceArtifactResponse:

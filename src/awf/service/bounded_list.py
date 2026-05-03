@@ -1,12 +1,13 @@
-"""Cursor helpers for already-materialized bounded list responses."""
+"""Cursor helpers for bounded list responses."""
 
 from __future__ import annotations
 
 import base64
 import binascii
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from itertools import islice
 
 
 class InvalidBoundedListCursorError(ValueError):
@@ -36,6 +37,27 @@ def paginate_bounded_list[T](
     has_more = len(items) > next_offset
     return BoundedListPage(
         items=page_items,
+        next_cursor=_encode_offset_cursor(next_offset) if has_more else None,
+        has_more=has_more,
+        limit=bounded_limit,
+        cursor=cursor,
+    )
+
+
+def paginate_bounded_iterable[T](
+    items: Iterable[T],
+    *,
+    limit: int,
+    max_limit: int,
+    cursor: str | None = None,
+) -> BoundedListPage[T]:
+    bounded_limit = max(1, min(limit, max_limit))
+    offset = _decode_offset_cursor(cursor)
+    next_offset = offset + bounded_limit
+    window = list(islice(items, offset, next_offset + 1))
+    has_more = len(window) > bounded_limit
+    return BoundedListPage(
+        items=window[:bounded_limit],
         next_cursor=_encode_offset_cursor(next_offset) if has_more else None,
         has_more=has_more,
         limit=bounded_limit,
