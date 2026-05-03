@@ -16,12 +16,17 @@ Skipped when:
 - the ``AWF_SKIP_DOCKER_TESTS=1`` env var is set, or
 - the test process is neither root nor the agent UID *and* passwordless
   sudo is not available (the test needs one of those three to land the
-  prepared worktree owned by UID 1000).
+  prepared worktree owned by UID 1000) — but only on developer machines:
+  see CI behavior below.
 
 When ``CI=true`` (set by GitHub Actions and most CI providers) the missing
 image case is handled by building ``awf-agent-runtime:latest`` from the
 checked-out source tree. If that build fails, the test fails loudly instead
-of silently skipping the container-side contract.
+of silently skipping the container-side contract. The UID/sudo precondition
+is also a hard failure under ``CI=true``: ubuntu-latest gives the ``runner``
+user (UID 1001) passwordless sudo, so the documented path always succeeds;
+if a runner-image change ever breaks that, the test fails loudly so the
+workspace-stack git contract is not silently bypassed in CI.
 
 The test runs as the invoking user and supports three modes:
 
@@ -194,13 +199,21 @@ async def test_agent_container_can_git_status_add_commit_in_workspace(
     is_agent_uid = os.geteuid() == _AGENT_RUNTIME_UID
     needs_sudo_chown = not is_root and not is_agent_uid
     if needs_sudo_chown and not _passwordless_sudo_available():
-        pytest.skip(
+        msg = (
             f"test must run as root, as UID {_AGENT_RUNTIME_UID}, or with "
             "passwordless sudo available so the prepared worktree can be "
             "chowned to the agent UID (GitHub Actions ubuntu-latest runs as "
             "UID 1001 with passwordless sudo, so the CI integration job "
             "exercises this path)"
         )
+        # ``CI=true`` means the workspace-stack git contract MUST be
+        # exercised — silently skipping would let regressions in the agent
+        # readability invariant slip through. Fail loudly so a runner-image
+        # change (sudo dropped, base image swap, etc.) surfaces immediately
+        # instead of turning into a green-but-empty integration job.
+        if _running_in_ci():
+            pytest.fail(msg)
+        pytest.skip(msg)
 
     workspace_id = f"test_agent_git_{os.getpid()}"
     origin_repo = tmp_path / "origin"

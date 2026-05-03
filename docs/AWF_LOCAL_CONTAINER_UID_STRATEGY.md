@@ -283,12 +283,14 @@ The decision is locked by the following tests:
   - `test_agent_container_can_git_status_add_commit_in_workspace` — full
     Docker integration: the rendered workspace stack lets the
     `awf-agent-runtime` container's `agent` user run the three required
-    git commands in `/workspace`. Skipped when Docker is unavailable, the
-    agent-runtime image is not present, or the test process is neither
-    UID `0` nor UID `1000` *and* passwordless sudo is not available
-    (GitHub Actions ubuntu-latest runs as UID `1001` with passwordless
-    sudo, so the CI integration job exercises this path via
-    `sudo chown` instead of skipping).
+    git commands in `/workspace`. Skipped on developer machines when
+    Docker is unavailable, the agent-runtime image is not present, or the
+    test process is neither UID `0` nor UID `1000` *and* passwordless
+    sudo is not available. GitHub Actions ubuntu-latest runs as UID
+    `1001` with passwordless sudo, so the CI integration job exercises
+    this path via `sudo chown` instead of skipping; if the UID/sudo
+    precondition is unmet under `CI=true`, the test fails loudly rather
+    than skipping silently (defensive against runner-image changes).
 
 ## See Also
 
