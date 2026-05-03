@@ -1154,12 +1154,26 @@ class WorkspaceExecutor:
                 cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
                 if cached.stdout.strip():
                     staged_paths = _git_name_lines(cached.stdout)
-                    if await self._fail_if_plan_only_paths(
-                        workspace_id=workspace_id,
-                        changed_paths=staged_paths,
-                        expected_status=WorkspaceStatus.running,
-                    ):
-                        return
+                    staged_paths_are_plan_only = changed_paths_are_only_internal_plan_artifacts(
+                        staged_paths
+                    )
+                    if staged_paths_are_plan_only:
+                        committed_paths = sorted(
+                            path.as_posix()
+                            for path in await self._committed_paths_since(
+                                worktree_path, base_commit
+                            )
+                        )
+                        committed_output_is_plan_only = (
+                            not committed_paths
+                            or changed_paths_are_only_internal_plan_artifacts(committed_paths)
+                        )
+                        if committed_output_is_plan_only and await self._fail_if_plan_only_paths(
+                            workspace_id=workspace_id,
+                            changed_paths=staged_paths,
+                            expected_status=WorkspaceStatus.running,
+                        ):
+                            return
                     has_known_non_plan_output = True
                     violations = find_protected_quality_gate_changes(
                         changed_paths=staged_paths,
