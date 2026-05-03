@@ -13,10 +13,9 @@ Before running the commands below, ensure your system has the following installe
 
 1. **Clone the repository**
    ```bash
-   git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
+   git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
    cd aira-agent-workspace-fabric
    ```
-
 2. **Install the AWF CLI**
    ```bash
    uv tool install aira-awf
