@@ -23,7 +23,13 @@ def generate_expected_catalog() -> str:
         if val.related_command:
             lines.append(f"**Related Command:** `{val.related_command}`")
         if val.docs_link:
-            lines.append(f"**Docs Link:** [{val.docs_link}]({val.docs_link})")
+            if val.docs_link.startswith("http"):
+                lines.append(f"**Docs Link:** [{val.docs_link}]({val.docs_link})")
+            elif val.docs_link.startswith("docs/REASON_CATALOG.md#"):
+                anchor = val.docs_link.split("#", 1)[1]
+                lines.append(f"**Docs Link:** [{val.docs_link}](#{anchor})")
+            else:
+                lines.append(f"**Docs Link:** [{val.docs_link}]({val.docs_link})")
         lines.append("")
     return "\n".join(lines)
 
