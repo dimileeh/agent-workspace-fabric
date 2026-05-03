@@ -119,3 +119,69 @@ def test_profile_security_serialization():
     assert dumped["secrets"][0]["provider"] == "aws"
     assert "security" in dumped
     assert dumped["security"]["egress"]["mode"] == "restricted"
+
+
+@pytest.mark.unit
+def test_supply_chain_policy_accepts_warn_block_modes_and_normalizes_hosts():
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "test",
+            "security": {
+                "supply_chain": {
+                    "unpinned_dependency_installs": {"mode": "block"},
+                    "remote_script_execution": {"mode": "warn"},
+                    "unexpected_registry_hosts": {
+                        "mode": "block",
+                        "allowed_hosts": [
+                            "https://registry.npmjs.org/",
+                            "pypi.org",
+                            "LOCALHOST",
+                            "pypi.org",
+                        ],
+                    },
+                    "lockfile_changes_outside_owned_paths": {"mode": "warn"},
+                }
+            },
+        }
+    )
+
+    dumped = profile.model_dump(mode="json")
+
+    assert dumped["security"]["supply_chain"]["unpinned_dependency_installs"] == {
+        "mode": "block"
+    }
+    assert dumped["security"]["supply_chain"]["unexpected_registry_hosts"] == {
+        "mode": "block",
+        "allowed_hosts": ["registry.npmjs.org", "pypi.org", "localhost"],
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "host",
+    [
+        "https://token@registry.example/simple",
+        "ftp://registry.example/simple",
+        "registry.example/simple",
+        "https://:443/simple",
+        "not a host",
+        "",
+    ],
+)
+def test_supply_chain_policy_rejects_malformed_or_secret_bearing_registry_hosts(
+    host: str,
+):
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "test",
+                "security": {
+                    "supply_chain": {
+                        "unexpected_registry_hosts": {
+                            "mode": "warn",
+                            "allowed_hosts": [host],
+                        }
+                    }
+                },
+            }
+        )

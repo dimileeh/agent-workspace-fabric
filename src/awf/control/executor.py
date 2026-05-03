@@ -147,6 +147,11 @@ from awf.service.conformance_salvage import (
 )
 from awf.service.coordination import coordination_warnings_from_task_policy
 from awf.service.provider_recovery import create_provider_recovery_attempt_row
+from awf.service.supply_chain_policy import (
+    SupplyChainFinding,
+    SupplyChainPolicyRefreshResult,
+    SupplyChainPolicyRefreshService,
+)
 
 
 class _MonitorRunnerProto(Protocol):
@@ -489,6 +494,36 @@ def _rebase_recovery_operation_payload_identities(
 
 def _str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _append_agent_result_evidence(
+    command_evidence: list[str] | None,
+    *,
+    stdout: str,
+    stderr: str,
+) -> None:
+    if command_evidence is None:
+        return
+    if stdout:
+        command_evidence.append(stdout)
+    if stderr:
+        command_evidence.append(stderr)
+
+
+def _supply_chain_block_message(findings: Sequence[SupplyChainFinding]) -> str:
+    blocking = [finding for finding in findings if finding.severity == "blocking"]
+    if not blocking:
+        return "Supply-chain policy blocked workspace output."
+    lines = ["Supply-chain policy blocked workspace output:"]
+    for finding in blocking[:5]:
+        guidance = finding.details.get("recovery_guidance")
+        subject = f" ({finding.subject_path})" if finding.subject_path else ""
+        lines.append(f"- {finding.reason_code}{subject}: {finding.explanation}")
+        if isinstance(guidance, str) and guidance:
+            lines.append(f"  Recovery: {guidance}")
+    if len(blocking) > 5:
+        lines.append(f"- {len(blocking) - 5} additional blocking finding(s).")
+    return "\n".join(lines)
 
 
 def _int_or_none(value: object) -> int | None:
@@ -1138,6 +1173,7 @@ class WorkspaceExecutor:
         adapter: AgentAdapter | None = None
         defaults: AgentDefaults | None = None
         default_model: str | None = None
+        agent_command_evidence: list[str] = []
         try:
             agent = AgentRuntime(ws.agent)
             defaults = self._defaults_for(agent)
@@ -1216,6 +1252,7 @@ class WorkspaceExecutor:
                     compose_file=compose_file,
                     worktree_path=worktree_path,
                     model=default_model,
+                    command_evidence=agent_command_evidence,
                 )
                 if planning_failure is not None:
                     failure_message = (
@@ -1273,6 +1310,11 @@ class WorkspaceExecutor:
             )
             return
         except AgentRunError as exc:
+            _append_agent_result_evidence(
+                agent_command_evidence,
+                stdout=exc.result.stdout,
+                stderr=exc.result.stderr,
+            )
             # Do NOT bail out yet. A CLI that exits non-zero — typically
             # ``claude_code`` hitting a 1-hour internal session cap and
             # returning 137 (SIGKILL), or a timeout against a flaky
@@ -1551,8 +1593,24 @@ class WorkspaceExecutor:
                         f"{add_result.stderr}"
                     )
                 cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
-                if cached.stdout.strip():
-                    staged_paths = _git_name_lines(cached.stdout)
+                staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
+                supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
+                    workspace_id=workspace_id,
+                    command_evidence=agent_command_evidence,
+                    changed_paths=staged_paths,
+                )
+                if supply_chain_result.policy_blocked:
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.policy_failure,
+                        reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
+                        message=_supply_chain_block_message(
+                            supply_chain_result.findings
+                        )[:2000],
+                    )
+                    return
+                if staged_paths:
                     staged_paths_are_plan_only = changed_paths_are_only_internal_plan_artifacts(
                         staged_paths
                     )
@@ -2092,13 +2150,19 @@ class WorkspaceExecutor:
                 requested_tier=validation_tier,
             ):
                 return
+            fix_command_evidence: list[str] = []
             try:
-                await adapter.run(
+                fix_result = await adapter.run(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     prompt=fix_prompt,
                     model=default_model,
                     workspace_id=workspace_id,
+                )
+                _append_agent_result_evidence(
+                    fix_command_evidence,
+                    stdout=fix_result.stdout,
+                    stderr=fix_result.stderr,
                 )
             except ComposeExecCleanupError as exc:
                 message = cleanup_failure_message(exc)
@@ -2132,6 +2196,11 @@ class WorkspaceExecutor:
                 )
                 return
             except AgentRunError as exc:
+                _append_agent_result_evidence(
+                    fix_command_evidence,
+                    stdout=exc.result.stdout,
+                    stderr=exc.result.stderr,
+                )
                 # Coding CLI exited non-zero on the fix pass. Mirrors the
                 # initial-run behaviour: log, remember the note, fall
                 # through to commit any salvaged work, then continue the
@@ -2190,8 +2259,37 @@ class WorkspaceExecutor:
             ):
                 return
             fix_cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
-            if fix_cached.stdout.strip():
-                fix_staged_paths = _git_name_lines(fix_cached.stdout)
+            fix_staged_paths = (
+                _git_name_lines(fix_cached.stdout) if fix_cached.stdout.strip() else []
+            )
+            supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
+                workspace_id=workspace_id,
+                command_evidence=fix_command_evidence,
+                changed_paths=fix_staged_paths,
+            )
+            if supply_chain_result.policy_blocked:
+                message = _supply_chain_block_message(supply_chain_result.findings)
+                await self._finish_pending_validate_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    validation_run_id=validation_run_id,
+                    requested_tier=validation_tier,
+                    reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
+                    coverage=_validation_run_coverage_metadata(
+                        val_result,
+                        baseline_coverage=baseline_coverage,
+                    ),
+                    error_message=message,
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.policy_failure,
+                    reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
+                    message=message[:2000],
+                )
+                return
+            if fix_staged_paths:
                 if await self._fail_if_plan_only_paths(
                     workspace_id=workspace_id,
                     changed_paths=fix_staged_paths,
@@ -3288,13 +3386,14 @@ class WorkspaceExecutor:
         compose_file: Path,
         worktree_path: Path,
         model: str | None,
+        command_evidence: list[str] | None = None,
     ) -> str | _PlanningRunFailure | None:
         planning = profile.planning
         coordination_warnings = coordination_warnings_from_task_policy(
             getattr(workspace, "task_policy", None)
         )
         if not planning.required:
-            await adapter.run(
+            result = await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 prompt=build_agent_task_prompt(
@@ -3303,6 +3402,11 @@ class WorkspaceExecutor:
                 ),
                 model=model,
                 workspace_id=workspace.id,
+            )
+            _append_agent_result_evidence(
+                command_evidence,
+                stdout=result.stdout,
+                stderr=result.stderr,
             )
             return None
 
@@ -3329,7 +3433,7 @@ class WorkspaceExecutor:
         )
         if rev_r.ok and rev_r.stdout.strip():
             baseline_sha = rev_r.stdout.strip()
-        await adapter.run(
+        plan_result = await adapter.run(
             compose_project=compose_project,
             compose_file=compose_file,
             prompt=build_planning_prompt(
@@ -3339,6 +3443,11 @@ class WorkspaceExecutor:
             ),
             model=model,
             workspace_id=workspace.id,
+        )
+        _append_agent_result_evidence(
+            command_evidence,
+            stdout=plan_result.stdout,
+            stderr=plan_result.stderr,
         )
         dirty_paths = await self._changed_paths(worktree_path)
         committed_paths = (
@@ -3396,7 +3505,7 @@ class WorkspaceExecutor:
         )
         for iteration in range(planning.max_iterations + 1):
             last_iteration = iteration
-            await adapter.run(
+            execute_result = await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 prompt=build_execution_prompt(
@@ -3408,6 +3517,11 @@ class WorkspaceExecutor:
                 ),
                 model=model,
                 workspace_id=workspace.id,
+            )
+            _append_agent_result_evidence(
+                command_evidence,
+                stdout=execute_result.stdout,
+                stderr=execute_result.stderr,
             )
             before_compare = await self._changed_paths(worktree_path)
             # Snapshot any pre-existing report digest so the timeout branch
@@ -3436,10 +3550,20 @@ class WorkspaceExecutor:
                     model=model,
                     workspace_id=workspace.id,
                 )
+                _append_agent_result_evidence(
+                    command_evidence,
+                    stdout=compare_result.stdout,
+                    stderr=compare_result.stderr,
+                )
             except AgentRunError as exc:
                 if exc.reason_code not in {"AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"}:
                     raise
                 compare_error = exc
+                _append_agent_result_evidence(
+                    command_evidence,
+                    stdout=exc.result.stdout,
+                    stderr=exc.result.stderr,
+                )
 
             elapsed_seconds = time.monotonic() - iteration_started_at
             # Compute after_compare on both success and timeout paths so the
@@ -3731,6 +3855,22 @@ class WorkspaceExecutor:
                 f"git status failed while checking workspace changes: {result.stderr}"
             )
         return changed_paths_from_porcelain(result.stdout)
+
+    async def _refresh_supply_chain_policy_for_workspace(
+        self,
+        *,
+        workspace_id: str,
+        command_evidence: Sequence[str],
+        changed_paths: Sequence[str],
+    ) -> SupplyChainPolicyRefreshResult:
+        async with self._session_factory() as session:
+            result = await SupplyChainPolicyRefreshService(session).refresh_workspace(
+                workspace_id,
+                command_evidence=command_evidence,
+                changed_paths=changed_paths,
+            )
+            await session.commit()
+            return result
 
     def _digest_dirty_content(
         self,

@@ -299,6 +299,10 @@ class ProviderRecoveryRetryError(Exception):
     """Raised when an operation should back off and retry later due to a provider error."""
 
 
+class _MonitorPolicyBlockedError(Exception):
+    """Raised when monitor-authored changes violate blocking workspace policy."""
+
+
 class PullRequestMonitorRunner:
     """Drives the ``monitoring_pr`` stage for a single workspace."""
 
@@ -2152,6 +2156,66 @@ class PullRequestMonitorRunner:
             await s.commit()
         return bool(result and result.policy_blocked)
 
+    async def _refresh_supply_chain_policy_before_push(
+        self,
+        *,
+        workspace_id: str,
+        command_evidence: Sequence[str],
+        changed_paths: Sequence[str],
+    ) -> str | None:
+        from awf.service.supply_chain_policy import (
+            SupplyChainPolicyRefreshError,
+            SupplyChainPolicyRefreshService,
+        )
+
+        try:
+            async with self._deps.session_factory() as s:
+                result = await SupplyChainPolicyRefreshService(
+                    s
+                ).refresh_workspace_open_candidate(
+                    workspace_id,
+                    command_evidence=command_evidence,
+                    changed_paths=changed_paths,
+                )
+                await s.commit()
+        except TypeError:
+            return None
+        except SupplyChainPolicyRefreshError:
+            _log.warning(
+                "monitor.supply_chain_policy_refresh_skipped",
+                workspace_id=workspace_id,
+                reason="workspace_not_found",
+            )
+            return None
+        blocking_codes = [
+            finding.reason_code
+            for finding in result.findings
+            if finding.severity == "blocking"
+        ]
+        if not blocking_codes:
+            return None
+        return _supply_chain_policy_blocked_message(blocking_codes)
+
+    async def _active_policy_block_message(self, workspace_id: str) -> str | None:
+        from awf.db.repositories import PolicyFindingRepository
+
+        try:
+            async with self._deps.session_factory() as s:
+                active_findings = await PolicyFindingRepository(s).list_active_for_workspace(
+                    workspace_id
+                )
+        except TypeError:
+            return None
+        blocking_codes = [
+            finding.reason_code
+            for finding in active_findings
+            if finding.severity == "blocking"
+            and finding.reason_code.startswith("SUPPLY_CHAIN_")
+        ]
+        if not blocking_codes:
+            return None
+        return _supply_chain_policy_blocked_message(blocking_codes)
+
     async def _merge_gate_for_workspace(
         self,
         workspace_id: str,
@@ -2869,29 +2933,45 @@ class PullRequestMonitorRunner:
         for _pass_num in range(self._runner_config.max_fix_cycle_passes):
             # 1) Address each item in the current batch.
             for t in threads:
-                verdict = await self._address_thread(
-                    workspace_id=workspace_id,
-                    repo=repo,
-                    pr_number=pr_number,
-                    thread=t,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    state=state,
-                )
+                try:
+                    verdict = await self._address_thread(
+                        workspace_id=workspace_id,
+                        repo=repo,
+                        pr_number=pr_number,
+                        thread=t,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        state=state,
+                    )
+                except _MonitorPolicyBlockedError as exc:
+                    return _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                    )
                 state.mark_addressed(t.thread_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     threads_to_resolve.append(t.thread_id)
                     publish_dependent_ids.append(t.thread_id)
             for c in reviews:
-                verdict = await self._address_review_comment(
-                    workspace_id=workspace_id,
-                    repo=repo,
-                    pr_number=pr_number,
-                    comment=c,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    state=state,
-                )
+                try:
+                    verdict = await self._address_review_comment(
+                        workspace_id=workspace_id,
+                        repo=repo,
+                        pr_number=pr_number,
+                        comment=c,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        state=state,
+                    )
+                except _MonitorPolicyBlockedError as exc:
+                    return _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=1,
+                        stderr=str(exc),
+                    )
                 state.mark_addressed(c.comment_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     publish_dependent_ids.append(c.comment_id)
@@ -3133,6 +3213,7 @@ class PullRequestMonitorRunner:
     ) -> Verdict:
         result_stdout = ""
         cli_failed = False
+        command_evidence: list[str] = []
         if await self._provider_recovery_suppresses_cli(workspace_id):
             raise ProviderRecoveryRetryError()
         agent_run_err = None
@@ -3145,10 +3226,20 @@ class PullRequestMonitorRunner:
                 log_source="recovery",
             )
             result_stdout = result.stdout
+            _append_command_evidence(
+                command_evidence,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
         except AgentRunError as exc:
             cli_failed = True
             result_stdout = exc.result.stdout
             agent_run_err = exc
+            _append_command_evidence(
+                command_evidence,
+                stdout=exc.result.stdout,
+                stderr=exc.result.stderr,
+            )
 
         committed_dirty_changes = await self._commit_dirty_worktree(
             workspace_id=workspace_id,
@@ -3156,6 +3247,7 @@ class PullRequestMonitorRunner:
             compose_project=compose_project,
             compose_file=compose_file,
             state=state,
+            command_evidence=command_evidence,
         )
 
         if agent_run_err is not None:
@@ -3275,28 +3367,44 @@ class PullRequestMonitorRunner:
     ) -> _GitPushResult:
         prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
         agent_run_err = None
+        command_evidence: list[str] = []
         if await self._provider_recovery_suppresses_cli(workspace_id):
             raise ProviderRecoveryRetryError()
         try:
-            await self._deps.adapter.run(
+            result = await self._deps.adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 prompt=prompt,
                 workspace_id=workspace_id,
                 log_source="recovery",
             )
+            _append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
         except AgentRunError as exc:
             agent_run_err = exc
+            _append_command_evidence(
+                command_evidence,
+                stdout=exc.result.stdout,
+                stderr=exc.result.stderr,
+            )
 
         if agent_run_err is not None:
             await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
 
-        await self._commit_dirty_worktree(
-            workspace_id=workspace_id,
-            message=f"fix: address PR #{pr_number} CI failure",
-            compose_project=compose_project,
-            compose_file=compose_file,
-        )
+        try:
+            await self._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message=f"fix: address PR #{pr_number} CI failure",
+                compose_project=compose_project,
+                compose_file=compose_file,
+                command_evidence=command_evidence,
+            )
+        except _MonitorPolicyBlockedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+            )
 
         if agent_run_err is not None:
             _log.warning(
@@ -3320,6 +3428,7 @@ class PullRequestMonitorRunner:
         compose_project: str | None = None,
         compose_file: Path | None = None,
         state: MonitorState | None = None,
+        command_evidence: Sequence[str] = (),
     ) -> bool:
         """Commit dirty monitor-agent edits so PR feedback is not stranded.
 
@@ -3344,6 +3453,15 @@ class PullRequestMonitorRunner:
             return False
         if not status.stdout.strip():
             return False
+
+        changed_paths = tuple(_changed_paths_from_porcelain(status.stdout))
+        policy_message = await self._refresh_supply_chain_policy_before_push(
+            workspace_id=workspace_id,
+            command_evidence=command_evidence,
+            changed_paths=changed_paths,
+        )
+        if policy_message is not None:
+            raise _MonitorPolicyBlockedError(policy_message)
 
         if compose_project is not None and compose_file is not None:
             repaired_status = await self._repair_protected_scope_changes_before_commit(
@@ -3738,7 +3856,17 @@ class PullRequestMonitorRunner:
         """
         remote = remote_url or "origin"
         refspec = refspec or f"HEAD:refs/heads/{remote_branch}"
-        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "push", remote, refspec])
+        policy_block_message = await self._active_policy_block_message(worktree_path.name)
+        if policy_block_message is not None:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=policy_block_message,
+            )
+        r = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "push", remote, refspec]
+        )
         if r.ok:
             # git prints "Everything up-to-date" to stderr when the ref didn't move.
             pushed = "up-to-date" not in (r.stderr or "").lower()
@@ -5168,6 +5296,24 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
         else:
             paths.append(path)
     return list(dict.fromkeys(paths))
+
+
+def _append_command_evidence(
+    command_evidence: list[str],
+    *,
+    stdout: str,
+    stderr: str,
+) -> None:
+    if stdout:
+        command_evidence.append(stdout)
+    if stderr:
+        command_evidence.append(stderr)
+
+
+def _supply_chain_policy_blocked_message(reason_codes: Iterable[str]) -> str:
+    codes = list(dict.fromkeys(reason_codes))
+    suffix = f": {', '.join(codes)}" if codes else "."
+    return f"Supply-chain policy blocked PR monitor publication{suffix}"
 
 
 def _target_reconcile_payload(result: object) -> dict[str, object]:

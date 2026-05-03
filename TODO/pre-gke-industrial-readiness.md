@@ -374,11 +374,17 @@ not listed here.
   as authority over AWF/system/task policy. Add regression tests proving
   adversarial external text cannot override owned paths, validation policy,
   secret handling, merge gates, or cleanup rules.
-- [ ] Add supply-chain guardrails for agent-run package installation and remote
+- [x] Add supply-chain guardrails for agent-run package installation and remote
   script execution. Profiles should be able to choose warn/block modes for
   unpinned dependency installs, curl-pipe-shell patterns, unexpected registry
   hosts, and lockfile changes outside owned paths; violations should produce
-  structured findings and operator-visible recovery guidance.
+  structured findings and operator-visible recovery guidance. Implemented in
+  `ws_a1357eb1d1db498a9ed499ed`: `security.supply_chain` profile policy,
+  structured `PolicyFinding` reason codes, executor and PR-monitor pre-commit /
+  pre-push blocking, and focused regressions for warn, block, allowed, and
+  false-positive-safe cases. Evidence:
+  `uv run --python 3.12 --extra dev pytest tests/unit/service/test_supply_chain_policy.py tests/unit/profiles/test_security_policy.py tests/unit/api/test_workspaces.py::TestCreateWorkspaceV2PolicyMetadata::test_inline_profile_accepts_and_returns_supply_chain_policy tests/unit/control/test_executor_validation_fix_cycle.py::TestSupplyChainPolicy tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py::test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed -q`;
+  `uv run --python 3.12 --extra dev mypy src/awf`.
 
 ## P1: Workspace Services And Realistic Project Profiles
 

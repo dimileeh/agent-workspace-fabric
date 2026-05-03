@@ -1476,6 +1476,46 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert overview_item["network_posture"] == "open"
 
     @pytest.mark.unit
+    async def test_inline_profile_accepts_and_returns_supply_chain_policy(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "workspace": {
+                "profile_ref": "inline",
+                "profile": {
+                    "name": "supply-chain-guarded",
+                    "security": {
+                        "supply_chain": {
+                            "unpinned_dependency_installs": {"mode": "block"},
+                            "remote_script_execution": {"mode": "block"},
+                            "unexpected_registry_hosts": {
+                                "mode": "warn",
+                                "allowed_hosts": ["https://registry.npmjs.org/"],
+                            },
+                            "lockfile_changes_outside_owned_paths": {"mode": "warn"},
+                        }
+                    },
+                },
+            },
+        }
+
+        create = await client.post("/v2/workspaces", json=payload)
+        assert create.status_code == 202
+
+        detail = await client.get(f"/v1/workspaces/{create.json()['workspace_id']}")
+
+        assert detail.status_code == 200
+        supply_chain = detail.json()["resolved_profile"]["security"]["supply_chain"]
+        assert supply_chain["unpinned_dependency_installs"]["mode"] == "block"
+        assert supply_chain["remote_script_execution"]["mode"] == "block"
+        assert supply_chain["unexpected_registry_hosts"] == {
+            "mode": "warn",
+            "allowed_hosts": ["registry.npmjs.org"],
+        }
+
+    @pytest.mark.unit
     async def test_persists_agent_model_override_in_task_policy(
         self,
         client: AsyncClient,
