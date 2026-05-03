@@ -1,0 +1,5 @@
+{
+  "status": "complete",
+  "summary": "Per-provider copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw are present in docs/PROJECT_ONBOARDING.md. README.md references them. The TODO item is checked off. The docs consistency test (test_project_onboarding_doc_has_provider_prompts) passes and is recorded in the validation artifact.",
+  "gaps": []
+}
