@@ -176,46 +176,17 @@ def collect_agent_readiness(
     resolved_http_get = http_get or _http_get
 
     providers: dict[str, dict[str, Any]] = {
-        "github": _check_github(
+        provider: _check_provider_readiness(
+            provider,
             settings,
             environ=env,
             host_home=host_home,
-            strict="github" in strict,
+            strict=provider in strict,
             run_subprocess=resolved_run,
-            secrets=secrets,
-        ),
-        "codex": _check_codex(
-            environ=env,
-            host_home=host_home,
-            strict="codex" in strict,
-            secrets=secrets,
-        ),
-        "claude_code": _check_claude(
-            environ=env,
-            host_home=host_home,
-            strict="claude_code" in strict,
-            secrets=secrets,
-        ),
-        "gemini": _check_gemini(
-            environ=env,
-            host_home=host_home,
-            strict="gemini" in strict,
-            secrets=secrets,
-        ),
-        "opencode": _check_opencode(
-            environ=env,
-            host_home=host_home,
-            strict="opencode" in strict,
             http_get=resolved_http_get,
             secrets=secrets,
-        ),
-        "docker": _check_docker_provider(
-            settings,
-            environ=env,
-            host_home=host_home,
-            strict="docker" in strict,
-            secrets=secrets,
-        ),
+        )
+        for provider in PROVIDER_NAMES
     }
     return {
         "status": "fail"
@@ -248,6 +219,7 @@ def selected_provider_readiness_preflight(
 
     env = os.environ if environ is None else environ
     secrets = _secret_values(settings, env)
+    host_home = Path(settings.host_home or "~").expanduser()
     identity = effective_agent_identity(agent=agent, task_policy=task_policy)
     runtime = _coerce_launch_agent(agent)
     checked = checked_at or datetime.now(UTC)
@@ -271,14 +243,16 @@ def selected_provider_readiness_preflight(
         )
 
     provider = _LAUNCH_PROVIDER_BY_AGENT[runtime]
-    readiness = collect_agent_readiness(
+    provider_result = _check_provider_readiness(
+        provider,
         settings,
         environ=env,
-        validated_strict_providers={provider},
+        host_home=host_home,
+        strict=True,
         run_subprocess=resolved_run,
         http_get=resolved_http_get,
+        secrets=secrets,
     )
-    provider_result = readiness["providers"][provider]
     probe = _selected_launch_probe(
         provider,
         provider_result=provider_result,
@@ -365,6 +339,66 @@ def _coerce_launch_agent(agent: AgentRuntime | str) -> AgentRuntime | None:
         return agent if isinstance(agent, AgentRuntime) else AgentRuntime(str(agent))
     except ValueError:
         return None
+
+
+def _check_provider_readiness(
+    provider: ProviderName,
+    settings: ServiceSettings,
+    *,
+    environ: Mapping[str, str],
+    host_home: Path,
+    strict: bool,
+    run_subprocess: SubprocessRun,
+    http_get: HttpGet,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    if provider == "github":
+        return _check_github(
+            settings,
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            run_subprocess=run_subprocess,
+            secrets=secrets,
+        )
+    if provider == "codex":
+        return _check_codex(
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            secrets=secrets,
+        )
+    if provider == "claude_code":
+        return _check_claude(
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            secrets=secrets,
+        )
+    if provider == "gemini":
+        return _check_gemini(
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            secrets=secrets,
+        )
+    if provider == "opencode":
+        return _check_opencode(
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            http_get=http_get,
+            secrets=secrets,
+        )
+    if provider == "docker":
+        return _check_docker_provider(
+            settings,
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            secrets=secrets,
+        )
+    raise AssertionError(f"unsupported provider: {provider}")
 
 
 def _selected_launch_probe(

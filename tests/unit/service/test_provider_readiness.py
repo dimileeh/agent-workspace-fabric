@@ -122,6 +122,42 @@ def test_selected_provider_preflight_blocks_missing_strict_auth(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_selected_provider_preflight_checks_only_selected_provider(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+    env = {
+        "AWF_GITHUB_TOKEN": "ghp_unrelated_provider_secret",
+        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+        "OPENAI_API_KEY": "sk-proj-selected-codex-secret",
+    }
+    subprocess_calls: list[list[str]] = []
+    http_urls: list[str] = []
+
+    def _run(args: list[str], **_kwargs: object) -> Any:
+        subprocess_calls.append(args)
+        return _completed(stdout="logged in\n")
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        http_urls.append(url)
+        return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="codex",
+        task_policy={},
+        environ=env,
+        run_subprocess=_run,
+        http_get=_http_get,
+    )
+
+    assert result["provider"] == "codex"
+    assert result["readiness_status"] == "ready"
+    assert subprocess_calls == []
+    assert http_urls == []
+
+
+@pytest.mark.unit
 def test_selected_provider_preflight_blocks_unsupported_runtime(tmp_path: Path) -> None:
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
