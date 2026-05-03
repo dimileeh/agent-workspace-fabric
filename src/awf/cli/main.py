@@ -32,17 +32,28 @@ from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceSta
 from awf.service.gc import WorkspaceGCComposeTeardownResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
+_COMMON_HELP_TEXT = """
+For first-time users: the recommended first path is to run `awf init`
+to verify prerequisites and bootstrap your local service stack, followed by
+`awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md
+for more details.
+
+Safety defaults & Dry-run: Commands that modify local state default to
+dry-runs or previews unless explicit write flags are passed.
+
+Mutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub
+via the async worker.
+"""
+
 app = typer.Typer(
     name="awf",
-    help="Aira Agent Workspace Fabric — CLI operator surface."
-    "\n\nFor first-time users: the recommended first path is to run `awf init` \nto verify prerequisites and bootstrap your local service stack, followed by \n`awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md \nfor more details.\n\nSafety defaults & Dry-run: Commands that modify local state default to \ndry-runs or previews unless explicit write flags are passed.\n\nMutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub \nvia the async worker.\n",
+    help=f"Aira Agent Workspace Fabric — CLI operator surface.\n{_COMMON_HELP_TEXT}",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
 
 workspace_app = typer.Typer(
-    help="Workspace lifecycle (create/inspect/destroy)."
-    "\n\nFor first-time users: the recommended first path is to run `awf init` \nto verify prerequisites and bootstrap your local service stack, followed by \n`awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md \nfor more details.\n\nSafety defaults & Dry-run: Commands that modify local state default to \ndry-runs or previews unless explicit write flags are passed.\n\nMutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub \nvia the async worker.\n"
+    help=f"Workspace lifecycle (create/inspect/destroy).\n{_COMMON_HELP_TEXT}"
 )
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
@@ -244,7 +255,10 @@ _DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS = 180.0
 _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = 2.0
 
 
-@app.command("init")
+@app.command(
+    "init",
+    help=f"Bootstrap AWF on this machine, or run local onboarding checks for a project path.\n{_COMMON_HELP_TEXT}",
+)
 def init(
     path: Path | None = typer.Argument(
         None,
@@ -299,19 +313,6 @@ def init(
         help="Output format. JSON unlocks scripting; pretty is the default.",
     ),
 ) -> None:
-    """Bootstrap AWF on this machine, or run local onboarding checks for a project path.
-
-    For first-time users: the recommended first path is to run `awf init`
-    to verify prerequisites and bootstrap your local service stack, followed by
-    `awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md
-    for more details.
-
-    Safety defaults & Dry-run: Commands that modify local state default to
-    dry-runs or previews unless explicit write flags are passed.
-
-    Mutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub
-    via the async worker.
-    """
     if path is None:
         if include_smoke_request:
             typer.echo(
@@ -853,7 +854,10 @@ def service_readiness(
         raise typer.Exit(code=1)
 
 
-@service_app.command("bootstrap")
+@service_app.command(
+    "bootstrap",
+    help=f"Start local Postgres, migrations, API, worker, and verify readiness.\n{_COMMON_HELP_TEXT}",
+)
 def service_bootstrap(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
     timeout_seconds: float = typer.Option(
@@ -882,19 +886,6 @@ def service_bootstrap(
         ),
     ),
 ) -> None:
-    """Start local Postgres, migrations, API, worker, and verify readiness.
-
-    For first-time users: the recommended first path is to run `awf init`
-    to verify prerequisites and bootstrap your local service stack, followed by
-    `awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md
-    for more details.
-
-    Safety defaults & Dry-run: Commands that modify local state default to
-    dry-runs or previews unless explicit write flags are passed.
-
-    Mutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub
-    via the async worker.
-    """
     from awf.service.bootstrap import (
         ServiceBootstrapError,
         ServiceBootstrapOptions,
