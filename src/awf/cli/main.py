@@ -32,18 +32,43 @@ from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceSta
 from awf.service.gc import WorkspaceGCComposeTeardownResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
+_DX_FIRST_PATH_HELP = """
+For first-time users: the recommended first path is to run `awf init`
+to verify prerequisites and bootstrap your local service stack, followed by
+`awf init <path>` to prepare your project repository.
+"""
+
+_MUTATES_GLOBAL_HELP = """
+Mutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub
+via the async worker.
+"""
+
+_DX_HELP = "DX smoke proof: validate local service, profile, and PR path."
+_PROVIDER_HELP = (
+    "Repeatable provider strictness check: github, codex, claude_code, "
+    "gemini, opencode, or docker."
+)
+_PROVIDER_HELP_PASSTHROUGH = (
+    "Repeatable provider strictness check passed through to local "
+    "service bootstrap: github, codex, claude_code, gemini, opencode, "
+    "or docker."
+)
+
+
 app = typer.Typer(
     name="awf",
-    help="Aira Agent Workspace Fabric — CLI operator surface.",
+    help=f"Aira Agent Workspace Fabric — CLI operator surface.\n{_DX_FIRST_PATH_HELP}{_MUTATES_GLOBAL_HELP}",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
 
-workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy).")
+workspace_app = typer.Typer(
+    help=f"Workspace lifecycle (create/inspect/destroy).\n{_DX_FIRST_PATH_HELP}"
+)
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
 locks_app = typer.Typer(help="Owned-path reservation and overlap-risk visibility.")
-smoke_app = typer.Typer(help="DX smoke proof: validate local service, profile, PR path.")
+smoke_app = typer.Typer(help=_DX_HELP)
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
 app.add_typer(service_app, name="service")
@@ -91,9 +116,7 @@ def _run_terminal_workspace_compose_teardown(
     candidate_compose_file_path = getattr(candidate, "compose_file_path", None)
     workspace_id = getattr(candidate, "workspace_id", None)
     compose_project_name = getattr(candidate, "compose_project_name", None)
-    compose_project_name = (
-        compose_project_name if isinstance(compose_project_name, str) else None
-    )
+    compose_project_name = compose_project_name if isinstance(compose_project_name, str) else None
     compose_file_path = (
         candidate_compose_file_path.expanduser()
         if isinstance(candidate_compose_file_path, Path)
@@ -103,10 +126,7 @@ def _run_terminal_workspace_compose_teardown(
             else compose_path
         )
     )
-    if (
-        not isinstance(compose_file_path, Path)
-        or not isinstance(workspace_id, str)
-    ):
+    if not isinstance(compose_file_path, Path) or not isinstance(workspace_id, str):
         return WorkspaceGCComposeTeardownResult(
             status="failed",
             reason_code="DOCKER_COMPOSE_DOWN_FAILED",
@@ -245,7 +265,10 @@ _DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS = 180.0
 _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = 2.0
 
 
-@app.command("init")
+@app.command(
+    "init",
+    help=f"Bootstrap AWF on this machine, or run local onboarding checks for a project path.\n{_DX_FIRST_PATH_HELP}",
+)
 def init(
     path: Path | None = typer.Argument(
         None,
@@ -288,11 +311,7 @@ def init(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check passed through to local "
-            "service bootstrap: github, codex, claude_code, gemini, opencode, "
-            "or docker."
-        ),
+        help=_PROVIDER_HELP_PASSTHROUGH,
     ),
     fmt: OutputFormat = typer.Option(
         OutputFormat.pretty,
@@ -300,7 +319,6 @@ def init(
         help="Output format. JSON unlocks scripting; pretty is the default.",
     ),
 ) -> None:
-    """Bootstrap AWF on this machine, or run local onboarding checks for a project path."""
     if path is None:
         if include_smoke_request:
             typer.echo(
@@ -468,7 +486,9 @@ def _run_init_project_onboarding(
     typer.echo("")
     typer.echo("Suggested next steps:")
     typer.echo("  - Run `awf profile init <path> --write` to create `.awf/workspace.yml`.")
-    typer.echo("  - Run `awf profile preview <path> --profile <name>` to inspect profile resolution.")
+    typer.echo(
+        "  - Run `awf profile preview <path> --profile <name>` to inspect profile resolution."
+    )
     typer.echo(
         "  - Optional: generate a smoke workspace request locally with "
         "`awf init <path> --include-smoke-request`; this prints the payload inline and does "
@@ -641,16 +661,9 @@ def _run_init_service_bootstrap(
         typer.echo("  bootstrap status: ok")
         typer.echo("")
         typer.echo("Next steps:")
-        typer.echo(
-            "  - export AWF_GITHUB_TOKEN=\"$(gh auth token)\" so the worker can "
-            "create PRs."
-        )
-        typer.echo(
-            "  - Run `awf service status --format pretty` to verify readiness."
-        )
-        typer.echo(
-            "  - Run `awf init <path>` to onboard a project repository."
-        )
+        typer.echo('  - export AWF_GITHUB_TOKEN="$(gh auth token)" so the worker can create PRs.')
+        typer.echo("  - Run `awf service status --format pretty` to verify readiness.")
+        typer.echo("  - Run `awf init <path>` to onboard a project repository.")
     else:
         payload = result.to_dict()
         payload["state_directory"] = str(state_dir)
@@ -699,10 +712,7 @@ def service_status(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check: github, codex, claude_code, "
-            "gemini, opencode, or docker."
-        ),
+        help=_PROVIDER_HELP,
     ),
 ) -> None:
     """Check local AWF service dependencies."""
@@ -734,10 +744,7 @@ def service_doctor(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check: github, codex, claude_code, "
-            "gemini, opencode, or docker."
-        ),
+        help=_PROVIDER_HELP,
     ),
 ) -> None:
     """Run operator-friendly local AWF diagnostics."""
@@ -811,10 +818,7 @@ def service_readiness(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check: github, codex, claude_code, "
-            "gemini, opencode, or docker."
-        ),
+        help=_PROVIDER_HELP,
     ),
 ) -> None:
     """Run the executable local AWF Core release-readiness gate."""
@@ -847,7 +851,10 @@ def service_readiness(
         raise typer.Exit(code=1)
 
 
-@service_app.command("bootstrap")
+@service_app.command(
+    "bootstrap",
+    help=f"Start local Postgres, migrations, API, worker, and verify readiness.\n{_DX_FIRST_PATH_HELP}",
+)
 def service_bootstrap(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
     timeout_seconds: float = typer.Option(
@@ -870,13 +877,9 @@ def service_bootstrap(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check: github, codex, claude_code, "
-            "gemini, opencode, or docker."
-        ),
+        help=_PROVIDER_HELP,
     ),
 ) -> None:
-    """Start local Postgres, migrations, API, worker, and verify readiness."""
     from awf.service.bootstrap import (
         ServiceBootstrapError,
         ServiceBootstrapOptions,
@@ -1009,9 +1012,7 @@ def service_gc(
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     retention_hours = (
-        settings.completed_workspace_retention_hours
-        if min_age_hours is None
-        else min_age_hours
+        settings.completed_workspace_retention_hours if min_age_hours is None else min_age_hours
     )
     candidate_limit = limit if limit is not None else settings.workspace_cleanup_batch_limit
 
@@ -1208,8 +1209,7 @@ def workspace_retry(
                 "provider_readiness_override": provider_readiness_override,
                 "provider_readiness_override_reason": provider_readiness_override_reason,
             }
-            if provider_readiness_override
-            or provider_readiness_override_reason is not None
+            if provider_readiness_override or provider_readiness_override_reason is not None
             else None
         ),
     )
@@ -1460,7 +1460,7 @@ def profile_init(
     _emit(payload, fmt)
 
 
-@smoke_app.command("run")
+@smoke_app.command("run", help=_DX_HELP)
 def smoke_run(
     project: Path = typer.Option(
         Path(),
@@ -1479,7 +1479,6 @@ def smoke_run(
         help="Fallback project path when --project has no profile.",
     ),
 ) -> None:
-    """Run a DX smoke proof validating local service, profile, and PR path."""
     from awf.service.config import resolve_service_settings
     from awf.service.smoke import collect_smoke_report
 
