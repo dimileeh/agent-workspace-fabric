@@ -972,6 +972,71 @@ async def test_remonitor_failed_workspace_with_pr_reenters_monitoring(
 
 
 @pytest.mark.unit
+async def test_remonitor_failed_workspace_cancels_stale_pr_monitor_recovery_ops(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/44"
+    workspace.pr_number = 44
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "monitor process died during validation recovery"
+    operation_repo = OperationRepository(session)
+    stale_validate = await operation_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+        payload={
+            "owner": "pr_monitor",
+            "source": "pr_monitor",
+            "recovery_mode": "validate_only",
+            "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+        },
+    )
+    operator_validate = await operation_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+        payload={
+            "owner": "operator",
+            "source": "operator_api",
+            "recovery_mode": "validate_only",
+            "reason_code": "OPERATOR_VALIDATE",
+        },
+    )
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason="reattach after stale validation op",
+        idempotency_key="remonitor-cancel-stale-recovery",
+        expected_version=workspace.version,
+    )
+    operations = {op.id: op for op in await _operations(session, workspace.id)}
+    events = await _events(session, workspace.id)
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert operations[stale_validate.id].status == OperationStatus.cancelled.value
+    assert operations[stale_validate.id].error_code == "OPERATOR_REMONITOR"
+    assert operations[stale_validate.id].result == {
+        "status": "cancelled",
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_action": "remonitor",
+    }
+    assert operations[operator_validate.id].status == OperationStatus.running.value
+    remonitor_event = next(
+        event for event in events if event.event_type == "workspace.remonitor_requested"
+    )
+    assert remonitor_event.payload["cancelled_recovery_operations"] == [
+        {
+            "operation_id": stale_validate.id,
+            "operation_type": OperationType.validate.value,
+            "operation_status": OperationStatus.running.value,
+        }
+    ]
+
+
+@pytest.mark.unit
 async def test_refresh_replays_same_idempotency_key_after_destroying_state(
     session: AsyncSession,
 ) -> None:

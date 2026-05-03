@@ -2406,7 +2406,27 @@ class PullRequestMonitorRunner:
                     for op in _ws.operations
                 )
                 if active_recovery:
-                    return True
+                    await s.commit()
+                    await self._sleep_with_monitor_state_operation(
+                        workspace_id=workspace_id,
+                        action="recovery_wait",
+                        requested_action=requested_action,
+                        reason="Waiting for an active PR monitor recovery operation to finish.",
+                        reason_code="RECOVERY_IN_PROGRESS",
+                        pr_number=pr_number,
+                        status=status,
+                        base_branch=base_branch,
+                        remote_branch=remote_branch,
+                        wait_seconds=self._config.poll_interval_seconds,
+                        monitor_log=monitor_log,
+                        stale_reason=stale_reason,
+                        extra_payload={
+                            "recovery_mode": recovery_mode,
+                            "stale_reason": stale_reason,
+                        },
+                        extra_identity=(recovery_mode, stale_reason),
+                    )
+                    return False
                 if _ws.status != WorkspaceStatus.monitoring_pr.value:
                     await workspace_repo.record_ignored_stale_callback(
                         _ws,

@@ -544,6 +544,12 @@ class WorkspaceControlService:
             self._session,
             workspace,
         )
+        cancelled_recovery_operations = (
+            await _cancel_stale_pr_monitor_recovery_operations(
+                operations,
+                workspace_id=workspace.id,
+            )
+        )
         workspace.monitor_claimed_by = None
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
@@ -557,6 +563,13 @@ class WorkspaceControlService:
         event_payload = _event_payload(event_payload, expected_version=expected_version)
         if state_reset is not None:
             event_payload["state_reset"] = state_reset
+        if cancelled_recovery_operations:
+            event_payload["cancelled_recovery_operations"] = cancelled_recovery_operations
+            event_payload["cancelled_recovery_reason_code"] = _OPERATOR_REMONITOR_REASON_CODE
+            event_payload["cancelled_recovery_requested_action"] = (
+                OperationType.remonitor.value
+            )
+        if state_reset is not None:
             workspace.events.append(
                 WorkspaceEvent(
                     id=new_event_id(),
@@ -583,6 +596,8 @@ class WorkspaceControlService:
         }
         if state_reset is not None:
             result["state_reset"] = state_reset
+        if cancelled_recovery_operations:
+            result["cancelled_recovery_operations"] = cancelled_recovery_operations
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,
@@ -1369,6 +1384,57 @@ async def _reset_failed_workspace_for_remonitor(
         "monitor_iter_count_reset_from": old_iter_count,
         "candidate_reopened": candidate_reopened,
     }
+
+
+async def _cancel_stale_pr_monitor_recovery_operations(
+    operations: OperationRepository,
+    *,
+    workspace_id: str,
+) -> list[dict[str, object]]:
+    cancelled: list[dict[str, object]] = []
+    active: list[Operation] = []
+    for status in (OperationStatus.pending, OperationStatus.running):
+        active.extend(
+            await operations.list_for_workspace(
+                workspace_id,
+                status=status,
+                limit=100,
+            )
+        )
+
+    for operation in active:
+        if not _is_pr_monitor_recovery_operation(operation):
+            continue
+        cancelled.append(_operation_conflict_detail(operation))
+        await operations.finish(
+            operation,
+            status=OperationStatus.cancelled,
+            result={
+                "status": OperationStatus.cancelled.value,
+                "reason_code": _OPERATOR_REMONITOR_REASON_CODE,
+                "requested_action": OperationType.remonitor.value,
+            },
+            error_code=_OPERATOR_REMONITOR_REASON_CODE,
+            error_message=(
+                "Cancelled stale PR monitor recovery operation before operator remonitor."
+            ),
+        )
+    return cancelled
+
+
+def _is_pr_monitor_recovery_operation(operation: Operation) -> bool:
+    if operation.type not in {
+        OperationType.validate.value,
+        OperationType.rebase.value,
+    }:
+        return False
+    payload = operation.payload
+    if not isinstance(payload, Mapping):
+        return False
+    return (
+        payload.get("source") == "pr_monitor"
+        and payload.get("recovery_mode") in {"validate_only", "rebase_only"}
+    )
 
 
 def _control_response(

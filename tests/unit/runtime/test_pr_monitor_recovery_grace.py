@@ -720,19 +720,31 @@ async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
         monitor_log=None,
     )
 
-    assert terminal is True
+    assert terminal is False
+    assert sleep_fn.calls == [runner._config.poll_interval_seconds]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
         # Workspace stays in monitoring_pr — the existing pending op is
         # owned by an earlier dispatch that already transitioned (or is
         # racing to transition); the duplicate-create guard MUST NOT
-        # transition again or it would corrupt state.
+        # transition again or exit the monitor as terminal.
         assert ws.status == WorkspaceStatus.monitoring_pr.value
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
-        # Only the pre-seeded operation exists — no duplicate was created.
-        assert len(operations) == 1
-        assert operations[0].payload == {
+        # The pre-seeded operation is preserved and a monitor_state wait
+        # operation records why the monitor stayed alive.
+        recovery_operations = [
+            op for op in operations if op.type == OperationType.validate.value
+        ]
+        wait_operations = [
+            op
+            for op in operations
+            if op.type == OperationType.monitor_state.value
+            and op.payload.get("reason_code") == "RECOVERY_IN_PROGRESS"
+        ]
+        assert len(recovery_operations) == 1
+        assert len(wait_operations) == 1
+        assert recovery_operations[0].payload == {
             "owner": "pr_monitor",
             "source": "pr_monitor",
             "reason": "Required validation tier has not passed for this merge candidate.",
@@ -741,7 +753,8 @@ async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
             "requested_action": "validate",
             "recovery_mode": "validate_only",
         }
-        assert operations[0].status == OperationStatus.pending.value
+        assert recovery_operations[0].status == OperationStatus.pending.value
+        assert wait_operations[0].status == OperationStatus.succeeded.value
         # No monitor.recovery_dispatched event fires the second time
         # (the original dispatch already emitted it).
         events = [e for e in ws.events if e.event_type == "monitor.recovery_dispatched"]
