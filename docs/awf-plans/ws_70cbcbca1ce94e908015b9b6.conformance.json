@@ -1,1 +1,5 @@
-{"status":"needs_iteration","summary":"Implementation matches the plan by documenting the SDK stance in README.md, docs/MCP_CLIENT_PARITY.md, and docs/REST_API_REFERENCE.md, and adding the required tests in tests/unit/docs/test_sdk_stance_docs.py. However, validation evidence is missing.","gaps":["Validation evidence is missing. Please run the validation commands specified in the plan (pytest, ruff, mypy on tests/unit/docs/test_sdk_stance_docs.py) under the validation phase."]}
+{
+  "status": "satisfied",
+  "summary": "The explicit-doc stance for the v0.1 SDK has been documented correctly in README.md, REST_API_REFERENCE.md, and MCP_CLIENT_PARITY.md. A validation test tests/unit/docs/test_sdk_stance_docs.py was created and passes based on the validation evidence provided.",
+  "gaps": []
+}
