@@ -344,8 +344,15 @@ def _phase_workspace_request(
                     },
                     "action": "No action required.",
                 }
-    except Exception:
-        pass
+    except Exception as exc:
+        return {
+            "name": "workspace_request",
+            "status": "fail",
+            "reason_code": "SMOKE_WORKSPACE_REQUEST_FAILED",
+            "message": f"Could not generate a workspace smoke request from the profile: {exc}",
+            "evidence": {"error": str(exc)},
+            "action": "Verify .awf/workspace.yml is valid and the project profile can be loaded.",
+        }
 
     return {
         "name": "workspace_request",
