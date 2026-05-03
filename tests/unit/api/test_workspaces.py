@@ -917,6 +917,51 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         assert replay.json()["workspace_id"] == first.json()["workspace_id"]
 
     @pytest.mark.unit
+    async def test_idempotent_replay_accepts_redacted_override_reason_after_secret_rotation(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        old_settings = Settings(
+            _env_file=None,
+            host_home=str(tmp_path / "home"),
+            docker_host="",
+            github_token="initial-local-secret",
+        )
+        new_settings = Settings(
+            _env_file=None,
+            host_home=str(tmp_path / "home"),
+            docker_host="",
+            github_token="rotated-local-secret",
+        )
+        active_settings = old_settings
+        app.dependency_overrides[get_settings] = lambda: active_settings
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": (
+                    "operator verified initial-local-secret manually"
+                ),
+            },
+        }
+        headers = {
+            "Idempotency-Key": "provider-readiness-redacted-rotated-reason-replay"
+        }
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        active_settings = new_settings
+        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+
+        assert first.status_code == 202
+        assert first.json()["provider_readiness_preflight"]["override_reason"] == (
+            "operator verified <redacted> manually"
+        )
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+
+    @pytest.mark.unit
     async def test_workspace_detail_list_and_overview_include_stored_preflight(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],

@@ -11,6 +11,7 @@ returns 409 ``IDEMPOTENCY_CONFLICT`` per docs/PLAN_MVP.md § Error code taxonomy
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated, cast
@@ -44,9 +45,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.profiles.resolver import ProfileResolutionError
-from awf.service.config import resolve_service_settings
 from awf.service.disk import DiskCheck, check_disk_space
-from awf.service.provider_readiness import redact_launch_preflight_text
 from awf.service.secret_leases import SecretLeaseService
 from awf.service.validation_observability import (
     latest_merge_candidate,
@@ -76,6 +75,7 @@ from awf.service.workspaces import (
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
 router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
 DiskCheckProvider = Callable[[Settings], DiskCheck]
+_REDACTED_TEXT = "<redacted>"
 
 __all__ = [
     "InvalidWorkspaceOverviewCursorError",
@@ -159,7 +159,7 @@ async def create_workspace_v2(
     if idempotency_key is not None:
         existing = await repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
-            if not _payloads_match_v2(existing, payload, settings=settings):
+            if not _payloads_match_v2(existing, payload):
                 return JSONResponse(
                     status_code=status.HTTP_409_CONFLICT,
                     content=ErrorResponse(
@@ -486,8 +486,6 @@ def _payloads_match(existing: Workspace, payload: WorkspaceCreateRequest) -> boo
 def _payloads_match_v2(
     existing: Workspace,
     payload: WorkspaceCreateV2Request,
-    *,
-    settings: Settings,
 ) -> bool:
     requested_profile = (
         payload.workspace.profile.model_dump(mode="json", by_alias=True)
@@ -522,8 +520,7 @@ def _payloads_match_v2(
             or _resolved_profile_requested_tier(existing) == payload.validation.requested_tier
         )
         and list(existing.test_commands) == list(payload.validation.commands)
-        and _stored_task_provider_readiness_override(existing)
-        == _requested_provider_readiness_override(payload, settings=settings)
+        and _task_provider_readiness_override_matches(existing, payload)
     )
 
 
@@ -577,15 +574,12 @@ def _stored_task_agent_model(existing: Workspace) -> str | None:
 
 def _requested_provider_readiness_override(
     payload: WorkspaceCreateV2Request,
-    *,
-    settings: Settings,
 ) -> tuple[bool, str | None]:
-    reason = payload.preflight.provider_readiness_override_reason
-    if not reason:
-        return (payload.preflight.provider_readiness_override, None)
     return (
         payload.preflight.provider_readiness_override,
-        redact_launch_preflight_text(resolve_service_settings(settings), reason),
+        _normalized_provider_readiness_override_reason(
+            payload.preflight.provider_readiness_override_reason
+        ),
     )
 
 
@@ -603,3 +597,42 @@ def _stored_task_provider_readiness_override(
         else preflight.get("override_used") is True,
         reason if isinstance(reason, str) else None,
     )
+
+
+def _task_provider_readiness_override_matches(
+    existing: Workspace,
+    payload: WorkspaceCreateV2Request,
+) -> bool:
+    stored_override, stored_reason = _stored_task_provider_readiness_override(existing)
+    requested_override, requested_reason = _requested_provider_readiness_override(payload)
+    return stored_override == requested_override and _override_reasons_match(
+        stored_reason,
+        requested_reason,
+    )
+
+
+def _normalized_provider_readiness_override_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    normalized = reason.strip()
+    return normalized or None
+
+
+def _override_reasons_match(
+    stored_reason: str | None,
+    requested_reason: str | None,
+) -> bool:
+    if stored_reason == requested_reason:
+        return True
+    if stored_reason is None or requested_reason is None:
+        return False
+    if _REDACTED_TEXT not in stored_reason:
+        return False
+
+    # Stored preflight snapshots are redacted at create time. Treat those
+    # redacted spans as stable wildcards so replays do not depend on today's
+    # service secret set after token rotation.
+    pattern = ".+".join(
+        re.escape(part) for part in stored_reason.split(_REDACTED_TEXT)
+    )
+    return re.fullmatch(pattern, requested_reason, flags=re.DOTALL) is not None
