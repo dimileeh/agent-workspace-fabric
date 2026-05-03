@@ -1459,6 +1459,32 @@ def test_provider_readiness_opencode_http_error_detail_is_redacted(tmp_path: Pat
 
 
 @pytest.mark.unit
+def test_ollama_http_probe_exception_logs_redacted_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+
+    def _http_get(_url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        raise RuntimeError("transport failed for sk-proj-ollama-secret")
+
+    result = provider_readiness._probe_ollama(
+        ("http://ollama.local:11434/api/version",),
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    serialized = json.dumps(result, sort_keys=True)
+    assert result["ok"] is False
+    assert "RuntimeError: transport failed for <redacted>" in serialized
+    assert "provider_readiness.ollama_probe_exception" in caplog.text
+    assert "Traceback" in caplog.text
+    assert "RuntimeError: transport failed for <redacted>" in caplog.text
+    assert "sk-proj-ollama-secret" not in serialized
+    assert "sk-proj-ollama-secret" not in caplog.text
+
+
+@pytest.mark.unit
 def test_ollama_model_probe_reports_missing_model_and_transport_failures() -> None:
     calls: list[str] = []
 
