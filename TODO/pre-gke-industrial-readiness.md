@@ -542,7 +542,7 @@ coding agent in any project to use AWF for a feature.
 - [x] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
 - [x] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
 - [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
-- [ ] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
+- [x] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
 - [x] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
 - [x] Convert the parity matrix into an implementation driver: every surface marked
   missing or partial must map to a concrete P1 implementation issue/slice, with
@@ -598,7 +598,7 @@ without reading the whole repo.
   troubleshooting, trust model, and contributor guide. Acceptance: README
   remains scannable under roughly 300 lines and points to one canonical doc for
   each developer journey stage.
-- [ ] Add an executable first-run DX smoke command, such as `awf demo run` or
+- [x] Add an executable first-run DX smoke command, such as `awf demo run` or
   `awf smoke run`, that prints a step-by-step report for service readiness,
   profile preview, workspace request, validation evidence, PR/monitor evidence
   or mocked-local equivalent, and cleanup evidence. Acceptance: it is safe to

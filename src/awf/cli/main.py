@@ -43,10 +43,12 @@ workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy)."
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
 locks_app = typer.Typer(help="Owned-path reservation and overlap-risk visibility.")
+smoke_app = typer.Typer(help="DX smoke proof: validate local service, profile, PR path.")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
 app.add_typer(service_app, name="service")
 app.add_typer(locks_app, name="locks")
+app.add_typer(smoke_app, name="smoke")
 
 
 class OutputFormat(StrEnum):
@@ -1415,6 +1417,46 @@ def profile_init(
         raise typer.Exit(code=2) from None
 
     _emit(payload, fmt)
+
+
+@smoke_app.command("run")
+def smoke_run(
+    project: Path = typer.Option(
+        Path(),
+        "--project",
+        help="Path to the project to smoke.",
+    ),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+    mocked_local: bool = typer.Option(
+        False,
+        "--mocked-local",
+        help="Run in mocked-local mode without live external services.",
+    ),
+    demo_path: Path | None = typer.Option(
+        None,
+        "--demo-path",
+        help="Fallback project path when --project has no profile.",
+    ),
+) -> None:
+    """Run a DX smoke proof validating local service, profile, and PR path."""
+    from awf.service.config import resolve_service_settings
+    from awf.service.smoke import collect_smoke_report
+
+    resolved = project.expanduser().resolve()
+    resolved_demo = demo_path.expanduser().resolve() if demo_path is not None else None
+    settings = resolve_service_settings()
+
+    report = asyncio.run(
+        collect_smoke_report(
+            project=resolved,
+            settings=settings,
+            mocked_local=mocked_local,
+            demo_path=resolved_demo,
+        )
+    )
+    _emit(report, fmt)
+    if report["status"] == "fail":
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":  # pragma: no cover - entry point

@@ -139,6 +139,17 @@ profile inlined:
 This is only a shape for review or later copy-paste. The init command never
 submits it.
 
+## DX smoke proof (post-onboarding)
+
+After completing onboarding, validate the full AWF surface with a single command:
+
+```bash
+awf smoke run --format pretty
+```
+
+See [docs/SMOKE_COMMAND.md](SMOKE_COMMAND.md) for the complete phase reference,
+reason codes, and mocked-local mode details.
+
 ## Secrets
 
 Generated profiles must not contain raw secrets. Use environment placeholders

@@ -583,6 +583,19 @@ uv run --python 3.12 --extra dev awf service logs --follow --service api --servi
 the `api` and `worker` services. Repeat `--service` to select `api`, `worker`,
 `migrate`, or `postgres`.
 
+Run a DX smoke proof from any project:
+
+```bash
+uv run --python 3.12 --extra dev awf smoke run
+uv run --python 3.12 --extra dev awf smoke run --mocked-local --format pretty
+```
+
+`awf smoke run` validates service readiness, auth/provider readiness, profile
+preview, validation commands, workspace request shape, PR/monitor path (mocked
+in `--mocked-local` mode), and console links. It is safe to run repeatedly and
+produces structured reason codes with next actions on failure. See
+[docs/SMOKE_COMMAND.md](docs/SMOKE_COMMAND.md) for the full phase reference.
+
 Run one target-branch reconciliation pass:
 
 ```bash
