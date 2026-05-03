@@ -13,6 +13,7 @@ import yaml
 from awf.common.config import DEFAULT_MIN_FREE_DISK_BYTES, Settings
 from awf.service.config import (
     _redact_database_url,
+    local_service_environ,
     resolve_service_settings,
     service_config_payload,
 )
@@ -200,6 +201,37 @@ def test_awf_github_token_precedes_standard_gh_token_fallback() -> None:
     )
 
     assert settings.github_token == "ghp_awf_token"
+
+
+@pytest.mark.unit
+def test_awf_github_token_resolves_from_explicit_service_environment() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"AWF_GITHUB_TOKEN": "ghp_explicit_awf_token"},
+    )
+
+    assert settings.github_token == "ghp_explicit_awf_token"
+
+
+@pytest.mark.unit
+def test_local_service_environ_loads_compose_env_with_host_override(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_GITHUB_TOKEN=ghp_compose_token\n"
+        "GH_TOKEN=ghp_compose_gh_token\n"
+        "EMPTY_VALUE=\n",
+        encoding="utf-8",
+    )
+
+    environ = local_service_environ(
+        {"AWF_GITHUB_TOKEN": "ghp_host_token", "PATH": "/usr/bin"},
+        env_file=env_file,
+    )
+
+    assert environ["AWF_GITHUB_TOKEN"] == "ghp_host_token"
+    assert environ["GH_TOKEN"] == "ghp_compose_gh_token"
+    assert environ["EMPTY_VALUE"] == ""
+    assert environ["PATH"] == "/usr/bin"
 
 
 @pytest.mark.unit

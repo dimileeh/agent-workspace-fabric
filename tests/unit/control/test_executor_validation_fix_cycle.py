@@ -124,6 +124,7 @@ def _queue_initial_pass(fake: FakeCommandRunner) -> None:
     block (through to just before validation). Shared prefix for every
     test in this file."""
     fake.queue_result(returncode=0)  # adapter.run (initial)
+    fake.queue_result(returncode=0, stdout="")  # current branch
     fake.queue_result(returncode=0)  # git add -A
     fake.queue_result(returncode=0, stdout="f\n")  # diff --cached (non-empty)
     fake.queue_result(returncode=0)  # git commit

@@ -111,6 +111,13 @@ def _secret_profile() -> WorkspaceProfile:
 
 class TestSuccess:
     @pytest.mark.unit
+    async def test_provision_claimed_missing_workspace_is_noop(
+        self,
+        provisioner: Provisioner,
+    ) -> None:
+        await provisioner.provision_claimed("ws_missing")
+
+    @pytest.mark.unit
     async def test_transitions_to_ready_only_after_stack_launch_succeeds(
         self,
         session_factory: async_sessionmaker[AsyncSession],

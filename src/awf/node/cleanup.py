@@ -170,6 +170,7 @@ class WorkspaceCleaner:
             workspace_id=workspace_id,
             worktree_host_path=worktree_host_path or Path("/dev/null"),
         )
+        compose_file_missing = compose_file_path is not None and not compose_file_path.exists()
         try:
             if compose_file_path is not None:
                 await self._compose.down_project(
@@ -178,8 +179,19 @@ class WorkspaceCleaner:
                     workspace_id=workspace_id,
                     remove_volumes=remove_volumes,
                 )
+                if compose_file_missing:
+                    await self._compose.remove_project_by_label(
+                        project_name=compose_project_name or spec.project_name(),
+                        workspace_id=workspace_id,
+                        remove_volumes=remove_volumes,
+                    )
             else:
                 await self._compose.down(spec, remove_volumes=remove_volumes)
+                await self._compose.remove_project_by_label(
+                    project_name=compose_project_name or spec.project_name(),
+                    workspace_id=workspace_id,
+                    remove_volumes=remove_volumes,
+                )
             steps.append(
                 WorkspaceCleanupStepResult(
                     name="compose_down",

@@ -7,10 +7,12 @@ exception, always close. We verify all three paths.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.base import Base
@@ -76,3 +78,18 @@ class TestSessionScope:
         with pytest.raises(ValueError, match="original"):
             async with session_scope(factory):
                 raise ValueError("original")
+
+
+@pytest.mark.unit
+async def test_sqlite_raw_datetime_binds_do_not_use_deprecated_default_adapter() -> None:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("SELECT :created_at"),
+                    {"created_at": datetime(2026, 4, 26, 12, 0, tzinfo=UTC)},
+                )
+    finally:
+        await engine.dispose()

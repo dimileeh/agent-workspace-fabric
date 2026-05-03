@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, cast
 
@@ -39,6 +40,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
+from awf.node.cleanup import WorkspaceCleanupResult
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.service.provider_recovery import (
@@ -78,6 +80,12 @@ _RUNTIME_HEALTH_SCAN_STATUSES: tuple[WorkspaceStatus, ...] = (
 )
 _STALE_ACTIVE_EXECUTION_REASON_CODE = "STALE_ACTIVE_EXECUTION"
 _STALE_ACTIVE_EXECUTION_EVENT_TYPE = "workspace.stale_active_execution_detected"
+_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE = (
+    "workspace.stale_active_execution_cleanup_failed"
+)
+_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE = (
+    "STALE_ACTIVE_EXECUTION_CLEANUP_FAILED"
+)
 _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
@@ -120,6 +128,7 @@ class _ActiveExecutionCandidate:
     workspace_id: str
     status: WorkspaceStatus
     compose_project_name: str | None
+    repo_url: str | None = None
     compose_file_path: str | None = None
     pr_url: str | None = None
     task_policy: dict[str, Any] | None = None
@@ -161,6 +170,20 @@ class RuntimeInspectorProtocol(Protocol):
     ) -> RuntimeSnapshot: ...
 
 
+class RuntimeCleanerProtocol(Protocol):
+    async def cleanup(  # pragma: no cover - Protocol method declaration only.
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> WorkspaceCleanupResult: ...
+
+
 class ControlWorker:
     """Reads pending work from the DB and dispatches it to runtime handlers."""
 
@@ -171,12 +194,14 @@ class ControlWorker:
         provisioner: Provisioner,
         executor: WorkspaceExecutorProtocol | None = None,
         runtime_inspector: RuntimeInspectorProtocol | None = None,
+        runtime_cleaner: RuntimeCleanerProtocol | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
         self._provisioner = provisioner
         self._executor = executor
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
+        self._runtime_cleaner = runtime_cleaner
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
@@ -625,6 +650,7 @@ class ControlWorker:
             select(
                 Workspace.id,
                 Workspace.status,
+                Workspace.repo_url,
                 Workspace.compose_project_name,
                 Workspace.compose_file_path,
                 Workspace.pr_url,
@@ -664,10 +690,11 @@ class ControlWorker:
             _ActiveExecutionCandidate(
                 workspace_id=row[0],
                 status=WorkspaceStatus(row[1]),
-                compose_project_name=row[2],
-                compose_file_path=row[3],
-                pr_url=row[4],
-                task_policy=row[5],
+                repo_url=row[2],
+                compose_project_name=row[3],
+                compose_file_path=row[4],
+                pr_url=row[5],
+                task_policy=row[6],
             )
             for row in rows
         ]
@@ -732,7 +759,7 @@ class ControlWorker:
                 candidate,
                 snapshot,
             ):
-                await self._fail_stale_active_execution(candidate, snapshot)
+                await self._cleanup_and_fail_stale_active_execution(candidate, snapshot)
             return
 
     async def _record_stale_active_execution_detected(
@@ -788,6 +815,106 @@ class ControlWorker:
             .limit(1)
         )
         return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _cleanup_and_fail_stale_active_execution(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        snapshot: RuntimeSnapshot,
+    ) -> None:
+        if not await self._stale_active_execution_can_fail(candidate):
+            return
+        if self._runtime_cleaner is None or not candidate.repo_url:
+            await self._record_stale_active_execution_cleanup_failed(
+                candidate,
+                snapshot,
+                cleanup=None,
+                message=(
+                    "runtime cleanup is not configured"
+                    if self._runtime_cleaner is None
+                    else "workspace has no repo_url for cleanup"
+                ),
+            )
+            return
+
+        cleanup = await self._runtime_cleaner.cleanup(
+            workspace_id=candidate.workspace_id,
+            repo_url=candidate.repo_url,
+            compose_project_name=candidate.compose_project_name,
+            compose_file_path=(
+                Path(candidate.compose_file_path)
+                if candidate.compose_file_path
+                else None
+            ),
+            remove_volumes=True,
+            remove_worktree=False,
+        )
+        if not cleanup.ok:
+            await self._record_stale_active_execution_cleanup_failed(
+                candidate,
+                snapshot,
+                cleanup=cleanup,
+                message="failed to stop or remove stale workspace runtime",
+            )
+            return
+
+        await self._fail_stale_active_execution(candidate, snapshot)
+
+    async def _stale_active_execution_can_fail(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            if not _execution_claim_is_stale(ws, datetime.now(UTC)):
+                return False
+            return await self._has_stale_active_execution_event(
+                session,
+                candidate.workspace_id,
+            )
+
+    async def _record_stale_active_execution_cleanup_failed(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        snapshot: RuntimeSnapshot,
+        *,
+        cleanup: WorkspaceCleanupResult | None,
+        message: str,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "compose_project_name": candidate.compose_project_name,
+            "workspace_status": candidate.status.value,
+            "runtime": _runtime_snapshot_payload(snapshot),
+            "message": message,
+        }
+        if cleanup is not None:
+            payload["cleanup"] = cleanup.to_dict()
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return
+            if not _execution_claim_is_stale(ws, datetime.now(UTC)):
+                return
+            await repo.add_event(
+                ws,
+                event_type=_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE,
+                reason_code=_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE,
+                payload=payload,
+            )
+            await session.commit()
+
+        _log.error(
+            _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE,
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            compose_project_name=candidate.compose_project_name,
+            reason_code=_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE,
+            message=message,
+        )
 
     async def _fail_stale_active_execution(
         self,

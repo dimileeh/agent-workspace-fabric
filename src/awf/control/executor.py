@@ -46,7 +46,10 @@ from awf.common.compose_exec import (
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.control.quality_gates import (
+    PLAN_ONLY_OUTPUT_REASON_CODE,
+    changed_paths_are_only_internal_plan_artifacts,
     find_protected_quality_gate_changes,
+    plan_only_output_message,
     quality_gate_violation_message,
 )
 from awf.control.state_machine import WorkspaceStateMachine
@@ -790,6 +793,7 @@ class WorkspaceExecutor:
             )
 
         expected_branch = ws.branch_name or f"awf/{workspace_id}"
+        has_known_non_plan_output = False
 
         try:
             if recovery is None:
@@ -935,8 +939,16 @@ class WorkspaceExecutor:
                 await _git_in_worktree(["add", "-A"])
                 cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
                 if cached.stdout.strip():
+                    staged_paths = _git_name_lines(cached.stdout)
+                    if await self._fail_if_plan_only_paths(
+                        workspace_id=workspace_id,
+                        changed_paths=staged_paths,
+                        expected_status=WorkspaceStatus.running,
+                    ):
+                        return
+                    has_known_non_plan_output = True
                     violations = find_protected_quality_gate_changes(
-                        changed_paths=_git_name_lines(cached.stdout),
+                        changed_paths=staged_paths,
                         owned_paths=list(ws.owned_paths),
                     )
                     if violations:
@@ -1462,8 +1474,28 @@ class WorkspaceExecutor:
                 return
             fix_cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
             if fix_cached.stdout.strip():
+                fix_staged_paths = _git_name_lines(fix_cached.stdout)
+                if await self._fail_if_plan_only_paths(
+                    workspace_id=workspace_id,
+                    changed_paths=fix_staged_paths,
+                    expected_status=WorkspaceStatus.validating,
+                ):
+                    await self._finish_pending_validate_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        validation_run_id=validation_run_id,
+                        requested_tier=validation_tier,
+                        reason_code=PLAN_ONLY_OUTPUT_REASON_CODE,
+                        coverage=_validation_run_coverage_metadata(
+                            val_result,
+                            baseline_coverage=baseline_coverage,
+                        ),
+                        error_message=plan_only_output_message(fix_staged_paths),
+                    )
+                    return
+                has_known_non_plan_output = True
                 violations = find_protected_quality_gate_changes(
-                    changed_paths=_git_name_lines(fix_cached.stdout),
+                    changed_paths=fix_staged_paths,
                     owned_paths=list(ws.owned_paths),
                 )
                 if violations:
@@ -1624,6 +1656,24 @@ class WorkspaceExecutor:
                 source_head_sha=recovery.get("source_head_sha"),
                 validated_workspace_head_sha=successful_validation_workspace_head_sha,
             )
+
+        try:
+            if not has_known_non_plan_output and await self._fail_if_plan_only_committed_output(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_commit=base_commit,
+                expected_status=WorkspaceStatus.validating,
+            ):
+                return
+        except Exception as exc:
+            _log.exception("executor.plan_only_output_check_failed", workspace_id=workspace_id)
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.validating,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"plan-only output check failed: {exc!r}"[:2000],
+            )
+            return
 
         # ── Step 3: push + open PR ──────────────────────────────────────────
         if not await self._transition_if_current(
@@ -2755,6 +2805,46 @@ class WorkspaceExecutor:
                 f"git diff --name-only failed while checking committed paths: {result.stderr}"
             )
         return {Path(line.strip()) for line in result.stdout.splitlines() if line.strip()}
+
+    async def _fail_if_plan_only_paths(
+        self,
+        *,
+        workspace_id: str,
+        changed_paths: list[str] | tuple[str, ...],
+        expected_status: WorkspaceStatus,
+    ) -> bool:
+        if not changed_paths_are_only_internal_plan_artifacts(changed_paths):
+            return False
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=expected_status,
+            failure_reason=FailureReason.agent_failure,
+            message=plan_only_output_message(changed_paths)[:2000],
+            reason_code=PLAN_ONLY_OUTPUT_REASON_CODE,
+            details={
+                "changed_paths": list(changed_paths),
+                "reason_code": PLAN_ONLY_OUTPUT_REASON_CODE,
+            },
+        )
+        return True
+
+    async def _fail_if_plan_only_committed_output(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        base_commit: str,
+        expected_status: WorkspaceStatus,
+    ) -> bool:
+        changed_paths = sorted(
+            path.as_posix()
+            for path in await self._committed_paths_since(worktree_path, base_commit)
+        )
+        return await self._fail_if_plan_only_paths(
+            workspace_id=workspace_id,
+            changed_paths=changed_paths,
+            expected_status=expected_status,
+        )
 
     async def _claim_ready(
         self,

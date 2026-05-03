@@ -149,72 +149,74 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     factory = make_session_factory(engine)
 
-    # Reset workspace back to ``ready`` so the executor will accept it.
-    async with factory() as s:
-        repo = WorkspaceRepository(s)
-        ws = await repo.get(workspace_id)
-        if ws is None:
-            print(f"No workspace {workspace_id} in DB", file=sys.stderr)
-            return 2
-        print(
-            f"Salvage target: {workspace_id}\n"
-            f"  status now: {ws.status}\n"
-            f"  agent:      {ws.agent}\n"
-            f"  branch:     {ws.branch_name}\n"
-            f"  base:       {ws.base_commit[:10] if ws.base_commit else '?'}\n"
-            f"  repo:       {ws.repo_url}",
-            flush=True,
+    try:
+        # Reset workspace back to ``ready`` so the executor will accept it.
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                print(f"No workspace {workspace_id} in DB", file=sys.stderr)
+                return 2
+            print(
+                f"Salvage target: {workspace_id}\n"
+                f"  status now: {ws.status}\n"
+                f"  agent:      {ws.agent}\n"
+                f"  branch:     {ws.branch_name}\n"
+                f"  base:       {ws.base_commit[:10] if ws.base_commit else '?'}\n"
+                f"  repo:       {ws.repo_url}",
+                flush=True,
+            )
+            if ws.status != WorkspaceStatus.ready.value:
+                # The state machine only permits ``failed -> destroying``, so a
+                # normal ``transition()`` call would refuse. For salvage we
+                # deliberately bypass the invariant: the containers + worktree
+                # the ``failed`` state was guarding are EXACTLY what we want to
+                # re-enter with. Set the field directly and record the reason
+                # in the transition log would require a new state; for the
+                # one-off script we just rewrite the column + clear failure
+                # info so the executor sees a clean ``ready`` workspace.
+                ws.status = WorkspaceStatus.ready.value
+                ws.failure_reason = None
+                ws.failure_message = None
+                await s.commit()
+
+        _install_noop_adapter_factory()
+
+        runner = AsyncioSubprocessRunner()
+        compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
+        validation = ValidationRunner(runner=runner, artifacts_dir=work_dir / "artifacts")
+        pr_creator = PullRequestCreator(runner)
+
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=runner,
+            compose=compose,
+            validation=validation,
+            pr_creator=pr_creator,
+            config=ExecutorConfig(
+                worktrees_root=work_dir / "git" / "worktrees",
+                compose_projects_root=work_dir / "compose" / "compose",
+                default_models={},
+            ),
         )
-        if ws.status != WorkspaceStatus.ready.value:
-            # The state machine only permits ``failed -> destroying``, so a
-            # normal ``transition()`` call would refuse. For salvage we
-            # deliberately bypass the invariant: the containers + worktree
-            # the ``failed`` state was guarding are EXACTLY what we want to
-            # re-enter with. Set the field directly and record the reason
-            # in the transition log would require a new state; for the
-            # one-off script we just rewrite the column + clear failure
-            # info so the executor sees a clean ``ready`` workspace.
-            ws.status = WorkspaceStatus.ready.value
-            ws.failure_reason = None
-            ws.failure_message = None
-            await s.commit()
 
-    _install_noop_adapter_factory()
+        print("[salvage] running executor (agent step is a no-op) ...", flush=True)
+        await executor.execute(workspace_id)
 
-    runner = AsyncioSubprocessRunner()
-    compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
-    validation = ValidationRunner(runner=runner, artifacts_dir=work_dir / "artifacts")
-    pr_creator = PullRequestCreator(runner)
-
-    executor = WorkspaceExecutor(
-        session_factory=factory,
-        runner=runner,
-        compose=compose,
-        validation=validation,
-        pr_creator=pr_creator,
-        config=ExecutorConfig(
-            worktrees_root=work_dir / "git" / "worktrees",
-            compose_projects_root=work_dir / "compose" / "compose",
-            default_models={},
-        ),
-    )
-
-    print("[salvage] running executor (agent step is a no-op) ...", flush=True)
-    await executor.execute(workspace_id)
-
-    async with factory() as s:
-        final = await WorkspaceRepository(s).get(workspace_id)
-        assert final is not None
-        print(
-            f"[salvage] done.\n"
-            f"  status:  {final.status}\n"
-            f"  pr_url:  {final.pr_url}\n"
-            f"  reason:  {final.failure_reason}\n"
-            f"  message: {final.failure_message}",
-            flush=True,
-        )
-    await engine.dispose()
-    return 0 if final and final.status == WorkspaceStatus.completed.value else 1
+        async with factory() as s:
+            final = await WorkspaceRepository(s).get(workspace_id)
+            assert final is not None
+            print(
+                f"[salvage] done.\n"
+                f"  status:  {final.status}\n"
+                f"  pr_url:  {final.pr_url}\n"
+                f"  reason:  {final.failure_reason}\n"
+                f"  message: {final.failure_message}",
+                flush=True,
+            )
+        return 0 if final and final.status == WorkspaceStatus.completed.value else 1
+    finally:
+        await engine.dispose()
 
 
 if __name__ == "__main__":

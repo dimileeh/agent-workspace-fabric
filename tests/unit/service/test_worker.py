@@ -166,11 +166,13 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             session_factory: object,
             provisioner: object,
             executor: object,
+            runtime_cleaner: object,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
             created["worker_provisioner"] = provisioner
             created["worker_executor"] = executor
+            created["worker_runtime_cleaner"] = runtime_cleaner
             created["worker_config"] = config
 
     engine = _Engine()
@@ -522,9 +524,11 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             session_factory: object,
             provisioner: object,
             executor: object,
+            runtime_cleaner: object,
             config: object,
         ) -> None:
             created["worker_config"] = config
+            created["worker_runtime_cleaner"] = runtime_cleaner
 
     engine = _Engine()
     session_factory = object()

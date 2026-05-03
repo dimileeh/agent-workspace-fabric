@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from awf.control.quality_gates import (
+    changed_paths_are_only_internal_plan_artifacts,
     find_protected_quality_gate_changes,
+    plan_only_output_message,
     quality_gate_violation_message,
 )
 
@@ -52,6 +54,37 @@ def test_regular_source_changes_are_not_protected() -> None:
     )
 
     assert violations == []
+
+
+@pytest.mark.unit
+def test_plan_only_output_detects_internal_plan_artifacts() -> None:
+    assert changed_paths_are_only_internal_plan_artifacts(
+        [
+            "docs/awf-plans/ws_123.md",
+            "./docs/awf-plans/ws_123.conformance.json",
+        ]
+    )
+
+
+@pytest.mark.unit
+def test_plan_only_output_allows_real_docs_and_source_changes() -> None:
+    assert not changed_paths_are_only_internal_plan_artifacts(
+        ["docs/PROJECT_ONBOARDING.md"]
+    )
+    assert not changed_paths_are_only_internal_plan_artifacts(
+        ["docs/awf-plans/ws_123.md", "src/awf/control/executor.py"]
+    )
+    assert not changed_paths_are_only_internal_plan_artifacts([])
+
+
+@pytest.mark.unit
+def test_plan_only_output_message_is_operator_visible() -> None:
+    message = plan_only_output_message(
+        ["docs/awf-plans/ws_123.md", "docs/awf-plans/ws_123.conformance.json"]
+    )
+
+    assert "only AWF plan/conformance artifact" in message
+    assert "docs/awf-plans/ws_123.md" in message
 
 
 @pytest.mark.unit

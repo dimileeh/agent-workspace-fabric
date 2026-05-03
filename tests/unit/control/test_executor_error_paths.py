@@ -38,6 +38,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
+    WorkspaceEventRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
@@ -124,9 +125,9 @@ class _RecordingValidation:
         *,
         phase_names: tuple[str, ...],
         **_kwargs: Any,
-    ) -> SimpleNamespace:
+    ) -> ValidationResult:
         self.calls.append(phase_names)
-        return SimpleNamespace(all_passed=True, first_failure=None)
+        return ValidationResult()
 
 
 class _ExplodingValidation:
@@ -1632,6 +1633,58 @@ class TestValidationInfrastructureError:
 
 class TestPullRequestUnexpectedError:
     @pytest.mark.unit
+    async def test_plan_only_output_fails_before_validation_and_pr_creation(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _UnexpectedPrCreator:
+            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
+                raise AssertionError("plan-only output must not be pushed")
+
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "docs/awf-plans/ws_plan.md\n"
+                "docs/awf-plans/ws_plan.conformance.json\n"
+            ),
+        )
+        validation = _RecordingValidation()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_UnexpectedPrCreator(),
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert "only AWF plan/conformance artifact" in (ws.failure_message or "")
+            assert ws.pr_url is None
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+            assert any(
+                event.event_type == "workspace.state_changed"
+                and event.reason_code == "PLAN_ONLY_OUTPUT"
+                for event in events
+            )
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert runs == []
+
+        assert validation.calls == [("setup", "pre_agent")]
+
+    @pytest.mark.unit
     async def test_unexpected_pr_creation_error_marks_failed(
         self,
         fake: FakeCommandRunner,
@@ -1705,6 +1758,7 @@ class TestPullRequestUnexpectedError:
         fake.queue_result(returncode=0)
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
+        fake.queue_result(returncode=0, stdout="src/app.py\n")
         fake.queue_result(returncode=0, stdout="deadbeef01\n")
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0, stdout="abc1234 commit\n")
@@ -1878,6 +1932,7 @@ class TestPrMonitorFactoryPath:
         ws_id = await _seed_ready(factory)
         # Drive the full happy path through agent→commit→validate→push→create PR.
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="a\n")  # cached diff
         fake.queue_result(returncode=0)  # git commit
@@ -1972,6 +2027,7 @@ class TestPrMonitorFactoryPath:
 
         ws_id = await _seed_ready(factory, auto_merge=False)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="a\n")  # cached diff
         fake.queue_result(returncode=0)  # git commit

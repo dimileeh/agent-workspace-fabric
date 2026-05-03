@@ -12,7 +12,7 @@ from awf.api.schemas import WorkspaceCreateV2Request
 from awf.common.config import Settings
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
-from awf.db.models import Operation, Task, TaskAttempt, WorkspaceEvent
+from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.planning import (
@@ -22,10 +22,12 @@ from awf.runtime.planning import (
     render_workspace_path,
 )
 from awf.service.workspaces import (
-    WorkspaceRetryExhaustedError,
     WorkspaceRetryNotFoundError,
+    WorkspaceRetryRequiresSalvageError,
     WorkspaceService,
 )
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
@@ -58,8 +60,6 @@ def _request(*, task_kind: str = "feature_branch_pr") -> WorkspaceCreateV2Reques
         resources={},
     )
 
-
-@pytest.mark.unit
 def test_retry_not_found_error_has_instance_detail() -> None:
     error = WorkspaceRetryNotFoundError("ws_missing")
 
@@ -229,8 +229,6 @@ async def _mark_planning_scope_failed(
         )
         await session.commit()
 
-
-@pytest.mark.unit
 async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -321,8 +319,6 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
         (retried.id, "workspace.retry_created", first.id),
     }
 
-
-@pytest.mark.unit
 async def test_retry_recomputes_resource_reservation_from_current_defaults(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -364,23 +360,22 @@ async def test_retry_recomputes_resource_reservation_from_current_defaults(
     assert retried_reservation.peak_cpu == 6.0
     assert retried_reservation.peak_memory_gb == 16.0
 
-
-@pytest.mark.unit
-async def test_retry_conformance_unsatisfied_enriches_prompt_with_final_gaps(
+async def test_retry_conformance_unsatisfied_requires_salvage(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
     first = await service.create_v2(_request())
     await _mark_conformance_failed(factory, first.id)
 
-    retry = await service.retry_workspace(first.id)
+    with pytest.raises(WorkspaceRetryRequiresSalvageError) as exc_info:
+        await service.retry_workspace(first.id)
 
     async with factory() as session:
-        retried = await WorkspaceRepository(session).get(retry.new_workspace_id)
+        workspaces = list((await session.execute(select(Workspace))).scalars())
         operations = list(
             (
                 await session.execute(
-                    select(Operation).where(Operation.workspace_id == retry.new_workspace_id)
+                    select(Operation).where(Operation.type == "retry")
                 )
             ).scalars()
         )
@@ -388,69 +383,59 @@ async def test_retry_conformance_unsatisfied_enriches_prompt_with_final_gaps(
             (
                 await session.execute(
                     select(WorkspaceEvent).where(
-                        WorkspaceEvent.workspace_id == retry.new_workspace_id,
                         WorkspaceEvent.event_type == "workspace.retry_created",
                     )
                 )
             ).scalars()
         )
 
-    assert retried is not None
-    assert "Fix the intermittent validation failure." in retried.task_prompt
-    assert "finish the remaining plan-conformance gaps" in retried.task_prompt
-    assert "Do not restart from scratch" in retried.task_prompt
-    assert "- Add regression test" in retried.task_prompt
-    assert "- Wire retry endpoint" in retried.task_prompt
-
-    assert len(operations) == 1
-    evidence_ref = operations[0].payload["conformance_evidence_ref"]
-    assert evidence_ref == {
+    assert exc_info.value.error_code == "WORKSPACE_RETRY_REQUIRES_SALVAGE"
+    assert exc_info.value.detail == {
         "source_workspace_id": first.id,
-        "event_type": "workspace.state_changed",
         "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+        "gaps": ["Add regression test", "Wire retry endpoint"],
+        "plan_path": "docs/awf-plans/ws_old.md",
+        "report_path": "docs/awf-plans/ws_old.conformance.json",
+        "recovery_guidance": (
+            "Retry is blocked because AWF cannot yet carry the implementation diff "
+            "from the failed conformance attempt into a fresh workspace. Inspect the "
+            "source worktree or relaunch the original task explicitly."
+        ),
     }
-    assert "Add regression test" not in str(operations[0].payload)
-    assert operations[0].result["source_reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
-    assert retry_created[0].payload["source_reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
-    assert "conformance_evidence_ref" in retry_created[0].payload
+    assert len(workspaces) == 1
+    assert operations == []
+    assert retry_created == []
 
 
 @pytest.mark.unit
-async def test_retry_conformance_unsatisfied_without_evidence_uses_original_prompt(
+async def test_retry_conformance_unsatisfied_without_evidence_requires_salvage(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
     first = await service.create_v2(_request())
     await _mark_conformance_failed_without_evidence(factory, first.id)
 
-    retry = await service.retry_workspace(first.id)
+    with pytest.raises(WorkspaceRetryRequiresSalvageError) as exc_info:
+        await service.retry_workspace(first.id)
 
     async with factory() as session:
-        retried = await WorkspaceRepository(session).get(retry.new_workspace_id)
-        operations = list(
-            (
-                await session.execute(
-                    select(Operation).where(Operation.workspace_id == retry.new_workspace_id)
-                )
-            ).scalars()
-        )
-        retry_created = list(
-            (
-                await session.execute(
-                    select(WorkspaceEvent).where(
-                        WorkspaceEvent.workspace_id == retry.new_workspace_id,
-                        WorkspaceEvent.event_type == "workspace.retry_created",
-                    )
-                )
-            ).scalars()
-        )
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        operations = list((await session.execute(select(Operation))).scalars())
 
-    assert retried is not None
-    assert retried.task_prompt == "Fix the intermittent validation failure."
-    assert operations[0].payload == {"source_workspace_id": first.id}
-    assert "source_reason_code" not in operations[0].result
-    assert "source_reason_code" not in retry_created[0].payload
-    assert "conformance_evidence_ref" not in retry_created[0].payload
+    assert exc_info.value.detail == {
+        "source_workspace_id": first.id,
+        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+        "gaps": [],
+        "plan_path": None,
+        "report_path": None,
+        "recovery_guidance": (
+            "Retry is blocked because AWF cannot yet carry the implementation diff "
+            "from the failed conformance attempt into a fresh workspace. Inspect the "
+            "source worktree or relaunch the original task explicitly."
+        ),
+    }
+    assert len(workspaces) == 1
+    assert operations == []
 
 
 @pytest.mark.unit
@@ -747,139 +732,3 @@ async def test_retry_persists_task_kind_without_post_insert_update() -> None:
         if statement.startswith("update workspaces") and "task_kind" in statement
     ]
     assert task_kind_updates == []
-
-
-@pytest.mark.unit
-async def test_conformance_retry_loop_terminates_after_exhausted_retries(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    service = WorkspaceService(factory)
-    first = await service.create_v2(_request())
-    await _mark_conformance_failed(factory, first.id)
-
-    retry1 = await service.retry_workspace(first.id)
-    retried1_id = retry1.new_workspace_id
-    await _mark_conformance_failed(factory, retried1_id)
-
-    retry2 = await service.retry_workspace(retried1_id)
-    retried2_id = retry2.new_workspace_id
-    await _mark_conformance_failed(factory, retried2_id)
-
-    retry3 = await service.retry_workspace(retried2_id)
-    retried3_id = retry3.new_workspace_id
-    await _mark_conformance_failed(factory, retried3_id)
-
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        ws3 = await repo.get(retried3_id)
-        assert ws3 is not None
-        assert ws3.status == WorkspaceStatus.failed.value
-
-        attempts = list(
-            (
-                await session.execute(
-                    select(TaskAttempt).order_by(TaskAttempt.attempt_number.asc())
-                )
-            ).scalars()
-        )
-        workspace_ids = [a.workspace_id for a in attempts]
-        assert len(workspace_ids) >= 4
-
-        operations_for_last = list(
-            (
-                await session.execute(
-                    select(Operation).where(Operation.workspace_id == retried3_id)
-                )
-            ).scalars()
-        )
-        assert len(operations_for_last) >= 1
-        payload = operations_for_last[0].payload or {}
-        assert payload.get("source_workspace_id") == retried2_id
-
-    with pytest.raises(WorkspaceRetryExhaustedError) as exc_info:
-        await service.retry_workspace(retried3_id)
-    assert exc_info.value.detail == {
-        "attempt_count": 4,
-        "max_attempts": 4,
-    }
-
-
-@pytest.mark.unit
-async def test_conformance_retry_payload_includes_retry_attempt_number_and_gaps(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    service = WorkspaceService(factory)
-    first = await service.create_v2(_request())
-    await _mark_conformance_failed(factory, first.id)
-
-    retry = await service.retry_workspace(first.id)
-
-    async with factory() as session:
-        operations = list(
-            (
-                await session.execute(
-                    select(Operation).where(
-                        Operation.workspace_id == retry.new_workspace_id
-                    )
-                )
-            ).scalars()
-        )
-        events = list(
-            (
-                await session.execute(
-                    select(WorkspaceEvent).where(
-                        WorkspaceEvent.workspace_id == first.id,
-                        WorkspaceEvent.event_type == "workspace.retry_requested",
-                    )
-                )
-            ).scalars()
-        )
-
-    assert len(operations) >= 1
-    evidence_ref = operations[0].payload.get("conformance_evidence_ref")
-    assert evidence_ref == {
-        "source_workspace_id": first.id,
-        "event_type": "workspace.state_changed",
-        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
-    }
-    result = operations[0].result or {}
-    assert result.get("attempt_number") == 2
-    assert result.get("source_reason_code") == PLAN_CONFORMANCE_UNSATISFIED
-    assert result.get("conformance_evidence_ref") == evidence_ref
-    assert result.get("remaining_gaps") == ["Add regression test", "Wire retry endpoint"]
-
-    assert len(events) >= 1
-    event_payload = events[0].payload
-    assert isinstance(event_payload, dict)
-    assert event_payload.get("attempt_number") == 2
-    assert event_payload.get("source_reason_code") == PLAN_CONFORMANCE_UNSATISFIED
-    assert event_payload.get("conformance_evidence_ref") == evidence_ref
-    assert event_payload.get("remaining_gaps") == ["Add regression test", "Wire retry endpoint"]
-
-
-@pytest.mark.unit
-async def test_conformance_retry_loop_terminates_even_without_valid_evidence(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    service = WorkspaceService(factory)
-    first = await service.create_v2(_request())
-    await _mark_conformance_failed_without_evidence(factory, first.id)
-
-    retry1 = await service.retry_workspace(first.id)
-    retried1_id = retry1.new_workspace_id
-    await _mark_conformance_failed_without_evidence(factory, retried1_id)
-
-    retry2 = await service.retry_workspace(retried1_id)
-    retried2_id = retry2.new_workspace_id
-    await _mark_conformance_failed_without_evidence(factory, retried2_id)
-
-    retry3 = await service.retry_workspace(retried2_id)
-    retried3_id = retry3.new_workspace_id
-    await _mark_conformance_failed_without_evidence(factory, retried3_id)
-
-    with pytest.raises(WorkspaceRetryExhaustedError) as exc_info:
-        await service.retry_workspace(retried3_id)
-    assert exc_info.value.detail == {
-        "attempt_count": 4,
-        "max_attempts": 4,
-    }

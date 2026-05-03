@@ -94,9 +94,13 @@ class TestSettings:
         get_settings.cache_clear()
 
     @pytest.mark.unit
-    def test_settings_constructor_uses_defaults(self) -> None:
+    def test_settings_constructor_uses_defaults(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Directly construct Settings without an env file so callers can
         override per-test."""
+        monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
         s = Settings(_env_file=None)
         assert s.database_url.startswith("sqlite")
         assert s.service_name == "awf"

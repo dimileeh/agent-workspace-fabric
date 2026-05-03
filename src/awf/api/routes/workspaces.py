@@ -188,7 +188,7 @@ async def create_workspace_v2(
         )
     except ProfileResolutionError as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content=ErrorResponse(
                 error_code="INVALID_PROFILE",
                 message=str(exc),

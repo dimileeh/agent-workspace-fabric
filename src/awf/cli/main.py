@@ -358,7 +358,11 @@ def _run_init_project_onboarding(
     include_smoke_request: bool,
 ) -> None:
     from awf.profiles.onboarding import preview_project_onboarding
-    from awf.service.config import ServiceSettings, resolve_service_settings
+    from awf.service.config import (
+        ServiceSettings,
+        local_service_environ,
+        resolve_service_settings,
+    )
     from awf.service.doctor import collect_doctor_report, render_doctor_pretty
     from awf.service.doctor.models import DoctorReport
     from awf.service.status import collect_service_status
@@ -374,6 +378,7 @@ def _run_init_project_onboarding(
 
     try:
         settings = resolve_service_settings()
+        service_env = local_service_environ()
         service_name = getattr(settings, "service_name", "unknown")
 
         async def _collect_reports() -> tuple[dict[str, object], DoctorReport]:
@@ -381,7 +386,7 @@ def _run_init_project_onboarding(
                 collect_service_status(
                     settings,
                     strict_providers=frozenset(),
-                    provider_environ=os.environ,
+                    provider_environ=service_env,
                 )
             )
 
@@ -408,8 +413,8 @@ def _run_init_project_onboarding(
                 collect_doctor_report(
                     settings,
                     strict_providers=frozenset(),
-                    provider_environ=os.environ,
-                    environ=os.environ,
+                    provider_environ=service_env,
+                    environ=service_env,
                     status_collector=_collect_cached_service_status,
                 ),
                 return_exceptions=True,
@@ -511,7 +516,7 @@ def _run_init_service_bootstrap(
         ServiceBootstrapOptions,
         run_service_bootstrap,
     )
-    from awf.service.config import resolve_service_settings
+    from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.doctor import collect_doctor_report
     from awf.service.provider_readiness import (
         ProviderReadinessError,
@@ -528,6 +533,7 @@ def _run_init_service_bootstrap(
 
     try:
         settings = resolve_service_settings()
+        service_env = local_service_environ()
 
         if pretty:
             typer.echo("AWF init: local service bootstrap")
@@ -536,8 +542,8 @@ def _run_init_service_bootstrap(
             collect_doctor_report(
                 settings,
                 strict_providers=frozenset(),
-                provider_environ=os.environ,
-                environ=os.environ,
+                provider_environ=service_env,
+                environ=service_env,
             )
         )
         docker_diag = _docker_diagnostic_from_report(docker_report)
@@ -700,7 +706,7 @@ def service_status(
     ),
 ) -> None:
     """Check local AWF service dependencies."""
-    from awf.service.config import resolve_service_settings
+    from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
     from awf.service.status import collect_service_status
 
@@ -714,7 +720,7 @@ def service_status(
         collect_service_status(
             resolve_service_settings(),
             strict_providers=strict_providers,
-            provider_environ=os.environ,
+            provider_environ=local_service_environ(),
         )
     )
     _emit(payload, fmt)
@@ -735,7 +741,7 @@ def service_doctor(
     ),
 ) -> None:
     """Run operator-friendly local AWF diagnostics."""
-    from awf.service.config import resolve_service_settings
+    from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.doctor import collect_doctor_report, render_doctor_pretty
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
 
@@ -746,12 +752,13 @@ def service_doctor(
         raise typer.Exit(code=2) from exc
 
     settings = resolve_service_settings()
+    service_env = local_service_environ()
     report = asyncio.run(
         collect_doctor_report(
             settings,
             strict_providers=strict_providers,
-            provider_environ=os.environ,
-            environ=os.environ,
+            provider_environ=service_env,
+            environ=service_env,
         )
     )
 
@@ -811,7 +818,7 @@ def service_readiness(
     ),
 ) -> None:
     """Run the executable local AWF Core release-readiness gate."""
-    from awf.service.config import resolve_service_settings
+    from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
     from awf.service.readiness import DEFAULT_DEMO_PATH, collect_core_readiness_report
 
@@ -821,6 +828,7 @@ def service_readiness(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
+    service_env = local_service_environ()
     report = asyncio.run(
         collect_core_readiness_report(
             settings=resolve_service_settings(),
@@ -828,8 +836,8 @@ def service_readiness(
             failure_window_hours=failure_window_hours,
             slo_window_hours=slo_window_hours,
             strict_providers=frozenset(strict_providers),
-            provider_environ=os.environ,
-            environ=os.environ,
+            provider_environ=service_env,
+            environ=service_env,
             allow_generic_failures=allow_generic_failures,
             allow_slo_breach=allow_slo_breach,
         )

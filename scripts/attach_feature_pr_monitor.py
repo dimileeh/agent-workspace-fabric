@@ -244,20 +244,21 @@ async def orchestrate_attach(
         # already follow this pattern.
         log_path = work_dir / f"feature-pr-monitor-{pr_number}.log"
         run_awf = _ROOT / "scripts" / "run_awf.py"
-        handle = spawn(
-            [
-                sys.executable,
-                str(run_awf),
-                "--config",
-                str(spec_path),
-                "--work-dir",
-                str(work_dir),
-                "--keep-state",
-            ],
-            stdout=log_path.open("a"),
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        with log_path.open("a") as log_file:
+            handle = spawn(
+                [
+                    sys.executable,
+                    str(run_awf),
+                    "--config",
+                    str(spec_path),
+                    "--work-dir",
+                    str(work_dir),
+                    "--keep-state",
+                ],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
         print(
             f"attach-feature-pr-monitor: spawned run_awf pid={getattr(handle, 'pid', '?')} "
             f"for {repo.slug()}#{pr_number}; log: {log_path}",

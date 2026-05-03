@@ -16,7 +16,7 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import ValidationRun, Workspace
 from awf.db.repositories import (
     OperationRepository,
     WorkspaceEventCreate,
@@ -43,10 +43,14 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
+    ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
     _as_utc,
     _candidate_stale_required_action,
+    _changed_paths_from_porcelain,
     _collect_defer_items,
+    _GitPushResult,
+    _has_successful_validation_for_pr_head,
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
     _initial_review_grace_state_for_persistence,
@@ -59,6 +63,7 @@ from awf.runtime.pr_monitor_runner import (
     _non_check_reviewer_settle_started_key,
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
+    _NonCheckReviewerSettleDecision,
     _notify_human_reason,
     _redact_and_truncate_github_error,
     _stale_pending_check_warnings,
@@ -3411,3 +3416,352 @@ def test_candidate_stale_required_action_maps_validation_reason() -> None:
     assert _candidate_stale_required_action(None) is None
     assert _candidate_stale_required_action("validation_insufficient_tier") == "validate"
     assert _candidate_stale_required_action("STALE_TARGET_ADVANCED") == "rebase"
+
+
+@pytest.mark.unit
+def test_git_push_and_porcelain_helpers_cover_clean_rename_and_invalid_lines() -> None:
+    clean_push = _GitPushResult(pushed=False, failed=False, returncode=0)
+    assert clean_push.error_message is None
+
+    assert _changed_paths_from_porcelain(
+        "\n"
+        "not porcelain\n"
+        " M src/changed.py\n"
+        "?? docs/new.md\n"
+        "R  old/name.py -> src/name.py\n"
+        " M src/changed.py\n"
+    ) == [
+        "src/changed.py",
+        "docs/new.md",
+        "old/name.py",
+        "src/name.py",
+    ]
+
+
+@pytest.mark.unit
+def test_validation_head_helper_requires_current_successful_matching_attempt() -> None:
+    workspace = Workspace(
+        id="ws_validation_helper",
+        status=WorkspaceStatus.monitoring_pr.value,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        branch_base="development",
+        task_title="validation helper",
+        task_prompt="x",
+        agent="claude_code",
+        test_commands=[],
+    )
+    workspace.validation_runs = [
+        ValidationRun(
+            id="vr_wrong_attempt",
+            workspace_id=workspace.id,
+            attempt_id="attempt-other",
+            tier=1,
+            command_set_hash="hash",
+            commands=[],
+            status="succeeded",
+            workspace_head_sha="workspace-head",
+            target_head_sha="target-head",
+        ),
+        ValidationRun(
+            id="vr_failed",
+            workspace_id=workspace.id,
+            attempt_id="attempt-1",
+            tier=1,
+            command_set_hash="hash",
+            commands=[],
+            status="failed",
+            workspace_head_sha="workspace-head",
+            target_head_sha="target-head",
+        ),
+        ValidationRun(
+            id="vr_success",
+            workspace_id=workspace.id,
+            attempt_id="attempt-1",
+            tier=1,
+            command_set_hash="hash",
+            commands=[],
+            status="succeeded",
+            workspace_head_sha="workspace-head",
+            target_head_sha="target-head",
+        ),
+    ]
+
+    assert not _has_successful_validation_for_pr_head(
+        workspace,
+        attempt_id="attempt-1",
+        current_head_sha=None,
+    )
+    assert not _has_successful_validation_for_pr_head(
+        workspace,
+        attempt_id="attempt-1",
+        current_head_sha="unvalidated-head",
+    )
+    assert _has_successful_validation_for_pr_head(
+        workspace,
+        attempt_id="attempt-1",
+        current_head_sha="workspace-head",
+    )
+    assert _has_successful_validation_for_pr_head(
+        workspace,
+        attempt_id="attempt-1",
+        current_head_sha="target-head",
+    )
+
+
+@pytest.mark.unit
+async def test_merge_gate_legacy_head_support_modern_fallback_and_typeerror(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    modern_calls: list[tuple[str, bool, str | None]] = []
+    sentinel = object()
+
+    async def modern_gate(
+        workspace_id: str,
+        *,
+        check_policy: bool = False,
+        current_head_sha: str | None = None,
+    ) -> object:
+        modern_calls.append((workspace_id, check_policy, current_head_sha))
+        return sentinel
+
+    monkeypatch.setattr(runner, "_merge_gate_for_workspace", modern_gate)
+    assert (
+        await runner._merge_gate_with_legacy_head_support(
+            "ws_modern",
+            check_policy=True,
+            current_head_sha="head1",
+        )
+        is sentinel
+    )
+    assert modern_calls == [("ws_modern", True, "head1")]
+
+    legacy_calls: list[tuple[str, bool]] = []
+
+    async def legacy_gate(
+        workspace_id: str,
+        *,
+        check_policy: bool = False,
+    ) -> object:
+        legacy_calls.append((workspace_id, check_policy))
+        return sentinel
+
+    monkeypatch.setattr(runner, "_merge_gate_for_workspace", legacy_gate)
+    assert (
+        await runner._merge_gate_with_legacy_head_support(
+            "ws_legacy",
+            check_policy=True,
+            current_head_sha="head2",
+        )
+        is sentinel
+    )
+    assert legacy_calls == [("ws_legacy", True)]
+
+    async def unrelated_type_error(
+        workspace_id: str,
+        *,
+        check_policy: bool = False,
+        current_head_sha: str | None = None,
+    ) -> object:
+        del workspace_id, check_policy, current_head_sha
+        raise TypeError("candidate relation is unavailable")
+
+    monkeypatch.setattr(runner, "_merge_gate_for_workspace", unrelated_type_error)
+    with pytest.raises(TypeError, match="candidate relation"):
+        await runner._merge_gate_with_legacy_head_support(
+            "ws_error",
+            current_head_sha="head3",
+        )
+
+
+@pytest.mark.unit
+async def test_non_check_reviewer_settle_ignores_unknown_waiting_and_unchanged_decisions(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        non_check_reviewer_settle_seconds=120,
+    )
+    status = _status_for_helpers()
+
+    await runner._record_non_check_reviewer_settle_decision(
+        decision=_NonCheckReviewerSettleDecision(action="unrecognized", state_changed=True),
+        workspace_id=workspace_id,
+        pr_number=42,
+        status=status,
+        monitor_log=None,
+    )
+    await runner._record_non_check_reviewer_settle_decision(
+        decision=_NonCheckReviewerSettleDecision(action="waiting", state_changed=True),
+        workspace_id=workspace_id,
+        pr_number=42,
+        status=status,
+        monitor_log=None,
+    )
+    await runner._record_non_check_reviewer_settle_decision(
+        decision=_NonCheckReviewerSettleDecision(action="started", state_changed=False),
+        workspace_id=workspace_id,
+        pr_number=42,
+        status=status,
+        monitor_log=None,
+    )
+
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.non_check_reviewer_settle",
+            limit=10,
+        )
+    assert events == []
+
+
+@pytest.mark.unit
+async def test_provider_recovery_suppression_blocks_all_monitor_agent_invocations(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def suppressed(_workspace_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_provider_recovery_suppresses_cli", suppressed)
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._invoke_cli_for_verdict(
+            workspace_id="ws_suppressed",
+            prompt="fix review",
+            commit_message="fix: review",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="boom"),),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id="ws_suppressed",
+            remote_branch="awf/ws_suppressed",
+        )
+
+    cmd.queue_result(returncode=0)  # git merge --abort
+    cmd.queue_result(returncode=0)  # git fetch origin development
+    cmd.queue_result(returncode=1, stderr="conflict")  # git merge
+    cmd.queue_result(returncode=0, stdout="UU src/conflict.py\n")  # git status
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._run_sync_base(
+            workspace_id="ws_suppressed",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            base_branch="development",
+            remote_branch="awf/ws_suppressed",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+    assert adapter.calls == []
+
+
+@pytest.mark.unit
+async def test_protected_scope_repair_returns_none_when_recheck_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await session.commit()
+
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="removed workflow edit")
+    cmd.queue_result(returncode=128, stderr="fatal: not a git repository")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert (
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id=workspace_id,
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        is None
+    )
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.unit
+async def test_protected_scope_repair_records_remaining_violations_after_agent_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await session.commit()
+
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(returncode=1, stdout="tool crashed before cleanup")
+    cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert (
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id=workspace_id,
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        is None
+    )
+
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.monitor_protected_scope_repair_failed",
+            limit=10,
+        )
+    assert len(events) == 1
+    assert events[0].reason_code == "PROTECTED_SCOPE_REPAIR_FAILED"
+    assert events[0].payload is not None
+    assert events[0].payload["paths"] == [".github/workflows/ci.yml"]

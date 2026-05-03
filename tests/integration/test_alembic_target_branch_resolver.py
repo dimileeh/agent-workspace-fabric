@@ -47,6 +47,7 @@ def _write_alembic_project(repo: Path) -> None:
         "[alembic]\n"
         "script_location = migrations\n"
         "prepend_sys_path = ./src\n"
+        "path_separator = os\n"
         "version_path_separator = os\n",
         encoding="utf-8",
     )
@@ -76,6 +77,7 @@ def _write_revision(
 
 def _heads(repo: Path) -> list[str]:
     config = Config(str(repo / "alembic.ini"))
+    config.set_main_option("path_separator", "os")
     config.set_main_option("script_location", str(repo / "migrations"))
     return sorted(ScriptDirectory.from_config(config).get_heads())
 

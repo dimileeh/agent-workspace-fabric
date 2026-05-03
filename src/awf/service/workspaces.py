@@ -59,7 +59,6 @@ from awf.runtime.logs import read_log_chunk
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
-    build_conformance_retry_prompt,
     build_planning_scope_retry_prompt,
 )
 from awf.service.controls import (
@@ -201,6 +200,28 @@ class WorkspaceRetryExhaustedError(WorkspaceRetryError):
             detail={
                 "attempt_count": attempt_count,
                 "max_attempts": MAX_CONFORMANCE_RETRY_ATTEMPTS,
+            },
+        )
+
+
+class WorkspaceRetryRequiresSalvageError(WorkspaceRetryError):
+    error_code = "WORKSPACE_RETRY_REQUIRES_SALVAGE"
+
+    def __init__(self, workspace: Workspace, evidence: Mapping[str, Any] | None) -> None:
+        evidence = evidence or {}
+        super().__init__(
+            "Conformance retry requires explicit implementation diff salvage.",
+            detail={
+                "source_workspace_id": workspace.id,
+                "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+                "gaps": _retry_evidence_gaps(evidence),
+                "plan_path": _optional_retry_evidence_str(evidence.get("plan_path")),
+                "report_path": _optional_retry_evidence_str(evidence.get("report_path")),
+                "recovery_guidance": (
+                    "Retry is blocked because AWF cannot yet carry the implementation diff "
+                    "from the failed conformance attempt into a fresh workspace. Inspect the "
+                    "source worktree or relaunch the original task explicitly."
+                ),
             },
         )
 
@@ -726,20 +747,15 @@ async def retry_workspace_row(
         None if planning_scope_context is not None else _conformance_retry_context(source)
     )
     if conformance_context is not None or _is_plan_conformance_unsatisfied(source):
-        attempt_repo = TaskAttemptRepository(session)
-        source_attempt = await attempt_repo.get_by_workspace_id(source.id)
-        if source_attempt is not None and source_attempt.attempt_number >= MAX_CONFORMANCE_RETRY_ATTEMPTS:
-            raise WorkspaceRetryExhaustedError(source_attempt.attempt_number)
+        raise WorkspaceRetryRequiresSalvageError(
+            source,
+            conformance_context.evidence if conformance_context is not None else None,
+        )
 
     if planning_scope_context is not None:
         retried_prompt = build_planning_scope_retry_prompt(
             task_prompt=source.task_prompt,
             evidence=planning_scope_context.evidence,
-        )
-    elif conformance_context is not None:
-        retried_prompt = build_conformance_retry_prompt(
-            task_prompt=source.task_prompt,
-            evidence=conformance_context.evidence,
         )
     else:
         retried_prompt = source.task_prompt
@@ -849,11 +865,6 @@ async def retry_workspace_row(
 
     operation_repo = OperationRepository(session)
     operation_payload: dict[str, Any] = {"source_workspace_id": source.id}
-    if conformance_context is not None:
-        operation_payload["source_reason_code"] = conformance_context.reason_code
-        operation_payload["conformance_evidence_ref"] = (
-            conformance_context.evidence_ref
-        )
     if planning_scope_context is not None:
         operation_payload.update(_planning_scope_recovery_payload(planning_scope_context))
     operation = await operation_repo.create(
@@ -867,10 +878,6 @@ async def retry_workspace_row(
         "new_workspace_id": retried.id,
         "attempt_number": attempt.attempt_number,
     }
-    if conformance_context is not None:
-        event_payload["source_reason_code"] = conformance_context.reason_code
-        event_payload["conformance_evidence_ref"] = conformance_context.evidence_ref
-        event_payload["remaining_gaps"] = conformance_context.evidence.get("gaps", [])
     if planning_scope_context is not None:
         event_payload.update(_planning_scope_recovery_payload(planning_scope_context))
     await repo.add_event(
@@ -1382,6 +1389,22 @@ def _conformance_retry_context(workspace: Workspace) -> _ConformanceRetryContext
             "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
         },
     )
+
+
+def _retry_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    value = evidence.get("gaps")
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _optional_retry_evidence_str(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _planning_scope_retry_context(workspace: Workspace) -> _PlanningScopeRetryContext | None:

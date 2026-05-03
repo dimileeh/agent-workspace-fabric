@@ -51,7 +51,7 @@ from pathlib import Path
 import pytest
 
 from awf.common.git_identity import git_safe_directory_config_args
-from awf.node.compose_manager import ComposeManager, WorkspaceComposeSpec
+from awf.node.compose_manager import AuthMount, ComposeManager, WorkspaceComposeSpec
 from awf.node.git_manager import GitManager
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -258,6 +258,13 @@ async def test_agent_container_can_git_status_add_commit_in_workspace(
         workspace_id=workspace_id,
         worktree_host_path=layout.worktree_path,
         agent_runtime_image=_AGENT_IMAGE,
+        auth_mounts=(
+            AuthMount(
+                source=str(layout.mirror_path),
+                target=str(layout.mirror_path),
+                mode="rw",
+            ),
+        ),
         # Set author/committer identity so ``git commit`` does not fail with
         # "please tell me who you are" when the operator's host gitconfig is
         # not mounted.

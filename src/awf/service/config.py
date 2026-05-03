@@ -6,7 +6,9 @@ import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 
+from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
 
 from awf.common.config import (
@@ -19,6 +21,7 @@ from awf.common.config import (
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
+LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -129,6 +132,32 @@ def service_config_payload(settings: ServiceSettings) -> dict[str, object]:
     return payload
 
 
+def local_service_environ(
+    environ: Mapping[str, str] | None = None,
+    *,
+    env_file: Path = LOCAL_SERVICE_COMPOSE_ENV_FILE,
+) -> dict[str, str]:
+    """Return the environment local Compose services actually receive.
+
+    Docker Compose resolves variables from its env file and then lets the host
+    shell override them. The CLI uses this merged view for readiness checks so a
+    token present in ``docker/compose/.env`` is not incorrectly reported as
+    missing just because it is absent from the host shell.
+    """
+
+    merged: dict[str, str] = {}
+    if env_file.exists():
+        merged.update(
+            {
+                key: value
+                for key, value in dotenv_values(env_file).items()
+                if value is not None
+            }
+        )
+    merged.update(os.environ if environ is None else dict(environ))
+    return merged
+
+
 def _has_env_key(environ: Mapping[str, str], key: str) -> bool:
     wanted = key.upper()
     return any(existing.upper() == wanted for existing in environ)
@@ -149,6 +178,7 @@ def _resolve_github_token(settings_value: str | None, environ: Mapping[str, str]
 
     return (
         _empty_to_none(settings_value)
+        or _empty_to_none(environ.get("AWF_GITHUB_TOKEN"))
         or _empty_to_none(environ.get("GH_TOKEN"))
         or _empty_to_none(environ.get("GITHUB_TOKEN"))
     )
