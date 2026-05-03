@@ -43,10 +43,12 @@ workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy)."
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
 locks_app = typer.Typer(help="Owned-path reservation and overlap-risk visibility.")
+smoke_app = typer.Typer(help="DX smoke proof: validate local service, profile, PR path.")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
 app.add_typer(service_app, name="service")
 app.add_typer(locks_app, name="locks")
+app.add_typer(smoke_app, name="smoke")
 
 
 class OutputFormat(StrEnum):
@@ -764,8 +766,8 @@ def service_doctor(
 @service_app.command("readiness")
 def service_readiness(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
-    demo_path: Path = typer.Option(
-        Path("examples/awf-core-demo"),
+    demo_path: Path | None = typer.Option(
+        None,
         "--demo-path",
         help="Path to the maintained AWF Core golden-path demo project.",
     ),
@@ -811,7 +813,7 @@ def service_readiness(
     """Run the executable local AWF Core release-readiness gate."""
     from awf.service.config import resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
-    from awf.service.readiness import collect_core_readiness_report
+    from awf.service.readiness import DEFAULT_DEMO_PATH, collect_core_readiness_report
 
     try:
         strict_providers = validate_provider_names(provider)
@@ -822,7 +824,7 @@ def service_readiness(
     report = asyncio.run(
         collect_core_readiness_report(
             settings=resolve_service_settings(),
-            demo_path=demo_path,
+            demo_path=demo_path if demo_path is not None else DEFAULT_DEMO_PATH,
             failure_window_hours=failure_window_hours,
             slo_window_hours=slo_window_hours,
             strict_providers=frozenset(strict_providers),
@@ -1448,6 +1450,46 @@ def profile_init(
         raise typer.Exit(code=2) from None
 
     _emit(payload, fmt)
+
+
+@smoke_app.command("run")
+def smoke_run(
+    project: Path = typer.Option(
+        Path(),
+        "--project",
+        help="Path to the project to smoke.",
+    ),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+    mocked_local: bool = typer.Option(
+        False,
+        "--mocked-local",
+        help="Run in mocked-local mode without live external services.",
+    ),
+    demo_path: Path | None = typer.Option(
+        None,
+        "--demo-path",
+        help="Fallback project path when --project has no profile.",
+    ),
+) -> None:
+    """Run a DX smoke proof validating local service, profile, and PR path."""
+    from awf.service.config import resolve_service_settings
+    from awf.service.smoke import collect_smoke_report
+
+    resolved = project.expanduser().resolve()
+    resolved_demo = demo_path.expanduser().resolve() if demo_path is not None else None
+    settings = resolve_service_settings()
+
+    report = asyncio.run(
+        collect_smoke_report(
+            project=resolved,
+            settings=settings,
+            mocked_local=mocked_local,
+            demo_path=resolved_demo,
+        )
+    )
+    _emit(report, fmt)
+    if report["status"] == "fail":
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":  # pragma: no cover - entry point
