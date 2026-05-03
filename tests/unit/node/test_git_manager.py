@@ -16,7 +16,11 @@ from pathlib import Path
 import pytest
 
 import awf.node.git_manager as git_manager
-from awf.node.git_manager import GitManager, GitOperationError
+from awf.node.git_manager import (
+    GitManager,
+    GitOperationError,
+    _agent_writable_git_targets,
+)
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -380,6 +384,175 @@ def test_chown_tree_returns_after_chowning_plain_file(
     git_manager._chown_tree(file_path, 1000, 1000)  # noqa: SLF001
 
     assert chowned == [file_path]
+
+
+class TestAgentWorktreeWritable:
+    """Regression coverage for the local UID/GID strategy.
+
+    Locks the contract that an agent-runtime user can run ``git status``,
+    ``git add``, and ``git commit`` inside a prepared worktree, and that the
+    helper that drives post-provision ownership repair lists every
+    mirror-bare directory required for a downstream commit while skipping
+    loose object files (the ``aa866959`` fix).
+    """
+
+    @pytest.mark.unit
+    async def test_agent_writable_targets_lists_required_paths_excluding_loose_objects(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_targets",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_targets",
+        )
+        # ``git clone --mirror`` does not create top-level ``logs/`` (bare
+        # repos default to ``core.logAllRefUpdates=false``). Operators who
+        # enable ref-log on the mirror end up with a ``logs/`` dir; the
+        # helper must include it so the agent can append to it. Force the
+        # dir to exist for this contract test.
+        (layout.mirror_path / "logs").mkdir(exist_ok=True)
+
+        targets = _agent_writable_git_targets(
+            layout_mirror=layout.mirror_path,
+            worktree_path=layout.worktree_path,
+        )
+        target_paths = {t.path for t in targets}
+        recursive_paths = {t.path for t in targets if t.recursive}
+        directories_only_paths = {t.path for t in targets if t.directories_only}
+
+        # Mirror-bare directories git needs to write into when the agent
+        # commits in the worktree (HEAD update, ref log, lock files).
+        assert layout.worktree_path in target_paths
+        assert layout.mirror_path in target_paths
+        assert layout.mirror_path / "refs" in target_paths
+        assert layout.mirror_path / "logs" in target_paths
+        assert layout.mirror_path / "worktrees" in target_paths
+        assert layout.mirror_path / "objects" in target_paths
+
+        # Loose object files must not be chowned recursively. Docker Desktop
+        # on macOS rejects the chown when host metadata is missing, which
+        # caused the regression fixed in commit aa866959.
+        objects_target = next(
+            t for t in targets if t.path == layout.mirror_path / "objects"
+        )
+        assert objects_target.recursive
+        assert objects_target.directories_only
+        assert layout.mirror_path / "objects" in directories_only_paths
+
+        # The mirror itself and the worktrees admin dir are non-recursive
+        # (only the directory entry is repaired) — recursive chown there
+        # would walk over loose objects again.
+        assert layout.mirror_path not in recursive_paths
+        assert layout.mirror_path / "worktrees" not in recursive_paths
+
+    @pytest.mark.unit
+    def test_agent_writable_targets_omits_logs_when_mirror_lacks_it(
+        self, tmp_path: Path
+    ) -> None:
+        """Bare mirrors default to no top-level logs/ — the helper must not
+        synthesize a target for a non-existent path or the chown step would
+        attempt to chown a missing entry on macOS Docker Desktop."""
+        mirror = tmp_path / "mirror.git"
+        worktree = tmp_path / "wt"
+        mirror.mkdir()
+        worktree.mkdir()
+        (mirror / "objects").mkdir()
+        (mirror / "refs").mkdir()
+        (mirror / "worktrees").mkdir()
+
+        targets = _agent_writable_git_targets(
+            layout_mirror=mirror, worktree_path=worktree
+        )
+        target_paths = {t.path for t in targets}
+
+        assert mirror / "logs" not in target_paths
+        assert mirror / "refs" in target_paths
+        assert mirror / "objects" in target_paths
+        assert mirror / "worktrees" in target_paths
+
+    @pytest.mark.unit
+    async def test_prepared_worktree_supports_agent_git_status_add_commit(
+        self, manager: GitManager, origin_repo: Path, tmp_path: Path
+    ) -> None:
+        """End-to-end: the prepared worktree accepts the three required git commands.
+
+        Exercises the realistic local mode where the controlling process is
+        the same UID as the prepared worktree (agent UID 1000 on Linux CI).
+        Privileged simulation of the root control-plane is covered by
+        ``test_prepares_linked_worktree_git_paths_for_agent_user``; this
+        test verifies the layout is actually usable.
+        """
+        layout = await manager.add_worktree(
+            workspace_id="ws_agent_git",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_agent_git",
+        )
+
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "AWF Test",
+            "GIT_AUTHOR_EMAIL": "awf@test.local",
+            "GIT_COMMITTER_NAME": "AWF Test",
+            "GIT_COMMITTER_EMAIL": "awf@test.local",
+        }
+
+        status = subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        assert status.stdout == ""
+
+        sentinel = layout.worktree_path / "AGENT_WROTE_THIS.md"
+        sentinel.write_text("agent-side commit smoke\n")
+
+        subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "add", sentinel.name],
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(layout.worktree_path),
+                "commit",
+                "-m",
+                "agent commit",
+            ],
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+
+        # The new commit is reachable from the worktree's branch and the
+        # bare mirror's ref log was updated (proves ``logs/`` and ``refs/``
+        # were writable end-to-end).
+        head = subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        mirror_branch_sha = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(layout.mirror_path),
+                "rev-parse",
+                f"refs/heads/{layout.branch_name}",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert head == mirror_branch_sha
 
 
 class TestRemoveWorktree:
