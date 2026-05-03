@@ -1128,6 +1128,10 @@ Example runtime and operation observability calls:
 {"workspace_id": "ws_abc123", "limit": 25}
 ```
 
+## Supported Client Surfaces (v0.1)
+
+REST, CLI, and MCP are the supported client surfaces for v0.1. AWF does not currently ship with a supported Python SDK. Integrators should use one of the supported surfaces (e.g., the CLI for operator convenience or the REST API for control-plane programmatic access). Please do not import internal AWF modules (such as `awf.*` or other internal paths) to build custom API clients, as they are not part of the stable public contract and are subject to change without notice.
+
 ## Local Dogfood Runner
 
 `scripts/run_awf.py` is the compatibility dogfood runner for exercising the same
