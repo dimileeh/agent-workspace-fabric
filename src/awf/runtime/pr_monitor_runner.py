@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError
 from awf.common.audit import redact_audit_text
-from awf.common.commands import AsyncCommandRunner
+from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
@@ -48,6 +48,11 @@ from awf.common.compose_exec import (
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
+from awf.control.quality_gates import (
+    QualityGateViolation,
+    find_protected_quality_gate_changes,
+    quality_gate_violation_message,
+)
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
@@ -181,6 +186,7 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
+_PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
 _AUDIT_MERGE_RESULT_EVENT = "workspace.audit.merge_result"
@@ -3006,6 +3012,9 @@ class PullRequestMonitorRunner:
         committed_dirty_changes = await self._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
         )
 
         if agent_run_err is not None:
@@ -3137,6 +3146,8 @@ class PullRequestMonitorRunner:
         await self._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=f"fix: address PR #{pr_number} CI failure",
+            compose_project=compose_project,
+            compose_file=compose_file,
         )
 
         if agent_run_err is not None:
@@ -3152,7 +3163,15 @@ class PullRequestMonitorRunner:
 
     # ── Git plumbing ───────────────────────────────────────────────────────
 
-    async def _commit_dirty_worktree(self, *, workspace_id: str, message: str) -> bool:
+    async def _commit_dirty_worktree(
+        self,
+        *,
+        workspace_id: str,
+        message: str,
+        compose_project: str | None = None,
+        compose_file: Path | None = None,
+        state: MonitorState | None = None,
+    ) -> bool:
         """Commit dirty monitor-agent edits so PR feedback is not stranded.
 
         Coding CLIs can apply a valid fix and still exit non-zero while
@@ -3176,6 +3195,18 @@ class PullRequestMonitorRunner:
             return False
         if not status.stdout.strip():
             return False
+
+        if compose_project is not None and compose_file is not None:
+            repaired_status = await self._repair_protected_scope_changes_before_commit(
+                workspace_id=workspace_id,
+                status_stdout=status.stdout,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+            )
+            if repaired_status is None:
+                return False
+            status = repaired_status
 
         add = await self._deps.runner.run(["git", "-C", str(worktree_path), "add", "-A"])
         if not add.ok:
@@ -3204,6 +3235,144 @@ class PullRequestMonitorRunner:
             return False
         _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
         return True
+
+    async def _repair_protected_scope_changes_before_commit(
+        self,
+        *,
+        workspace_id: str,
+        status_stdout: str,
+        compose_project: str,
+        compose_file: Path,
+        state: MonitorState | None = None,
+    ) -> CommandResult | None:
+        """Give the agent one chance to remove protected out-of-scope edits.
+
+        The check runs before commit/push so protected files such as GitHub
+        workflow definitions never enter the PR branch history unless the task
+        explicitly owns them. That matters for OAuth tokens that cannot push
+        workflow changes at all, and for merge safety more generally.
+        """
+
+        violations = await self._protected_scope_violations_for_status(
+            workspace_id=workspace_id,
+            status_stdout=status_stdout,
+        )
+        if not violations:
+            return CommandResult(returncode=0, stdout=status_stdout, stderr="")
+
+        prompt = await self._protected_scope_repair_prompt(
+            workspace_id=workspace_id,
+            violations=violations,
+        )
+        _log.warning(
+            "monitor.protected_scope_repair_requested",
+            workspace_id=workspace_id,
+            paths=[violation.path for violation in violations],
+        )
+        if await self._provider_recovery_suppresses_cli(workspace_id):
+            raise ProviderRecoveryRetryError()
+        agent_run_err = None
+        try:
+            await self._deps.adapter.run(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
+                workspace_id=workspace_id,
+                log_source="recovery",
+            )
+        except AgentRunError as exc:
+            agent_run_err = exc
+            await self._handle_provider_agent_run_error(workspace_id, exc, state=state)
+
+        worktree_path = self._worktrees_root / workspace_id
+        repaired_status = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "status", "--porcelain"]
+        )
+        if not repaired_status.ok:
+            return None
+        remaining = await self._protected_scope_violations_for_status(
+            workspace_id=workspace_id,
+            status_stdout=repaired_status.stdout,
+        )
+        if remaining:
+            _log.warning(
+                "monitor.protected_scope_repair_failed",
+                workspace_id=workspace_id,
+                paths=[violation.path for violation in remaining],
+                cli_failed=agent_run_err is not None,
+            )
+            await self._append_workspace_events(
+                workspace_id=workspace_id,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="workspace.monitor_protected_scope_repair_failed",
+                        reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                        payload={
+                            "paths": [violation.path for violation in remaining],
+                            "protected_patterns": [
+                                violation.protected_pattern for violation in remaining
+                            ],
+                            "message": quality_gate_violation_message(remaining),
+                        },
+                    )
+                ],
+            )
+            return None
+        _log.info(
+            "monitor.protected_scope_repair_succeeded",
+            workspace_id=workspace_id,
+            paths=[violation.path for violation in violations],
+        )
+        return repaired_status
+
+    async def _protected_scope_violations_for_status(
+        self,
+        *,
+        workspace_id: str,
+        status_stdout: str,
+    ) -> list[QualityGateViolation]:
+        changed_paths = _changed_paths_from_porcelain(status_stdout)
+        if not changed_paths:
+            return []
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None:
+                return []
+            owned_paths = list(workspace.owned_paths)
+        return find_protected_quality_gate_changes(
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+        )
+
+    async def _protected_scope_repair_prompt(
+        self,
+        *,
+        workspace_id: str,
+        violations: list[QualityGateViolation],
+    ) -> str:
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            owned_paths = list(workspace.owned_paths) if workspace is not None else []
+        paths = "\n".join(
+            f"  - {violation.path} (protected by {violation.protected_pattern})"
+            for violation in violations
+        )
+        owned = "\n".join(f"  - {path}" for path in owned_paths) or "  - (none declared)"
+        return (
+            "Your previous PR-monitor repair changed protected file(s) outside "
+            "this workspace's declared owned_paths.\n\n"
+            f"Protected out-of-scope changes:\n{paths}\n\n"
+            f"Declared owned_paths:\n{owned}\n\n"
+            "Do not commit or keep these protected out-of-scope edits. Remove "
+            "the protected-file changes from the worktree and resolve the PR "
+            "feedback using files inside the declared scope. For example, if a "
+            "review offers either changing CI or making a test self-sufficient, "
+            "prefer the in-scope test change when CI workflow files are not "
+            "owned. If the protected change is truly required, leave it removed "
+            "and explain that human/orchestrator approval is needed.\n\n"
+            "Make the smallest corrective edit now. AWF will re-check the diff "
+            "before it commits or pushes."
+        )
 
     async def _fetch_base(self, *, worktree_path: Path, base_branch: str) -> None:
         """``git fetch origin <base>`` — refreshes the worktree's
@@ -4602,6 +4771,24 @@ def _collect_defer_items(
             }
         )
     return bot_items, human_items
+
+
+def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
+    """Extract changed paths from ``git status --porcelain`` output."""
+    paths: list[str] = []
+    for line in status_stdout.splitlines():
+        if not line:
+            continue
+        if line.startswith("?? ") or (len(line) >= 4 and line[2] == " "):
+            path = line[3:]
+        else:
+            continue
+        if " -> " in path:
+            old_path, new_path = path.split(" -> ", 1)
+            paths.extend([old_path, new_path])
+        else:
+            paths.append(path)
+    return list(dict.fromkeys(paths))
 
 
 def _target_reconcile_payload(result: object) -> dict[str, object]:
