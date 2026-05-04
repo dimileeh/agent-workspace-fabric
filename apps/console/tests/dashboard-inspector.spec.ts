@@ -115,6 +115,9 @@ test.describe("Dashboard Workspace Inspector", () => {
     await page.goto("/?workspaceId=ws_mock123");
     const inspectorDrawer = page.locator(".fixed.inset-y-0.right-0").first();
     
+    // Wait for inspector to open before asserting layout
+    await expect(inspectorDrawer).toHaveClass(/translate-x-0/);
+
     // Desktop layout (default is 1280x720)
     await expect(inspectorDrawer).toHaveClass(/sm:w-\[600px\]/);
     await expect(inspectorDrawer).toHaveClass(/xl:w-\[800px\]/);
