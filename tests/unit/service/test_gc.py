@@ -4,7 +4,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import event, select
@@ -32,6 +32,7 @@ from awf.service.gc import (
     WorkspaceGCComposeTeardownResult,
     WorkspaceGCPath,
     WorkspaceGCPreserved,
+    WorkspaceGCWorktreeRemoveResult,
     _classify_workspace_for_gc,
     _container_command_is_idle,
     _delete_gc_path,
@@ -48,6 +49,20 @@ from awf.service.gc import (
 
 
 
+
+
+@pytest.fixture(autouse=True)
+def _mock_default_worktree_remover():
+    with patch(
+        "awf.service.gc._default_worktree_remover",
+        new=AsyncMock(
+            return_value=WorkspaceGCWorktreeRemoveResult(
+                status="succeeded",
+                reason_code="WORKTREE_REMOVE_SUCCEEDED",
+            )
+        ),
+    ):
+        yield
 
 
 @pytest.fixture
@@ -128,6 +143,20 @@ class _StaticRuntimeInspector:
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
         assert compose_project_name is not None
         return self.snapshot
+
+
+@pytest.mark.unit
+def test_default_candidate_predicate_requires_pr_metadata():
+    cutoff = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    predicate = gc._workspace_gc_candidate_predicate(
+        eligible_statuses={WorkspaceStatus.completed.value},
+        cutoff_at=cutoff,
+        default_policy=True,
+        cleanup_enabled=True,
+    )
+    assert predicate is not None
+    compiled = str(predicate.compile(compile_kwargs={"literal_binds": True}))
+    assert "pr_number" in compiled or "pr_url" in compiled
 
 
 @pytest.mark.unit
@@ -310,6 +339,7 @@ async def test_plan_applies_min_age_filter_and_limit_oldest_first(
         updated_at=now - timedelta(hours=300),
         title="oldest",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     await _workspace(
         session_factory,
@@ -317,6 +347,7 @@ async def test_plan_applies_min_age_filter_and_limit_oldest_first(
         updated_at=now - timedelta(hours=100),
         title="middle",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     await _workspace(
         session_factory,
@@ -324,6 +355,7 @@ async def test_plan_applies_min_age_filter_and_limit_oldest_first(
         updated_at=now - timedelta(hours=2),
         title="fresh",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
 
     plan = await plan_terminal_workspace_gc(
@@ -360,6 +392,7 @@ async def test_plan_applies_limit_to_workspace_queries(
             updated_at=now - timedelta(hours=300 - index),
             title=f"candidate {index}",
             pr=True,
+            pr_merge_sha="a" * 40,
         )
 
     workspace_selects: list[str] = []
@@ -406,6 +439,7 @@ async def test_plan_classifies_workspace_paths_in_threads(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=48),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     preserved_id = await _workspace(
         session_factory,
@@ -454,6 +488,7 @@ async def test_plan_tolerates_missing_workspace_paths(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=48),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
 
     plan = await plan_terminal_workspace_gc(
@@ -486,6 +521,7 @@ async def test_run_defaults_to_dry_run_and_keeps_candidate_directories(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=48),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     compose = work_dir / "compose" / workspace_id
@@ -594,6 +630,7 @@ async def test_recent_completed_pr_workspace_is_preserved(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=2),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     compose = work_dir / "compose" / workspace_id
@@ -924,6 +961,7 @@ async def test_cleanup_disabled_preserves_completed_pr_workspace(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
 
     plan = await plan_terminal_workspace_gc(
@@ -999,6 +1037,7 @@ async def test_explicit_status_filter_can_select_old_terminal_non_pr_workspace(
         "retention_hours": 24,
         "eligible_statuses": [WorkspaceStatus.failed.value],
         "requires_pr_metadata": False,
+        "requires_pr_merge": False,
         "preserves_failed_workspaces": False,
     }
 
@@ -1015,6 +1054,7 @@ async def test_single_workspace_gc_deletes_only_requested_completed_workspace_af
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     other_id = await _workspace(
         session_factory,
@@ -1022,6 +1062,7 @@ async def test_single_workspace_gc_deletes_only_requested_completed_workspace_af
         updated_at=now,
         title="other completed workspace",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     target_worktree = work_dir / "git" / "worktrees" / target_id
     target_auth = work_dir / "auth" / target_id
@@ -1063,6 +1104,7 @@ async def test_single_workspace_gc_revokes_active_secret_leases_before_auth_clea
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     await _issue_gc_secret_lease(session_factory, workspace_id, now=now)
     auth = work_dir / "auth" / workspace_id
@@ -1109,12 +1151,14 @@ async def test_batch_terminal_gc_revokes_each_candidate_and_is_retry_safe(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     second_id = await _workspace(
         session_factory,
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=210),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     await _issue_gc_secret_lease(session_factory, first_id, now=now)
     await _issue_gc_secret_lease(session_factory, second_id, now=now)
@@ -1214,6 +1258,7 @@ async def test_execute_gc_deletes_workspace_paths_in_threads(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     _write(work_dir / "git" / "worktrees" / workspace_id / "repo.txt", "repo")
     _write(work_dir / "compose" / workspace_id / "compose.yml", "compose")
@@ -1267,6 +1312,7 @@ async def test_cleanup_is_idempotent_after_partial_compose_failure(
         updated_at=now - timedelta(hours=200),
         compose_file_path=str(work_dir / "compose" / compose_slug / "compose.yml"),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     compose = work_dir / "compose" / compose_slug
     worktree = work_dir / "git" / "worktrees" / workspace_id
@@ -1363,6 +1409,7 @@ async def test_single_workspace_cleanup_is_idempotent_after_partial_compose_fail
         updated_at=now - timedelta(hours=200),
         compose_file_path=str(work_dir / "compose" / compose_slug / "compose.yml"),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     compose = work_dir / "compose" / compose_slug
     worktree = work_dir / "git" / "worktrees" / workspace_id
@@ -1470,6 +1517,7 @@ async def test_gc_accepts_sync_compose_teardown_result(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     _write(worktree / "repo.txt", "repo")
@@ -1515,6 +1563,7 @@ async def test_default_gc_policy_ignores_non_pr_terminal_and_unknown_statuses(
         updated_at=now - timedelta(hours=200),
         title="future status",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     async with session_factory() as session:
         unknown = await session.get(Workspace, unknown_id)
@@ -1621,6 +1670,7 @@ async def test_gc_execution_reports_refused_file_symlink_and_out_of_root_paths(
         updated_at=now - timedelta(hours=200),
         compose_file_path=str(outside_dir / "compose.yml"),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     auth = work_dir / "auth" / workspace_id
@@ -1998,3 +2048,73 @@ async def test_no_work_superseded_gc_candidate_includes_recovery_metadata_refere
 
         events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
         assert any(e.event_type == "workspace.provider_recovery_requested" for e in events)
+
+
+@pytest.mark.unit
+async def test_completed_workspace_with_merge_sha_but_no_pr_metadata_is_preserved(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+    )
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.pr_merge_sha = "d" * 40
+        await session.commit()
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert plan.candidates == []
+    assert len(plan.preserved) == 1
+    assert plan.preserved[0].workspace_id == workspace_id
+    assert plan.preserved[0].reason_code == "COMPLETED_WORKSPACE_WITHOUT_PR"
+
+
+@pytest.mark.unit
+async def test_completed_workspace_without_pr_metadata_does_not_consume_candidate_slot(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    without_pr_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=300),
+        title="no pr metadata",
+    )
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, without_pr_id)
+        assert workspace is not None
+        workspace.pr_merge_sha = "a" * 40
+        await session.commit()
+
+    with_pr_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        title="has pr metadata",
+        pr=True,
+        pr_merge_sha="b" * 40,
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        limit=1,
+        now=now,
+    )
+
+    assert [c.workspace_id for c in plan.candidates] == [with_pr_id]
+    preserved_ids = {p.workspace_id for p in plan.preserved}
+    assert without_pr_id in preserved_ids

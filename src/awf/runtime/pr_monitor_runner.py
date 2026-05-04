@@ -3979,12 +3979,13 @@ class PullRequestMonitorRunner:
                 retention_hours=result.plan.min_age_hours,
             )
             return
-        if result.delete_errors:
+        if result.status == "partial":
             _log.warning(
                 "monitor.filesystem_gc_failed",
                 workspace_id=workspace_id,
                 deleted_path_count=len(result.deleted_paths),
                 delete_errors=[error.to_dict() for error in result.delete_errors],
+                reservation_releases=result.reservation_releases,
             )
             return
         _log.info(

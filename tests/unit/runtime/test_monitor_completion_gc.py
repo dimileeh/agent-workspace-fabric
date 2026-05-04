@@ -359,3 +359,82 @@ async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.completed.value
+
+
+@pytest.mark.unit
+async def test_completed_monitor_filesystem_gc_logs_failure_on_reservation_release_error(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from awf.service.gc import (
+        WorkspaceGCCandidate,
+        WorkspaceGCPath,
+        WorkspaceGCPlan,
+        WorkspaceGCResult,
+    )
+
+    ws_id = "ws-resv-err"
+    work_dir = tmp_path / "service"
+    worktrees_root = work_dir / "git" / "worktrees"
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=worktrees_root,
+    )
+
+    now = datetime.now(UTC) - timedelta(days=30)
+    candidate = WorkspaceGCCandidate(
+        workspace_id=ws_id,
+        status="completed",
+        updated_at=now,
+        age_hours=720,
+        reason_code="AGE",
+        worktree=WorkspaceGCPath(kind="worktree", path=worktrees_root / ws_id, exists=True, estimated_bytes=0),
+        compose=WorkspaceGCPath(kind="compose", path=work_dir / "compose" / ws_id, exists=True, estimated_bytes=0),
+        auth=WorkspaceGCPath(kind="auth", path=work_dir / "auth" / ws_id, exists=True, estimated_bytes=0),
+    )
+    plan = WorkspaceGCPlan(
+        work_dir=work_dir,
+        min_age_hours=24,
+        cutoff_at=now,
+        include_statuses=("completed",),
+        exclude_statuses=(),
+        candidates=[candidate],
+        preserved=[],
+    )
+    fake_result = WorkspaceGCResult(
+        plan=plan,
+        dry_run=False,
+        deleted_paths=[],
+        delete_errors=[],
+        path_outcomes=[],
+        compose_teardowns={},
+        secret_lease_revocations={},
+        worktree_removes={},
+        reservation_releases={ws_id: {"released_count": 0, "reason_code": "TERMINAL_GC", "error": "db connection failed"}},
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+    )
+
+    with patch("awf.runtime.pr_monitor_runner.run_workspace_filesystem_gc", new=AsyncMock(return_value=fake_result)), \
+         structlog.testing.capture_logs() as captured:
+        await runner._gc_completed_workspace_filesystem(ws_id)
+
+    assert any(
+        record.get("event") == "monitor.filesystem_gc_failed"
+        and record.get("workspace_id") == ws_id
+        and record.get("reservation_releases", {}).get(ws_id, {}).get("error") is not None
+        for record in captured
+    ), f"Expected filesystem_gc_failed with reservation release error; got events: {[r.get('event') for r in captured]}"
+    assert not any(
+        record.get("event") == "monitor.filesystem_gc_ok"
+        for record in captured
+    ), "filesystem_gc_ok should not be emitted when reservation release fails"

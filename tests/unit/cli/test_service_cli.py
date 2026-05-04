@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 
 from awf.cli.main import app
 from awf.common.config import Settings
-from awf.service.gc import WorkspaceGCComposeTeardownResult
+from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.readiness import CoreReadinessCheck, CoreReadinessReport
 from awf.service.target_branch_monitor import (
     TargetBranchMonitorResult,
@@ -94,6 +94,15 @@ def _mock_compose_teardown_succeeded(_candidate: object) -> WorkspaceGCComposeTe
     return WorkspaceGCComposeTeardownResult(
         status="succeeded",
         reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+    )
+
+
+async def _mock_worktree_remover_succeeded(
+    _candidate: object, **_kwargs: object
+) -> WorkspaceGCWorktreeRemoveResult:
+    return WorkspaceGCWorktreeRemoveResult(
+        status="succeeded",
+        reason_code="WORKTREE_REMOVE_SUCCEEDED",
     )
 
 
@@ -734,6 +743,11 @@ def test_service_gc_cli_execute_deletes_and_supports_pretty_output(
         "_run_terminal_workspace_compose_teardown",
         _mock_compose_teardown_succeeded,
     )
+    monkeypatch.setattr(
+        cli_main,
+        "_run_terminal_workspace_worktree_remove",
+        _mock_worktree_remover_succeeded,
+    )
 
     result = _runner.invoke(
         app,
@@ -815,6 +829,11 @@ def test_service_gc_cli_execute_failures_exit_nonzero_with_reason_payload(
         "_run_terminal_workspace_compose_teardown",
         _mock_compose_teardown_succeeded,
     )
+    monkeypatch.setattr(
+        cli_main,
+        "_run_terminal_workspace_worktree_remove",
+        _mock_worktree_remover_succeeded,
+    )
 
     result = _runner.invoke(
         app,
@@ -856,6 +875,11 @@ def test_service_gc_cli_execute_records_compose_teardown_failure(
         cli_main,
         "_run_terminal_workspace_compose_teardown",
         _mock_compose_teardown_failed,
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_run_terminal_workspace_worktree_remove",
+        _mock_worktree_remover_succeeded,
     )
 
     result = _runner.invoke(
