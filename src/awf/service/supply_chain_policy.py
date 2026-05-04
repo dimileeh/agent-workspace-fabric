@@ -129,6 +129,9 @@ _NODE_SEMVER_WILDCARD_PATTERN: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 _NODE_SCP_GIT_SPEC_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^:\s]+:.+")
+_PIP_REGISTRY_ENV_VARS: Final[frozenset[str]] = frozenset(
+    {"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"}
+)
 _SHELL_CONTROL_OPERATORS: Final[frozenset[str]] = frozenset({";", "&&", "||"})
 _SHELL_PIPE_OPERATORS: Final[frozenset[str]] = frozenset({"|", "|&"})
 _SHELL_PACKAGE_BOUNDARIES: Final[frozenset[str]] = (
@@ -411,6 +414,18 @@ class _PackageCommand:
     registry_hosts: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _PackageCommandPrefixes:
+    tokens: list[str]
+    env_assignments: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _SkippedWrapperOptions:
+    index: int
+    env_assignments: tuple[str, ...]
+
+
 def _remote_script_execution(
     command: str,
     tokens: list[str],
@@ -568,35 +583,50 @@ def _unexpected_registry_finding(
 
 def _package_command(command: str, tokens: list[str]) -> _PackageCommand | None:
     del command
-    tokens = _strip_package_command_prefixes(tokens)
-    if not tokens:
+    prefixes = _strip_package_command_prefixes(tokens)
+    if not prefixes.tokens:
         return None
-    first = PurePosixPath(_shell_token_word(tokens[0])).name
-    if len(tokens) >= 3 and _is_python_executable(first) and tokens[1:3] == [
-        "-m",
-        "pip",
-    ]:
-        return _pip_command(tokens[3:], manager="pip")
-    if len(tokens) >= 2 and first == "uv" and tokens[1] == "pip":
-        return _pip_command(tokens[2:], manager="uv pip")
+    first = PurePosixPath(_shell_token_word(prefixes.tokens[0])).name
+    if (
+        len(prefixes.tokens) >= 3
+        and _is_python_executable(first)
+        and prefixes.tokens[1:3] == ["-m", "pip"]
+    ):
+        return _pip_command(
+            prefixes.tokens[3:],
+            manager="pip",
+            env_assignments=prefixes.env_assignments,
+        )
+    if len(prefixes.tokens) >= 2 and first == "uv" and prefixes.tokens[1] == "pip":
+        return _pip_command(
+            prefixes.tokens[2:],
+            manager="uv pip",
+            env_assignments=prefixes.env_assignments,
+        )
     if first in {"pip", "pip3"}:
-        return _pip_command(tokens[1:], manager="pip")
+        return _pip_command(
+            prefixes.tokens[1:],
+            manager="pip",
+            env_assignments=prefixes.env_assignments,
+        )
     if first in {"npm", "pnpm", "yarn", "bun"}:
-        return _node_package_command(tokens[1:], manager=first)
+        return _node_package_command(prefixes.tokens[1:], manager=first)
     return None
 
 
-def _strip_package_command_prefixes(tokens: list[str]) -> list[str]:
+def _strip_package_command_prefixes(tokens: list[str]) -> _PackageCommandPrefixes:
     index = 0
+    env_assignments: list[str] = []
     while index < len(tokens):
         token = tokens[index]
         command = PurePosixPath(_shell_token_word(token)).name
         if _is_shell_assignment(token):
+            env_assignments.append(token)
             index += 1
             continue
         if command == "sudo":
             index += 1
-            index = _skip_wrapper_options(
+            skipped = _skip_wrapper_options(
                 tokens,
                 index,
                 value_flags={
@@ -624,10 +654,11 @@ def _strip_package_command_prefixes(tokens: list[str]) -> list[str]:
                     "--user",
                 },
             )
+            index = skipped.index
             continue
         if command == "env":
             index += 1
-            index = _skip_wrapper_options(
+            skipped = _skip_wrapper_options(
                 tokens,
                 index,
                 value_flags={
@@ -641,13 +672,19 @@ def _strip_package_command_prefixes(tokens: list[str]) -> list[str]:
                 },
                 skip_assignments=True,
             )
+            env_assignments.extend(skipped.env_assignments)
+            index = skipped.index
             continue
         if command == "command":
             index += 1
-            index = _skip_wrapper_options(tokens, index)
+            skipped = _skip_wrapper_options(tokens, index)
+            index = skipped.index
             continue
         break
-    return tokens[index:]
+    return _PackageCommandPrefixes(
+        tokens=tokens[index:],
+        env_assignments=tuple(env_assignments),
+    )
 
 
 def _skip_wrapper_options(
@@ -656,15 +693,20 @@ def _skip_wrapper_options(
     *,
     value_flags: set[str] | None = None,
     skip_assignments: bool = False,
-) -> int:
+) -> _SkippedWrapperOptions:
     flags_with_values = value_flags or set()
+    env_assignments: list[str] = []
     while index < len(tokens):
         token = tokens[index]
         if skip_assignments and _is_shell_assignment(token):
+            env_assignments.append(token)
             index += 1
             continue
         if token == "--":
-            return index + 1
+            return _SkippedWrapperOptions(
+                index=index + 1,
+                env_assignments=tuple(env_assignments),
+            )
         if token in flags_with_values:
             index += 2
             continue
@@ -674,20 +716,30 @@ def _skip_wrapper_options(
         if token.startswith("-"):
             index += 1
             continue
-        return index
-    return index
+        return _SkippedWrapperOptions(
+            index=index,
+            env_assignments=tuple(env_assignments),
+        )
+    return _SkippedWrapperOptions(index=index, env_assignments=tuple(env_assignments))
 
 
 def _is_shell_assignment(token: str) -> bool:
     return _SHELL_ASSIGNMENT_PATTERN.match(token) is not None
 
 
-def _pip_command(tokens: list[str], *, manager: str) -> _PackageCommand | None:
+def _pip_command(
+    tokens: list[str],
+    *,
+    manager: str,
+    env_assignments: Sequence[str] = (),
+) -> _PackageCommand | None:
     if not tokens or tokens[0] != "install":
         return None
     args = tokens[1:]
     packages = tuple(_package_args(args, manager="pip"))
-    registries = tuple(_registry_hosts(args, manager="pip"))
+    registries = tuple(
+        _registry_hosts(args, manager="pip", env_assignments=env_assignments)
+    )
     return _PackageCommand(
         manager=manager,
         operation="install",
@@ -761,8 +813,17 @@ def _package_args(args: Sequence[str], *, manager: str) -> list[str]:
     return packages
 
 
-def _registry_hosts(args: Sequence[str], *, manager: str) -> list[str]:
+def _registry_hosts(
+    args: Sequence[str],
+    *,
+    manager: str,
+    env_assignments: Sequence[str] = (),
+) -> list[str]:
     hosts: list[str] = []
+    if manager == "pip":
+        for env_host in _pip_env_registry_hosts(env_assignments):
+            if env_host not in hosts:
+                hosts.append(env_host)
     flags = (
         {"--registry"}
         if manager in {"npm", "pnpm", "yarn", "bun"}
@@ -783,6 +844,20 @@ def _registry_hosts(args: Sequence[str], *, manager: str) -> list[str]:
         host = _host_from_url(value)
         if host is not None and host not in hosts:
             hosts.append(host)
+    return hosts
+
+
+def _pip_env_registry_hosts(env_assignments: Sequence[str]) -> list[str]:
+    hosts: list[str] = []
+    for assignment in env_assignments:
+        name, separator, value = assignment.partition("=")
+        if separator != "=" or name not in _PIP_REGISTRY_ENV_VARS:
+            continue
+        values = _shell_tokens(value) or [value]
+        for item in values:
+            host = _host_from_url(item)
+            if host is not None and host not in hosts:
+                hosts.append(host)
     return hosts
 
 
@@ -1081,7 +1156,20 @@ def _command_from_line(line: str) -> str | None:
         return stripped[4:].strip()
     first = stripped.split(maxsplit=1)[0]
     command = PurePosixPath(first).name
-    return stripped if command in _KNOWN_COMMANDS or _is_python_executable(command) else None
+    if _is_known_evidence_command(command):
+        return stripped
+    tokens = _shell_tokens(stripped)
+    if not tokens:
+        return None
+    prefixes = _strip_package_command_prefixes(tokens)
+    if not prefixes.tokens:
+        return None
+    command = PurePosixPath(_shell_token_word(prefixes.tokens[0])).name
+    return stripped if _is_known_evidence_command(command) else None
+
+
+def _is_known_evidence_command(command: str) -> bool:
+    return command in _KNOWN_COMMANDS or _is_python_executable(command)
 
 
 def _is_python_executable(command: str) -> bool:
