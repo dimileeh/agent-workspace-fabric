@@ -532,7 +532,7 @@ class TaskAttemptRepository:
             select(TaskAttempt)
             .where(TaskAttempt.task_id == task_id)
             .options(
-                selectinload(TaskAttempt.workspace),
+                selectinload(TaskAttempt.workspace).selectinload(Workspace.operations),
                 selectinload(TaskAttempt.merge_candidate),
             )
             .order_by(TaskAttempt.attempt_number.desc(), TaskAttempt.id.desc())
@@ -568,7 +568,7 @@ class TaskAttemptRepository:
             .join(Workspace, TaskAttempt.workspace_id == Workspace.id)
             .options(
                 selectinload(TaskAttempt.task),
-                selectinload(TaskAttempt.workspace),
+                selectinload(TaskAttempt.workspace).selectinload(Workspace.operations),
                 selectinload(TaskAttempt.merge_candidate),
             )
         )
@@ -2442,6 +2442,7 @@ class WorkspaceRepository:
             select(Workspace)
             .where(Workspace.id == workspace_id)
             .options(selectinload(Workspace.secret_leases))
+            .options(selectinload(Workspace.operations))
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
@@ -2586,7 +2587,11 @@ class WorkspaceRepository:
                     ),
                 )
             )
-        stmt = stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc()).limit(limit)
+        stmt = (
+            stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc())
+            .options(selectinload(Workspace.operations))
+            .limit(limit)
+        )
         return list((await self._session.execute(stmt)).scalars())
 
     async def list_without_task_attempts(
