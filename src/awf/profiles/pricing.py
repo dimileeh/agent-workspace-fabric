@@ -45,7 +45,7 @@ class PricingMetadata(BaseModel):
         now: datetime | None = None,
         max_age_days: int = PRICING_MAX_AGE_DAYS,
     ) -> bool:
-        now_utc = (now or datetime.now(UTC)).replace(tzinfo=UTC)
-        timestamp_utc = self.timestamp.replace(tzinfo=UTC)
+        now_utc = (now or datetime.now(UTC)).astimezone(UTC)
+        timestamp_utc = self.timestamp.astimezone(UTC)
         age = now_utc - timestamp_utc
         return age < timedelta(days=max_age_days)
