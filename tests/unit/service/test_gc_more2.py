@@ -335,8 +335,8 @@ async def test_gc_partial_worktree_remove_failure_still_deletes_other_paths(
 
     assert result.status == "partial"
     assert result.worktree_removes[workspace_id].status == "failed"
-    assert not compose.exists()
-    assert not auth.exists()
+    assert compose.exists()
+    assert auth.exists()
     assert workspace_id in result.reservation_releases
 
 
