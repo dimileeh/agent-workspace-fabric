@@ -2406,7 +2406,37 @@ def test_workspace_usage_summary_aggregates_from_operations() -> None:
     assert usage.status == "available"
     assert usage.source == "operations"
 
+
 @pytest.mark.unit
+def test_usage_payload_does_not_leak_pricing_reason_into_usage_reason() -> None:
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    usage = LlmUsageSummary(
+        input_tokens=1000,
+        output_tokens=500,
+        total_tokens=1500,
+        cost_estimate=None,
+        currency=None,
+        status="available",
+        source="adapter_reported",
+        reason=None,
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: None,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["reason"] is None
+    assert result["cost_estimate"] is None
+
+
+@ pytest.mark.unit
 def test_workspace_usage_summary_safely_ignores_malformed_usage() -> None:
     workspace = SimpleNamespace(
         id="ws_usage",
