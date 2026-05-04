@@ -87,12 +87,19 @@ export function formatCostWithPricing(
     return "—";
   }
   const c = currency || pricing.currency || "USD";
-  return new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: c,
-    minimumFractionDigits: 4,
-    maximumFractionDigits: 4,
-  }).format(cost);
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: c,
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 4,
+    }).format(cost);
+  } catch {
+    return new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 4,
+    }).format(cost);
+  }
 }
 
 export function pricingAvailabilityReason(
