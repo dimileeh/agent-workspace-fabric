@@ -886,6 +886,53 @@ async def test_pre_merge_recheck_base_fetch_error_fails_workspace(
 
 
 @pytest.mark.unit
+async def test_pre_merge_recheck_base_behind_error_fails_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        pre_merge_settle_seconds=2,
+    )
+    mocker.patch.object(
+        runner,
+        "_fetch_status_for_decision",
+        mocker.AsyncMock(side_effect=BaseBehindCountError("rev-list died")),
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert sleep_fn.calls == [2]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert "could not calculate base-behind count" in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == "GIT_BASE_BEHIND_FAILED"
+
+
+@pytest.mark.unit
 async def test_pre_merge_recheck_transient_github_error_retries_later(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2855,6 +2902,50 @@ async def test_git_helpers_handle_bad_base_count_and_push_rejection_recovery(
 
     assert cmd.calls[-2].args[-2:] == ["origin", "awf/ws_git"]
     assert cmd.calls[-1].args[-2:] == ["--hard", "origin/awf/ws_git"]
+
+
+@pytest.mark.unit
+async def test_fetch_base_repairs_multiple_broken_awf_refs_before_failing_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fetch_base_once = mocker.patch.object(
+        runner,
+        "_fetch_base_once",
+        mocker.AsyncMock(
+            side_effect=[
+                CommandResult(returncode=1, stdout="", stderr="bad ref ws_old_1"),
+                CommandResult(returncode=1, stdout="", stderr="bad ref ws_old_2"),
+                CommandResult(returncode=0, stdout="", stderr=""),
+            ]
+        ),
+    )
+    repair = mocker.patch.object(
+        runner,
+        "_repair_orphaned_broken_awf_ref",
+        mocker.AsyncMock(side_effect=[True, True]),
+    )
+
+    await runner._fetch_base(
+        workspace_id="ws_current",
+        worktree_path=tmp_path / "worktrees" / "ws_current",
+        base_branch="development",
+    )
+
+    assert fetch_base_once.await_count == 3
+    assert repair.await_count == 2
+    assert [call.kwargs["stderr"] for call in repair.await_args_list] == [
+        "bad ref ws_old_1",
+        "bad ref ws_old_2",
+    ]
 
 
 @pytest.mark.unit

@@ -2703,13 +2703,32 @@ class WorkspaceExecutor:
                 reason_code=GIT_OBJECT_MISSING_REASON_CODE,
             )
             return False
-        recovery = await _recover_missing_head_from_filesystem(
-            runner=self._runner,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            base_commit=base_commit,
-            branch_name=branch_name,
-        )
+        try:
+            recovery = await _recover_missing_head_from_filesystem(
+                runner=self._runner,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_commit=base_commit,
+                branch_name=branch_name,
+            )
+        except Exception as exc:
+            _log.exception(
+                "executor.git_object_filesystem_recovery_failed",
+                workspace_id=workspace_id,
+                stage=stage,
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=from_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "Git object recovery failed: workspace HEAD points at a "
+                    f"missing object during {stage}, but AWF could not run "
+                    f"filesystem recovery: {exc!r}"
+                )[:2000],
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
+            return False
         if recovery is None:
             await self._mark_failed(
                 workspace_id=workspace_id,

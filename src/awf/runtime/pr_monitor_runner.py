@@ -190,6 +190,7 @@ _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
 _GIT_FETCH_BASE_FAILED_REASON = "GIT_FETCH_BASE_FAILED"
 _GIT_BASE_BEHIND_FAILED_REASON = "GIT_BASE_BEHIND_FAILED"
 _GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
+_GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
@@ -1731,6 +1732,7 @@ class PullRequestMonitorRunner:
             merge_operation: MonitorOperationHandle | None = None
             recheck_error: GitHubClientError | None = None
             recheck_base_error: BaseFetchError | None = None
+            recheck_behind_error: BaseBehindCountError | None = None
             merge_status = status
             queue_blockers_after_lock: list[MergeQueueBlocker] = []
             merge_gate_after_lock: _MergeGateResult | None = None
@@ -1760,6 +1762,8 @@ class PullRequestMonitorRunner:
                         recheck_error = exc
                     except BaseFetchError as exc:
                         recheck_base_error = exc
+                    except BaseBehindCountError as exc:
+                        recheck_behind_error = exc
                     else:
                         checked_action = decide(checked_status, state, self._config)
                         if not isinstance(checked_action, Merge):
@@ -1787,6 +1791,7 @@ class PullRequestMonitorRunner:
                 if (
                     recheck_error is None
                     and recheck_base_error is None
+                    and recheck_behind_error is None
                     and fresh_action is None
                 ):
                     queue_blockers_after_lock = await self._merge_queue_blockers_for_workspace(
@@ -1940,6 +1945,17 @@ class PullRequestMonitorRunner:
                         f"{recheck_base_error}"
                     )[:2000],
                     reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                )
+                return True
+
+            if recheck_behind_error is not None:
+                await self._terminate_failed(
+                    workspace_id,
+                    message=(
+                        "monitor: could not calculate base-behind count during "
+                        f"pre-merge recheck: {recheck_behind_error}"
+                    )[:2000],
+                    reason_code=_GIT_BASE_BEHIND_FAILED_REASON,
                 )
                 return True
 
@@ -3532,20 +3548,22 @@ class PullRequestMonitorRunner:
         would make ``base_behind_count`` stale and can livelock SyncBase.
         """
         result = await self._fetch_base_once(worktree_path=worktree_path, base_branch=base_branch)
-        if result.ok:
-            return
-        if await self._repair_orphaned_broken_awf_ref(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            stderr=result.stderr,
-        ):
-            retry = await self._fetch_base_once(
+        repairs_attempted = 0
+        while not result.ok and repairs_attempted < _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS:
+            repaired = await self._repair_orphaned_broken_awf_ref(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                stderr=result.stderr,
+            )
+            if not repaired:
+                break
+            repairs_attempted += 1
+            result = await self._fetch_base_once(
                 worktree_path=worktree_path,
                 base_branch=base_branch,
             )
-            if retry.ok:
-                return
-            result = retry
+        if result.ok:
+            return
         raise BaseFetchError(_git_failure_message("git fetch base", result))
 
     async def _fetch_base_once(self, *, worktree_path: Path, base_branch: str) -> CommandResult:
