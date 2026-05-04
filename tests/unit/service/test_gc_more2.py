@@ -27,6 +27,7 @@ from awf.service.gc import (
     _classify_workspace_for_gc,
     _default_worktree_remover,
     _pr_has_merged,
+    _release_gc_reservations,
     plan_terminal_workspace_gc,
     run_terminal_workspace_gc,
     run_workspace_filesystem_gc,
@@ -1124,3 +1125,33 @@ async def test_release_gc_reservations_rollback_on_db_exception(
     assert result.reservation_releases[ws_a].get("error") is not None
     assert ws_b in result.reservation_releases
     assert result.reservation_releases[ws_b].get("released_count", 0) >= 1
+
+
+async def test_release_gc_reservations_session_isolation_on_db_error(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ws_a = "ws_session_iso_a"
+    ws_b = "ws_session_iso_b"
+    original_release = ResourceReservationRepository.release_active_for_workspace
+
+    async def _taint_then_fail(
+        self: ResourceReservationRepository, workspace_id: str, **kwargs: object
+    ) -> list[ResourceReservation]:
+        if workspace_id == ws_a:
+            raise RuntimeError("simulated db error that taints session")
+        return await original_release(self, workspace_id, **kwargs)
+
+    with patch.object(
+        ResourceReservationRepository, "release_active_for_workspace", _taint_then_fail
+    ):
+        summaries = await _release_gc_reservations(
+            session_factory,
+            workspace_ids=[ws_a, ws_b],
+        )
+
+    assert ws_a in summaries
+    assert summaries[ws_a].get("error") is not None
+    assert summaries[ws_a].get("released_count") == 0
+    assert ws_b in summaries
+    assert summaries[ws_b].get("error") is None

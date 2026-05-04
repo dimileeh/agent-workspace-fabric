@@ -1015,11 +1015,12 @@ async def _release_gc_reservations(
     summaries: dict[str, dict[str, object]] = {}
     if not workspace_ids:
         return summaries
-    async with session_factory() as session:
-        repo = ResourceReservationRepository(session)
-        for workspace_id in workspace_ids:
+    for workspace_id in workspace_ids:
+        async with session_factory() as session:
+            repo = ResourceReservationRepository(session)
             try:
                 released = await repo.release_active_for_workspace(workspace_id)
+                await session.commit()
                 summaries[workspace_id] = {
                     "released_count": len(released),
                     "reason_code": "TERMINAL_GC",
@@ -1031,7 +1032,6 @@ async def _release_gc_reservations(
                     "reason_code": "TERMINAL_GC",
                     "error": str(exc),
                 }
-        await session.commit()
     return summaries
 
 
