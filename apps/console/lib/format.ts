@@ -78,9 +78,6 @@ export function formatCostWithPricing(
   pricing: PricingMetadata | null | undefined,
 ): string {
   if (cost === null || cost === undefined) {
-    if (pricing) {
-      return "—";
-    }
     return "—";
   }
   if (!pricing) {
