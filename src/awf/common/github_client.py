@@ -368,18 +368,6 @@ def _parse_pull_request_adoption_metadata(
 
     closed = state == "CLOSED"
     merged = state == "MERGED"
-    if merged:
-        raise PullRequestMetadataError(
-            reason_code="PR_ALREADY_MERGED",
-            message=f"PR {repo.slug()}#{pr_number} is already merged.",
-            detail={"repo_slug": repo.slug(), "pr_number": pr_number, "state": state},
-        )
-    if closed:
-        raise PullRequestMetadataError(
-            reason_code="PR_ALREADY_CLOSED",
-            message=f"PR {repo.slug()}#{pr_number} is closed.",
-            detail={"repo_slug": repo.slug(), "pr_number": pr_number, "state": state},
-        )
 
     author_obj = payload.get("author")
     author = author_obj.get("login") if isinstance(author_obj, dict) else None

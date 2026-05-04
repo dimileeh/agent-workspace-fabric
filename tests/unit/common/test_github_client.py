@@ -154,28 +154,30 @@ class TestFetchPullRequestAdoptionMetadata:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        "state, reason_code",
+        "state, expected_closed, expected_merged",
         [
-            ("CLOSED", "PR_ALREADY_CLOSED"),
-            ("MERGED", "PR_ALREADY_MERGED"),
+            ("CLOSED", True, False),
+            ("MERGED", False, True),
         ],
     )
-    async def test_terminal_prs_raise_structured_reason(
+    async def test_terminal_prs_return_state_for_service_policy(
         self,
         state: str,
-        reason_code: str,
+        expected_closed: bool,
+        expected_merged: bool,
     ) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=_adoption_pr_payload(state=state))
 
-        with pytest.raises(PullRequestMetadataError) as excinfo:
-            await fetch_pull_request_adoption_metadata(
-                runner=fake,
-                repo=RepoRef(owner="dimileeh", name="aira-web"),
-                pr_number=277,
-            )
+        metadata = await fetch_pull_request_adoption_metadata(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=277,
+        )
 
-        assert excinfo.value.reason_code == reason_code
+        assert metadata.state == state
+        assert metadata.closed is expected_closed
+        assert metadata.merged is expected_merged
 
     @pytest.mark.unit
     async def test_missing_pr_raises_not_found_reason(self) -> None:
