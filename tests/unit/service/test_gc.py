@@ -4,7 +4,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import event, select
@@ -32,6 +32,7 @@ from awf.service.gc import (
     WorkspaceGCComposeTeardownResult,
     WorkspaceGCPath,
     WorkspaceGCPreserved,
+    WorkspaceGCWorktreeRemoveResult,
     _classify_workspace_for_gc,
     _container_command_is_idle,
     _delete_gc_path,
@@ -48,6 +49,20 @@ from awf.service.gc import (
 
 
 
+
+
+@pytest.fixture(autouse=True)
+def _mock_default_worktree_remover():
+    with patch(
+        "awf.service.gc._default_worktree_remover",
+        new=AsyncMock(
+            return_value=WorkspaceGCWorktreeRemoveResult(
+                status="succeeded",
+                reason_code="WORKTREE_REMOVE_SUCCEEDED",
+            )
+        ),
+    ):
+        yield
 
 
 @pytest.fixture

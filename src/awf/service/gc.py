@@ -685,6 +685,7 @@ async def run_terminal_workspace_gc(
             reservation_releases={},
         )
 
+    resolved_worktree_remover = _resolve_worktree_remover(worktree_remover, session_factory, work_dir)
     secret_lease_revocations = await _revoke_gc_secret_leases(
         session_factory,
         workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
@@ -693,7 +694,7 @@ async def run_terminal_workspace_gc(
     deleted_paths, delete_errors, path_outcomes, compose_teardowns, worktree_removes = await _delete_gc_plan_paths(
         plan,
         compose_teardown=compose_teardown,
-        worktree_remover=worktree_remover,
+        worktree_remover=resolved_worktree_remover,
     )
     reservation_releases = await _release_gc_reservations(
         session_factory,
@@ -710,6 +711,23 @@ async def run_terminal_workspace_gc(
         worktree_removes=worktree_removes,
         reservation_releases=reservation_releases,
     )
+
+
+def _resolve_worktree_remover(
+    worktree_remover: WorkspaceGCWorktreeRemove | None,
+    session_factory: async_sessionmaker[AsyncSession],
+    work_dir: Path | str,
+) -> WorkspaceGCWorktreeRemove:
+    if worktree_remover is not None:
+        return worktree_remover
+    normalized = Path(work_dir).expanduser()
+
+    async def _default_remover(candidate: WorkspaceGCCandidate) -> WorkspaceGCWorktreeRemoveResult:
+        return await _default_worktree_remover(
+            candidate, session_factory=session_factory, work_dir=normalized
+        )
+
+    return _default_remover
 
 
 async def run_workspace_filesystem_gc(
@@ -735,6 +753,7 @@ async def run_workspace_filesystem_gc(
     current_time = _to_utc(now or datetime.now(UTC))
     normalized_work_dir = Path(work_dir).expanduser()
     cutoff_at = current_time - timedelta(hours=min_age_hours)
+    resolved_worktree_remover = _resolve_worktree_remover(worktree_remover, session_factory, work_dir)
     async with session_factory() as session:
         workspace = await session.get(Workspace, workspace_id)
 
@@ -788,7 +807,7 @@ async def run_workspace_filesystem_gc(
     deleted_paths, delete_errors, path_outcomes, compose_teardowns, worktree_removes = await _delete_gc_plan_paths(
         plan,
         compose_teardown=compose_teardown,
-        worktree_remover=worktree_remover,
+        worktree_remover=resolved_worktree_remover,
     )
     reservation_releases = await _release_gc_reservations(
         session_factory,
@@ -939,6 +958,39 @@ async def _run_compose_teardown(
     if isawaitable(result):
         result = await result
     return result
+
+
+async def _default_worktree_remover(
+    candidate: WorkspaceGCCandidate,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    work_dir: Path,
+) -> WorkspaceGCWorktreeRemoveResult:
+    from awf.node.git_manager import GitManager
+
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, candidate.workspace_id)
+    if workspace is None or not workspace.repo_url:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="skipped",
+            reason_code="NO_REPO_URL",
+        )
+    git_manager = GitManager(work_dir / "git")
+    try:
+        await git_manager.remove_worktree(
+            workspace_id=candidate.workspace_id,
+            repo_url=workspace.repo_url,
+        )
+        return WorkspaceGCWorktreeRemoveResult(
+            status="succeeded",
+            reason_code="WORKTREE_REMOVE_SUCCEEDED",
+        )
+    except Exception as exc:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            error=str(exc)[:1000],
+        )
 
 
 async def _run_worktree_remove(
