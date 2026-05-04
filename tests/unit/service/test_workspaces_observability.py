@@ -1904,7 +1904,7 @@ def test_workspace_usage_summary_aggregates_from_operations() -> None:
 
     assert usage.input_tokens == 30
     assert usage.output_tokens == 25
-    assert usage.total_tokens == 55
+    assert usage.total_tokens == 40
     assert usage.cost_estimate is not None
     assert abs(usage.cost_estimate - 0.06) < 1e-9
     assert usage.currency == "USD"

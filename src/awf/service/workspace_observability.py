@@ -552,13 +552,6 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
                     if total_tokens is None:
                         total_tokens = 0
                     total_tokens += usage["total_tokens"]
-                else:
-                    has_in = isinstance(usage.get("input_tokens"), int)
-                    has_out = isinstance(usage.get("output_tokens"), int)
-                    if has_in or has_out:
-                        if total_tokens is None:
-                            total_tokens = 0
-                        total_tokens += (usage.get("input_tokens") if has_in else 0) + (usage.get("output_tokens") if has_out else 0)
                 op_currency = usage.get("currency")
                 if isinstance(op_currency, str):
                     if currency is None:
