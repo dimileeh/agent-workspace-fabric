@@ -77,11 +77,13 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'ex.db'}")
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    session_factory = make_session_factory(engine)
+    session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
     try:
-        yield make_session_factory(engine)
+        yield session_factory
     finally:
         await engine.dispose()
 

@@ -144,6 +144,13 @@ def test_network_posture_legacy_cutoff_is_unset_by_default_and_in_payload() -> N
 
 
 @pytest.mark.unit
+def test_network_posture_legacy_cutoff_treats_blank_string_as_unset() -> None:
+    settings = Settings(_env_file=None, network_posture_open_legacy_cutoff=" ")
+
+    assert settings.network_posture_open_legacy_cutoff is None
+
+
+@pytest.mark.unit
 def test_network_posture_legacy_cutoff_flows_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

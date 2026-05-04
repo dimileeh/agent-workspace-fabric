@@ -58,11 +58,8 @@ def origin_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    # File-based SQLite so multiple sessions see the same state (the provisioner
-    # opens several short sessions across the flow).
-    db_path = tmp_path / "awf-test.db"
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     try:
@@ -123,6 +120,37 @@ class TestSuccess:
         provisioner: Provisioner,
     ) -> None:
         await provisioner.provision_claimed("ws_missing")
+
+    @pytest.mark.unit
+    async def test_provision_claimed_ready_workspace_records_stale_skip(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="stale",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision_claimed(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.events[-1].event_type == "workspace.stale_action_skipped"
+            assert reloaded.events[-1].payload["action"] == "provision"
 
     @pytest.mark.unit
     async def test_transitions_to_ready_only_after_stack_launch_succeeds(

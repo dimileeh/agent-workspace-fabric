@@ -93,7 +93,7 @@ class TestExecutorFixPassWarnings:
         template = (
             Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
         )
-        engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'fp.db'}")
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         factory = make_session_factory(engine)
@@ -270,7 +270,7 @@ class TestExecutorMarkFailedStatusDiverged:
         template = (
             Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
         )
-        engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'mf.db'}")
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         factory = make_session_factory(engine)

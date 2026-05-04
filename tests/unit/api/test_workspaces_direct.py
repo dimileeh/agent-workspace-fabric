@@ -14,7 +14,6 @@ confidence plus instrumented line coverage."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -25,6 +24,7 @@ from awf.api.routes.workspaces import (
     _payloads_match,
     create_workspace,
     get_workspace,
+    get_workspace_secret_leases,
     list_workspaces,
 )
 from awf.api.schemas import (
@@ -38,8 +38,8 @@ from awf.db.session import make_engine, make_session_factory
 
 
 @pytest.fixture
-async def session(tmp_path: Path) -> AsyncIterator[AsyncSession]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'api.db'}")
+async def session() -> AsyncIterator[AsyncSession]:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = make_session_factory(engine)
@@ -74,6 +74,20 @@ class TestCreateDirect:
         assert isinstance(result, WorkspaceAcceptedResponse)
         assert result.workspace_id.startswith("ws_")
         assert result.version == 1
+
+    @pytest.mark.unit
+    async def test_secret_lease_route_missing_workspace_raises_structured_404(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            await get_workspace_secret_leases("ws_missing", session=session)
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == {
+            "error_code": "NOT_FOUND",
+            "message": "No workspace with id ws_missing",
+        }
 
     @pytest.mark.unit
     async def test_replays_idempotent_match(self, session: AsyncSession) -> None:

@@ -593,6 +593,33 @@ class TestWorkspaceArtifacts:
         assert response.items[0].size_bytes == len("artifact notes\n")
 
     @pytest.mark.unit
+    async def test_list_route_maps_invalid_cursor_to_structured_400(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _raise_invalid_cursor(*_args: Any, **_kwargs: Any) -> object:
+            raise artifacts.InvalidBoundedListCursorError("bad cursor")
+
+        monkeypatch.setattr(
+            artifacts,
+            "list_workspace_artifacts_metadata",
+            _raise_invalid_cursor,
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await artifacts.list_workspace_artifacts(
+                "ws_test",
+                cursor="bad",
+                session=object(),  # type: ignore[arg-type]
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == {
+            "error_code": "INVALID_CURSOR",
+            "message": "Invalid artifact list cursor.",
+        }
+
+    @pytest.mark.unit
     async def test_require_workspace_raises_structured_404_for_missing_workspace(
         self,
         engine: AsyncEngine,
@@ -606,6 +633,17 @@ class TestWorkspaceArtifacts:
             "error_code": "NOT_FOUND",
             "message": "No workspace with id ws_missing",
         }
+
+    @pytest.mark.unit
+    async def test_require_workspace_accepts_existing_workspace(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+
+        async with make_session_factory(engine)() as session:
+            await artifacts._require_workspace(session, workspace_id)
 
     @pytest.mark.unit
     async def test_artifact_service_and_route_report_missing_workspace(

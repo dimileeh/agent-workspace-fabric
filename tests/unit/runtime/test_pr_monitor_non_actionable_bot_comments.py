@@ -37,8 +37,8 @@ REPO = RepoRef.from_url(REPO_URL)
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     try:

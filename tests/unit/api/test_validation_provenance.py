@@ -67,6 +67,33 @@ def test_validation_route_exports_only_route_endpoint() -> None:
 
 
 @pytest.mark.unit
+async def test_validation_route_maps_invalid_cursor_to_structured_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _raise_invalid_cursor(*_args: object, **_kwargs: object) -> object:
+        raise validation_route.InvalidBoundedListCursorError("bad cursor")
+
+    monkeypatch.setattr(
+        validation_route,
+        "list_validation_provenance_response",
+        _raise_invalid_cursor,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await validation_route.list_validation_provenance(
+            "ws_test",
+            cursor="bad",
+            session=object(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == {
+        "error_code": "INVALID_CURSOR",
+        "message": "Invalid validation provenance cursor.",
+    }
+
+
+@pytest.mark.unit
 def test_validation_provenance_command_lookup_includes_database_hooks() -> None:
     profile = {
         "name": "api-provenance-db-hooks",
