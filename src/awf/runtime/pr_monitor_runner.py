@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError
 from awf.common.audit import redact_audit_text
+from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
@@ -3221,7 +3222,7 @@ class PullRequestMonitorRunner:
                 log_source="recovery",
             )
             result_stdout = result.stdout
-            _append_command_evidence(
+            append_command_evidence(
                 command_evidence,
                 stdout=result.stdout,
                 stderr=result.stderr,
@@ -3230,7 +3231,7 @@ class PullRequestMonitorRunner:
             cli_failed = True
             result_stdout = exc.result.stdout
             agent_run_err = exc
-            _append_command_evidence(
+            append_command_evidence(
                 command_evidence,
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
@@ -3373,10 +3374,10 @@ class PullRequestMonitorRunner:
                 workspace_id=workspace_id,
                 log_source="recovery",
             )
-            _append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+            append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
         except AgentRunError as exc:
             agent_run_err = exc
-            _append_command_evidence(
+            append_command_evidence(
                 command_evidence,
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
@@ -5291,18 +5292,6 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
         else:
             paths.append(path)
     return list(dict.fromkeys(paths))
-
-
-def _append_command_evidence(
-    command_evidence: list[str],
-    *,
-    stdout: str,
-    stderr: str,
-) -> None:
-    if stdout:
-        command_evidence.append(stdout)
-    if stderr:
-        command_evidence.append(stderr)
 
 
 def _supply_chain_policy_blocked_message(reason_codes: Iterable[str]) -> str:

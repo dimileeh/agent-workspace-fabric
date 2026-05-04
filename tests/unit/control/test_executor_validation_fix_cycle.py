@@ -30,11 +30,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapters
+from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
-    _append_agent_result_evidence,
     _supply_chain_block_message,
 )
 from awf.db.enums import AgentRuntime, WorkspaceStatus
@@ -647,8 +647,8 @@ class TestSupplyChainPolicy:
     @pytest.mark.unit
     def test_supply_chain_block_message_and_evidence_helpers(self) -> None:
         evidence: list[str] = []
-        _append_agent_result_evidence(None, stdout="ignored", stderr="ignored")
-        _append_agent_result_evidence(evidence, stdout="out", stderr="err")
+        append_command_evidence(None, stdout="ignored", stderr="ignored")
+        append_command_evidence(evidence, stdout="out", stderr="err")
         findings = [
             SupplyChainFinding(
                 reason_code=f"SUPPLY_CHAIN_TEST_{index}",

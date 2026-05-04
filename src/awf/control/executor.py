@@ -40,6 +40,7 @@ from awf.adapters.base import (
 )
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
 from awf.common.audit import redact_audit_text
+from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
@@ -494,20 +495,6 @@ def _rebase_recovery_operation_payload_identities(
 
 def _str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
-
-
-def _append_agent_result_evidence(
-    command_evidence: list[str] | None,
-    *,
-    stdout: str,
-    stderr: str,
-) -> None:
-    if command_evidence is None:
-        return
-    if stdout:
-        command_evidence.append(stdout)
-    if stderr:
-        command_evidence.append(stderr)
 
 
 def _supply_chain_block_message(findings: Sequence[SupplyChainFinding]) -> str:
@@ -1310,7 +1297,7 @@ class WorkspaceExecutor:
             )
             return
         except AgentRunError as exc:
-            _append_agent_result_evidence(
+            append_command_evidence(
                 agent_command_evidence,
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
@@ -2159,7 +2146,7 @@ class WorkspaceExecutor:
                     model=default_model,
                     workspace_id=workspace_id,
                 )
-                _append_agent_result_evidence(
+                append_command_evidence(
                     fix_command_evidence,
                     stdout=fix_result.stdout,
                     stderr=fix_result.stderr,
@@ -2196,7 +2183,7 @@ class WorkspaceExecutor:
                 )
                 return
             except AgentRunError as exc:
-                _append_agent_result_evidence(
+                append_command_evidence(
                     fix_command_evidence,
                     stdout=exc.result.stdout,
                     stderr=exc.result.stderr,
@@ -3403,7 +3390,7 @@ class WorkspaceExecutor:
                 model=model,
                 workspace_id=workspace.id,
             )
-            _append_agent_result_evidence(
+            append_command_evidence(
                 command_evidence,
                 stdout=result.stdout,
                 stderr=result.stderr,
@@ -3444,7 +3431,7 @@ class WorkspaceExecutor:
             model=model,
             workspace_id=workspace.id,
         )
-        _append_agent_result_evidence(
+        append_command_evidence(
             command_evidence,
             stdout=plan_result.stdout,
             stderr=plan_result.stderr,
@@ -3518,7 +3505,7 @@ class WorkspaceExecutor:
                 model=model,
                 workspace_id=workspace.id,
             )
-            _append_agent_result_evidence(
+            append_command_evidence(
                 command_evidence,
                 stdout=execute_result.stdout,
                 stderr=execute_result.stderr,
@@ -3550,7 +3537,7 @@ class WorkspaceExecutor:
                     model=model,
                     workspace_id=workspace.id,
                 )
-                _append_agent_result_evidence(
+                append_command_evidence(
                     command_evidence,
                     stdout=compare_result.stdout,
                     stderr=compare_result.stderr,
@@ -3559,7 +3546,7 @@ class WorkspaceExecutor:
                 if exc.reason_code not in {"AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"}:
                     raise
                 compare_error = exc
-                _append_agent_result_evidence(
+                append_command_evidence(
                     command_evidence,
                     stdout=exc.result.stdout,
                     stderr=exc.result.stderr,
