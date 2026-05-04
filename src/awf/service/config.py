@@ -42,7 +42,7 @@ class ServiceSettings:
     worker_max_concurrent_provisions: int
     worker_max_concurrent_executions: int = 3
     agent_wall_timeout_seconds: float = 7200
-    agent_idle_timeout_seconds: float = 900
+    agent_idle_timeout_seconds: float = 1800
     planning_max_iterations_default: int = 3
     host_home: str = "~"
     node_id: str | None = None

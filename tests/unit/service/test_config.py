@@ -26,9 +26,9 @@ def test_agent_watchdog_defaults_are_conservative_and_documented_in_payload() ->
     rendered = json.dumps(payload)
 
     assert settings.agent_wall_timeout_seconds == 7200
-    assert settings.agent_idle_timeout_seconds == 900
+    assert settings.agent_idle_timeout_seconds == 1800
     assert payload["agent_wall_timeout_seconds"] == 7200
-    assert payload["agent_idle_timeout_seconds"] == 900
+    assert payload["agent_idle_timeout_seconds"] == 1800
     assert "agent_wall_timeout_seconds" in rendered
     assert "agent_idle_timeout_seconds" in rendered
 

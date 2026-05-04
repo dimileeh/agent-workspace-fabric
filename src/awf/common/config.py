@@ -152,11 +152,11 @@ class Settings(BaseSettings):
         ),
     )
     agent_idle_timeout_seconds: float = Field(
-        default=900,
+        default=1800,
         gt=0,
         description=(
             "Maximum seconds with no agent stdout/stderr before AWF terminates it. "
-            "Default: 900 seconds."
+            "Default: 1800 seconds."
         ),
     )
     planning_max_iterations_default: int = Field(

@@ -38,7 +38,7 @@ _log = get_logger(__name__)
 DEFAULT_AGENT_WALL_TIMEOUT_SECONDS = 7200.0
 """Default maximum wall-clock duration for a single agent CLI run."""
 
-DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 900.0
+DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 1800.0
 """Default maximum stdout/stderr silence for a single agent CLI run."""
 
 
