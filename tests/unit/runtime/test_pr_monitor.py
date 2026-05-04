@@ -65,6 +65,7 @@ def _review(
 
 def _status(
     *,
+    head_sha: str = "abc123",
     mergeable: MergeableState = MergeableState.MERGEABLE,
     check_state: CheckState = CheckState.SUCCESS,
     inline: tuple[ReviewThread, ...] = (),
@@ -77,7 +78,7 @@ def _status(
 ) -> PRStatus:
     return PRStatus(
         number=42,
-        head_sha="abc123",
+        head_sha=head_sha,
         mergeable=mergeable,
         check_state=check_state,
         unresolved_inline_threads=inline,
@@ -556,16 +557,99 @@ class TestMergeStateStatus:
 
     @pytest.mark.unit
     def test_dirty_keeps_syncing_even_after_many_attempts(self) -> None:
-        """Volume isn't a terminal condition: even at iter_count=1000 with
-        DIRTY the monitor keeps issuing SyncBase. Operator intervention
-        (closing / rebasing the PR) is how a genuinely-stuck conflict
-        gets resolved; the monitor itself never gives up."""
+        """Volume alone is not terminal; only repeated no-progress syncs
+        for the same PR snapshot trip the guard."""
         action = decide(
             _status(merge_state_status=MergeStateStatus.DIRTY),
             MonitorState(iter_count=1000),
             MonitorConfig(),
         )
         assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    def test_dirty_no_progress_syncs_abort_instead_of_looping_forever(self) -> None:
+        status = _status(
+            head_sha="abc1234567890def",
+            mergeable=MergeableState.CONFLICTING,
+            merge_state_status=MergeStateStatus.DIRTY,
+        )
+        action = decide(
+            status,
+            MonitorState(
+                sync_base_no_progress_signature=(
+                    "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
+                ),
+                sync_base_no_progress_count=3,
+            ),
+            MonitorConfig(max_no_progress_sync_base_attempts=3),
+        )
+
+        assert isinstance(action, Abort)
+        assert action.reason == AbortReason.merge_conflict_not_reproduced
+
+    @pytest.mark.unit
+    def test_dirty_no_progress_allows_new_review_comments_once(self) -> None:
+        status = _status(
+            head_sha="abc1234567890def",
+            mergeable=MergeableState.CONFLICTING,
+            merge_state_status=MergeStateStatus.DIRTY,
+            inline=(_thread(tid="T_new"),),
+        )
+        action = decide(
+            status,
+            MonitorState(
+                sync_base_no_progress_signature=(
+                    "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
+                ),
+                sync_base_no_progress_count=3,
+            ),
+            MonitorConfig(max_no_progress_sync_base_attempts=3),
+        )
+
+        assert isinstance(action, AddressComments)
+        assert [thread.thread_id for thread in action.threads] == ["T_new"]
+
+    @pytest.mark.unit
+    def test_behind_no_progress_aborts_with_base_sync_reason(self) -> None:
+        status = _status(
+            head_sha="abc1234567890def",
+            base_behind=1,
+            merge_state_status=MergeStateStatus.BEHIND,
+        )
+        action = decide(
+            status,
+            MonitorState(
+                sync_base_no_progress_signature=(
+                    "abc1234567890def|MERGEABLE|BEHIND|base_behind=1"
+                ),
+                sync_base_no_progress_count=3,
+            ),
+            MonitorConfig(max_no_progress_sync_base_attempts=3),
+        )
+
+        assert isinstance(action, Abort)
+        assert action.reason == AbortReason.base_sync_no_progress
+
+    @pytest.mark.unit
+    def test_legacy_conflicting_no_progress_aborts_without_rerunning_sync(self) -> None:
+        status = _status(
+            head_sha="abc1234567890def",
+            mergeable=MergeableState.CONFLICTING,
+            merge_state_status=MergeStateStatus.CLEAN,
+        )
+        action = decide(
+            status,
+            MonitorState(
+                sync_base_no_progress_signature=(
+                    "abc1234567890def|CONFLICTING|CLEAN|base_behind=0"
+                ),
+                sync_base_no_progress_count=3,
+            ),
+            MonitorConfig(max_no_progress_sync_base_attempts=3),
+        )
+
+        assert isinstance(action, Abort)
+        assert action.reason == AbortReason.merge_conflict_not_reproduced
 
     @pytest.mark.unit
     def test_blocked_notifies_human_even_with_auto_merge(self) -> None:

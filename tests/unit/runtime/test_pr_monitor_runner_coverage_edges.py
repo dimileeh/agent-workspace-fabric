@@ -42,6 +42,7 @@ from awf.runtime.pr_monitor import (
     SyncBase,
 )
 from awf.runtime.pr_monitor_runner import (
+    BaseBehindCountError,
     MonitorRunnerConfig,
     ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
@@ -2477,7 +2478,7 @@ async def test_monitor_sync_base_cleanup_failure_terminates_without_push(
     assert terminal is True
     assert [call.args[-2:] for call in cmd.calls] == [
         ["merge", "--abort"],
-        ["origin", "development"],
+        ["origin", "+refs/heads/development:refs/remotes/origin/development"],
         ["--no-edit", "origin/development"],
         ["status", "--porcelain"],
     ]
@@ -2731,7 +2732,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
     assert "src/conflict.py" in adapter.calls[0]
     assert [call.args[-2:] for call in cmd.calls[:2]] == [
         ["merge", "--abort"],
-        ["origin", "development"],
+        ["origin", "+refs/heads/development:refs/remotes/origin/development"],
     ]
     assert cmd.calls[-1].args[-2:] == ["origin", "HEAD:refs/heads/awf/ws_sync_conflict"]
 
@@ -2797,8 +2798,10 @@ async def test_git_helpers_handle_bad_base_count_and_push_rejection_recovery(
     )
     worktree = tmp_path / "worktrees" / "ws_git"
 
-    assert await runner._count_base_behind(worktree_path=worktree, base_branch="main") == 0
-    assert await runner._count_base_behind(worktree_path=worktree, base_branch="main") == 0
+    with pytest.raises(BaseBehindCountError):
+        await runner._count_base_behind(worktree_path=worktree, base_branch="main")
+    with pytest.raises(BaseBehindCountError):
+        await runner._count_base_behind(worktree_path=worktree, base_branch="main")
     assert await runner._git_push(worktree_path=worktree, remote_branch="awf/ws_git") is False
 
     assert cmd.calls[-2].args[-2:] == ["origin", "awf/ws_git"]

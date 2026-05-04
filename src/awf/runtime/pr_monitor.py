@@ -189,6 +189,8 @@ class MonitorState:
 
     iter_count: int = 0
     last_push_sha: str | None = None  # SHA at the time of last push
+    sync_base_no_progress_signature: str | None = None
+    sync_base_no_progress_count: int = 0
     # thread_id → one of:
     # "fix_committed" / "false_positive" / "defer" / "agent_failed"
     threads_addressed_ids: dict[str, str] = field(default_factory=dict)
@@ -238,6 +240,12 @@ class MonitorConfig:
     exceeded this age. This is observability only; pending checks still
     block merge through the ordinary WaitForCI path."""
 
+    max_no_progress_sync_base_attempts: int = 3
+    """Abort or move to still-actionable review feedback after this many
+    consecutive no-op SyncBase attempts for the same PR snapshot. This
+    prevents stale git mirrors or unreproducible GitHub DIRTY states from
+    burning monitor iterations forever."""
+
 
 # ── Actions — the vocabulary decide() returns to the runner ────────────────
 
@@ -253,6 +261,8 @@ class AbortReason(StrEnum):
     pr_closed_externally = "pr_closed_externally"
     no_progress_on_comments = "no_progress_on_comments"
     merge_conflict_unresolvable = "merge_conflict_unresolvable"
+    merge_conflict_not_reproduced = "merge_conflict_not_reproduced"
+    base_sync_no_progress = "base_sync_no_progress"
     stale = "stale"
     """GitHub reports mergeStateStatus == DIRTY after every other gate is
     clean — git can't auto-resolve and the CLI already had its chance."""
@@ -368,6 +378,29 @@ def _needs_comment_attention(verdict: str | None) -> bool:
     return verdict is None or verdict == "agent_failed"
 
 
+def sync_base_no_progress_signature(status: PRStatus) -> str:
+    """Stable identity for a SyncBase snapshot that made no local progress."""
+
+    mergeable = status.mergeable.value
+    merge_state = status.merge_state_status.value if status.merge_state_status else "UNKNOWN"
+    return (
+        f"{status.head_sha}|{mergeable}|{merge_state}|"
+        f"base_behind={status.base_behind_count}"
+    )
+
+
+def _sync_base_no_progress_exhausted(
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+) -> bool:
+    return (
+        config.max_no_progress_sync_base_attempts > 0
+        and state.sync_base_no_progress_signature == sync_base_no_progress_signature(status)
+        and state.sync_base_no_progress_count >= config.max_no_progress_sync_base_attempts
+    )
+
+
 # ── The decision function ──────────────────────────────────────────────────
 
 
@@ -423,6 +456,20 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
 
+    # Pre-compute actionable comments so a no-progress DIRTY loop can break
+    # back to review repair instead of starving new feedback forever.
+    new_threads = tuple(
+        t
+        for t in status.unresolved_inline_threads
+        if _needs_comment_attention(state.threads_addressed_ids.get(t.thread_id))
+    )
+    new_reviews = tuple(
+        c
+        for c in status.unresolved_review_comments
+        if not c.blocks_merge
+        and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
+    )
+
     # 1. Base-behind / DIRTY check runs BEFORE comments. Rationale: on a
     # PR with an active bot-review fleet (Greptile/CodeRabbit/Bugbot/
     # Codex/etc.) every push triggers a new wave of comments —
@@ -450,23 +497,20 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         MergeStateStatus.BEHIND,
         MergeStateStatus.DIRTY,
     ):
+        if _sync_base_no_progress_exhausted(status, state, config):
+            if status.merge_state_status == MergeStateStatus.DIRTY and (
+                new_threads or new_reviews
+            ):
+                return AddressComments(threads=new_threads, review_comments=new_reviews)
+            if status.merge_state_status == MergeStateStatus.DIRTY:
+                return Abort(reason=AbortReason.merge_conflict_not_reproduced)
+            return Abort(reason=AbortReason.base_sync_no_progress)
         return SyncBase()
 
     # 2. Unresolved comments, filtered to those we haven't handled yet.
     # Policy/checklist blockers remain visible to the merge gate, but are
     # not sent to the coding CLI: no code edit can click a review-bot
     # "Trigger review" checkbox or change organization review settings.
-    new_threads = tuple(
-        t
-        for t in status.unresolved_inline_threads
-        if _needs_comment_attention(state.threads_addressed_ids.get(t.thread_id))
-    )
-    new_reviews = tuple(
-        c
-        for c in status.unresolved_review_comments
-        if not c.blocks_merge
-        and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
-    )
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 
@@ -515,6 +559,8 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # comment fixes; contrast with BEHIND/DIRTY (step 1) which must run
     # first to break the push→comment→push loop.
     if status.mergeable == MergeableState.CONFLICTING:
+        if _sync_base_no_progress_exhausted(status, state, config):
+            return Abort(reason=AbortReason.merge_conflict_not_reproduced)
         return SyncBase()
 
     # 7. Branch protection / required-review blocker → hand off to human
