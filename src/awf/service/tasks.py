@@ -45,6 +45,7 @@ def _pricing_from_workspace(workspace: Workspace) -> dict[str, object] | None:
         "model": pricing.model,
         "currency": pricing.currency,
         "unit": pricing.unit,
+        "price_per_1k_tokens": pricing.price_per_1k_tokens,
         "timestamp": pricing.timestamp,
         "version": pricing.version,
         "is_current": pricing.is_current(),
