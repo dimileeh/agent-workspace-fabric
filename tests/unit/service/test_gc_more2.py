@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+import awf.service.gc as gc
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import ResourceReservation, Workspace
 from awf.db.repositories import (
@@ -16,7 +17,9 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
+    TERMINAL_WORKSPACE_RETENTION_EXPIRED,
     WorkspaceGCPreserved,
     WorkspaceGCWorktreeRemoveResult,
     _classify_workspace_for_gc,
@@ -25,6 +28,15 @@ from awf.service.gc import (
     run_terminal_workspace_gc,
     run_workspace_filesystem_gc,
 )
+
+
+class _StaticRuntimeInspector:
+    def __init__(self, snapshot: RuntimeSnapshot) -> None:
+        self.snapshot = snapshot
+
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        assert compose_project_name is not None
+        return self.snapshot
 
 
 @pytest.fixture
@@ -583,3 +595,259 @@ async def test_single_workspace_gc_calls_worktree_remover(
     assert result.status == "succeeded"
     assert remover_calls == [workspace_id]
     assert result.worktree_removes[workspace_id].status == "succeeded"
+
+
+def test_worktree_remove_result_to_dict_with_error():
+    result = WorkspaceGCWorktreeRemoveResult(
+        status="failed",
+        reason_code="GIT_WORKTREE_REMOVE_FAILED",
+        error="mirror not accessible",
+    )
+    payload = result.to_dict()
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "GIT_WORKTREE_REMOVE_FAILED"
+    assert payload["error"] == "mirror not accessible"
+
+
+async def test_gc_worktree_remover_with_awaitable_callback(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="k" * 40,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+
+    async def _async_worktree_remover(
+        candidate: object,
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="succeeded",
+            reason_code="WORKTREE_REMOVE_SUCCEEDED",
+        )
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        worktree_remover=_async_worktree_remover,
+    )
+
+    assert result.status == "succeeded"
+    assert result.worktree_removes[workspace_id].status == "succeeded"
+
+
+async def test_gc_async_worktree_remover_dry_run_does_not_call(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="l" * 40,
+    )
+    remover_calls: list[str] = []
+
+    async def _async_worktree_remover(
+        candidate: object,
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        remover_calls.append("called")
+        return WorkspaceGCWorktreeRemoveResult(
+            status="succeeded",
+            reason_code="WORKTREE_REMOVE_SUCCEEDED",
+        )
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        execute=False,
+        now=now,
+        worktree_remover=_async_worktree_remover,
+    )
+
+    assert result.dry_run is True
+    assert remover_calls == []
+
+
+async def test_single_workspace_gc_preserves_completed_workspace_with_unmerged_pr(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha=None,
+    )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert result.deleted_paths == []
+    assert result.reservation_releases == {}
+    preserved_ids = {p.workspace_id for p in result.plan.preserved}
+    assert workspace_id in preserved_ids
+
+
+@pytest.mark.unit
+async def test_plan_with_limit_includes_preserved_rows(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    unmerged_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha=None,
+        title="unmerged pr workspace",
+    )
+    recent_merged_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=2),
+        pr=True,
+        pr_merge_sha="a" * 40,
+        title="recent merged workspace",
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        limit=10,
+        now=now,
+    )
+
+    assert plan.preserved_count >= 1
+    preserved_ids = {p.workspace_id for p in plan.preserved}
+    assert unmerged_id in preserved_ids
+    assert recent_merged_id in preserved_ids
+
+
+@pytest.mark.unit
+async def test_gc_with_sync_worktree_remover_callback(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="m" * 40,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    remover_calls: list[str] = []
+
+    def _sync_worktree_remover(
+        candidate: object,
+    ) -> WorkspaceGCWorktreeRemoveResult:
+        workspace_id_arg = getattr(candidate, "workspace_id", None)
+        remover_calls.append(workspace_id_arg)
+        return WorkspaceGCWorktreeRemoveResult(
+            status="succeeded",
+            reason_code="WORKTREE_REMOVE_SUCCEEDED",
+        )
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        worktree_remover=_sync_worktree_remover,
+    )
+
+    assert result.status == "succeeded"
+    assert remover_calls == [workspace_id]
+    assert result.worktree_removes[workspace_id].status == "succeeded"
+
+
+@pytest.mark.unit
+async def test_plan_reclassifies_old_failed_active_workspace_from_candidate_to_preserved(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    failed_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+    async with session_factory() as session:
+        ws = await session.get(Workspace, failed_id)
+        assert ws is not None
+        ws.compose_project_name = "awf_reclassify_gc"
+        ws.updated_at = now - timedelta(hours=200)
+        await session.commit()
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="running",
+                        command="./run_agent.sh",
+                    )
+                ],
+            )
+        ),
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        include_statuses=[WorkspaceStatus.failed],
+        now=now,
+    )
+
+    assert plan.candidates == []
+    assert plan.preserved_count >= 1
+    preserved_for_ws = [p for p in plan.preserved if p.workspace_id == failed_id]
+    assert len(preserved_for_ws) == 1
+    assert preserved_for_ws[0].reason_code == TERMINAL_WORKSPACE_RETENTION_EXPIRED
