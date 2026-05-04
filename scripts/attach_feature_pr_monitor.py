@@ -310,6 +310,9 @@ async def orchestrate_service_adoption(
     ``--legacy-detached`` for old recovery playbooks, but the default now
     creates an AWF service-managed workspace and monitor lineage.
     """
+    # ``work_dir`` only controls the deprecated detached runner. The
+    # service-managed adoption endpoint uses the AWF service's configured
+    # workspace root, so this wrapper intentionally does not forward it.
     del work_dir
     print(
         "attach-feature-pr-monitor: using supported AWF PR adoption API; "
