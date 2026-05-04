@@ -1532,6 +1532,55 @@ async def test_execute_sync_base_records_no_progress_noop(
 
 
 @pytest.mark.unit
+async def test_execute_sync_base_failed_push_resets_no_progress_streak(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=1, stderr="push rejected")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState(
+        sync_base_no_progress_signature=(
+            "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
+        ),
+        sync_base_no_progress_count=2,
+    )
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(
+            head_sha="abc1234567890def",
+            mergeable=MergeableState.CONFLICTING,
+            merge_state_status=MergeStateStatus.DIRTY,
+        ),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert state.sync_base_no_progress_signature is None
+    assert state.sync_base_no_progress_count == 0
+
+
+@pytest.mark.unit
 async def test_sync_base_progress_increments_same_snapshot_and_resets_on_failure(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

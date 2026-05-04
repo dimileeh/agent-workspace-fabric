@@ -1281,6 +1281,11 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
+                self._record_sync_base_progress(
+                    state=state,
+                    status=status,
+                    push_result=push_result,
+                )
                 state.iter_count += 1
                 return False
             await self._finish_monitor_operation(

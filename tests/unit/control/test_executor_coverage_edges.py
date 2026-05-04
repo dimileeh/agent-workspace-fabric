@@ -14,6 +14,8 @@ import awf.control.executor as executor_mod
 from awf.adapters.base import AgentDefaults
 from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 from awf.control.executor import (
+    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+    PLAN_ONLY_OUTPUT_REASON_CODE,
     ExecutorConfig,
     WorkspaceExecutor,
     _agent_defaults_for_workspace,
@@ -1871,6 +1873,126 @@ async def test_record_git_object_recovery_event_persists_workspace_event(
     assert len(recovery_events) == 1
     assert recovery_events[0].reason_code == "GIT_OBJECT_MISSING_RECOVERED"
     assert recovery_events[0].payload["stage"] == "agent_run"
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_rejects_protected_paths(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path(".awf/workspace.yml")}
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_policy",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.policy_failure
+    assert kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_rejects_empty_recovery(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._committed_paths_since = AsyncMock(return_value=set())  # type: ignore[method-assign]
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_empty",
+        worktree_path=tmp_path / "worktree",
+        base_commit="d" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.agent_failure
+    assert kwargs["reason_code"] == GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
+    assert kwargs["details"] == {"recovered_stage": "post_agent_commit"}
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_rejects_plan_only_recovery(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("docs/awf-plans/ws_plan_only.md")}
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_plan_only",
+        worktree_path=tmp_path / "worktree",
+        base_commit="e" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.agent_failure
+    assert kwargs["reason_code"] == PLAN_ONLY_OUTPUT_REASON_CODE
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_rejects_orphaned_history(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="not an ancestor")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("src/app.py")}
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_orphan",
+        worktree_path=tmp_path / "worktree",
+        base_commit="b" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.agent_failure
+    assert "does not descend from base commit" in kwargs["message"]
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_accepts_policy_clean_commit(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("src/app.py")}
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_clean",
+        worktree_path=tmp_path / "worktree",
+        base_commit="c" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
