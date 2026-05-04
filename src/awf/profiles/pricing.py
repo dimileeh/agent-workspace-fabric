@@ -49,4 +49,4 @@ class PricingMetadata(BaseModel):
         now_utc = (now or datetime.now(UTC)).astimezone(UTC)
         timestamp_utc = self.timestamp.astimezone(UTC)
         age = now_utc - timestamp_utc
-        return age < timedelta(days=max_age_days)
+        return timedelta(0) <= age < timedelta(days=max_age_days)

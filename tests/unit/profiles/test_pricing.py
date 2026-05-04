@@ -206,6 +206,49 @@ class TestPricingMetadataModel:
         assert meta.price_per_1k_tokens == 0.015
 
     @pytest.mark.unit
+    def test_is_current_false_for_future_timestamp(self) -> None:
+        from awf.profiles.pricing import PricingMetadata
+
+        now = datetime.now(UTC)
+        future_ts = now + timedelta(days=30)
+        meta = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            timestamp=future_ts,
+        )
+        assert meta.is_current(now=now) is False
+
+    @pytest.mark.unit
+    def test_is_current_false_for_far_future_timestamp(self) -> None:
+        from awf.profiles.pricing import PricingMetadata
+
+        now = datetime.now(UTC)
+        meta = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            timestamp=now + timedelta(days=365),
+        )
+        assert meta.is_current(now=now) is False
+
+    @pytest.mark.unit
+    def test_is_current_true_for_very_recent_past_timestamp(self) -> None:
+        from awf.profiles.pricing import PricingMetadata
+
+        now = datetime.now(UTC)
+        meta = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            timestamp=now - timedelta(minutes=5),
+        )
+        assert meta.is_current(now=now) is True
+
+    @pytest.mark.unit
     def test_rejects_negative_price_per_1k_tokens(self) -> None:
         from awf.profiles.pricing import PricingMetadata
 
