@@ -1539,13 +1539,9 @@ async def test_agent_git_writability_preflight_runs_inside_agent_container(
     assert runner.calls
     call = runner.calls[0]
     assert call.input_bytes == b""
-    assert call.args[:5] == [
-        "docker",
-        "compose",
-        "--project-name",
-        "awf_ws_preflight",
-        "--file",
-    ]
+    assert call.args[:2] == ["docker", "compose"]
+    assert call.args[call.args.index("-p") + 1] == "awf_ws_preflight"
+    assert call.args[call.args.index("-f") + 1] == str(compose_file)
     assert "agent_git_writability_preflight" not in " ".join(call.args[:10])
     assert "git hash-object -w --stdin" in " ".join(call.args)
 

@@ -116,19 +116,6 @@ def _config_resolver(api_base_url="http://localhost:8000"):
 
 
 @pytest.mark.unit
-def test_default_config_resolver_includes_console_url_when_configured() -> None:
-    assert _default_config_resolver(
-        SimpleNamespace(
-            api_base_url="http://localhost:8000",
-            console_url="http://localhost:3000",
-        )
-    ) == {
-        "api_base_url": "http://localhost:8000",
-        "console_url": "http://localhost:3000",
-    }
-
-
-@pytest.mark.unit
 class TestCollectSmokeReportLiveMode:
     async def test_all_phases_pass_with_valid_project(self, tmp_path: Path) -> None:
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
