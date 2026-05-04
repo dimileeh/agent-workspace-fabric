@@ -332,6 +332,11 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   }, []);
 
   useEffect(() => {
+    const urlWorkspaceId = searchParams.get("workspaceId");
+    setSelectedIdState((current) => (current !== urlWorkspaceId ? urlWorkspaceId : current));
+  }, [searchParams]);
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const currentParam = params.get("workspaceId");
     if (selectedId !== currentParam) {
