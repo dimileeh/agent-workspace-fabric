@@ -486,6 +486,7 @@ class TestPullRequestMonitorAdoptionService:
         [
             ("PR_ALREADY_CLOSED", 409),
             ("PR_ADOPTION_INPUT_REQUIRED", 422),
+            ("PR_METADATA_FETCH_FAILED", 502),
             ("PR_METADATA_INVALID", 502),
         ],
     )
@@ -495,3 +496,11 @@ class TestPullRequestMonitorAdoptionService:
         status_code: int,
     ) -> None:
         assert adoption_module._metadata_error_status_code(reason_code) == status_code
+
+    @pytest.mark.unit
+    def test_public_error_code_contract_covers_metadata_fetch_failures(self) -> None:
+        contract_codes = {
+            row["error_code"] for row in adoption_module._PR_ADOPTION_ERROR_CODE_CONTRACT
+        }
+
+        assert {"PR_METADATA_FETCH_FAILED", "PR_METADATA_INVALID"} <= contract_codes

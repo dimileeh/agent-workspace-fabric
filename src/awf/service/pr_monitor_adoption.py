@@ -50,6 +50,8 @@ _PR_ADOPTION_ERROR_CODE_CONTRACT = (
     {"error_code": "PR_NOT_FOUND"},
     {"error_code": "PR_ALREADY_CLOSED"},
     {"error_code": "PR_ALREADY_MERGED"},
+    {"error_code": "PR_METADATA_FETCH_FAILED"},
+    {"error_code": "PR_METADATA_INVALID"},
     {"error_code": "PR_ADOPTION_POLICY_CONFLICT"},
 )
 
