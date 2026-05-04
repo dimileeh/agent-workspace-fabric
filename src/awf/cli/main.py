@@ -777,7 +777,10 @@ def service_doctor(
             )
         )
         path = write_support_bundle(bundle_payload)
-        typer.echo(f"Support bundle written to: {path}")
+        if fmt == OutputFormat.json:
+            _emit({"support_bundle_path": str(path)}, fmt)
+        else:
+            typer.echo(f"Support bundle written to: {path}")
         return
 
     report = asyncio.run(

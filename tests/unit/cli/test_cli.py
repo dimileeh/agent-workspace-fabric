@@ -855,6 +855,8 @@ class TestServiceDoctorBundle:
         assert result.exit_code == 0, result.output
         bundle_path = next(out_dir.glob("awf-support-bundle-*.json"), None)
         assert bundle_path is not None
+        parsed = json.loads(result.stdout)
+        assert parsed == {"support_bundle_path": str(bundle_path)}
 
     @pytest.mark.unit
     def test_cli_service_doctor_bundle_flag_ignores_failing_report_exit(
