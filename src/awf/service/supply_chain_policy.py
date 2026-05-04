@@ -100,6 +100,13 @@ _PYTHON_EXECUTABLE_PATTERN: Final[re.Pattern[str]] = re.compile(
 _REMOTE_SCRIPT_INTERPRETERS: Final[frozenset[str]] = frozenset(
     {"sh", "bash", "zsh", "dash", "fish", "python", "python3", "ruby", "perl", "node"}
 )
+_SHELL_COMMAND_INTERPRETERS: Final[frozenset[str]] = frozenset(
+    {"sh", "bash", "zsh", "dash", "fish"}
+)
+_SHELL_COMMAND_PAYLOAD_MAX_DEPTH: Final[int] = 4
+_SHELL_COMMAND_VALUE_OPTIONS: Final[frozenset[str]] = frozenset(
+    {"-o", "+o", "-O", "+O"}
+)
 _URL_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(https?://)[^/@\s]+(?::[^/@\s]+)?@"
 )
@@ -1211,8 +1218,60 @@ def _command_lines(command_evidence: str | Sequence[str]) -> list[str]:
         for line in str(blob).splitlines():
             command = _command_from_line(line)
             if command:
-                commands.append(command)
+                commands.extend(_command_with_shell_payloads(command))
     return commands
+
+
+def _command_with_shell_payloads(command: str, *, depth: int = 0) -> list[str]:
+    commands = [command]
+    if depth >= _SHELL_COMMAND_PAYLOAD_MAX_DEPTH:
+        return commands
+    for payload in _shell_command_payloads(_shell_tokens(command)):
+        for line in payload.splitlines():
+            nested = line.strip()
+            if nested:
+                commands.extend(
+                    _command_with_shell_payloads(nested, depth=depth + 1)
+                )
+    return commands
+
+
+def _shell_command_payloads(tokens: Sequence[str]) -> list[str]:
+    payloads: list[str] = []
+    for segment in _command_token_segments(tokens, _SHELL_PACKAGE_BOUNDARIES):
+        prefixes = _strip_package_command_prefixes(list(segment))
+        payload = _shell_command_payload(prefixes.tokens)
+        if payload:
+            payloads.append(payload)
+    return payloads
+
+
+def _shell_command_payload(tokens: Sequence[str]) -> str | None:
+    if not tokens:
+        return None
+    command = PurePosixPath(_shell_token_word(tokens[0])).name
+    if command not in _SHELL_COMMAND_INTERPRETERS:
+        return None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-c" or (command == "fish" and token == "--command"):
+            return tokens[index + 1] if index + 1 < len(tokens) else None
+        if command == "fish" and token.startswith("--command="):
+            return token.split("=", maxsplit=1)[1]
+        if token in _SHELL_COMMAND_VALUE_OPTIONS:
+            index += 2
+            continue
+        if token.startswith("-") and not token.startswith("--"):
+            if "c" in token[1:]:
+                return tokens[index + 1] if index + 1 < len(tokens) else None
+            index += 1
+            continue
+        if token.startswith("--") or token.startswith("+"):
+            index += 1
+            continue
+        return None
+    return None
 
 
 def _command_from_line(line: str) -> str | None:
