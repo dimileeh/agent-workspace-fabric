@@ -100,6 +100,11 @@ _URL_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(https?://)[^/@\s]+(?::[^/@\s]+)?@"
 )
 _PIP_VCS_SPEC_PREFIXES: Final[tuple[str, ...]] = ("git+", "hg+", "svn+", "bzr+")
+_SHELL_CONTROL_OPERATORS: Final[frozenset[str]] = frozenset({";", "&&", "||"})
+_SHELL_PIPE_OPERATORS: Final[frozenset[str]] = frozenset({"|", "|&"})
+_SHELL_PACKAGE_BOUNDARIES: Final[frozenset[str]] = (
+    _SHELL_CONTROL_OPERATORS | _SHELL_PIPE_OPERATORS
+)
 
 
 @dataclass(frozen=True)
@@ -143,19 +148,20 @@ def evaluate_supply_chain_policy(
         remote_script = _remote_script_execution(command, tokens, policy=policy)
         if remote_script is not None:
             findings.append(remote_script)
-        package_command = _package_command(command, tokens)
-        if package_command is None:
-            continue
-        unpinned = _unpinned_dependency_install_finding(
-            command,
-            package_command,
-            policy=policy,
-        )
-        if unpinned is not None:
-            findings.append(unpinned)
-        registry = _unexpected_registry_finding(command, package_command, policy=policy)
-        if registry is not None:
-            findings.append(registry)
+        for package_tokens in _command_token_segments(tokens, _SHELL_PACKAGE_BOUNDARIES):
+            package_command = _package_command(command, package_tokens)
+            if package_command is None:
+                continue
+            unpinned = _unpinned_dependency_install_finding(
+                command,
+                package_command,
+                policy=policy,
+            )
+            if unpinned is not None:
+                findings.append(unpinned)
+            registry = _unexpected_registry_finding(command, package_command, policy=policy)
+            if registry is not None:
+                findings.append(registry)
 
     for path in _normalized_unique_paths(changed_paths):
         if not _is_lockfile_path(path):
@@ -407,25 +413,25 @@ def _remote_script_execution(
 
 
 def _has_piped_remote_script_execution(tokens: Sequence[str]) -> bool:
-    for index, token in enumerate(tokens):
-        if token not in {"|", "|&"}:
-            continue
-        if not _is_remote_fetch(tokens[:index]):
-            continue
-        if not _pipe_target_is_interpreter(tokens[index + 1 :]):
-            continue
-        return True
+    for segment in _command_token_segments(tokens, _SHELL_CONTROL_OPERATORS):
+        for index, token in enumerate(segment):
+            if token not in _SHELL_PIPE_OPERATORS:
+                continue
+            if not _is_remote_fetch(segment[:index]):
+                continue
+            if not _pipe_target_is_interpreter(segment[index + 1 :]):
+                continue
+            return True
     return False
 
 
 def _has_chained_remote_script_execution(tokens: Sequence[str]) -> bool:
-    for index, token in enumerate(tokens):
-        if token != "&&":
-            continue
-        artifact_names = _remote_fetch_artifact_names(tokens[:index])
+    segments = _command_token_segments(tokens, _SHELL_CONTROL_OPERATORS)
+    for fetch_tokens, interpreter_tokens in zip(segments, segments[1:], strict=False):
+        artifact_names = _remote_fetch_artifact_names(fetch_tokens)
         if not artifact_names:
             continue
-        target = _interpreter_script_target(tokens[index + 1 :])
+        target = _interpreter_script_target(interpreter_tokens)
         if target is None:
             continue
         if PurePosixPath(target).name in artifact_names:
@@ -434,24 +440,25 @@ def _has_chained_remote_script_execution(tokens: Sequence[str]) -> bool:
 
 
 def _has_process_substitution_remote_script_execution(tokens: Sequence[str]) -> bool:
-    if not _pipe_target_is_interpreter(tokens):
-        return False
-    for index, token in enumerate(tokens):
-        fetch_tokens: Sequence[str]
-        if token == "<(":
-            fetch_tokens = tokens[index + 1 :]
-        elif token.startswith("<("):
-            fetch_tokens = (token[2:], *tokens[index + 1 :])
-        else:
+    for segment in _command_token_segments(tokens, _SHELL_CONTROL_OPERATORS):
+        if not _pipe_target_is_interpreter(segment):
             continue
-        if not fetch_tokens:
-            continue
-        command = PurePosixPath(_shell_token_word(fetch_tokens[0])).name
-        if command not in {"curl", "wget"}:
-            continue
-        for arg in _process_substitution_args(fetch_tokens[1:]):
-            if _is_remote_url_token(arg):
-                return True
+        for index, token in enumerate(segment):
+            fetch_tokens: Sequence[str]
+            if token == "<(":
+                fetch_tokens = segment[index + 1 :]
+            elif token.startswith("<("):
+                fetch_tokens = (token[2:], *segment[index + 1 :])
+            else:
+                continue
+            if not fetch_tokens:
+                continue
+            command = PurePosixPath(_shell_token_word(fetch_tokens[0])).name
+            if command not in {"curl", "wget"}:
+                continue
+            for arg in _process_substitution_args(fetch_tokens[1:]):
+                if _is_remote_url_token(arg):
+                    return True
     return False
 
 
@@ -865,12 +872,30 @@ def _command_from_line(line: str) -> str | None:
 
 def _shell_tokens(command: str) -> list[str]:
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&")
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
         lexer.whitespace_split = True
         lexer.commenters = ""
         return list(lexer)
     except ValueError:
         return []
+
+
+def _command_token_segments(
+    tokens: Sequence[str],
+    separators: frozenset[str],
+) -> list[list[str]]:
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in separators:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
 
 
 def _severity(mode: str) -> PolicySeverity:
