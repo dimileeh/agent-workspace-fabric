@@ -583,10 +583,10 @@ _SUFFIX_MULTIPLIERS: dict[str, int] = {
 }
 
 
-def _token_divisor_from_unit(unit: str) -> int:
+def _token_divisor_from_unit(unit: str) -> int | None:
     match = _PRICING_UNIT_PATTERN.search(unit)
     if match is None:
-        return 1000
+        return None
     base = int(match.group("multiplier"))
     suffix = match.group("suffix")
     return base * _SUFFIX_MULTIPLIERS.get(suffix, 1)
@@ -613,6 +613,8 @@ def compute_cost_estimate(
         output_t = usage.output_tokens or 0
         total_tokens = input_t + output_t
     divisor = _token_divisor_from_unit(pricing.unit)
+    if divisor is None:
+        return None, "unsupported_pricing_unit"
     cost = (total_tokens / divisor) * pricing.price_per_1k_tokens
     return cost, None
 

@@ -2223,12 +2223,12 @@ class TestTokenDivisorFromUnit:
         assert _token_divisor_from_unit("per_500_tokens") == 500
 
     @pytest.mark.unit
-    def test_unknown_unit_defaults_to_1000(self) -> None:
-        assert _token_divisor_from_unit("per_token") == 1000
+    def test_unknown_unit_returns_none(self) -> None:
+        assert _token_divisor_from_unit("per_token") is None
 
     @pytest.mark.unit
-    def test_unknown_unit_defaults_to_1000_for_garbage(self) -> None:
-        assert _token_divisor_from_unit("garbage") == 1000
+    def test_unknown_unit_returns_none_for_garbage(self) -> None:
+        assert _token_divisor_from_unit("garbage") is None
 
 
 class TestComputeCostEstimatePerUnit:
@@ -2283,3 +2283,29 @@ class TestComputeCostEstimatePerUnit:
         cost, reason = compute_cost_estimate(usage, pricing)
         assert reason is None
         assert cost == pytest.approx(0.0015)
+
+    @pytest.mark.unit
+    def test_unsupported_unit_returns_reason(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="test",
+            model="test-model",
+            currency="USD",
+            unit="per_token",
+            price_per_1k_tokens=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "unsupported_pricing_unit"
