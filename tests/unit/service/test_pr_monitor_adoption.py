@@ -344,6 +344,44 @@ class TestPullRequestMonitorAdoptionService:
         assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
 
     @pytest.mark.unit
+    async def test_replay_with_changed_inline_profile_conflicts(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    profile={
+                        "name": "inline-a",
+                        "monitor": {"initial_review_grace_period_seconds": 10},
+                    },
+                )
+            )
+
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        profile={
+                            "name": "inline-b",
+                            "monitor": {"initial_review_grace_period_seconds": 10},
+                        },
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": excinfo.value.detail["workspace_id"],
+            "existing_inline_profile_name": "inline-a",
+            "requested_inline_profile_name": "inline-b",
+        }
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "initial_kwargs, replay_kwargs, expected_detail",
         [

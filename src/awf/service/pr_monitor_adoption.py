@@ -170,11 +170,7 @@ class PullRequestMonitorAdoptionService:
         metadata: PullRequestAdoptionMetadata,
         idempotency_key: str,
     ) -> Workspace:
-        requested_profile = (
-            request.profile.model_dump(mode="json", by_alias=True)
-            if request.profile is not None
-            else None
-        )
+        requested_profile = _requested_inline_profile_policy(request)
         task_policy = _adoption_task_policy(
             repo=repo,
             metadata=metadata,
@@ -495,6 +491,7 @@ def _raise_if_policy_conflicts(
 ) -> None:
     requested_grace = request.initial_review_grace_period_seconds
     requested_agent = request.agent.value
+    requested_profile = _requested_inline_profile_policy(request)
     if workspace.agent != requested_agent:
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
@@ -513,6 +510,18 @@ def _raise_if_policy_conflicts(
                 "workspace_id": workspace.id,
                 "existing_profile_ref": workspace.profile_ref,
                 "requested_profile_ref": request.profile_ref,
+            },
+        )
+    if workspace.requested_profile != requested_profile:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different inline profile policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "existing_inline_profile_name": _inline_profile_name(
+                    workspace.requested_profile
+                ),
+                "requested_inline_profile_name": _inline_profile_name(requested_profile),
             },
         )
     if workspace.auto_merge != request.auto_merge:
@@ -540,6 +549,23 @@ def _raise_if_policy_conflicts(
                 "requested_initial_review_grace_period_seconds": requested_grace,
             },
         )
+
+
+def _requested_inline_profile_policy(
+    request: PullRequestMonitorAdoptionRequest,
+) -> dict[str, Any] | None:
+    return (
+        request.profile.model_dump(mode="json", by_alias=True)
+        if request.profile is not None
+        else None
+    )
+
+
+def _inline_profile_name(profile: Mapping[str, Any] | None) -> str | None:
+    if profile is None:
+        return None
+    name = profile.get("name")
+    return name if isinstance(name, str) else None
 
 
 def _adoption_policy(workspace: Workspace) -> Mapping[str, Any]:
