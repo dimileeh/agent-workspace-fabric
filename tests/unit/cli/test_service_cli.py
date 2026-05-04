@@ -97,7 +97,9 @@ def _mock_compose_teardown_succeeded(_candidate: object) -> WorkspaceGCComposeTe
     )
 
 
-async def _mock_worktree_remover_succeeded(_candidate: object) -> WorkspaceGCWorktreeRemoveResult:
+async def _mock_worktree_remover_succeeded(
+    _candidate: object, **_kwargs: object
+) -> WorkspaceGCWorktreeRemoveResult:
     return WorkspaceGCWorktreeRemoveResult(
         status="succeeded",
         reason_code="WORKTREE_REMOVE_SUCCEEDED",

@@ -20,6 +20,7 @@ import sys
 import urllib.parse
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ import click
 import httpx
 import typer
 from click.core import ParameterSource
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
@@ -193,6 +195,8 @@ def _run_terminal_workspace_compose_teardown(
 
 async def _run_terminal_workspace_worktree_remove(
     candidate: Any,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> WorkspaceGCWorktreeRemoveResult:
     """Remove the git worktree for a terminal workspace candidate.
 
@@ -200,8 +204,11 @@ async def _run_terminal_workspace_worktree_remove(
     expectations: the GC path calls ``git worktree remove`` before issuing
     ``shutil.rmtree``, so stale worktree metadata in the bare mirror is
     cleaned up atomically.
+
+    The caller must provide a shared ``session_factory`` so that a batch GC
+    run does not open and close a fresh connection pool per candidate.
     """
-    from awf.db.session import make_engine, make_session_factory
+    from awf.db.models import Workspace as WsModel
     from awf.node.git_manager import GitManager
     from awf.service.config import resolve_service_settings
 
@@ -211,19 +218,14 @@ async def _run_terminal_workspace_worktree_remove(
             status="skipped",
             reason_code="NO_WORKSPACE_ID",
         )
-    settings = resolve_service_settings()
-    engine = make_engine(settings.database_url)
-    session_factory = make_session_factory(engine)
-    from awf.db.models import Workspace as WsModel
-
     async with session_factory() as session:
         workspace = await session.get(WsModel, workspace_id)
-    await engine.dispose()
     if workspace is None or not workspace.repo_url:
         return WorkspaceGCWorktreeRemoveResult(
             status="skipped",
             reason_code="NO_REPO_URL",
         )
+    settings = resolve_service_settings()
     git_manager = GitManager(Path(settings.work_dir).expanduser().resolve() / "git")
     try:
         await git_manager.remove_worktree(
@@ -1079,7 +1081,10 @@ def service_gc(
                 execute=execute,
                 cleanup_enabled=settings.workspace_cleanup_enabled,
                 compose_teardown=_run_terminal_workspace_compose_teardown,
-                worktree_remover=_run_terminal_workspace_worktree_remove,
+                worktree_remover=partial(
+                    _run_terminal_workspace_worktree_remove,
+                    session_factory=session_factory,
+                ),
             )
             return result.to_dict()
         finally:
