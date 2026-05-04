@@ -21,6 +21,7 @@ import inspect
 import re
 import shlex
 import time
+import traceback
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -176,6 +177,7 @@ _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
 _PR_ADOPTION_METADATA_MISSING_REASON_CODE = "PR_ADOPTION_METADATA_MISSING"
 _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE = "PR_ADOPTION_MONITOR_UNAVAILABLE"
+_EXCEPTION_TRACEBACK_REDACTION_SLACK = 1024
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -923,15 +925,17 @@ class WorkspaceExecutor:
                     workspace=workspace,
                 )
         except Exception as exc:
-            _log.exception(
+            _log.error(
                 "executor.sync_feature_pr_monitor_build_failed",
                 workspace_id=workspace_id,
+                redacted_traceback=_redacted_exception_traceback(exc),
             )
+            safe_exception = redact_audit_text(repr(exc), limit=1900)
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
                 failure_reason=FailureReason.infrastructure_failure,
-                message=f"adopted PR monitor handoff failed: {exc!r}"[:2000],
+                message=f"adopted PR monitor handoff failed: {safe_exception}"[:2000],
                 reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
             )
             return
@@ -5041,6 +5045,14 @@ def _sync_feature_pr_missing_metadata_message(missing: Sequence[str]) -> str:
     return (
         "adopted PR workspace is missing required monitor handoff metadata: "
         + ", ".join(missing)
+    )
+
+
+def _redacted_exception_traceback(exc: BaseException) -> str:
+    formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return redact_audit_text(
+        formatted,
+        limit=max(len(formatted) + _EXCEPTION_TRACEBACK_REDACTION_SLACK, 1000),
     )
 
 

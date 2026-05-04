@@ -3113,6 +3113,7 @@ class TestExecutorCoverageEdges:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        secret = "ghp_factorysecret123456"
         ws_id = await _seed_ready(
             factory,
             task_kind="sync_feature_pr",
@@ -3130,7 +3131,7 @@ class TestExecutorCoverageEdges:
         )
 
         def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
-            raise RuntimeError("factory exploded")
+            raise RuntimeError(f"factory exploded Authorization: Bearer {secret}")
 
         executor = _make_executor(
             fake,
@@ -3139,7 +3140,8 @@ class TestExecutorCoverageEdges:
             pr_monitor_factory=_monitor_factory,
         )
 
-        await executor.execute(ws_id)
+        with structlog.testing.capture_logs() as captured:
+            await executor.execute(ws_id)
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
@@ -3147,7 +3149,21 @@ class TestExecutorCoverageEdges:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "infrastructure_failure"
             assert "factory exploded" in (ws.failure_message or "")
+            assert secret not in (ws.failure_message or "")
+            assert "Authorization: Bearer [redacted]" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "PR_ADOPTION_MONITOR_UNAVAILABLE"
+        log_entry = next(
+            event
+            for event in captured
+            if event.get("event") == "executor.sync_feature_pr_monitor_build_failed"
+        )
+        assert "exc_info" not in log_entry
+        redacted_traceback = log_entry["redacted_traceback"]
+        assert "Traceback" in redacted_traceback
+        assert "RuntimeError: factory exploded Authorization: Bearer [redacted]" in (
+            redacted_traceback
+        )
+        assert secret not in redacted_traceback
 
     @pytest.mark.unit
     async def test_sync_feature_pr_persisted_metadata_loss_fails_before_monitor_run(
