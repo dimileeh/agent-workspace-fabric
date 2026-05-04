@@ -234,6 +234,89 @@ class TestPullRequestMonitorAdoptionService:
             assert await _count(session, Operation) == 1
 
     @pytest.mark.unit
+    async def test_adopt_rechecks_existing_workspace_after_idempotency_lock(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        metadata = _metadata()
+        lock_keys: list[str] = []
+        inserted_workspace_id: str | None = None
+
+        async def _insert_concurrent_adoption(
+            self: WorkspaceRepository,
+            key: str,
+        ) -> None:
+            nonlocal inserted_workspace_id
+            lock_keys.append(key)
+            repo = WorkspaceRepository(self._session)
+            workspace = await repo.create(
+                repo_url="https://github.com/dimileeh/aira-web.git",
+                branch_base=metadata.base_ref,
+                task_title=metadata.title,
+                task_prompt="existing adoption",
+                agent="codex",
+                test_commands=[],
+                task_policy={
+                    "task_kind": "sync_feature_pr",
+                    "pr_adoption": {
+                        "repo_slug": "dimileeh/aira-web",
+                        "pr_number": metadata.number,
+                        "pr_url": metadata.url,
+                        "head_ref": metadata.head_ref,
+                        "head_repo_slug": metadata.head_repo_slug,
+                        "head_repo_url": "https://github.com/dimileeh/aira-web.git",
+                        "base_ref": metadata.base_ref,
+                        "head_sha": metadata.head_sha,
+                        "base_sha": metadata.base_sha,
+                    },
+                },
+                auto_merge=True,
+                profile_ref="auto",
+                idempotency_key=key,
+                task_kind="sync_feature_pr",
+                remote_push_branch=metadata.head_ref,
+            )
+            workspace.pr_url = metadata.url
+            workspace.pr_number = metadata.number
+            workspace.base_commit = metadata.base_sha
+            workspace.monitor_last_commit_sha = metadata.head_sha
+            await self._session.flush()
+            inserted_workspace_id = workspace.id
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "acquire_idempotency_key_lock",
+            _insert_concurrent_adoption,
+            raising=False,
+        )
+
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(metadata),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        assert result.attached_existing is True
+        assert result.workspace_id == inserted_workspace_id
+        assert lock_keys == [
+            adoption_module.pr_adoption_idempotency_key(
+                repo_slug="dimileeh/aira-web",
+                pr_number=277,
+            )
+        ]
+
+        async with factory() as session:
+            assert await _count(session, Workspace) == 1
+            assert await _count(session, TaskAttempt) == 0
+
+    @pytest.mark.unit
     async def test_replay_with_changed_monitor_policy_conflicts(
         self,
         factory: async_sessionmaker[AsyncSession],

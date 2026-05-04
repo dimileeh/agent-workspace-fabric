@@ -2478,6 +2478,17 @@ class WorkspaceRepository:
         stmt = select(Workspace).where(Workspace.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def acquire_idempotency_key_lock(self, key: str) -> None:
+        """Serialize workspace idempotency decisions for one key on Postgres."""
+        if self._dialect_name != "postgresql":
+            return
+
+        lock_key = _workspace_idempotency_advisory_lock_key(key)
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+
     async def acquire_owned_path_conflict_lock(
         self,
         *,
@@ -3465,6 +3476,14 @@ def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -
 
 def _operation_idempotency_advisory_lock_key(key: str) -> int:
     digest = hashlib.sha256(f"awf:operation-idempotency\x00{key}".encode()).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 1 << 63:
+        return unsigned - (1 << 64)
+    return unsigned
+
+
+def _workspace_idempotency_advisory_lock_key(key: str) -> int:
+    digest = hashlib.sha256(f"awf:workspace-idempotency\x00{key}".encode()).digest()
     unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
     if unsigned >= 1 << 63:
         return unsigned - (1 << 64)

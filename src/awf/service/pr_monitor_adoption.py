@@ -108,6 +108,14 @@ class PullRequestMonitorAdoptionService:
             _raise_if_policy_conflicts(existing, request)
             return await self._response(existing, attached_existing=True)
 
+        await workspace_repo.acquire_idempotency_key_lock(idempotency_key)
+        # Re-read under the transaction lock so a concurrent adopter that won
+        # the race attaches here instead of surfacing the unique constraint.
+        existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            _raise_if_policy_conflicts(existing, request)
+            return await self._response(existing, attached_existing=True)
+
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
         workspace = await self._create_adoption_workspace(
             request=request,

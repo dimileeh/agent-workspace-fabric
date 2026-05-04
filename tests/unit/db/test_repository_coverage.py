@@ -42,6 +42,7 @@ from awf.db.repositories import (
     _resolve_session_dialect_name,
     _secret_lease_insert_if_absent_stmt,
     _wildcard_prefixes_overlap,
+    _workspace_idempotency_advisory_lock_key,
     owned_path_overlap_match,
     owned_paths_overlap,
     sync_candidate_readiness,
@@ -367,6 +368,16 @@ async def test_postgres_only_repository_locks_are_skipped_or_executed_intentiona
         branch_base="main",
         owned_paths=["src/awf/**"],
     )
+    workspace_idempotency_session = RecordingSession()
+    await WorkspaceRepository(
+        workspace_idempotency_session,
+        dialect_name="postgresql",
+    ).acquire_idempotency_key_lock("key0")
+    sqlite_workspace_idempotency_session = RecordingSession()
+    await WorkspaceRepository(
+        sqlite_workspace_idempotency_session,
+        dialect_name="sqlite",
+    ).acquire_idempotency_key_lock("key0")
 
     operation_session = RecordingSession()
     await OperationRepository(
@@ -383,12 +394,19 @@ async def test_postgres_only_repository_locks_are_skipped_or_executed_intentiona
             branch_base="main",
         )
     }
+    assert len(workspace_idempotency_session.executed) == 1
+    assert workspace_idempotency_session.executed[0][1] == {
+        "lock_key": _workspace_idempotency_advisory_lock_key("key0")
+    }
+    assert sqlite_workspace_idempotency_session.executed == []
     assert len(operation_session.executed) == 1
     assert operation_session.executed[0][1] == {
         "lock_key": _operation_idempotency_advisory_lock_key("key0")
     }
     assert _owned_path_conflict_advisory_lock_key(repo_url="repo0", branch_base="main") > 0
     assert _owned_path_conflict_advisory_lock_key(repo_url="repo3", branch_base="main") < 0
+    assert _workspace_idempotency_advisory_lock_key("key0") > 0
+    assert _workspace_idempotency_advisory_lock_key("key1") < 0
     assert _operation_idempotency_advisory_lock_key("key2") > 0
     assert _operation_idempotency_advisory_lock_key("key0") < 0
 
