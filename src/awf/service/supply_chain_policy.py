@@ -593,9 +593,10 @@ def _registry_hosts(args: Sequence[str], *, manager: str) -> list[str]:
 
 def _host_from_url(value: str) -> str | None:
     parsed = urlsplit(value if "://" in value else f"https://{value}")
-    if parsed.username or parsed.password or parsed.hostname is None:
+    host = parsed.hostname
+    if host is None:
         return None
-    return parsed.hostname.lower().rstrip(".")
+    return host.lower().rstrip(".")
 
 
 def _value_flags(manager: str) -> set[str]:

