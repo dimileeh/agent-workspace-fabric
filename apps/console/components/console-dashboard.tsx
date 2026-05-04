@@ -34,11 +34,18 @@ import {
   XCircle,
 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { createContext, useContext } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 import { WorkspaceInspector } from "./workspace-inspector";
 
-export const PanelContext = createContext<"default" | "ghost">("default");
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   bytes,
   compactDuration,
@@ -133,6 +140,8 @@ import type {
   WorkspaceStatus,
   WorkspaceReliabilitySummary,
 } from "@/lib/types";
+
+export const PanelContext = createContext<"default" | "ghost">("default");
 
 const pollMs = Number(process.env.NEXT_PUBLIC_AWF_CONSOLE_POLL_MS || "5000");
 const maxLogChars = 180_000;
