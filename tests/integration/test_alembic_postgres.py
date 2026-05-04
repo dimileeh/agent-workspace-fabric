@@ -16,18 +16,34 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
 import asyncpg
 import pytest
+from dotenv import dotenv_values
 from sqlalchemy.engine import URL, make_url
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _postgres_database_url() -> URL:
+def _raw_postgres_database_url() -> str | None:
     raw_url = os.environ.get("AWF_TEST_DATABASE_URL") or os.environ.get("AWF_DATABASE_URL")
+    if raw_url:
+        return raw_url
+
+    # Load only this test URL from the repo-local dotenv file. Pulling the whole
+    # file into os.environ would leak host provider/auth settings into hermetic
+    # readiness tests.
+    dotenv_url = dotenv_values(_REPO_ROOT / ".env").get("AWF_TEST_DATABASE_URL")
+    if isinstance(dotenv_url, str) and dotenv_url.strip():
+        return dotenv_url
+    return None
+
+
+def _postgres_database_url() -> URL:
+    raw_url = _raw_postgres_database_url()
     if not raw_url:
         pytest.fail(
             "AWF_TEST_DATABASE_URL or AWF_DATABASE_URL must point at a live PostgreSQL "
@@ -40,6 +56,22 @@ def _postgres_database_url() -> URL:
             "the full integration suite."
         )
     return url
+
+
+def test_postgres_database_url_reads_repo_dotenv_when_environment_is_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AWF_TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "_REPO_ROOT", tmp_path)
+    (tmp_path / ".env").write_text(
+        "AWF_TEST_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf\n",
+        encoding="utf-8",
+    )
+
+    assert _postgres_database_url().render_as_string(hide_password=False) == (
+        "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    )
 
 
 def _asyncpg_url(url: URL) -> str:
@@ -88,7 +120,7 @@ def test_alembic_upgrade_downgrade_upgrade_on_postgres() -> None:
 
     def _alembic(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [".venv/bin/alembic", "-c", "alembic.ini", *args],
+            [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
             cwd=cwd,
             env=env,
             check=True,
