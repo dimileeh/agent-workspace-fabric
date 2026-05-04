@@ -521,6 +521,11 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     currency = None
     has_usage = False
 
+    from sqlalchemy import inspect
+    insp = inspect(workspace, raiseerr=False)
+    if insp is not None and "operations" in insp.unloaded:
+        raise ValueError("operations relationship must be preloaded to compute usage summary")
+
     operations = getattr(workspace, "operations", [])
 
     if operations:
@@ -850,6 +855,11 @@ def _latest_recovery_operation(
     *,
     active_only: bool,
 ) -> _RecoveryOperationLike | None:
+    from sqlalchemy import inspect
+    insp = inspect(workspace, raiseerr=False)
+    if insp is not None and "operations" in insp.unloaded:
+        raise ValueError("operations relationship must be preloaded")
+
     operations = cast(Sequence[object], getattr(workspace, "operations", None) or [])
     matching: list[_RecoveryOperationLike] = []
     for operation in operations:
