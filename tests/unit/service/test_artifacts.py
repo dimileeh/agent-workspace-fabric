@@ -201,14 +201,14 @@ class TestArtifactService:
     ) -> None:
         artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
         artifact_dir.mkdir(parents=True)
-        original_walk = Path.walk
+        original_iterdir = Path.iterdir
 
-        def walk_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+        def iterdir_candidate(self: Path) -> Any:
             if self == artifact_dir:
                 raise OSError("walk failed")
-            return original_walk(self, *args, **kwargs)
+            return original_iterdir(self)
 
-        monkeypatch.setattr(Path, "walk", walk_candidate)
+        monkeypatch.setattr(Path, "iterdir", iterdir_candidate)
 
         assert list_artifacts("ws_artifacts", artifact_dir) == []
 
@@ -319,3 +319,116 @@ class TestArtifactService:
                 raise OSError("cannot stat")
 
         assert _is_symlink(_UnstatablePath()) is True  # type: ignore[arg-type]
+
+    @pytest.mark.unit
+    def test_listing_skips_directory_that_resolves_outside_root(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        skipped_dir = artifact_dir / "outside-looking-dir"
+        kept = artifact_dir / "kept.txt"
+        skipped_dir.mkdir(parents=True)
+        kept.write_text("kept\n", encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        original_resolve = Path.resolve
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == skipped_dir:
+                return outside
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "kept.txt"
+        ]
+
+    @pytest.mark.unit
+    def test_listing_skips_symlinked_directory_after_queueing(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        linked_target = tmp_path / "outside-dir"
+        linked_target.mkdir(parents=True)
+        (linked_target / "secret.txt").write_text("secret\n", encoding="utf-8")
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "linked-dir").symlink_to(linked_target, target_is_directory=True)
+        kept = artifact_dir / "kept.txt"
+        kept.write_text("kept\n", encoding="utf-8")
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "kept.txt"
+        ]
+
+    @pytest.mark.unit
+    def test_listing_skips_directory_that_disappears_during_resolve(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        disappearing_dir = artifact_dir / "disappearing"
+        disappearing_dir.mkdir(parents=True)
+        (disappearing_dir / "hidden.txt").write_text("gone\n", encoding="utf-8")
+        kept = artifact_dir / "kept.txt"
+        kept.write_text("kept\n", encoding="utf-8")
+        original_resolve = Path.resolve
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == disappearing_dir:
+                raise FileNotFoundError(str(self))
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "kept.txt"
+        ]
+
+    @pytest.mark.unit
+    def test_listing_skips_leaf_symlink_after_directory_queueing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        target = tmp_path / "outside.txt"
+        target.write_text("secret\n", encoding="utf-8")
+        link = artifact_dir / "link.txt"
+        link.symlink_to(target)
+        original_is_symlink = Path.is_symlink
+        seen_link = False
+
+        def is_symlink_candidate(self: Path) -> bool:
+            nonlocal seen_link
+            if self == link and not seen_link:
+                seen_link = True
+                return False
+            return original_is_symlink(self)
+
+        monkeypatch.setattr(Path, "is_symlink", is_symlink_candidate)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_listing_skips_file_that_disappears_during_resolve(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        vanished = artifact_dir / "vanished.txt"
+        vanished.write_text("gone\n", encoding="utf-8")
+        original_resolve = Path.resolve
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == vanished:
+                raise FileNotFoundError(str(self))
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []

@@ -71,6 +71,7 @@ ALLOWLIST = {
     "WORKSPACE_STATE_NOT_VALIDATABLE": "Grandfathered",
 }
 
+
 def test_catalog_coverage() -> None:
     """Ensure all public reason codes are documented in the REASON_CATALOG.md."""
     if not CATALOG_PATH.exists():
@@ -87,7 +88,7 @@ def test_catalog_coverage() -> None:
     for py_file in SRC_AWF_PATH.rglob("*.py"):
         try:
             tree = ast.parse(py_file.read_text())
-            
+
             # Map file-level constants to their string values
             file_constants: dict[str, str] = {}
             for node in ast.walk(tree):
@@ -96,12 +97,15 @@ def test_catalog_coverage() -> None:
                         if isinstance(target, ast.Name):
                             file_constants[target.id] = node.value.value
 
-            def _extract_val(val_node: ast.expr) -> str | None:
+            def _extract_val(
+                val_node: ast.expr,
+                file_constants: dict[str, str] = file_constants,
+            ) -> str | None:
                 if isinstance(val_node, ast.Constant) and isinstance(val_node.value, str):
                     return val_node.value
-                elif isinstance(val_node, ast.Name) and val_node.id in file_constants:
+                if isinstance(val_node, ast.Name) and val_node.id in file_constants:
                     return file_constants[val_node.id]
-                elif isinstance(val_node, ast.JoinedStr):
+                if isinstance(val_node, ast.JoinedStr):
                     return ast.unparse(val_node)
                 return None
 
@@ -111,7 +115,7 @@ def test_catalog_coverage() -> None:
                     extracted = _extract_val(node.value)
                     if extracted:
                         all_reason_codes.add(extracted)
-                
+
                 # assignment: error_code = "XYZ" or self.error_code = "XYZ"
                 elif isinstance(node, ast.Assign):
                     for target in node.targets:
@@ -120,10 +124,10 @@ def test_catalog_coverage() -> None:
                             extracted = _extract_val(node.value)
                             if extracted:
                                 all_reason_codes.add(extracted)
-                
+
                 # dict key: {"error_code": "XYZ"} or {"error_code": CONSTANT}
                 elif isinstance(node, ast.Dict):
-                    for key, val in zip(node.keys, node.values):
+                    for key, val in zip(node.keys, node.values, strict=True):
                         if isinstance(key, ast.Constant) and key.value == "error_code":
                             extracted = _extract_val(val)
                             if extracted:
@@ -132,7 +136,7 @@ def test_catalog_coverage() -> None:
             pass
 
     missing_docs = []
-    for code in sorted(list(all_reason_codes)):
+    for code in sorted(all_reason_codes):
         if code in ALLOWLIST:
             continue
         if code not in documented_codes:
@@ -145,4 +149,3 @@ def test_catalog_coverage() -> None:
         if code in documented_codes and ALLOWLIST[code] == "Grandfathered"
     ]
     assert not documented_but_allowlisted, f"The following reason codes are fully documented but still in ALLOWLIST (Grandfathered): {', '.join(documented_but_allowlisted)}"
-

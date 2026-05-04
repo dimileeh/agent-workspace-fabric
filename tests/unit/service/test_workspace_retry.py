@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -222,6 +221,7 @@ async def test_create_v2_blocks_provider_readiness_before_rows(
                 session,
                 _request(provider_readiness_override=False),
                 settings=settings,
+                provider_environ={},
             )
 
         workspaces = list((await session.execute(select(Workspace))).scalars())
@@ -270,6 +270,7 @@ async def test_create_v2_with_provider_readiness_override_records_policy_and_eve
             session,
             _request_with_preflight_override(reason="manual local token refresh"),
             settings=settings,
+            provider_environ={},
         )
         events = list(
             (
@@ -336,13 +337,14 @@ async def test_retry_blocks_provider_readiness_before_new_attempt(
             session,
             _request_with_preflight_override(),
             settings=settings,
+            provider_environ={},
         )
         await session.commit()
     await _mark_failed(factory, first.id)
 
     async with factory() as session:
         with pytest.raises(WorkspaceProviderReadinessBlockedError):
-            await retry_workspace_row(session, first.id, settings=settings)
+            await retry_workspace_row(session, first.id, settings=settings, provider_environ={})
 
         workspaces = list((await session.execute(select(Workspace))).scalars())
         attempts = list((await session.execute(select(TaskAttempt))).scalars())
@@ -396,6 +398,7 @@ async def test_retry_with_provider_readiness_override_records_source_and_target(
             session,
             _request_with_preflight_override(),
             settings=settings,
+            provider_environ={},
         )
         await session.commit()
     await _mark_failed(factory, first.id)
@@ -407,6 +410,7 @@ async def test_retry_with_provider_readiness_override_records_source_and_target(
             provider_readiness_override=True,
             provider_readiness_override_reason="retry after local auth repair",
             settings=settings,
+            provider_environ={},
         )
         retried = await WorkspaceRepository(session).get(retry.new_workspace.id)
 

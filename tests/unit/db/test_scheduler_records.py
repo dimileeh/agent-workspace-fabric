@@ -194,6 +194,16 @@ async def test_queue_decision_repository_batches_create_and_latest_lookup(
 
 
 @pytest.mark.unit
+async def test_queue_decision_repository_empty_batch_helpers_short_circuit(
+    session: AsyncSession,
+) -> None:
+    repo = QueueDecisionRepository(session)
+
+    assert await repo.create_many([]) == []
+    assert await repo.latest_by_workspace_ids([]) == {}
+
+
+@pytest.mark.unit
 async def test_resource_reservation_repository_tracks_active_and_released_rows(
     session: AsyncSession,
 ) -> None:

@@ -98,8 +98,13 @@ def _make_noop_factory(runtime_value: AgentRuntime) -> type[AgentAdapter]:
             runner: object = None,
             default_model: str | None = None,
             default_effort: str | None = None,
+            log_store: object = None,
+            agent_wall_timeout_seconds: float | None = None,
+            agent_idle_timeout_seconds: float | None = None,
         ) -> None:
             # runner / defaults accepted for signature compat, unused.
+            del runner, default_model, default_effort
+            del log_store, agent_wall_timeout_seconds, agent_idle_timeout_seconds
             self._runtime = runtime_value
 
         def get_provider(self, model: str | None) -> str:
@@ -180,28 +185,32 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
                 ws.failure_message = None
                 await s.commit()
 
+        original_registry = dict(_adapter_base._REGISTRY)
         _install_noop_adapter_factory()
+        try:
+            runner = AsyncioSubprocessRunner()
+            compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
+            validation = ValidationRunner(runner=runner, artifacts_dir=work_dir / "artifacts")
+            pr_creator = PullRequestCreator(runner)
 
-        runner = AsyncioSubprocessRunner()
-        compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
-        validation = ValidationRunner(runner=runner, artifacts_dir=work_dir / "artifacts")
-        pr_creator = PullRequestCreator(runner)
+            executor = WorkspaceExecutor(
+                session_factory=factory,
+                runner=runner,
+                compose=compose,
+                validation=validation,
+                pr_creator=pr_creator,
+                config=ExecutorConfig(
+                    worktrees_root=work_dir / "git" / "worktrees",
+                    compose_projects_root=work_dir / "compose" / "compose",
+                    default_models={},
+                ),
+            )
 
-        executor = WorkspaceExecutor(
-            session_factory=factory,
-            runner=runner,
-            compose=compose,
-            validation=validation,
-            pr_creator=pr_creator,
-            config=ExecutorConfig(
-                worktrees_root=work_dir / "git" / "worktrees",
-                compose_projects_root=work_dir / "compose" / "compose",
-                default_models={},
-            ),
-        )
-
-        print("[salvage] running executor (agent step is a no-op) ...", flush=True)
-        await executor.execute(workspace_id)
+            print("[salvage] running executor (agent step is a no-op) ...", flush=True)
+            await executor.execute(workspace_id)
+        finally:
+            _adapter_base._REGISTRY.clear()
+            _adapter_base._REGISTRY.update(original_registry)
 
         async with factory() as s:
             final = await WorkspaceRepository(s).get(workspace_id)

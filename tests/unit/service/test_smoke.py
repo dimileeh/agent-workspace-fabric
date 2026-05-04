@@ -26,6 +26,17 @@ def _settings(github_token: str | None = None) -> SimpleNamespace:
     )
 
 
+@pytest.mark.unit
+def test_default_config_resolver_includes_console_url_when_configured() -> None:
+    settings = _settings()
+    settings.console_url = "http://localhost:3000"
+
+    assert _default_config_resolver(settings) == {
+        "api_base_url": "http://localhost:8000",
+        "console_url": "http://localhost:3000",
+    }
+
+
 def _ok_service_collector():
     async def _fn(settings, *, http_client=None):
         return {"status": "ok"}

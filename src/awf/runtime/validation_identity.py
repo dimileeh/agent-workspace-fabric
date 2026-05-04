@@ -174,6 +174,8 @@ def _coverage_identity(coverage: ProfileCoverage) -> dict[str, Any]:
         "enforce": coverage.enforce,
         "provider": coverage.provider,
         "command": _command_identity(coverage.command) if coverage.command is not None else None,
+        "parallel_workers": coverage.parallel_workers,
+        "parallel_worker_max": coverage.parallel_worker_max,
     }
 
 

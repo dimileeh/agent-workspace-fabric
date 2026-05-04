@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+import awf.service.support_bundle as support_bundle_module
 from awf.service.config import ServiceSettings
 from awf.service.support_bundle import (
     BUNDLE_FILENAME_PREFIX,
@@ -409,3 +411,171 @@ def test_support_bundle_degrades_when_db_unreachable(tmp_path: Path) -> None:
     assert isinstance(recent, dict)
     assert recent.get("degraded") is True
     assert "DB is down" in str(recent.get("error", ""))
+
+
+@pytest.mark.unit
+def test_support_bundle_degrades_when_status_and_doctor_collectors_fail(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+
+    async def _bad_status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        raise RuntimeError("status collector down")
+
+    async def _bad_doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        raise RuntimeError("doctor collector down")
+
+    async def _failure_collector(**_: object) -> object:
+        return object()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_bad_status_collector,
+            doctor_collector=_bad_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+        )
+    )
+
+    service_status = bundle["service_status"]
+    doctor_report = bundle["doctor_report"]
+    recent = bundle["recent_failure_summary"]
+    assert isinstance(service_status, dict)
+    assert service_status["status"] == "fail"
+    assert "status collector down" in str(service_status["detail"])
+    assert isinstance(doctor_report, dict)
+    assert doctor_report["status"] == "fail"
+    assert "doctor collector down" in str(doctor_report["detail"])
+    assert isinstance(recent, dict)
+    assert recent["degraded"] is True
+    assert "object" in str(recent["error"])
+
+
+@pytest.mark.unit
+def test_support_bundle_accepts_plain_doctor_mapping_and_default_failure_collector(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return {"service": "awf", "status": "warn", "diagnostics": []}
+
+    async def _default_failure_collector(_: ServiceSettings, *, since_hours: int) -> dict[str, object]:
+        return {"since_hours": since_hours, "latest_examples": "not-a-list"}
+
+    monkeypatch.setattr(
+        support_bundle_module,
+        "_default_failure_analysis_collector",
+        _default_failure_collector,
+    )
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_window_hours=7,
+        )
+    )
+
+    assert bundle["doctor_report"] == {"service": "awf", "status": "warn", "diagnostics": []}
+    recent = bundle["recent_failure_summary"]
+    assert isinstance(recent, dict)
+    assert recent["since_hours"] == 7
+
+
+@dataclass
+class _DataclassFailureSummary:
+    latest_examples: list[object]
+    root_cause_clusters: list[object]
+
+
+@pytest.mark.unit
+def test_support_bundle_sanitizes_dataclass_and_non_mapping_examples() -> None:
+    summary = _DataclassFailureSummary(
+        latest_examples=[
+            "not-a-mapping",
+            {"workspace_id": "ws_1", "stdout": "secret output"},
+        ],
+        root_cause_clusters=[
+            "not-a-mapping",
+            {"failure_reason": "agent_failure", "task_prompt": "secret prompt"},
+        ],
+    )
+
+    sanitized = support_bundle_module._sanitize_failure_summary(summary, frozenset())
+
+    assert sanitized["latest_examples"] == [{}, {"workspace_id": "ws_1"}]
+    assert sanitized["root_cause_clusters"] == [
+        {},
+        {"failure_reason": "agent_failure"},
+    ]
+
+
+@pytest.mark.unit
+def test_support_bundle_redacts_unknown_object_values() -> None:
+    class SecretishObject:
+        def __str__(self) -> str:
+            return "value sk-objectsecret123456"
+
+    redacted = support_bundle_module._redact_value(
+        {"nested": SecretishObject()},
+        frozenset({"sk-objectsecret123456"}),
+    )
+
+    assert redacted == {"nested": "value <redacted>"}
+
+
+@pytest.mark.unit
+def test_default_failure_analysis_collector_disposes_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    disposed = False
+    fake_session_factory = object()
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            nonlocal disposed
+            disposed = True
+
+    async def _summarize(session_factory: object, *, since_hours: int) -> dict[str, object]:
+        assert session_factory is fake_session_factory
+        return {"since_hours": since_hours}
+
+    monkeypatch.setattr(
+        support_bundle_module,
+        "make_engine",
+        lambda _database_url: FakeEngine(),
+    )
+    monkeypatch.setattr(
+        support_bundle_module,
+        "make_session_factory",
+        lambda _engine: fake_session_factory,
+    )
+    monkeypatch.setattr(
+        support_bundle_module,
+        "summarize_failure_analysis",
+        _summarize,
+    )
+
+    result = asyncio.run(
+        support_bundle_module._default_failure_analysis_collector(
+            settings,
+            since_hours=11,
+        )
+    )
+
+    assert result == {"since_hours": 11}
+    assert disposed is True

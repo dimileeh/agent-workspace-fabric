@@ -32,9 +32,9 @@ def test_builds_tracked_exec_wrapper_with_unique_invocation_id() -> None:
     assert args[:8] == [
         "docker",
         "compose",
-        "--project-name",
+        "-p",
         "awf_ws_123",
-        "--file",
+        "-f",
         "/tmp/ws/compose.yml",
         "exec",
         "-T",
@@ -71,9 +71,9 @@ def test_cleanup_command_targets_only_invocation_id() -> None:
     assert cleanup[:8] == [
         "docker",
         "compose",
-        "--project-name",
+        "-p",
         "awf_ws_123",
-        "--file",
+        "-f",
         "/tmp/ws/compose.yml",
         "exec",
         "-T",

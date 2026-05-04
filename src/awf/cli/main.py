@@ -162,9 +162,9 @@ def _run_terminal_workspace_compose_teardown(
     command = [
         "docker",
         "compose",
-        "--project-name",
+        "-p",
         compose_name,
-        "--file",
+        "-f",
         str(compose_file_path),
         "down",
         "--remove-orphans",

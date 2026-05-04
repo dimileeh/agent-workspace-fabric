@@ -7,9 +7,6 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-
-pytestmark = pytest.mark.usefixtures('mock_docker_cli_probe')
-
 from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import text
@@ -20,6 +17,14 @@ import awf.service.validation_provenance as validation_service
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+
+pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
+
+
+@pytest.fixture(autouse=True)
+def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
+
 
 _V2_PROFILE_BODY = {
     "repo": {

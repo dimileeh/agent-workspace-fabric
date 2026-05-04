@@ -1025,6 +1025,48 @@ async def test_default_worktree_remover_skips_when_no_repo_url(
     assert result.reason_code == "NO_REPO_URL"
 
 
+async def test_default_worktree_remover_skips_existing_plain_directory(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="r" * 40,
+    )
+    worktree_path = work_dir / "git" / "worktrees" / workspace_id
+    worktree_path.mkdir(parents=True)
+    candidate = WorkspaceGCCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.completed.value,
+        updated_at=now,
+        age_hours=200,
+        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=worktree_path,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(kind="compose", path=work_dir / "compose" / workspace_id, exists=False, estimated_bytes=0),
+        auth=WorkspaceGCPath(kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0),
+    )
+
+    result = await _default_worktree_remover(
+        candidate,
+        session_factory=session_factory,
+        work_dir=work_dir,
+    )
+
+    assert result.status == "skipped"
+    assert result.reason_code == "WORKTREE_NOT_GIT_MANAGED"
+
+
 async def test_default_worktree_remover_handles_git_error(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],

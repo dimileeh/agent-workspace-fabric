@@ -49,8 +49,8 @@ _COMPOSE_FILE = Path("/fake/path/compose.yml")
 def _assert_docker_exec_prefix(args: list[str]) -> None:
     """Common assertions for the docker compose exec prefix."""
     assert args[:2] == ["docker", "compose"]
-    assert "--project-name" in args and _COMPOSE_PROJECT in args
-    assert "--file" in args and str(_COMPOSE_FILE) in args
+    assert "-p" in args and _COMPOSE_PROJECT in args
+    assert "-f" in args and str(_COMPOSE_FILE) in args
     exec_idx = args.index("exec")
     assert args[exec_idx : exec_idx + 4] == ["exec", "-T", "-w", "/workspace"]
     assert "agent" in args

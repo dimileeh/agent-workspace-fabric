@@ -3908,9 +3908,9 @@ class PullRequestMonitorRunner:
                 [
                     "docker",
                     "compose",
-                    "--project-name",
+                    "-p",
                     compose_project,
-                    "--file",
+                    "-f",
                     str(compose_file),
                     "down",
                     "--remove-orphans",

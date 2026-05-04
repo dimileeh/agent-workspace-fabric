@@ -246,7 +246,11 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
 ) -> None:
     work_dir = tmp_path / "service"
     worktrees_root = work_dir / "git" / "worktrees"
-    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    ws_id = await seed_monitoring_workspace(
+        factory,
+        auto_merge=False,
+        pr_merge_sha="m" * 40,
+    )
     worktree = worktrees_root / ws_id
     compose_dir = work_dir / "compose" / ws_id
     auth_dir = work_dir / "auth" / ws_id

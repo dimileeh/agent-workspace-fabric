@@ -15,9 +15,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
-pytestmark = pytest.mark.usefixtures('mock_docker_cli_probe')
-
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
@@ -39,6 +36,8 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
+
+pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
 
 _MINIMAL_BODY = {
     "repo_url": "git@github.com:dimileeh/aira-agent.git",
@@ -65,6 +64,25 @@ _V2_MINIMAL_BODY = {
     "validation": {"commands": ["pytest -q"], "requested_tier": 1},
     "resources": {},
 }
+
+
+_PROVIDER_AUTH_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "OPENAI_API_TOKEN",
+    "CODEX_API_KEY",
+    "CODEX_AUTH_TOKEN",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+)
+
+
+@pytest.fixture(autouse=True)
+def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
+
+
+def _set_codex_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
 
 
 def _endpoint_profile_body() -> dict[str, object]:
@@ -138,6 +156,16 @@ def _v2_body(
             "base_branch": base_branch,
         },
         "task": task,
+    }
+
+
+def _v2_body_with_preflight_override(**kwargs: object) -> dict[str, object]:
+    return {
+        **_v2_body(**kwargs),
+        "preflight": {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "unit test bypasses provider auth",
+        },
     }
 
 
@@ -748,6 +776,11 @@ class TestCreateWorkspaceV2MonitorPolicy:
 
 
 class TestWorkspaceCreateProviderReadinessPreflight:
+    @pytest.fixture(autouse=True)
+    def _clear_provider_auth_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for key in _PROVIDER_AUTH_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
+
     @pytest.mark.unit
     async def test_v2_create_blocks_missing_selected_provider_readiness(
         self,
@@ -1040,7 +1073,9 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         self,
         client: AsyncClient,
         engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _set_codex_auth_env(monkeypatch)
         headers = {"Idempotency-Key": "direct-v2-replay"}
         first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
         assert first.status_code == 202
@@ -1080,7 +1115,9 @@ class TestWorkspaceCreateProviderReadinessPreflight:
     async def test_v2_rejects_external_id_reuse_for_different_scope(
         self,
         client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _set_codex_auth_env(monkeypatch)
         first_payload = _v2_body(title="docs slice", owned_paths=["docs/**"])
         first_payload["task"]["external_id"] = "WAVE-1"  # type: ignore[index]
         second_payload = _v2_body(
@@ -1108,7 +1145,9 @@ class TestWorkspaceCreateProviderReadinessPreflight:
     async def test_v2_rejects_external_id_reuse_for_different_title(
         self,
         client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _set_codex_auth_env(monkeypatch)
         first_payload = _v2_body(
             title="docs(onboarding): add prompts",
             owned_paths=["docs/**", "README.md"],
@@ -1180,7 +1219,9 @@ class TestWorkspaceCreateProviderReadinessPreflight:
     async def test_direct_v2_create_success_returns_accepted_response(
         self,
         engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _set_codex_auth_env(monkeypatch)
         factory = make_session_factory(engine)
         async with factory() as session:
             accepted = await workspaces_route.create_workspace_v2(
@@ -1199,7 +1240,9 @@ class TestWorkspaceCreateProviderReadinessPreflight:
     async def test_direct_v2_create_with_fresh_idempotency_key_creates_workspace(
         self,
         engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _set_codex_auth_env(monkeypatch)
         factory = make_session_factory(engine)
         async with factory() as session:
             accepted = await workspaces_route.create_workspace_v2(
@@ -2213,7 +2256,7 @@ class TestGetWorkspace:
     ) -> None:
         create = await client.post(
             "/v2/workspaces",
-            json=_v2_body(task_class="refactor_task"),
+            json=_v2_body_with_preflight_override(task_class="refactor_task"),
         )
         assert create.status_code == 202
         ws_id = create.json()["workspace_id"]
@@ -2272,7 +2315,7 @@ class TestGetWorkspace:
     ) -> None:
         create = await client.post(
             "/v2/workspaces",
-            json=_v2_body(task_class="refactor_task"),
+            json=_v2_body_with_preflight_override(task_class="refactor_task"),
         )
         assert create.status_code == 202
         ws_id = create.json()["workspace_id"]
@@ -2313,7 +2356,7 @@ class TestGetWorkspace:
     ) -> None:
         create = await client.post(
             "/v2/workspaces",
-            json=_v2_body(task_class="dependency_task"),
+            json=_v2_body_with_preflight_override(task_class="dependency_task"),
         )
         assert create.status_code == 202
         ws_id = create.json()["workspace_id"]
@@ -2380,6 +2423,10 @@ class TestGetWorkspace:
             "workspace": {"profile_ref": "auto", "profile": profile},
             "validation": {"commands": ["pytest -q"], "requested_tier": 1},
             "resources": {},
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "unit test bypasses provider auth",
+            },
         }
         create = await client.post("/v2/workspaces", json=payload)
         assert create.status_code == 202

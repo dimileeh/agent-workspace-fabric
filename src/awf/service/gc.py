@@ -995,6 +995,11 @@ async def _default_worktree_remover(
             status="skipped",
             reason_code="NO_REPO_URL",
         )
+    if candidate.worktree.path.exists() and not (candidate.worktree.path / ".git").exists():
+        return WorkspaceGCWorktreeRemoveResult(
+            status="skipped",
+            reason_code="WORKTREE_NOT_GIT_MANAGED",
+        )
     git_manager = GitManager(work_dir / "git")
     try:
         await git_manager.remove_worktree(

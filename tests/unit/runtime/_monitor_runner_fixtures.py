@@ -215,6 +215,7 @@ async def seed_monitoring_workspace(
     pr_number: int = 42,
     head_sha: str = "abc1234567890def",
     auto_merge: bool = True,
+    pr_merge_sha: str | None = None,
 ) -> str:
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -244,6 +245,7 @@ async def seed_monitoring_workspace(
         ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
         ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
         ws.pr_number = pr_number
+        ws.pr_merge_sha = pr_merge_sha
         task = await TaskRepository(s).create_or_get(
             repo_url=ws.repo_url,
             base_branch=ws.branch_base,

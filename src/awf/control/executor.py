@@ -70,6 +70,7 @@ from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    ResourceReservationRepository,
     StaleReasonRepository,
     TaskAttemptRepository,
     ValidationRunRepository,
@@ -2612,12 +2613,32 @@ class WorkspaceExecutor:
             compose_file=compose_file,
             profile=profile,
             phase="final_coverage",
+            parallel_worker_cpu_limit=await self._parallel_worker_cpu_limit_for_workspace(
+                workspace_id,
+                profile=profile,
+            ),
         )
         return _CoverageEvidenceResult(
             coverage=result,
             evidence_status="executed" if result is not None else None,
             reason_code="VALIDATION_EVIDENCE_EXECUTED" if result is not None else None,
         )
+
+    async def _parallel_worker_cpu_limit_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        profile: WorkspaceProfile,
+    ) -> int | None:
+        if profile.validation.coverage.parallel_workers is None:
+            return None
+        async with self._session_factory() as session:
+            reservation = await ResourceReservationRepository(session).active_for_workspace(
+                workspace_id
+            )
+        if reservation is None:
+            return None
+        return max(1, int(reservation.steady_cpu))
 
     async def _run_agent_task_with_optional_planning(
         self,
@@ -4704,6 +4725,9 @@ def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> Validation
     gaps = metadata.get("gaps")
     failing_node_ids = metadata.get("failing_test_node_ids")
     failing_evidence = metadata.get("failing_test_evidence")
+    parallel_requested = metadata.get("parallel_workers_requested")
+    parallel_effective = metadata.get("parallel_workers_effective")
+    parallel_distribution = metadata.get("parallel_distribution")
     return ValidationCoverageResult(
         provider=str(metadata.get("provider") or "python"),
         percent=float(percent) if isinstance(percent, int | float) else None,
@@ -4726,6 +4750,15 @@ def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> Validation
         ]
         if isinstance(failing_evidence, list)
         else [],
+        parallel_workers_requested=(
+            int(parallel_requested) if isinstance(parallel_requested, int) else None
+        ),
+        parallel_workers_effective=(
+            int(parallel_effective) if isinstance(parallel_effective, int) else None
+        ),
+        parallel_distribution=(
+            str(parallel_distribution) if isinstance(parallel_distribution, str) else None
+        ),
     )
 
 

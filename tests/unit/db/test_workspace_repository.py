@@ -519,6 +519,30 @@ class TestValidationRunRepository:
             )
 
     @pytest.mark.unit
+    async def test_find_reusable_coverage_evidence_requires_workspace_head_sha(self) -> None:
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        async with make_session_factory(engine)() as s:
+            repo = ValidationRunRepository(s)
+
+            assert (
+                await repo.find_reusable_coverage_evidence(
+                    workspace_id="ws_missing_head",
+                    tier=1,
+                    commands=[{"phase": "coverage", "command": "pytest --cov=awf"}],
+                    workspace_head_sha=None,
+                    resolved_profile_digest="profile",
+                    environment_identity_digest="env",
+                    max_age_seconds=3600,
+                )
+                is None
+            )
+
+        await engine.dispose()
+
+    @pytest.mark.unit
     async def test_list_by_workspace_ids_can_filter_by_status(
         self,
     ) -> None:
@@ -1248,6 +1272,19 @@ class TestOwnedPathOverlapLookup:
         assert "SKIP LOCKED" in sql
         assert "LIMIT 2" in sql
         assert "workspaces.id NOT IN ('ws_active')" in sql
+
+    @pytest.mark.unit
+    async def test_list_schedulable_workspaces_returns_empty_for_non_positive_limit(self) -> None:
+        session = _RecordingSchedulerSession("postgresql", values=[])
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.ready,
+            limit=0,
+        )
+
+        assert listed == []
+        assert session.executed == []
 
     @pytest.mark.unit
     async def test_postgres_scheduler_cursor_uses_keyset_without_offset(self) -> None:

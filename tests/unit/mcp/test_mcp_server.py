@@ -29,6 +29,15 @@ from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
 from awf.service.controls import WorkspaceControlError
 
+_PROVIDER_AUTH_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "OPENAI_API_TOKEN",
+    "CODEX_API_KEY",
+    "CODEX_AUTH_TOKEN",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+)
+
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
@@ -705,6 +714,11 @@ class TestWorkspaceControls:
 
 
 class TestCreateWorkspaceV2:
+    @pytest.fixture(autouse=True)
+    def _clear_provider_auth_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for key in _PROVIDER_AUTH_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
+
     @pytest.mark.unit
     async def test_persists_clean_v2_contract_fields(
         self,
@@ -940,6 +954,67 @@ class TestCreateWorkspaceV2:
         assert preflight["source_workspace_id"] == workspace_id
         assert preflight["override_used"] is True
         assert preflight["override_reason"] == "retry override"
+
+    @pytest.mark.unit
+    async def test_retry_workspace_returns_structured_retry_error_for_missing_workspace(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool(
+            "awf_retry_workspace",
+            {"workspace_id": "ws_missing_retry"},
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "WORKSPACE_NOT_FOUND"
+
+    @pytest.mark.unit
+    async def test_observability_list_tools_return_invalid_cursor_errors(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/observability.git",
+                branch_base="main",
+                task_title="Observe cursor handling",
+                task_prompt="Exercise invalid cursors.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        for tool_name in (
+            "awf_list_workspace_validation",
+            "awf_list_workspace_stale_reasons",
+            "awf_list_workspace_artifacts",
+        ):
+            result = await mcp.call_tool(
+                tool_name,
+                {"workspace_id": workspace.id, "cursor": "not-valid-cursor"},
+            )
+            assert isinstance(result, CallToolResult)
+            assert result.isError is True
+            assert result.structuredContent is not None
+            assert result.structuredContent["error_code"] == "INVALID_CURSOR"
+
+    @pytest.mark.unit
+    async def test_core_readiness_rejects_unknown_strict_provider(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool(
+            "awf_get_core_release_readiness",
+            {"providers": ["bogus-provider"]},
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_PROVIDERS"
 
     @pytest.mark.unit
     async def test_unknown_profile_ref_returns_structured_invalid_profile_error(

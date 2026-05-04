@@ -183,6 +183,91 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_accepts_parallel_coverage_workers() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "parallel-coverage",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99,
+                    "parallel_workers": 3,
+                    "parallel_worker_max": 4,
+                    "command": "uv run pytest --cov=awf --cov-report=term",
+                }
+            },
+        }
+    )
+
+    assert profile.validation.coverage.parallel_workers == 3
+    assert profile.validation.coverage.parallel_worker_max == 4
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "parallel_workers",
+    [0, -1, "auto", 1.5],
+)
+def test_profile_schema_rejects_invalid_parallel_coverage_workers(
+    parallel_workers: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-parallel-coverage",
+                "validation": {
+                    "coverage": {
+                        "parallel_workers": parallel_workers,
+                        "command": "pytest --cov=awf",
+                    }
+                },
+            }
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -n 3 --cov=awf",
+        "pytest --numprocesses 3 --cov=awf",
+        "pytest --dist=loadscope --cov=awf",
+    ],
+)
+def test_profile_schema_rejects_manual_xdist_args_with_parallel_workers(
+    command: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "duplicate-xdist-policy",
+                "validation": {
+                    "coverage": {
+                        "parallel_workers": 3,
+                        "command": command,
+                    }
+                },
+            }
+        )
+
+
+@pytest.mark.unit
+def test_profile_schema_malformed_coverage_command_uses_safe_xdist_scan_fallback() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "malformed-command",
+            "validation": {
+                "coverage": {
+                    "parallel_workers": 3,
+                    "command": "pytest --cov=awf 'unterminated",
+                }
+            },
+        }
+    )
+
+    assert profile.validation.coverage.parallel_workers == 3
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_declared_provider_github_and_local_auth_leases() -> None:
     profile = WorkspaceProfile.model_validate(
         {

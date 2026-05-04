@@ -1971,3 +1971,141 @@ def test_provider_readiness_helper_fallbacks_handle_unknown_shapes() -> None:
         "DOCKER_HOST_BROAD_CONTROL",
         "GITHUB_TOKEN_ENV_MISSING",
     ]
+
+
+@pytest.mark.unit
+def test_provider_readiness_defensive_provider_dispatch_and_probe_fallbacks(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+
+    with pytest.raises(AssertionError, match="unsupported provider"):
+        provider_readiness._check_provider_readiness(
+            "unknown",  # type: ignore[arg-type]
+            settings,
+            environ={},
+            host_home=tmp_path,
+            strict=True,
+            run_subprocess=_unexpected_subprocess,
+            http_get=_ollama_ok,
+            secrets=frozenset(),
+        )
+
+    probe = provider_readiness._selected_launch_probe(
+        "github",
+        settings=settings,
+        provider_result={"ok": True},
+        model="gpt-test",
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_ollama_ok,
+        secrets=frozenset(),
+    )
+
+    assert probe["status"] == "unavailable"
+    assert probe["reason_code"] == "PROVIDER_PROBE_UNAVAILABLE"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("exc", "reason_code"),
+    [
+        (FileNotFoundError("docker missing"), "DOCKER_CLI_NOT_FOUND"),
+        (
+            subprocess.TimeoutExpired(cmd=["docker"], timeout=5),
+            "CODEX_RUNTIME_CLI_PROBE_TIMEOUT",
+        ),
+        (RuntimeError("probe blew up sk-runtime-secret"), "CODEX_RUNTIME_CLI_PROBE_ERROR"),
+    ],
+)
+def test_agent_runtime_cli_probe_reports_structured_failures(
+    tmp_path: Path,
+    exc: Exception,
+    reason_code: str,
+) -> None:
+    def _run(_: list[str], **_kwargs: object) -> Any:
+        raise exc
+
+    result = provider_readiness._probe_agent_runtime_cli(
+        _settings(tmp_path),
+        executable="codex",
+        provider="codex",
+        environ={},
+        run_subprocess=_run,
+        secrets=frozenset({"sk-runtime-secret"}),
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == reason_code
+    assert "sk-runtime-secret" not in json.dumps(result, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_cli_auth_probe_reports_success_and_nonzero_failure() -> None:
+    ok = provider_readiness._probe_cli_auth_status(
+        provider_label="Codex",
+        args=["codex", "auth", "status"],
+        failure_reason="CODEX_AUTH_FAILED",
+        timeout_reason="CODEX_AUTH_TIMEOUT",
+        missing_reason="CODEX_AUTH_CLI_MISSING",
+        error_reason="CODEX_AUTH_ERROR",
+        environ={},
+        run_subprocess=lambda _args, **_kwargs: _completed(stdout="ok\n"),
+        secrets=frozenset(),
+    )
+    failed = provider_readiness._probe_cli_auth_status(
+        provider_label="Codex",
+        args=["codex", "auth", "status"],
+        failure_reason="CODEX_AUTH_FAILED",
+        timeout_reason="CODEX_AUTH_TIMEOUT",
+        missing_reason="CODEX_AUTH_CLI_MISSING",
+        error_reason="CODEX_AUTH_ERROR",
+        environ={},
+        run_subprocess=lambda _args, **_kwargs: _completed(returncode=1, stderr="bad auth"),
+        secrets=frozenset(),
+    )
+
+    assert ok == {"status": "ok", "reason_code": "CODEX_AUTH_OK"}
+    assert failed["status"] == "fail"
+    assert failed["reason_code"] == "CODEX_AUTH_FAILED"
+    assert failed["detail"] == "bad auth"
+
+
+@pytest.mark.unit
+def test_redaction_parts_cover_urls_empty_secrets_existing_redactions_and_merges() -> None:
+    redacted, parts = provider_readiness._redact_with_redaction_parts(
+        "connect http://user:pass@example.test with sk-providersecret123456",
+        frozenset({""}),
+    )
+
+    assert "user:pass" not in redacted
+    assert "sk-providersecret123456" not in redacted
+    assert parts is not None
+    assert provider_readiness._slice_redaction_segments(
+        [("literal", "before"), ("redaction", ""), ("literal", "after")],
+        6,
+        16,
+    ) == [("redaction", "")]
+    assert provider_readiness._merge_literal_redaction_segments(
+        [("literal", ""), ("literal", "a"), ("literal", "b")]
+    ) == [("literal", "ab")]
+
+
+@pytest.mark.unit
+def test_ollama_model_probe_reports_missing_model_with_prior_failures() -> None:
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url.endswith("/bad"):
+            return SimpleNamespace(status_code=503, text="offline")
+        return SimpleNamespace(status_code=200, text='{"models":[{"name":"glm-5.1:cloud"}]}')
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://ollama.local/bad", "http://ollama.local/api/tags"),
+        model="kimi-k2.6:cloud",
+        http_get=_http_get,
+        secrets=frozenset(),
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
+    assert "probe_failures=" in result["detail"]

@@ -57,8 +57,8 @@ class TestUp:
         assert mock_exec.call_count == 1
         cmd = mock_exec.call_args[0]
         assert cmd[:2] == ("docker", "compose")
-        assert "--project-name" in cmd and spec.project_name() in cmd
-        assert "--file" in cmd
+        assert "-p" in cmd and spec.project_name() in cmd
+        assert "-f" in cmd
         assert "up" in cmd and "-d" in cmd and "--wait" in cmd
         assert "--remove-orphans" in cmd
         assert "--wait-timeout" in cmd and "300" in cmd
@@ -135,9 +135,9 @@ class TestEnsureProjectUp:
         assert cmd == (
             "docker",
             "compose",
-            "--project-name",
+            "-p",
             "awf_persisted_ws",
-            "--file",
+            "-f",
             str(compose_file),
             "up",
             "-d",
@@ -197,8 +197,8 @@ class TestDown:
             )
 
         cmd = mock_exec.call_args[0]
-        assert "--project-name" in cmd and "awf_ws_custom" in cmd
-        assert "--file" in cmd and str(compose_file) in cmd
+        assert "-p" in cmd and "awf_ws_custom" in cmd
+        assert "-f" in cmd and str(compose_file) in cmd
         assert "down" in cmd and "-v" in cmd
         assert "--remove-orphans" in cmd
 

@@ -51,6 +51,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.integration
 @pytest.mark.docker
 @pytest.mark.slow
+@pytest.mark.timeout(240)
 async def test_compose_up_waits_for_postgres_health_then_down_cleans_up(
     tmp_path: Path,
 ) -> None:

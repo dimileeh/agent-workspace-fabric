@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
-pytestmark = pytest.mark.usefixtures('mock_docker_cli_probe')
-
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -17,6 +14,26 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 
+pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
+
+_PROVIDER_AUTH_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "OPENAI_API_TOKEN",
+    "CODEX_API_KEY",
+    "CODEX_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
+    "OLLAMA_API_KEY",
+)
+_PROVIDER_READINESS_OVERRIDE_REASON = "unit test fixture supplies provider readiness"
+_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS = {
+    "provider_readiness_override": "true",
+    "provider_readiness_override_reason": _PROVIDER_READINESS_OVERRIDE_REASON,
+}
 _V2_RETRY_BODY = {
     "repo": {
         "url": "git@github.com:example/retry-api.git",
@@ -35,7 +52,17 @@ _V2_RETRY_BODY = {
     "workspace": {"profile_ref": "python", "profile": None},
     "validation": {"commands": ["pytest tests/unit/api -q"], "requested_tier": 2},
     "resources": {},
+    "preflight": {
+        "provider_readiness_override": True,
+        "provider_readiness_override_reason": _PROVIDER_READINESS_OVERRIDE_REASON,
+    },
 }
+
+
+@pytest.fixture(autouse=True)
+def _clear_provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in _PROVIDER_AUTH_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
 
 
 async def _create_failed_workspace(client: AsyncClient, engine: AsyncEngine) -> str:
@@ -126,7 +153,10 @@ async def test_retry_endpoint_creates_new_requested_workspace(
 ) -> None:
     original_id = await _create_failed_workspace(client, engine)
 
-    response = await client.post(f"/v1/workspaces/{original_id}/retry")
+    response = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+    )
 
     assert response.status_code == 202
     body = response.json()
@@ -171,7 +201,10 @@ async def test_retry_endpoint_reports_unrecoverable_conformance_salvage_failure(
 ) -> None:
     original_id = await _create_conformance_failed_workspace(client, engine)
 
-    response = await client.post(f"/v1/workspaces/{original_id}/retry")
+    response = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+    )
 
     assert response.status_code == 409
     body = response.json()
@@ -193,7 +226,12 @@ async def test_retry_route_direct_success_returns_retry_response(
 
     factory = make_session_factory(engine)
     async with factory() as session:
-        response = await workspaces_route.retry_workspace(original_id, session=session)
+        response = await workspaces_route.retry_workspace(
+            original_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason=_PROVIDER_READINESS_OVERRIDE_REASON,
+            session=session,
+        )
 
     assert response.source_workspace_id == original_id
     assert response.new_workspace_id.startswith("ws_")
@@ -209,7 +247,10 @@ async def test_retry_endpoint_accepts_cancelled_workspace(
 ) -> None:
     original_id = await _create_cancelled_workspace(client, engine)
 
-    response = await client.post(f"/v1/workspaces/{original_id}/retry")
+    response = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+    )
 
     assert response.status_code == 202
     assert response.json()["source_workspace_id"] == original_id

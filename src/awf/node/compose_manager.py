@@ -400,9 +400,9 @@ class ComposeManager:
         cmd = [
             "docker",
             "compose",
-            "--project-name",
+            "-p",
             project_name,
-            "--file",
+            "-f",
             str(compose_file),
             *args,
         ]

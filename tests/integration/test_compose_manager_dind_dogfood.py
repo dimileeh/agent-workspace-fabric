@@ -73,9 +73,9 @@ def _exec_agent(
         [
             "docker",
             "compose",
-            "--project-name",
+            "-p",
             project_name,
-            "--file",
+            "-f",
             str(compose_file),
             "exec",
             "-T",
@@ -203,7 +203,7 @@ async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Pa
             compose_file=paths.compose_file,
             command=(
                 f"docker compose -f {inner_compose} "
-                f"--project-name {inner_project} up -d --wait"
+                f"-p {inner_project} up -d --wait"
             ),
             timeout=180,
         )
@@ -221,7 +221,7 @@ async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Pa
                 compose_file=paths.compose_file,
                 command=(
                     f"docker compose -f {inner_compose} "
-                    f"--project-name {inner_project} down -v --remove-orphans"
+                    f"-p {inner_project} down -v --remove-orphans"
                 ),
             )
         if paths is not None:

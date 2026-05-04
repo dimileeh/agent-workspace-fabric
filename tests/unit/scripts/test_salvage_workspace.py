@@ -55,6 +55,21 @@ class TestClosureCapture:
         assert claude_factory().name == AgentRuntime.claude_code
 
     @pytest.mark.unit
+    def test_factory_accepts_full_adapter_constructor_surface(self) -> None:
+        factory = _make_noop_factory(AgentRuntime.codex)
+
+        adapter = factory(
+            runner=None,
+            default_model=None,
+            default_effort=None,
+            log_store=None,
+            agent_wall_timeout_seconds=7200,
+            agent_idle_timeout_seconds=1800,
+        )
+
+        assert adapter.name == AgentRuntime.codex
+
+    @pytest.mark.unit
     async def test_factory_run_is_noop_with_success_message(self) -> None:
         """The adapter's ``run`` coroutine is what actually skips the
         agent. Must return exit 0 with the sentinel stdout so the
@@ -147,6 +162,7 @@ class TestSalvageMain:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         ws_id = await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="failed")
+        original_registry = dict(_adapter_base._REGISTRY)
 
         def _exec_ctor(**kwargs: Any) -> _FakeExecutor:
             return _FakeExecutor(session_factory=kwargs["session_factory"])
@@ -158,8 +174,13 @@ class TestSalvageMain:
         monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *_a, **_k: object())
         monkeypatch.setattr(salvage_workspace, "AsyncioSubprocessRunner", lambda: object())
 
-        rc = await salvage_workspace._main(tmp_path, ws_id)
-        assert rc == 0
+        try:
+            rc = await salvage_workspace._main(tmp_path, ws_id)
+            assert rc == 0
+            assert original_registry == _adapter_base._REGISTRY
+        finally:
+            _adapter_base._REGISTRY.clear()
+            _adapter_base._REGISTRY.update(original_registry)
 
     @pytest.mark.unit
     async def test_missing_db_returns_two(self, tmp_path: Path) -> None:

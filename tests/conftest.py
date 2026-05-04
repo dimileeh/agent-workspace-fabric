@@ -9,10 +9,13 @@ tests/unit/db/test_workspace_repository.py) which uses the same pattern.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
+import tempfile
 from collections import namedtuple
 from collections.abc import AsyncIterator, Iterator
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -23,6 +26,11 @@ from awf.common.config import Settings
 from awf.db.base import Base
 from awf.db.session import make_engine, make_session_factory
 from awf.service.disk import DiskCheck
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows does not run AWF Docker CI.
+    fcntl = None  # type: ignore[assignment]
 
 
 def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
@@ -64,6 +72,36 @@ def _close_idle_asyncio_policy_loop() -> Iterator[None]:
     loop.close()
     with suppress(RuntimeError):
         asyncio.set_event_loop(None)
+
+
+@contextmanager
+def _docker_test_lock() -> Iterator[None]:
+    if fcntl is None:
+        yield
+        return
+    run_uid = os.environ.get("PYTEST_XDIST_TESTRUNUID", "local")
+    lock_path = Path(tempfile.gettempdir()) / f"awf-pytest-docker-{run_uid}.lock"
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@pytest.fixture(autouse=True)
+def _serialize_docker_daemon_tests(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Serialize real Docker daemon tests under xdist.
+
+    Compose projects share the same Docker daemon, image cache, plugin process,
+    and network/volume namespace. The application remains parallel-safe; these
+    integration tests are the shared external resource and need a narrow lock.
+    """
+    if request.node.get_closest_marker("docker") is None:
+        yield
+        return
+    with _docker_test_lock():
+        yield
 
 
 @pytest.fixture

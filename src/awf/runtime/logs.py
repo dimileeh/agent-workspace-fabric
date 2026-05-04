@@ -303,9 +303,9 @@ async def stream_compose_service_logs(
     proc = await factory(
         "docker",
         "compose",
-        "--project-name",
+        "-p",
         compose_project,
-        "--file",
+        "-f",
         str(compose_file),
         "logs",
         "--follow",

@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import pytest
-
-pytestmark = pytest.mark.usefixtures('mock_docker_cli_probe')
-
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+
+pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
+
+
+@pytest.fixture(autouse=True)
+def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
 
 
 def _v2_body(

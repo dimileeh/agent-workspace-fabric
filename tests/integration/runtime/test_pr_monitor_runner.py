@@ -2010,7 +2010,7 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         ]
         assert len(teardown_calls) == 1
         args = teardown_calls[0].args
-        assert "--project-name" in args and "awf_ws_test" in args
+        assert "-p" in args and "awf_ws_test" in args
         assert "--remove-orphans" in args
         assert "--volumes" in args
 

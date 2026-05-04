@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.service.workspace_observability as workspace_observability_module
 from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
@@ -87,6 +88,46 @@ def test_json_safe_value_truncates_long_sequences() -> None:
 
     assert value[-1] == "__truncated__"
     assert value[:3] == [0, 1, 2]
+
+
+@pytest.mark.unit
+def test_json_safe_value_keeps_short_sequences_unmarked() -> None:
+    assert _json_safe_value([1, 2, 3]) == [1, 2, 3]
+
+
+@pytest.mark.unit
+def test_workspace_observability_private_fallbacks_cover_absent_policy_metadata() -> None:
+    workspace = SimpleNamespace(resolved_profile=None)
+
+    assert workspace_observability_module._overview_pricing_metadata(workspace) is None
+    assert workspace_observability_module._provider_readiness_preflight_from_task_policy(None) is None
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_handles_mixed_currencies_and_result_fallback() -> None:
+    workspace = SimpleNamespace(
+        operations=[
+            SimpleNamespace(result={"usage": {"input_tokens": 1, "cost_estimate": 0.25, "currency": "USD"}}, payload={}),
+            SimpleNamespace(result={}, payload={"usage": {"output_tokens": 2, "cost_estimate": 0.50, "currency": "EUR"}}),
+        ]
+    )
+
+    summary = workspace_usage_summary(workspace)
+
+    assert summary.status == "available"
+    assert summary.input_tokens == 1
+    assert summary.output_tokens == 2
+    assert summary.currency == "MIXED"
+    assert summary.cost_estimate is None
+
+
+@pytest.mark.unit
+def test_workspace_pricing_metadata_returns_none_for_invalid_payload() -> None:
+    workspace = SimpleNamespace(
+        resolved_profile={"pricing": {"pricing": {"provider": None, "model": "bad"}}}
+    )
+
+    assert workspace_pricing_metadata(workspace) is None
 
 
 @pytest.mark.unit

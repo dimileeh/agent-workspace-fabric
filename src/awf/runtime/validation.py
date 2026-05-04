@@ -153,6 +153,14 @@ class PytestFailureEvidence:
 
 
 @dataclass(frozen=True)
+class CoverageCommandPlan:
+    command: str
+    parallel_workers_requested: int | None = None
+    parallel_workers_effective: int | None = None
+    parallel_distribution: str | None = None
+
+
+@dataclass(frozen=True)
 class ValidationCoverageResult:
     """Coverage measurement parsed from an explicit provider command."""
 
@@ -166,6 +174,9 @@ class ValidationCoverageResult:
     gaps: list[dict[str, object]] = field(default_factory=list)
     failing_test_node_ids: list[str] = field(default_factory=list)
     failing_test_evidence: list[str] = field(default_factory=list)
+    parallel_workers_requested: int | None = None
+    parallel_workers_effective: int | None = None
+    parallel_distribution: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -187,6 +198,12 @@ class ValidationCoverageResult:
             metadata["failing_test_node_ids"] = self.failing_test_node_ids
         if self.failing_test_evidence:
             metadata["failing_test_evidence"] = self.failing_test_evidence
+        if self.parallel_workers_requested is not None:
+            metadata["parallel_workers_requested"] = self.parallel_workers_requested
+        if self.parallel_workers_effective is not None:
+            metadata["parallel_workers_effective"] = self.parallel_workers_effective
+        if self.parallel_distribution is not None:
+            metadata["parallel_distribution"] = self.parallel_distribution
         return metadata
 
 
@@ -371,6 +388,7 @@ class ValidationRunner:
         compose_file: Path,
         profile: WorkspaceProfile,
         phase: str = "coverage",
+        parallel_worker_cpu_limit: int | None = None,
     ) -> ValidationCoverageResult | None:
         """Run only the profile coverage command and return its policy result."""
         coverage = profile.validation.coverage
@@ -388,6 +406,7 @@ class ValidationRunner:
             phase_indices={},
             phase=phase,
             full_gate_concurrency=profile.validation.strategy.full_gate_concurrency,
+            parallel_worker_cpu_limit=parallel_worker_cpu_limit,
         )
 
     async def _run_commands(
@@ -818,6 +837,7 @@ class ValidationRunner:
         phase_indices: dict[str, int],
         phase: str = "coverage",
         full_gate_concurrency: int = 0,
+        parallel_worker_cpu_limit: int | None = None,
     ) -> ValidationCoverageResult:
         if full_gate_concurrency > 0:
             semaphore = _FULL_GATE_SEMAPHORES.setdefault(
@@ -833,6 +853,7 @@ class ValidationRunner:
                     results=results,
                     phase_indices=phase_indices,
                     phase=phase,
+                    parallel_worker_cpu_limit=parallel_worker_cpu_limit,
                 )
         return await self._collect_coverage_unthrottled(
             workspace_id=workspace_id,
@@ -843,6 +864,7 @@ class ValidationRunner:
             results=results,
             phase_indices=phase_indices,
             phase=phase,
+            parallel_worker_cpu_limit=parallel_worker_cpu_limit,
         )
 
     async def _collect_coverage_unthrottled(
@@ -856,6 +878,7 @@ class ValidationRunner:
         results: list[ValidationCommandResult],
         phase_indices: dict[str, int],
         phase: str,
+        parallel_worker_cpu_limit: int | None = None,
     ) -> ValidationCoverageResult:
         if coverage.provider != "python":
             return ValidationCoverageResult(
@@ -868,13 +891,18 @@ class ValidationRunner:
             )
 
         command_result: ValidationCommandResult | None = None
+        command_plan = CoverageCommandPlan(command=coverage.command.command) if coverage.command else None
         if coverage.command is not None:
+            command_plan = coverage_command_plan(
+                coverage,
+                parallel_worker_cpu_limit=parallel_worker_cpu_limit,
+            )
             phase_indices[phase] = phase_indices.get(phase, 0) + 1
             label = f"{phase_indices[phase]:02d}_{phase}"
             command_result = await self._exec(
                 compose_project=compose_project,
                 compose_file=compose_file,
-                cli_args=["sh", "-lc", _VENV_ACTIVATE_PREAMBLE + coverage.command.command],
+                cli_args=["sh", "-lc", _VENV_ACTIVATE_PREAMBLE + command_plan.command],
                 label=label,
                 artifacts_dir=artifacts_dir,
                 phase=phase,
@@ -911,6 +939,14 @@ class ValidationRunner:
                 command_metadata["failing_test_evidence"] = pytest_evidence.evidence
             if pytest_evidence.present:
                 command_metadata["coverage_reason_code"] = reason_code
+            if command_plan is not None and command_plan.parallel_workers_requested is not None:
+                command_metadata["parallel_workers_requested"] = (
+                    command_plan.parallel_workers_requested
+                )
+                command_metadata["parallel_workers_effective"] = (
+                    command_plan.parallel_workers_effective
+                )
+                command_metadata["parallel_distribution"] = command_plan.parallel_distribution
             command_result = replace(
                 command_result,
                 reason_code=command_reason_code,
@@ -941,6 +977,15 @@ class ValidationRunner:
             gaps=gaps,
             failing_test_node_ids=pytest_evidence.node_ids,
             failing_test_evidence=pytest_evidence.evidence,
+            parallel_workers_requested=(
+                command_plan.parallel_workers_requested if command_plan is not None else None
+            ),
+            parallel_workers_effective=(
+                command_plan.parallel_workers_effective if command_plan is not None else None
+            ),
+            parallel_distribution=(
+                command_plan.parallel_distribution if command_plan is not None else None
+            ),
         )
 
     async def _exec(
@@ -1251,6 +1296,82 @@ def _healthcheck_metadata(
 def _format_seconds(value: float) -> str:
     return f"{value:g}"
 
+
+def coverage_command_plan(
+    coverage: ProfileCoverage,
+    *,
+    parallel_worker_cpu_limit: int | None = None,
+) -> CoverageCommandPlan:
+    if coverage.command is None:
+        return CoverageCommandPlan(command="")
+    command = coverage.command.command
+    requested = coverage.parallel_workers
+    if requested is None:
+        return CoverageCommandPlan(command=command)
+
+    effective = _effective_parallel_workers(
+        requested=requested,
+        profile_max=coverage.parallel_worker_max,
+        cpu_limit=parallel_worker_cpu_limit,
+    )
+    distribution = "loadscope"
+    injected = _inject_pytest_parallel_workers(
+        command,
+        workers=effective,
+        distribution=distribution,
+    )
+    return CoverageCommandPlan(
+        command=injected,
+        parallel_workers_requested=requested,
+        parallel_workers_effective=effective if injected != command else None,
+        parallel_distribution=distribution if injected != command else None,
+    )
+
+
+def _effective_parallel_workers(
+    *,
+    requested: int,
+    profile_max: int | None,
+    cpu_limit: int | None,
+) -> int:
+    limits = [requested]
+    if profile_max is not None:
+        limits.append(profile_max)
+    if cpu_limit is not None:
+        limits.append(max(1, cpu_limit))
+    return max(1, min(limits))
+
+
+def _inject_pytest_parallel_workers(
+    command: str,
+    *,
+    workers: int,
+    distribution: str,
+) -> str:
+    if not _is_pytest_coverage_command(command):
+        return command
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return command
+    pytest_index = _pytest_token_index(tokens)
+    if pytest_index is None:
+        return command
+    injected = [
+        *tokens[: pytest_index + 1],
+        "-n",
+        str(workers),
+        f"--dist={distribution}",
+        *tokens[pytest_index + 1 :],
+    ]
+    return shlex.join(injected)
+
+
+def _pytest_token_index(tokens: list[str]) -> int | None:
+    for index, token in enumerate(tokens):
+        if _command_token_name(token) in {"pytest", "py.test"}:
+            return index
+    return None
 
 
 def _coverage_requested(coverage: ProfileCoverage) -> bool:

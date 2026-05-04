@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
-pytestmark = pytest.mark.usefixtures('mock_docker_cli_probe')
-
 from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -15,6 +12,14 @@ import awf.api.routes.tasks as tasks_route
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import TaskAttemptRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+
+pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
+
+
+@pytest.fixture(autouse=True)
+def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
+
 
 _V1_BODY = {
     "repo_url": "git@github.com:example/console.git",

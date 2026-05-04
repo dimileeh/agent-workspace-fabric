@@ -202,6 +202,22 @@ def test_environment_identity_digest_is_stable_across_mapping_and_service_order(
 
 
 @pytest.mark.unit
+def test_environment_identity_digest_changes_for_parallel_coverage_policy() -> None:
+    serial = _identity_profile()
+    parallel = _identity_profile(
+        validation={
+            "coverage": {
+                "minimum_percent": 99,
+                "command": "pytest --cov=awf",
+                "parallel_workers": 3,
+            }
+        }
+    )
+
+    assert environment_identity_digest(serial) != environment_identity_digest(parallel)
+
+
+@pytest.mark.unit
 def test_environment_identity_sorts_services_with_nullable_dockerfile() -> None:
     profile = _identity_profile()
     service_without_dockerfile = profile.services[0].model_copy(update={"dockerfile": None})
@@ -1666,6 +1682,158 @@ class TestCoverageEnforcement:
         assert failed.status == "failed"
         assert failed.reason_code == "COVERAGE_PROVIDER_UNSUPPORTED"
         assert failed.ok is False
+
+    @pytest.mark.unit
+    async def test_run_profile_coverage_injects_bounded_parallel_pytest_workers(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="TOTAL 100 0 99%\n")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "parallel-coverage",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "parallel_workers": 20,
+                        "parallel_worker_max": 8,
+                        "command": "uv run --python 3.12 --extra dev pytest --cov=awf",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_coverage(
+            workspace_id="ws_parallel",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            parallel_worker_cpu_limit=3,
+        )
+
+        assert result is not None
+        assert result.ok
+        shell = fake.calls[0].args[-1]
+        assert "pytest -n 3 --dist=loadscope --cov=awf" in shell
+        assert result.parallel_workers_requested == 20
+        assert result.parallel_workers_effective == 3
+
+    @pytest.mark.unit
+    async def test_run_profile_coverage_does_not_inject_without_opt_in(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="TOTAL 100 0 99%\n")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "serial-coverage",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "command": "pytest --cov=awf",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_coverage(
+            workspace_id="ws_serial",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            parallel_worker_cpu_limit=3,
+        )
+
+        assert result is not None
+        shell = fake.calls[0].args[-1]
+        assert " -n " not in shell
+        assert result.parallel_workers_effective is None
+
+    @pytest.mark.unit
+    def test_parallel_coverage_command_plan_defensive_paths(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        no_command = WorkspaceProfile.model_validate(
+            {
+                "name": "no-command",
+                "validation": {"coverage": {"minimum_percent": 99, "parallel_workers": 3}},
+            }
+        ).validation.coverage
+        non_pytest = WorkspaceProfile.model_validate(
+            {
+                "name": "non-pytest",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "parallel_workers": 3,
+                        "command": "coverage report",
+                    }
+                },
+            }
+        ).validation.coverage
+        max_only = WorkspaceProfile.model_validate(
+            {
+                "name": "max-only",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "parallel_workers": 8,
+                        "parallel_worker_max": 5,
+                        "command": "pytest --cov=awf",
+                    }
+                },
+            }
+        ).validation.coverage
+
+        assert validation_module.coverage_command_plan(no_command).command == ""
+        assert validation_module.coverage_command_plan(non_pytest).command == "coverage report"
+        assert "pytest -n 5 --dist=loadscope" in validation_module.coverage_command_plan(
+            max_only
+        ).command
+        assert validation_module._pytest_token_index(["python", "-m", "unittest"]) is None
+        assert validation_module._is_pytest_coverage_command("coverage run -m pytest")
+
+        monkeypatch.setattr(validation_module, "_is_pytest_coverage_command", lambda _: True)
+        assert (
+            validation_module._inject_pytest_parallel_workers(
+                "pytest 'unterminated",
+                workers=3,
+                distribution="loadscope",
+            )
+            == "pytest 'unterminated"
+        )
+        assert (
+            validation_module._inject_pytest_parallel_workers(
+                "coverage report",
+                workers=3,
+                distribution="loadscope",
+            )
+            == "coverage report"
+        )
+
+    @pytest.mark.unit
+    def test_coverage_metadata_includes_parallel_policy_fields(self) -> None:
+        result = ValidationCoverageResult(
+            provider="python",
+            minimum_percent=99,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_BELOW_THRESHOLD",
+            percent=98.5,
+            gaps=["missing branch"],
+            failing_test_node_ids=["tests/test_example.py::test_fails"],
+            failing_test_evidence=[{"nodeid": "tests/test_example.py::test_fails"}],
+            parallel_workers_requested=20,
+            parallel_workers_effective=3,
+            parallel_distribution="loadscope",
+        )
+
+        metadata = result.as_metadata()
+
+        assert metadata["parallel_workers_requested"] == 20
+        assert metadata["parallel_workers_effective"] == 3
+        assert metadata["parallel_distribution"] == "loadscope"
 
     @pytest.mark.unit
     async def test_runs_configured_python_coverage_command_and_records_percent(

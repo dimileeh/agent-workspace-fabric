@@ -74,6 +74,7 @@ async def _seed_old_completed_pr_workspace(
         workspace.updated_at = updated_at
         workspace.pr_url = "https://github.com/dimileeh/aira-web/pull/42"
         workspace.pr_number = 42
+        workspace.pr_merge_sha = "m" * 40
         await session.commit()
         return workspace.id
 
@@ -117,7 +118,7 @@ async def test_completed_monitor_defers_recent_workspace_pressure_dir_cleanup(
 ) -> None:
     work_dir = tmp_path / "service"
     worktrees_root = work_dir / "git" / "worktrees"
-    ws_id = await seed_monitoring_workspace(factory)
+    ws_id = await seed_monitoring_workspace(factory, pr_merge_sha="m" * 40)
     worktree = worktrees_root / ws_id
     compose_dir = work_dir / "compose" / ws_id
     auth = work_dir / "auth" / ws_id

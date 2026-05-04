@@ -9,12 +9,21 @@ without trying to encode every possible build-system nuance.
 from __future__ import annotations
 
 import re
+import shlex
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse, urlsplit
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from awf.profiles.pricing import PricingMetadata
 
@@ -213,6 +222,8 @@ class ProfileCoverage(BaseModel):
     enforce: bool = True
     provider: Annotated[str, Field(min_length=1, max_length=64)] = "python"
     command: ProfileCommand | None = None
+    parallel_workers: StrictInt | None = Field(default=None, ge=1, le=64)
+    parallel_worker_max: StrictInt | None = Field(default=None, ge=1, le=64)
 
     @field_validator("command", mode="before")
     @classmethod
@@ -222,6 +233,19 @@ class ProfileCoverage(BaseModel):
         if isinstance(value, str):
             return ProfileCommand.from_shell(value)
         return value
+
+    @model_validator(mode="after")
+    def _validate_parallel_policy(self) -> ProfileCoverage:
+        if (
+            self.parallel_workers is not None
+            and self.command is not None
+            and _coverage_command_has_xdist_args(self.command.command)
+        ):
+            raise ValueError(
+                "validation.coverage.command must not include pytest-xdist "
+                "worker/distribution args when parallel_workers is set"
+            )
+        return self
 
 
 class ProfileValidationStrategy(BaseModel):
@@ -253,6 +277,25 @@ class ProfileAlembicValidation(BaseModel):
         if self.script_location is not None:
             _validate_workspace_relative_path("script_location", self.script_location)
         return self
+
+
+def _coverage_command_has_xdist_args(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    return any(_is_xdist_arg(token) for token in tokens)
+
+
+def _is_xdist_arg(token: str) -> bool:
+    return (
+        token == "-n"
+        or (token.startswith("-n") and len(token) > 2)
+        or token == "--numprocesses"
+        or token.startswith("--numprocesses=")
+        or token == "--dist"
+        or token.startswith("--dist=")
+    )
 
 
 def _validate_workspace_relative_path(field_name: str, value: str) -> None:

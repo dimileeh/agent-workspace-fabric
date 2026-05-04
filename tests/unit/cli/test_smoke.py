@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -137,7 +138,7 @@ class TestSmokeRunCommand:
         result = _runner.invoke(app, ["smoke", "run", "--demo-path", "/tmp/custom-demo"])
         assert result.exit_code == 0
         output = json.loads(result.stdout)
-        assert output["demo_path_value"] == "/tmp/custom-demo"
+        assert output["demo_path_value"] == str(Path("/tmp/custom-demo").resolve())
 
     def test_help_shows_description(self) -> None:
         result = _runner.invoke(app, ["smoke", "run", "--help"])

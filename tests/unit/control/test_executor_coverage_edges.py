@@ -42,7 +42,13 @@ from awf.control.executor import (
 )
 from awf.db.base import Base
 from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskClass, WorkspaceStatus
-from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
+from awf.db.repositories import (
+    ResourceReservationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    ValidationRunRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
 from awf.runtime.planning import (
@@ -166,9 +172,11 @@ class _CoverageValidation:
     def __init__(self, coverage: ValidationCoverageResult | None) -> None:
         self.coverage = coverage
         self.calls: list[str] = []
+        self.kwargs: list[dict[str, object]] = []
 
     async def run_profile_coverage(self, *, phase: str, **_kwargs: object) -> ValidationCoverageResult | None:
         self.calls.append(phase)
+        self.kwargs.append(dict(_kwargs))
         return self.coverage
 
 
@@ -816,6 +824,91 @@ async def test_final_coverage_gate_reuses_exact_fresh_evidence(
     assert result.evidence_status == "reused"
     assert result.source_run_id == source_run_id
     assert validation.calls == []
+
+
+@pytest.mark.unit
+async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
+    tmp_path: Path,
+) -> None:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = make_session_factory(engine)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "final-gate-parallel",
+            "validation": {
+                "strategy": {"final_gate": "coverage"},
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                    "parallel_workers": 20,
+                },
+            },
+        }
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/awf.git",
+            branch_base="main",
+            task_title="parallel final coverage",
+            task_prompt="parallel final coverage",
+            agent="codex",
+            test_commands=[],
+        )
+        task = await TaskRepository(session).create_or_get(
+            repo_url=workspace.repo_url,
+            base_branch=workspace.branch_base,
+            title=workspace.task_title,
+            prompt=workspace.task_prompt,
+            external_id=None,
+            idempotency_key=None,
+            task_class=None,
+            owned_paths=[],
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
+        await ResourceReservationRepository(session).create(
+            workspace_id=workspace.id,
+            attempt_id=attempt.id,
+            node_id="local",
+            steady_cpu=3.0,
+            steady_memory_gb=10.0,
+            peak_cpu=6.0,
+            peak_memory_gb=16.0,
+            disk_mb=None,
+            phase="execution",
+        )
+        await session.commit()
+        workspace_id = workspace.id
+
+    coverage = _coverage(tmp_path, percent=100, status="passed", reason_code="COVERAGE_OK")
+    validation = _CoverageValidation(coverage)
+    executor = WorkspaceExecutor(
+        session_factory=factory,
+        runner=FakeCommandRunner(),
+        compose=object(),  # type: ignore[arg-type]
+        validation=validation,  # type: ignore[arg-type]
+        pr_creator=object(),  # type: ignore[arg-type]
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "worktrees",
+            compose_projects_root=tmp_path / "compose",
+        ),
+    )
+
+    result = await executor._run_final_coverage_gate(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        validation_tier=1,
+        workspace_head_sha="head",
+    )
+
+    assert result.coverage is coverage
+    assert validation.kwargs[0]["parallel_worker_cpu_limit"] == 3
 
 
 @pytest.mark.unit

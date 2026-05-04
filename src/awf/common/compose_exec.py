@@ -223,9 +223,9 @@ def _compose_exec_prefix(
     return [
         "docker",
         "compose",
-        "--project-name",
+        "-p",
         compose_project,
-        "--file",
+        "-f",
         str(compose_file),
         "exec",
         "-T",
