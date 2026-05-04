@@ -1,4 +1,9 @@
-import type { LlmUsageSummary, WorkspaceLifecycleStage, WorkspaceStatus } from "@/lib/types";
+import type {
+  LlmUsageSummary,
+  PricingMetadata,
+  WorkspaceLifecycleStage,
+  WorkspaceStatus,
+} from "@/lib/types";
 
 export type LogSortDirection = "asc" | "desc";
 
@@ -65,6 +70,48 @@ export function fallbackLlmUsage(
     source: usage?.source ?? "none",
     reason: hasReason ? usage.reason ?? null : "usage_not_reported",
   };
+}
+
+export function formatCostWithPricing(
+  cost: number | null,
+  currency: string | null | undefined,
+  pricing: PricingMetadata | null | undefined,
+): string {
+  if (cost === null || cost === undefined) {
+    return "—";
+  }
+  if (!pricing) {
+    return "—";
+  }
+  if (!pricing.is_current) {
+    return "—";
+  }
+  const c = currency || pricing.currency || "USD";
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: c,
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 4,
+    }).format(cost);
+  } catch {
+    return new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 4,
+    }).format(cost);
+  }
+}
+
+export function pricingAvailabilityReason(
+  pricing: PricingMetadata | null | undefined,
+): string | null {
+  if (!pricing) {
+    return "pricing not configured";
+  }
+  if (!pricing.is_current) {
+    return "pricing stale";
+  }
+  return null;
 }
 
 export function compactId(value: string | null | undefined, head = 8): string {

@@ -19,11 +19,13 @@ from awf.profiles.models import (
     ProfileLintSeverity,
     ProfileMonitor,
     ProfilePhaseSet,
+    ProfilePricing,
     ProfileResolution,
     ProfileRuntime,
     ProfileService,
     WorkspaceProfile,
 )
+from awf.profiles.pricing import PRICING_MAX_AGE_DAYS, PricingMetadata
 from awf.profiles.resolver import ProfileResolver, resolve_workspace_profile
 
 __all__ = [
@@ -31,6 +33,8 @@ __all__ = [
     "EndpointVisibility",
     "HostHomeAuthMountMode",
     "HostHomeAuthMountPolicy",
+    "PRICING_MAX_AGE_DAYS",
+    "PricingMetadata",
     "ProfileAppEndpoint",
     "ProfileAppEndpointHealth",
     "ProfileCommand",
@@ -40,6 +44,7 @@ __all__ = [
     "ProfileLintSeverity",
     "ProfileMonitor",
     "ProfilePhaseSet",
+    "ProfilePricing",
     "ProfileResolution",
     "ProfileRuntime",
     "ProfileResolver",

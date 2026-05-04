@@ -16,6 +16,8 @@ from urllib.parse import urlparse, urlsplit
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from awf.profiles.pricing import PricingMetadata
+
 
 class DockerMode(StrEnum):
     """Docker availability inside the workspace."""
@@ -555,7 +557,7 @@ class HostHomeAuthMountPolicy(BaseModel):
 
 
 class ProfileSecurity(BaseModel):
-    """Security and policy declarations for the workspace."""
+    """Security policy settings for a workspace."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -563,6 +565,14 @@ class ProfileSecurity(BaseModel):
     host_home_auth_mounts: HostHomeAuthMountPolicy = Field(
         default_factory=HostHomeAuthMountPolicy
     )
+
+
+class ProfilePricing(BaseModel):
+    """Optional pricing metadata in a workspace profile."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pricing: PricingMetadata
 
 
 class WorkspaceProfile(BaseModel):
@@ -586,6 +596,7 @@ class WorkspaceProfile(BaseModel):
     planning: ProfilePlanning = Field(default_factory=ProfilePlanning)
     secrets: list[ProfileSecret] = Field(default_factory=list)
     security: ProfileSecurity = Field(default_factory=ProfileSecurity)
+    pricing: ProfilePricing | None = None
     ports: dict[str, str] = Field(default_factory=dict)
     app_endpoints: list[ProfileAppEndpoint] = Field(default_factory=list)
 
