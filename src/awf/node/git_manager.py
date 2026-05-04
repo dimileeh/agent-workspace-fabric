@@ -31,6 +31,7 @@ from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
 
+_GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
 AGENT_RUNTIME_UID = 1000
 AGENT_RUNTIME_GID = 1000
 
@@ -260,6 +261,9 @@ class GitManager:
     ) -> WorktreeLayout:
         """Create a fresh worktree for ``workspace_id`` at a new branch off ``base_branch``.
 
+        ``base_branch`` is normally a branch name. Adopted GitHub PR workspaces
+        may pass ``refs/pull/<number>/head`` to check out the exact PR head.
+
         Raises ``GitOperationError`` with a specific reason code if:
         - the base branch doesn't exist (``GIT_BASE_BRANCH_MISSING``)
         - the worktree path already exists (``GIT_WORKTREE_ALREADY_EXISTS``)
@@ -290,11 +294,23 @@ class GitManager:
         # see the latest server tip even across long-running sessions, and
         # so ``remote update --prune`` (which prunes only tracking refs
         # under the new refspec) never targets the worktree's own branch.
-        tracking_ref = f"origin/{base_branch}"
+        tracking_ref, fetch_refspec = _checkout_tracking_ref(base_branch)
 
         lock = self._lock_for_mirror(mirror_path)
         async with lock:
             try:
+                if fetch_refspec is not None:
+                    await self._run(
+                        [
+                            "git",
+                            "--git-dir",
+                            str(mirror_path),
+                            "fetch",
+                            "origin",
+                            fetch_refspec,
+                        ],
+                        operation="mirror.fetch_checkout_ref",
+                    )
                 await self._run(
                     [
                         "git",
@@ -450,6 +466,16 @@ class GitManager:
 
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _checkout_tracking_ref(base_branch: str) -> tuple[str, str | None]:
+    pull_ref = _GITHUB_PULL_HEAD_REF.fullmatch(base_branch)
+    if pull_ref is None:
+        return f"origin/{base_branch}", None
+
+    pr_number = pull_ref.group(1)
+    tracking_ref = f"refs/remotes/origin/pull/{pr_number}/head"
+    return tracking_ref, f"+refs/pull/{pr_number}/head:{tracking_ref}"
 
 
 def _slugify_repo(repo_url: str) -> str:

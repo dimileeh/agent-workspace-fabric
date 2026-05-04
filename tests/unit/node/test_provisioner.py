@@ -212,7 +212,7 @@ class TestSuccess:
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
 
     @pytest.mark.unit
-    async def test_sync_feature_pr_checks_out_head_ref_and_records_remote_push_branch(
+    async def test_sync_feature_pr_checks_out_pull_head_ref_and_records_remote_push_branch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
@@ -268,12 +268,14 @@ class TestSuccess:
                 task_kind="sync_feature_pr",
                 task_policy={
                     "pr_adoption": {
+                        "pr_number": 277,
                         "head_ref": "feature/ready",
                         "base_ref": "development",
                     }
                 },
                 resolved_profile={"name": "generic"},
             )
+            ws.pr_number = 277
             await s.commit()
             workspace_id = ws.id
 
@@ -283,7 +285,7 @@ class TestSuccess:
             {
                 "workspace_id": workspace_id,
                 "repo_url": "https://github.com/dimileeh/aira-web.git",
-                "base_branch": "feature/ready",
+                "base_branch": "refs/pull/277/head",
                 "new_branch": f"feature-sync/{workspace_id}",
             }
         ]
@@ -294,6 +296,28 @@ class TestSuccess:
             assert reloaded.branch_base == "development"
             assert reloaded.branch_name == f"feature-sync/{workspace_id}"
             assert reloaded.remote_push_branch == "feature/ready"
+
+    @pytest.mark.unit
+    def test_sync_feature_pr_checkout_uses_pull_head_ref_when_pr_number_is_present(
+        self,
+    ) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="feature-sync/ws",
+            remote_push_branch="feature/fork-head",
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "pr_number": "278",
+                    "head_ref": "feature/fork-head",
+                    "base_ref": "development",
+                }
+            },
+        )
+
+        assert _provision_checkout_base_branch(ws) == "refs/pull/278/head"
+        assert _provision_remote_push_branch(ws) == "feature/fork-head"
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

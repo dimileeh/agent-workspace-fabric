@@ -521,7 +521,11 @@ def _provision_local_branch_name(
 
 
 def _provision_checkout_base_branch(ws: Workspace) -> str:
-    return _sync_feature_pr_head_ref(ws) or ws.branch_base
+    return (
+        _sync_feature_pr_pull_head_ref(ws)
+        or _sync_feature_pr_head_ref(ws)
+        or ws.branch_base
+    )
 
 
 def _provision_remote_push_branch(ws: Workspace) -> str | None:
@@ -529,14 +533,51 @@ def _provision_remote_push_branch(ws: Workspace) -> str | None:
 
 
 def _sync_feature_pr_head_ref(ws: Workspace) -> str | None:
-    if ws.task_kind != "sync_feature_pr":
-        return None
-    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
-    adoption = policy.get("pr_adoption")
-    if not isinstance(adoption, dict):
+    adoption = _sync_feature_pr_adoption(ws)
+    if adoption is None:
         return None
     head_ref = adoption.get("head_ref")
     if not isinstance(head_ref, str):
         return None
     stripped = head_ref.strip()
     return stripped or None
+
+
+def _sync_feature_pr_pull_head_ref(ws: Workspace) -> str | None:
+    pr_number = _sync_feature_pr_pr_number(ws)
+    if pr_number is None:
+        return None
+    return f"refs/pull/{pr_number}/head"
+
+
+def _sync_feature_pr_pr_number(ws: Workspace) -> int | None:
+    if ws.task_kind != "sync_feature_pr":
+        return None
+    pr_number = _positive_int(getattr(ws, "pr_number", None))
+    if pr_number is not None:
+        return pr_number
+    adoption = _sync_feature_pr_adoption(ws)
+    if adoption is None:
+        return None
+    return _positive_int(adoption.get("pr_number"))
+
+
+def _sync_feature_pr_adoption(ws: Workspace) -> dict[str, Any] | None:
+    if ws.task_kind != "sync_feature_pr":
+        return None
+    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    adoption = policy.get("pr_adoption")
+    return adoption if isinstance(adoption, dict) else None
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            parsed = int(stripped)
+            return parsed if parsed > 0 else None
+    return None

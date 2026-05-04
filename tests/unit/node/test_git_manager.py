@@ -153,6 +153,54 @@ class TestAddWorktree:
         assert branch == "awf/ws_abc123"
 
     @pytest.mark.unit
+    async def test_creates_worktree_from_github_pull_head_ref(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        _git(["switch", "-q", "-c", "fork-pr-head"], origin_repo)
+        (origin_repo / "FORK.md").write_text("from pull head\n")
+        _git(["add", "FORK.md"], origin_repo)
+        _git(["commit", "-q", "-m", "fork pr head"], origin_repo)
+        pr_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=origin_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        _git(["update-ref", "refs/pull/42/head", pr_head], origin_repo)
+        _git(["switch", "-q", "development"], origin_repo)
+        _git(["branch", "-D", "fork-pr-head"], origin_repo)
+
+        layout = await manager.add_worktree(
+            workspace_id="ws_pr_head",
+            repo_url=str(origin_repo),
+            base_branch="refs/pull/42/head",
+            new_branch="feature-sync/ws_pr_head",
+        )
+
+        assert (layout.worktree_path / "FORK.md").read_text() == "from pull head\n"
+        head = subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        tracking = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(layout.mirror_path),
+                "rev-parse",
+                "refs/remotes/origin/pull/42/head",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert head == pr_head
+        assert tracking == pr_head
+
+    @pytest.mark.unit
     async def test_rejects_duplicate_worktree_path(
         self, manager: GitManager, origin_repo: Path
     ) -> None:
