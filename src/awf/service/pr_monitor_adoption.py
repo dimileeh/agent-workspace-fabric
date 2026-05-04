@@ -441,6 +441,27 @@ def _raise_if_policy_conflicts(
     request: PullRequestMonitorAdoptionRequest,
 ) -> None:
     requested_grace = request.initial_review_grace_period_seconds
+    requested_agent = request.agent.value
+    if workspace.agent != requested_agent:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different agent policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "existing_agent": workspace.agent,
+                "requested_agent": requested_agent,
+            },
+        )
+    if workspace.profile_ref != request.profile_ref:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different profile_ref policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "existing_profile_ref": workspace.profile_ref,
+                "requested_profile_ref": request.profile_ref,
+            },
+        )
     if workspace.auto_merge != request.auto_merge:
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",

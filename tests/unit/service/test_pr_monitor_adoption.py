@@ -226,6 +226,61 @@ class TestPullRequestMonitorAdoptionService:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "initial_kwargs, replay_kwargs, expected_detail",
+        [
+            (
+                {"agent": "codex"},
+                {"agent": "claude_code"},
+                {
+                    "existing_agent": "codex",
+                    "requested_agent": "claude_code",
+                },
+            ),
+            (
+                {"profile_ref": "auto"},
+                {"profile_ref": "python"},
+                {
+                    "existing_profile_ref": "auto",
+                    "requested_profile_ref": "python",
+                },
+            ),
+        ],
+    )
+    async def test_replay_with_changed_agent_or_profile_policy_conflicts(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        initial_kwargs: dict[str, object],
+        replay_kwargs: dict[str, object],
+        expected_detail: dict[str, object],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    **initial_kwargs,
+                )
+            )
+
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        **replay_kwargs,
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": excinfo.value.detail["workspace_id"],
+            **expected_detail,
+        }
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "metadata, error_code",
         [
             (_metadata(state="CLOSED"), "PR_ALREADY_CLOSED"),
