@@ -77,7 +77,7 @@ test.describe("Dashboard Workspace Inspector", () => {
     await inspector.waitFor({ state: "visible" });
 
     // Verify URL was updated to include workspaceId
-    expect(page.url()).toContain("workspaceId=ws_mock123");
+    await expect(page).toHaveURL(/workspaceId=ws_mock123/);
 
     // Measure global pane to check for jumps later
     const capacityPanel = page.locator("text=Resource / Capacity").first();
@@ -93,7 +93,7 @@ test.describe("Dashboard Workspace Inspector", () => {
     await expect(page.locator(".fixed.inset-y-0.right-0").first()).toHaveClass(/translate-x-full/);
 
     // Verify URL updated to remove workspaceId
-    expect(page.url()).not.toContain("workspaceId");
+    await expect(page).not.toHaveURL(/workspaceId/);
 
     // 3. No Jump Validation
     const afterBox = await capacityPanel.boundingBox();
