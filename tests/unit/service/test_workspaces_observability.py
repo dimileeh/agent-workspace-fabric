@@ -1871,7 +1871,7 @@ def test_observability_payloads_include_identity_lifecycle_and_usage() -> None:
     }
     assert observability["llm_usage"]["status"] == "unavailable"
     assert identity_usage["agent_model"] == "ollama/kimi-k2.6:cloud"
-    assert identity_usage["llm_usage"]["reason"] == "usage_not_reported"
+    assert identity_usage["llm_usage"]["reason"] == "pricing_not_configured"
 
 
 @pytest.mark.unit

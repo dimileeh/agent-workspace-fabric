@@ -625,15 +625,17 @@ def lifecycle_payload(
 
 def usage_payload(workspace: Workspace) -> LlmUsagePayload:
     usage = workspace_usage_summary(workspace)
+    pricing = workspace_pricing_metadata(workspace)
+    cost, reason = compute_cost_estimate(usage, pricing)
     return {
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "total_tokens": usage.total_tokens,
-        "cost_estimate": usage.cost_estimate,
-        "currency": usage.currency,
-        "status": usage.status,
-        "source": usage.source,
-        "reason": usage.reason,
+        "cost_estimate": cost,
+        "currency": pricing.currency if pricing is not None else None,
+        "status": "available" if cost is not None else usage.status,
+        "source": "pricing_profile" if cost is not None else usage.source,
+        "reason": reason or usage.reason,
     }
 
 
