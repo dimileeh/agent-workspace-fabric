@@ -326,7 +326,7 @@ class WorkspacePricingMetadataResponse(BaseModel):
     model: str
     currency: str
     unit: str
-    price_per_1k_tokens: float | None = None
+    price_per_unit: float | None = None
     timestamp: datetime
     version: int | None = None
     is_current: bool

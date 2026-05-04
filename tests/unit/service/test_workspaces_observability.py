@@ -1989,7 +1989,7 @@ class TestComputeCostEstimate:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=stale_ts,
         )
         usage = LlmUsageSummary(
@@ -2015,7 +2015,7 @@ class TestComputeCostEstimate:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2041,7 +2041,7 @@ class TestComputeCostEstimate:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2068,7 +2068,7 @@ class TestComputeCostEstimate:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2095,7 +2095,7 @@ class TestComputeCostEstimate:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2122,7 +2122,7 @@ class TestComputeCostEstimate:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         )
         usage = LlmUsageSummary(
@@ -2156,7 +2156,7 @@ class TestComputeCostEstimate:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2183,7 +2183,7 @@ class TestComputeCostEstimate:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2210,7 +2210,7 @@ class TestComputeCostEstimate:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=None,
+            price_per_unit=None,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2272,7 +2272,7 @@ class TestComputeCostEstimatePerUnit:
             model="claude",
             currency="USD",
             unit="per_1M_tokens",
-            price_per_1k_tokens=15.0,
+            price_per_unit=15.0,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2298,7 +2298,7 @@ class TestComputeCostEstimatePerUnit:
             model="gpt-5.5",
             currency="USD",
             unit="per_1k_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2324,7 +2324,7 @@ class TestComputeCostEstimatePerUnit:
             model="test-model",
             currency="USD",
             unit="per_token",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(
@@ -2350,7 +2350,7 @@ class TestComputeCostEstimatePerUnit:
             model="test-model",
             currency="USD",
             unit="per_0_tokens",
-            price_per_1k_tokens=0.001,
+            price_per_unit=0.001,
             timestamp=datetime.now(UTC),
         )
         usage = LlmUsageSummary(

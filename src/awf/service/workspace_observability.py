@@ -359,7 +359,7 @@ def _overview_pricing_metadata(ws: Workspace) -> dict[str, object] | None:
         "model": pricing.model,
         "currency": pricing.currency,
         "unit": pricing.unit,
-        "price_per_1k_tokens": pricing.price_per_1k_tokens,
+        "price_per_unit": pricing.price_per_unit,
         "timestamp": pricing.timestamp,
         "version": pricing.version,
         "is_current": pricing.is_current(),
@@ -684,7 +684,7 @@ def compute_cost_estimate(
         return None, "pricing_not_configured"
     if not pricing.is_current(now=now, max_age_days=PRICING_MAX_AGE_DAYS):
         return None, "pricing_stale"
-    if pricing.price_per_1k_tokens is None:
+    if pricing.price_per_unit is None:
         return None, "pricing_rates_unavailable"
     if usage.total_tokens is not None:
         total_tokens = usage.total_tokens
@@ -695,7 +695,7 @@ def compute_cost_estimate(
     divisor = _token_divisor_from_unit(pricing.unit)
     if divisor is None:
         return None, "unsupported_pricing_unit"
-    cost = (total_tokens / divisor) * pricing.price_per_1k_tokens
+    cost = (total_tokens / divisor) * pricing.price_per_unit
     return cost, None
 
 

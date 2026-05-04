@@ -1350,7 +1350,7 @@ def _pricing_metadata_response(workspace: Workspace) -> dict[str, Any] | None:
         "model": pricing.model,
         "currency": pricing.currency,
         "unit": pricing.unit,
-        "price_per_1k_tokens": pricing.price_per_1k_tokens,
+        "price_per_unit": pricing.price_per_unit,
         "timestamp": pricing.timestamp,
         "version": pricing.version,
         "is_current": pricing.is_current(),
