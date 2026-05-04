@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import awf.service.support_bundle as support_bundle_module
+from awf.service import support_bundle as support_bundle_mod
 from awf.service.config import ServiceSettings
 from awf.service.support_bundle import (
     BUNDLE_FILENAME_PREFIX,
@@ -142,6 +142,23 @@ def _mock_failure_summary() -> dict[str, object]:
         "latest_examples": [],
         "root_cause_clusters": [],
     }
+
+
+class SecretEcho:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def __str__(self) -> str:
+        return f"opaque {self.value}"
+
+
+@dataclass
+class FailureSummaryPayload:
+    generated_at: str
+    since_hours: int
+    latest_examples: list[object]
+    root_cause_clusters: list[object]
+    opaque_detail: object
 
 
 @pytest.mark.unit
@@ -414,67 +431,64 @@ def test_support_bundle_degrades_when_db_unreachable(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_support_bundle_degrades_when_status_and_doctor_collectors_fail(
-    tmp_path: Path,
-) -> None:
+def test_support_bundle_degrades_when_status_and_doctor_collectors_fail(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
+    secret = "sk-support-bundle-secret"
 
-    async def _bad_status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
-        raise RuntimeError("status collector down")
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        raise RuntimeError(f"status failed with {secret}")
 
-    async def _bad_doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
-        raise RuntimeError("doctor collector down")
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        raise RuntimeError(f"doctor failed with {secret}")
 
-    async def _failure_collector(**_: object) -> object:
-        return object()
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
 
     bundle = asyncio.run(
         collect_support_bundle(
             settings,
             strict_providers=frozenset(),
             provider_environ={},
-            environ={},
-            status_collector=_bad_status_collector,
-            doctor_collector=_bad_doctor_collector,
+            environ={"OPENAI_API_KEY": secret},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
             failure_analysis_collector=_failure_collector,
         )
     )
 
+    assert bundle["provider_readiness_summary"] == {"status": "fail"}
     service_status = bundle["service_status"]
-    doctor_report = bundle["doctor_report"]
-    recent = bundle["recent_failure_summary"]
     assert isinstance(service_status, dict)
     assert service_status["status"] == "fail"
-    assert "status collector down" in str(service_status["detail"])
+    assert service_status["detail"] == "status failed with <redacted>"
+    doctor_report = bundle["doctor_report"]
     assert isinstance(doctor_report, dict)
     assert doctor_report["status"] == "fail"
-    assert "doctor collector down" in str(doctor_report["detail"])
-    assert isinstance(recent, dict)
-    assert recent["degraded"] is True
-    assert "object" in str(recent["error"])
+    assert doctor_report["detail"] == "doctor failed with <redacted>"
 
 
 @pytest.mark.unit
-def test_support_bundle_accepts_plain_doctor_mapping_and_default_failure_collector(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_support_bundle_accepts_plain_doctor_mapping_and_non_mapping_checks(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 
     async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
-        return _green_status()
+        return {
+            "service": "awf",
+            "status": "ok",
+            "checks": "not-a-check-map",
+            "agent_readiness": {"status": "warn", "providers": {}},
+        }
 
     async def _doctor_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
-        return {"service": "awf", "status": "warn", "diagnostics": []}
+        return {
+            "service": "awf",
+            "status": "warn",
+            "summary": {"ok": 0, "warn": 1, "fail": 0},
+            "diagnostics": [{"id": "config", "status": "warn"}],
+        }
 
-    async def _default_failure_collector(_: ServiceSettings, *, since_hours: int) -> dict[str, object]:
-        return {"since_hours": since_hours, "latest_examples": "not-a-list"}
-
-    monkeypatch.setattr(
-        support_bundle_module,
-        "_default_failure_analysis_collector",
-        _default_failure_collector,
-    )
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
 
     bundle = asyncio.run(
         collect_support_bundle(
@@ -484,98 +498,186 @@ def test_support_bundle_accepts_plain_doctor_mapping_and_default_failure_collect
             environ={},
             status_collector=_status_collector,
             doctor_collector=_doctor_collector,
-            failure_window_hours=7,
+            failure_analysis_collector=_failure_collector,
         )
     )
 
-    assert bundle["doctor_report"] == {"service": "awf", "status": "warn", "diagnostics": []}
-    recent = bundle["recent_failure_summary"]
-    assert isinstance(recent, dict)
-    assert recent["since_hours"] == 7
-
-
-@dataclass
-class _DataclassFailureSummary:
-    latest_examples: list[object]
-    root_cause_clusters: list[object]
+    assert bundle["doctor_report"] == {
+        "service": "awf",
+        "status": "warn",
+        "summary": {"ok": 0, "warn": 1, "fail": 0},
+        "diagnostics": [{"id": "config", "status": "warn"}],
+    }
+    assert bundle["orphan_cleanup_posture"] == {
+        "workspace_cleanup": {},
+        "orphan_resources": {},
+        "stranded_workspaces": {},
+    }
 
 
 @pytest.mark.unit
-def test_support_bundle_sanitizes_dataclass_and_non_mapping_examples() -> None:
-    summary = _DataclassFailureSummary(
+def test_support_bundle_sanitizes_dataclass_failure_summary(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    secret = "sk-support-dataclass-secret"
+    summary = FailureSummaryPayload(
+        generated_at=datetime.now(UTC).isoformat(),
+        since_hours=24,
         latest_examples=[
-            "not-a-mapping",
-            {"workspace_id": "ws_1", "stdout": "secret output"},
+            {
+                "workspace_id": "ws_secret",
+                "failure_reason": "agent_failure",
+                "reason_code": "AGENT_FAILURE",
+                "status": "failed",
+                "updated_at": datetime.now(UTC).isoformat(),
+                "task_prompt": f"secret prompt {secret}",
+            },
+            f"raw example {secret}",
         ],
         root_cause_clusters=[
-            "not-a-mapping",
-            {"failure_reason": "agent_failure", "task_prompt": "secret prompt"},
+            {
+                "failure_reason": "agent_failure",
+                "reason_code": "AGENT_FAILURE",
+                "count": 1,
+                "sample_workspace_ids": ["ws_secret"],
+                "stdout": f"secret output {secret}",
+            },
+            SecretEcho(secret),
         ],
+        opaque_detail=SecretEcho(secret),
     )
 
-    sanitized = support_bundle_module._sanitize_failure_summary(summary, frozenset())
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return _green_status()
 
-    assert sanitized["latest_examples"] == [{}, {"workspace_id": "ws_1"}]
-    assert sanitized["root_cause_clusters"] == [
-        {},
-        {"failure_reason": "agent_failure"},
-    ]
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> FailureSummaryPayload:
+        return summary
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={"OPENAI_API_KEY": secret},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+        )
+    )
+
+    recent = bundle["recent_failure_summary"]
+    assert isinstance(recent, dict)
+    assert recent["opaque_detail"] == "opaque <redacted>"
+    assert recent["latest_examples"][0] == {
+        "workspace_id": "ws_secret",
+        "failure_reason": "agent_failure",
+        "reason_code": "AGENT_FAILURE",
+        "status": "failed",
+        "updated_at": summary.latest_examples[0]["updated_at"],
+    }
+    assert recent["latest_examples"][1] == {}
+    assert recent["root_cause_clusters"][0] == {
+        "failure_reason": "agent_failure",
+        "reason_code": "AGENT_FAILURE",
+        "count": 1,
+        "sample_workspace_ids": ["ws_secret"],
+    }
+    assert recent["root_cause_clusters"][1] == {}
+    assert secret not in json.dumps(bundle, sort_keys=True, default=str)
 
 
 @pytest.mark.unit
-def test_support_bundle_redacts_unknown_object_values() -> None:
-    class SecretishObject:
-        def __str__(self) -> str:
-            return "value sk-objectsecret123456"
+def test_support_bundle_marks_opaque_failure_summary_degraded(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    secret = "sk-support-opaque-secret"
 
-    redacted = support_bundle_module._redact_value(
-        {"nested": SecretishObject()},
-        frozenset({"sk-objectsecret123456"}),
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        return _green_doctor()
+
+    async def _failure_collector(**_: object) -> SecretEcho:
+        return SecretEcho(secret)
+
+    bundle = asyncio.run(
+        collect_support_bundle(
+            settings,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={"OPENAI_API_KEY": secret},
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
+            failure_analysis_collector=_failure_collector,
+        )
     )
 
-    assert redacted == {"nested": "value <redacted>"}
+    recent = bundle["recent_failure_summary"]
+    assert isinstance(recent, dict)
+    assert recent == {"error": "opaque <redacted>", "degraded": True}
 
 
 @pytest.mark.unit
-def test_default_failure_analysis_collector_disposes_engine(
+def test_support_bundle_uses_default_failure_analysis_collector(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path)
-    disposed = False
-    fake_session_factory = object()
+    calls: dict[str, object] = {}
 
     class FakeEngine:
         async def dispose(self) -> None:
-            nonlocal disposed
-            disposed = True
+            calls["disposed"] = True
 
-    async def _summarize(session_factory: object, *, since_hours: int) -> dict[str, object]:
-        assert session_factory is fake_session_factory
-        return {"since_hours": since_hours}
+    fake_engine = FakeEngine()
+    fake_session_factory = object()
 
+    def _make_engine(database_url: str) -> FakeEngine:
+        calls["database_url"] = database_url
+        return fake_engine
+
+    def _make_session_factory(engine: FakeEngine) -> object:
+        calls["session_engine"] = engine
+        return fake_session_factory
+
+    async def _summarize_failure_analysis(session_factory: object, *, since_hours: int) -> dict[str, object]:
+        calls["session_factory"] = session_factory
+        calls["since_hours"] = since_hours
+        return _mock_failure_summary()
+
+    monkeypatch.setattr(support_bundle_mod, "make_engine", _make_engine)
+    monkeypatch.setattr(support_bundle_mod, "make_session_factory", _make_session_factory)
     monkeypatch.setattr(
-        support_bundle_module,
-        "make_engine",
-        lambda _database_url: FakeEngine(),
-    )
-    monkeypatch.setattr(
-        support_bundle_module,
-        "make_session_factory",
-        lambda _engine: fake_session_factory,
-    )
-    monkeypatch.setattr(
-        support_bundle_module,
+        support_bundle_mod,
         "summarize_failure_analysis",
-        _summarize,
+        _summarize_failure_analysis,
     )
 
-    result = asyncio.run(
-        support_bundle_module._default_failure_analysis_collector(
+    async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
+        return _green_status()
+
+    async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
+        return _green_doctor()
+
+    bundle = asyncio.run(
+        collect_support_bundle(
             settings,
-            since_hours=11,
+            strict_providers=frozenset(),
+            provider_environ={},
+            environ={},
+            failure_window_hours=72,
+            status_collector=_status_collector,
+            doctor_collector=_doctor_collector,
         )
     )
 
-    assert result == {"since_hours": 11}
-    assert disposed is True
+    assert calls == {
+        "database_url": settings.database_url,
+        "session_engine": fake_engine,
+        "session_factory": fake_session_factory,
+        "since_hours": 72,
+        "disposed": True,
+    }
+    assert bundle["recent_failure_summary"]["since_hours"] == 24

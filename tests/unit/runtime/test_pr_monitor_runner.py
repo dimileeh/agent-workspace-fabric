@@ -64,12 +64,15 @@ from awf.runtime.pr_monitor import (
     WaitForCI,
 )
 from awf.runtime.pr_monitor_runner import (
+    BaseBehindCountError,
+    BaseFetchError,
     MonitorRunnerConfig,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
     _as_utc,
     _collect_defer_items,
+    _GitPushResult,
     _infer_service_work_dir,
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
@@ -134,6 +137,34 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
 
 def _gh_pr_merge_calls(cmd: FakeCommandRunner) -> list[list[str]]:
     return [call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "merge"]]
+
+
+class _CapturingGH:
+    def __init__(self, status: PRStatus | None = None) -> None:
+        self.status = status or _green_status()
+        self.base_behind_counts: list[int] = []
+        self.failing_log_requests: list[tuple[RepoRef, int, str]] = []
+
+    async def fetch_pr_status(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        base_behind_count: int,
+    ) -> PRStatus:
+        del repo, pr_number
+        self.base_behind_counts.append(base_behind_count)
+        return replace(self.status, base_behind_count=base_behind_count)
+
+    async def fetch_failing_check_logs(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        head_sha: str,
+    ) -> tuple[CheckFailure, ...]:
+        self.failing_log_requests.append((repo, pr_number, head_sha))
+        return ()
 
 
 def _provider_recovery_policy(
@@ -1218,6 +1249,453 @@ async def test_sync_base_provider_failure_records_recovery_and_source_cooldown(
     assert [operation for operation in operations if operation.type == "retry"] == []
     assert len(recovery_events) == 1
     assert recovery_events[0]["provider_recovery"]["retry_after_seconds"] == 120
+
+
+@pytest.mark.unit
+async def test_fetch_status_repairs_orphaned_broken_awf_ref_before_counting_base(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=128,
+        stderr="fatal: bad object refs/heads/awf/ws_deadbeef1234567890",
+    )
+    cmd.queue_result(returncode=0)  # update-ref -d broken orphan branch
+    cmd.queue_result(returncode=0)  # worktree prune stale metadata
+    cmd.queue_result(returncode=0)  # retry fetch with explicit base refspec
+    cmd.queue_result(returncode=0, stdout="2\n")  # rev-list HEAD..origin/base
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    gh = _CapturingGH()
+    runner._deps.gh = gh  # type: ignore[assignment]
+
+    status = await runner._fetch_status_for_decision(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        workspace_id="ws_current",
+        base_branch="development",
+    )
+
+    assert status.base_behind_count == 2
+    assert gh.base_behind_counts == [2]
+    assert cmd.calls[0].args[-3:] == [
+        "fetch",
+        "origin",
+        "+refs/heads/development:refs/remotes/origin/development",
+    ]
+    assert cmd.calls[1].args[-3:] == [
+        "update-ref",
+        "-d",
+        "refs/heads/awf/ws_deadbeef1234567890",
+    ]
+    assert cmd.calls[2].args[-2:] == ["worktree", "prune"]
+    assert cmd.calls[3].args[-3:] == [
+        "fetch",
+        "origin",
+        "+refs/heads/development:refs/remotes/origin/development",
+    ]
+
+
+@pytest.mark.unit
+async def test_fetch_status_refuses_to_delete_broken_ref_for_active_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    broken_workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=128,
+        stderr=f"fatal: bad object refs/heads/awf/{broken_workspace_id}",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
+
+    with pytest.raises(BaseFetchError) as exc:
+        await runner._fetch_status_for_decision(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            workspace_id=broken_workspace_id,
+            base_branch="development",
+        )
+
+    assert "refs/heads/awf/" in str(exc.value)
+    assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
+async def test_fetch_status_keeps_failure_when_broken_ref_delete_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=128,
+        stderr="fatal: bad object refs/heads/awf/ws_deletefail123456",
+    )
+    cmd.queue_result(returncode=1, stderr="cannot lock ref")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
+
+    with pytest.raises(BaseFetchError) as exc:
+        await runner._fetch_status_for_decision(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            workspace_id="ws_current",
+            base_branch="development",
+        )
+
+    assert "bad object refs/heads/awf/ws_deletefail123456" in str(exc.value)
+    assert len(cmd.calls) == 2
+
+
+@pytest.mark.unit
+async def test_fetch_status_keeps_failure_when_retry_fetch_still_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=128,
+        stderr="fatal: bad object refs/heads/awf/ws_retryfail123456",
+    )
+    cmd.queue_result(returncode=0)  # update-ref -d broken orphan branch
+    cmd.queue_result(returncode=0)  # worktree prune
+    cmd.queue_result(returncode=128, stderr="fatal: remote hung up")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
+
+    with pytest.raises(BaseFetchError) as exc:
+        await runner._fetch_status_for_decision(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            workspace_id="ws_current",
+            base_branch="development",
+        )
+
+    assert "remote hung up" in str(exc.value)
+    assert len(cmd.calls) == 4
+
+
+@pytest.mark.unit
+async def test_run_fails_workspace_when_base_fetch_cannot_be_refreshed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: could not fetch base")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == "infrastructure_failure"
+        assert workspace.failure_message is not None
+        assert "could not refresh base branch" in workspace.failure_message
+
+
+@pytest.mark.unit
+async def test_base_behind_count_failure_is_explicit_not_zero(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: bad object")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(BaseBehindCountError):
+        await runner._count_base_behind(
+            worktree_path=tmp_path / "worktrees" / "ws_count",
+            base_branch="development",
+        )
+
+
+@pytest.mark.unit
+async def test_sync_base_no_progress_state_is_persisted_across_restarts(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._persist_state(
+        workspace_id,
+        MonitorState(
+            sync_base_no_progress_signature="abc|CONFLICTING|DIRTY|base_behind=0",
+            sync_base_no_progress_count=2,
+            threads_addressed_ids={"T1": "fix_committed"},
+        ),
+    )
+
+    workspace = await runner._load_workspace(workspace_id)
+    state = runner._load_state(workspace)
+
+    assert state.sync_base_no_progress_signature == "abc|CONFLICTING|DIRTY|base_behind=0"
+    assert state.sync_base_no_progress_count == 2
+    assert state.threads_addressed_ids == {"T1": "fix_committed"}
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_records_no_progress_noop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(
+            head_sha="abc1234567890def",
+            mergeable=MergeableState.CONFLICTING,
+            merge_state_status=MergeStateStatus.DIRTY,
+        ),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert state.sync_base_no_progress_signature == (
+        "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
+    )
+    assert state.sync_base_no_progress_count == 1
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_failed_push_resets_no_progress_streak(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=1, stderr="push rejected")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState(
+        sync_base_no_progress_signature=(
+            "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
+        ),
+        sync_base_no_progress_count=2,
+    )
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(
+            head_sha="abc1234567890def",
+            mergeable=MergeableState.CONFLICTING,
+            merge_state_status=MergeStateStatus.DIRTY,
+        ),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert state.sync_base_no_progress_signature is None
+    assert state.sync_base_no_progress_count == 0
+
+
+@pytest.mark.unit
+async def test_sync_base_progress_increments_same_snapshot_and_resets_on_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    status = _status(
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.CONFLICTING,
+        merge_state_status=MergeStateStatus.DIRTY,
+    )
+    state = MonitorState(
+        sync_base_no_progress_signature=(
+            "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
+        ),
+        sync_base_no_progress_count=1,
+    )
+
+    runner._record_sync_base_progress(
+        state=state,
+        status=status,
+        push_result=_GitPushResult(pushed=False, failed=False, returncode=0),
+    )
+    assert state.sync_base_no_progress_count == 2
+
+    runner._record_sync_base_progress(
+        state=state,
+        status=status,
+        push_result=_GitPushResult(pushed=False, failed=True, returncode=128),
+    )
+    assert state.sync_base_no_progress_signature is None
+    assert state.sync_base_no_progress_count == 0
+
+
+@pytest.mark.unit
+async def test_load_state_ignores_invalid_persisted_no_progress_count(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {
+            "__awf_sync_base_no_progress_signature": "sig",
+            "__awf_sync_base_no_progress_count": "not-an-int",
+            "T1": "defer",
+        }
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    workspace = await runner._load_workspace(workspace_id)
+    state = runner._load_state(workspace)
+
+    assert state.sync_base_no_progress_signature == "sig"
+    assert state.sync_base_no_progress_count == 0
+    assert state.threads_addressed_ids == {"T1": "defer"}
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_base_fetch_failure_finishes_operation_and_fails_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _raise_base_fetch_error(**_kwargs: object) -> object:
+        raise BaseFetchError("broken mirror")
+
+    mocker.patch.object(runner, "_run_sync_base", _raise_base_fetch_error)
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(merge_state_status=MergeStateStatus.DIRTY),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    assert terminal is True
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.failure_message is not None
+    assert "broken mirror" in workspace.failure_message
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "GIT_FETCH_BASE_FAILED"
 
 
 @pytest.mark.unit

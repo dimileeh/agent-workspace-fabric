@@ -36,6 +36,11 @@ def _settings(tmp_path: Path) -> ServiceSettings:
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_local_compose_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bootstrap, "local_service_environ", lambda: {})
+
+
 async def _ok_status_collector(
     settings: ServiceSettings,
     **kwargs: object,

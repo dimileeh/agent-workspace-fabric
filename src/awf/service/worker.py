@@ -25,7 +25,7 @@ from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
 from awf.node.cleanup import WorkspaceCleaner
 from awf.node.compose_manager import ComposeManager
-from awf.node.git_manager import GitManager
+from awf.node.git_manager import AGENT_RUNTIME_GID, AGENT_RUNTIME_UID, GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.secret_mounts import LocalSecretLeaseMountResolver
 from awf.node.stack_launcher import ComposeStackLauncher
@@ -48,8 +48,6 @@ from awf.service.target_branch_monitor import (
 )
 
 _log = get_logger(__name__)
-_AGENT_RUNTIME_UID = 1000
-_AGENT_RUNTIME_GID = 1000
 
 
 @dataclass(frozen=True)
@@ -71,8 +69,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     git = GitManager(
         work_dir / "git",
         env=git_env,
-        worktree_owner_uid=_AGENT_RUNTIME_UID,
-        worktree_owner_gid=_AGENT_RUNTIME_GID,
+        worktree_owner_uid=AGENT_RUNTIME_UID,
+        worktree_owner_gid=AGENT_RUNTIME_GID,
     )
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
@@ -121,8 +119,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     auth_mount_resolver = ServiceAuthMountResolver(
         host_home=host_home,
         work_dir=work_dir,
-        workspace_owner_uid=_AGENT_RUNTIME_UID,
-        workspace_owner_gid=_AGENT_RUNTIME_GID,
+        workspace_owner_uid=AGENT_RUNTIME_UID,
+        workspace_owner_gid=AGENT_RUNTIME_GID,
     )
     secret_lease_resolver = LocalSecretLeaseMountResolver(
         host_home=host_home,

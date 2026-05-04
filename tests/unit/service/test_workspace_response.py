@@ -10,6 +10,7 @@ import pytest
 
 from awf.api.schemas import WorkspaceResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -1330,6 +1331,22 @@ def test_profile_requested_validation_tier_ignores_non_integer_profile_value() -
 @pytest.mark.unit
 def test_loaded_collection_returns_empty_for_none_relationship() -> None:
     workspace = SimpleNamespace(operations=None)
+
+    assert _loaded_collection(workspace, "operations") == []
+
+
+@pytest.mark.unit
+def test_loaded_collection_returns_empty_for_unloaded_orm_relationship() -> None:
+    workspace = Workspace(
+        id="ws_unloaded_relationship",
+        status=WorkspaceStatus.requested.value,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        task_title="Unloaded relationship",
+        task_prompt="Verify validation projection does not lazy-load relationships.",
+        agent="codex",
+        test_commands=[],
+    )
 
     assert _loaded_collection(workspace, "operations") == []
 

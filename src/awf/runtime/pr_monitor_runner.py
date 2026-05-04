@@ -91,6 +91,7 @@ from awf.runtime.pr_monitor import (
     WaitForCI,
     _is_bot_author,
     decide,
+    sync_base_no_progress_signature,
 )
 from awf.runtime.pr_monitor_operations import (
     MonitorOperationHandle,
@@ -186,6 +187,10 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
+_GIT_FETCH_BASE_FAILED_REASON = "GIT_FETCH_BASE_FAILED"
+_GIT_BASE_BEHIND_FAILED_REASON = "GIT_BASE_BEHIND_FAILED"
+_GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
+_GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
@@ -207,6 +212,23 @@ _TOKEN_RE = re.compile(
     r"xox[baprs]-[A-Za-z0-9-]{8,}"
     r")(?![A-Za-z0-9])"
 )
+_BROKEN_AWF_REF_RE = re.compile(r"refs/heads/awf/(ws_[A-Za-z0-9_-]+)")
+_SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY = "__awf_sync_base_no_progress_signature"
+_SYNC_BASE_NO_PROGRESS_COUNT_KEY = "__awf_sync_base_no_progress_count"
+_TERMINAL_WORKSPACE_STATUSES = {
+    WorkspaceStatus.completed.value,
+    WorkspaceStatus.failed.value,
+    WorkspaceStatus.cancelled.value,
+    WorkspaceStatus.destroyed.value,
+}
+
+
+class BaseFetchError(Exception):
+    """Base branch refresh failed; PR monitor must not use stale refs."""
+
+
+class BaseBehindCountError(Exception):
+    """Base-behind calculation failed; PR monitor must not assume zero."""
 
 
 @dataclass
@@ -830,6 +852,40 @@ class PullRequestMonitorRunner:
                         workspace_id=workspace_id,
                         base_branch=ws.branch_base,
                     )
+                except BaseFetchError as exc:
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.failed",
+                            "workspace_id": workspace_id,
+                            "reason": "base_fetch_failed",
+                            "message": str(exc)[:400],
+                        },
+                    )
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=f"monitor: could not refresh base branch: {exc}"[:2000],
+                        reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                    )
+                    return
+                except BaseBehindCountError as exc:
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.failed",
+                            "workspace_id": workspace_id,
+                            "reason": "base_behind_count_failed",
+                            "message": str(exc)[:400],
+                        },
+                    )
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=f"monitor: could not calculate base-behind count: {exc}"[
+                            :2000
+                        ],
+                        reason_code=_GIT_BASE_BEHIND_FAILED_REASON,
+                    )
+                    return
                 except GitHubClientError as exc:
                     if await self._wait_after_transient_github_error(
                         exc,
@@ -1049,7 +1105,7 @@ class PullRequestMonitorRunner:
             )
             await self._terminate_completed(
                 workspace_id,
-                pr_merge_sha=None,
+                pr_merge_sha=status.merge_commit_sha or status.head_sha,
                 repo_url=repo_url,
                 base_branch=base_branch,
                 compose_project=compose_project,
@@ -1162,6 +1218,25 @@ class PullRequestMonitorRunner:
                     error_message="Provider recovery triggered fallback",
                 )
                 raise
+            except BaseFetchError as exc:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "base_fetch_failed",
+                        "reason_code": _GIT_FETCH_BASE_FAILED_REASON,
+                        "pushed": False,
+                    },
+                    error_code=_GIT_FETCH_BASE_FAILED_REASON,
+                    error_message=str(exc),
+                )
+                await self._terminate_failed(
+                    workspace_id,
+                    message=f"monitor: could not refresh base branch: {exc}"[:2000],
+                    reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                )
+                return True
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
                     operation,
@@ -1207,6 +1282,11 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
+                self._record_sync_base_progress(
+                    state=state,
+                    status=status,
+                    push_result=push_result,
+                )
                 state.iter_count += 1
                 return False
             await self._finish_monitor_operation(
@@ -1217,6 +1297,11 @@ class PullRequestMonitorRunner:
                     "outcome": "base_synced",
                     "pushed": push_result.pushed,
                 },
+            )
+            self._record_sync_base_progress(
+                state=state,
+                status=status,
+                push_result=push_result,
             )
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
@@ -1646,6 +1731,8 @@ class PullRequestMonitorRunner:
             merge_blocker: GitHubClientError | None = None
             merge_operation: MonitorOperationHandle | None = None
             recheck_error: GitHubClientError | None = None
+            recheck_base_error: BaseFetchError | None = None
+            recheck_behind_error: BaseBehindCountError | None = None
             merge_status = status
             queue_blockers_after_lock: list[MergeQueueBlocker] = []
             merge_gate_after_lock: _MergeGateResult | None = None
@@ -1673,6 +1760,10 @@ class PullRequestMonitorRunner:
                         )
                     except GitHubClientError as exc:
                         recheck_error = exc
+                    except BaseFetchError as exc:
+                        recheck_base_error = exc
+                    except BaseBehindCountError as exc:
+                        recheck_behind_error = exc
                     else:
                         checked_action = decide(checked_status, state, self._config)
                         if not isinstance(checked_action, Merge):
@@ -1697,7 +1788,12 @@ class PullRequestMonitorRunner:
                         else:
                             merge_status = checked_status
 
-                if recheck_error is None and fresh_action is None:
+                if (
+                    recheck_error is None
+                    and recheck_base_error is None
+                    and recheck_behind_error is None
+                    and fresh_action is None
+                ):
                     queue_blockers_after_lock = await self._merge_queue_blockers_for_workspace(
                         workspace_id
                     )
@@ -1840,6 +1936,28 @@ class PullRequestMonitorRunner:
                 if handled is None:  # pragma: no cover - defensive invariant
                     raise RuntimeError("merge gate blocker was not handled")
                 return handled
+
+            if recheck_base_error is not None:
+                await self._terminate_failed(
+                    workspace_id,
+                    message=(
+                        f"monitor: could not refresh base branch during pre-merge recheck: "
+                        f"{recheck_base_error}"
+                    )[:2000],
+                    reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                )
+                return True
+
+            if recheck_behind_error is not None:
+                await self._terminate_failed(
+                    workspace_id,
+                    message=(
+                        "monitor: could not calculate base-behind count during "
+                        f"pre-merge recheck: {recheck_behind_error}"
+                    )[:2000],
+                    reason_code=_GIT_BASE_BEHIND_FAILED_REASON,
+                )
+                return True
 
             if recheck_error is not None:
                 if await self._wait_after_transient_github_error(
@@ -3081,7 +3199,11 @@ class PullRequestMonitorRunner:
         # "You have not concluded your merge". Abort first; the command
         # exits non-zero when there's nothing to abort, which we ignore.
         await _git("merge", "--abort")
-        await _git("fetch", "origin", base_branch)
+        await self._fetch_base(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_branch=base_branch,
+        )
         rc, _stdout, stderr = await _git("merge", "--no-edit", f"origin/{base_branch}")
         if rc != 0:
             # Conflicts — enumerate them for the prompt.
@@ -3394,23 +3516,136 @@ class PullRequestMonitorRunner:
             "before it commits or pushes."
         )
 
-    async def _fetch_base(self, *, worktree_path: Path, base_branch: str) -> None:
+    def _record_sync_base_progress(
+        self,
+        *,
+        state: MonitorState,
+        status: PRStatus,
+        push_result: _GitPushResult,
+    ) -> None:
+        if push_result.pushed or push_result.failed:
+            state.sync_base_no_progress_signature = None
+            state.sync_base_no_progress_count = 0
+            return
+        signature = sync_base_no_progress_signature(status)
+        if state.sync_base_no_progress_signature == signature:
+            state.sync_base_no_progress_count += 1
+        else:
+            state.sync_base_no_progress_signature = signature
+            state.sync_base_no_progress_count = 1
+
+    async def _fetch_base(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        base_branch: str,
+    ) -> None:
         """``git fetch origin <base>`` — refreshes the worktree's
         remote-tracking ref so the subsequent rev-list is accurate.
 
-        Non-fatal on failure (offline, transient network, etc.). The
-        decide() gate will fall back to GitHub's mergeStateStatus if
-        the local count is wrong."""
-        await self._deps.runner.run(
+        Fetch is authoritative. If AWF cannot refresh this ref, continuing
+        would make ``base_behind_count`` stale and can livelock SyncBase.
+        """
+        result = await self._fetch_base_once(worktree_path=worktree_path, base_branch=base_branch)
+        repairs_attempted = 0
+        while not result.ok and repairs_attempted < _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS:
+            try:
+                repaired = await self._repair_orphaned_broken_awf_ref(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    stderr=result.stderr,
+                )
+            except Exception as exc:
+                _log.exception(
+                    "monitor.git_mirror_broken_ref_repair_failed",
+                    workspace_id=workspace_id,
+                    base_branch=base_branch,
+                    repairs_attempted=repairs_attempted,
+                )
+                raise BaseFetchError(
+                    redact_audit_text(
+                        "git fetch base failed: broken AWF ref repair failed "
+                        f"after fetch failure: {exc!r}",
+                        limit=2000,
+                    )
+                ) from exc
+            if not repaired:
+                break
+            repairs_attempted += 1
+            result = await self._fetch_base_once(
+                worktree_path=worktree_path,
+                base_branch=base_branch,
+            )
+        if result.ok:
+            return
+        raise BaseFetchError(_git_failure_message("git fetch base", result))
+
+    async def _fetch_base_once(self, *, worktree_path: Path, base_branch: str) -> CommandResult:
+        return await self._deps.runner.run(
             [
                 "git",
                 "-C",
                 str(worktree_path),
                 "fetch",
                 "origin",
-                base_branch,
+                f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
             ]
         )
+
+    async def _repair_orphaned_broken_awf_ref(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        stderr: str,
+    ) -> bool:
+        match = _BROKEN_AWF_REF_RE.search(stderr or "")
+        if match is None:
+            return False
+        broken_workspace_id = match.group(1)
+        broken_ref = f"refs/heads/awf/{broken_workspace_id}"
+        if not await self._can_remove_broken_awf_ref(broken_workspace_id):
+            _log.warning(
+                "monitor.git_mirror_broken_ref_active_workspace",
+                workspace_id=workspace_id,
+                broken_workspace_id=broken_workspace_id,
+                broken_ref=broken_ref,
+            )
+            return False
+        delete_result = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "update-ref", "-d", broken_ref]
+        )
+        if not delete_result.ok:
+            _log.warning(
+                "monitor.git_mirror_broken_ref_delete_failed",
+                workspace_id=workspace_id,
+                broken_ref=broken_ref,
+                stderr=(delete_result.stderr or "")[:400],
+            )
+            return False
+        await self._deps.runner.run(["git", "-C", str(worktree_path), "worktree", "prune"])
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="workspace.git_mirror_repaired",
+                    reason_code=_GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
+                    payload={
+                        "broken_ref": broken_ref,
+                        "broken_workspace_id": broken_workspace_id,
+                    },
+                )
+            ],
+        )
+        return True
+
+    async def _can_remove_broken_awf_ref(self, broken_workspace_id: str) -> bool:
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(broken_workspace_id)
+            if workspace is None:
+                return True
+            return workspace.status in _TERMINAL_WORKSPACE_STATUSES
 
     async def _count_base_behind(self, *, worktree_path: Path, base_branch: str) -> int:
         r = await self._deps.runner.run(
@@ -3424,11 +3659,13 @@ class PullRequestMonitorRunner:
             ]
         )
         if not r.ok:
-            return 0
+            raise BaseBehindCountError(_git_failure_message("git rev-list base behind", r))
         try:
             return int(r.stdout.strip() or "0")
-        except ValueError:
-            return 0
+        except ValueError as exc:
+            raise BaseBehindCountError(
+                f"git rev-list base behind returned non-integer output: {r.stdout[:200]!r}"
+            ) from exc
 
     async def _rev_parse_head(self, worktree_path: Path) -> str:
         r = await self._deps.runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
@@ -3566,7 +3803,11 @@ class PullRequestMonitorRunner:
         weaker data than ordinary polling.
         """
         worktree_path = self._worktrees_root / workspace_id
-        await self._fetch_base(worktree_path=worktree_path, base_branch=base_branch)
+        await self._fetch_base(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_branch=base_branch,
+        )
         base_behind = await self._count_base_behind(
             worktree_path=worktree_path,
             base_branch=base_branch,
@@ -3705,6 +3946,18 @@ class PullRequestMonitorRunner:
             elapsed = (now_wall - started_dt).total_seconds()
             started_at = now_monotonic - max(elapsed, 0.0)
         threads_addressed = dict(ws.monitor_threads_addressed or {})
+        sync_base_no_progress_signature = threads_addressed.pop(
+            _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY,
+            None,
+        )
+        sync_base_no_progress_count_raw = threads_addressed.pop(
+            _SYNC_BASE_NO_PROGRESS_COUNT_KEY,
+            "0",
+        )
+        try:
+            sync_base_no_progress_count = int(sync_base_no_progress_count_raw)
+        except (TypeError, ValueError):
+            sync_base_no_progress_count = 0
         if ws.pr_number is not None:
             threads_addressed = _initial_review_grace_state_for_runtime(
                 threads_addressed,
@@ -3722,6 +3975,8 @@ class PullRequestMonitorRunner:
         return MonitorState(
             iter_count=ws.monitor_iter_count,
             last_push_sha=ws.monitor_last_commit_sha,
+            sync_base_no_progress_signature=sync_base_no_progress_signature,
+            sync_base_no_progress_count=sync_base_no_progress_count,
             threads_addressed_ids=threads_addressed,
             started_at=started_at,
         )
@@ -3746,6 +4001,16 @@ class PullRequestMonitorRunner:
                     pr_number=ws.pr_number,
                     now_monotonic=now_monotonic,
                     now_wall_seconds=now_wall.timestamp(),
+                )
+            if (
+                state.sync_base_no_progress_signature is not None
+                and state.sync_base_no_progress_count > 0
+            ):
+                threads_addressed[_SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY] = (
+                    state.sync_base_no_progress_signature
+                )
+                threads_addressed[_SYNC_BASE_NO_PROGRESS_COUNT_KEY] = str(
+                    state.sync_base_no_progress_count
                 )
             ws.monitor_iter_count = state.iter_count
             ws.monitor_threads_addressed = threads_addressed
@@ -4270,6 +4535,14 @@ def _redact_and_truncate_github_error(value: str, *, limit: int = 400) -> str:
     if len(redacted) <= limit:
         return redacted
     return redacted[: limit - 3] + "..."
+
+
+def _git_failure_message(operation: str, result: CommandResult) -> str:
+    detail = result.stderr.strip() or result.stdout.strip() or "<no output>"
+    return redact_audit_text(
+        f"{operation} failed with exit code {result.returncode}: {detail}",
+        limit=2000,
+    )
 
 
 def _is_transient_github_client_error(exc: GitHubClientError) -> bool:

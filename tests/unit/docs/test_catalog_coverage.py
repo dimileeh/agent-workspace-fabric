@@ -72,6 +72,19 @@ ALLOWLIST = {
 }
 
 
+def _extract_reason_code_value(
+    val_node: ast.expr,
+    file_constants: dict[str, str],
+) -> str | None:
+    if isinstance(val_node, ast.Constant) and isinstance(val_node.value, str):
+        return val_node.value
+    if isinstance(val_node, ast.Name) and val_node.id in file_constants:
+        return file_constants[val_node.id]
+    if isinstance(val_node, ast.JoinedStr):
+        return ast.unparse(val_node)
+    return None
+
+
 def test_catalog_coverage() -> None:
     """Ensure all public reason codes are documented in the REASON_CATALOG.md."""
     if not CATALOG_PATH.exists():
@@ -92,44 +105,44 @@ def test_catalog_coverage() -> None:
             # Map file-level constants to their string values
             file_constants: dict[str, str] = {}
             for node in ast.walk(tree):
-                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                if (
+                    isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                ):
                     for target in node.targets:
                         if isinstance(target, ast.Name):
                             file_constants[target.id] = node.value.value
 
-            def _extract_val(
-                val_node: ast.expr,
-                file_constants: dict[str, str] = file_constants,
-            ) -> str | None:
-                if isinstance(val_node, ast.Constant) and isinstance(val_node.value, str):
-                    return val_node.value
-                if isinstance(val_node, ast.Name) and val_node.id in file_constants:
-                    return file_constants[val_node.id]
-                if isinstance(val_node, ast.JoinedStr):
-                    return ast.unparse(val_node)
-                return None
-
             for node in ast.walk(tree):
                 # keyword arg: error_code="XYZ" or error_code=CONSTANT
                 if isinstance(node, ast.keyword) and node.arg == "error_code":
-                    extracted = _extract_val(node.value)
+                    extracted = _extract_reason_code_value(node.value, file_constants)
                     if extracted:
                         all_reason_codes.add(extracted)
 
                 # assignment: error_code = "XYZ" or self.error_code = "XYZ"
                 elif isinstance(node, ast.Assign):
                     for target in node.targets:
-                        if (isinstance(target, ast.Name) and target.id == "error_code") or \
-                           (isinstance(target, ast.Attribute) and target.attr == "error_code"):
-                            extracted = _extract_val(node.value)
+                        if (
+                            isinstance(target, ast.Name)
+                            and target.id == "error_code"
+                        ) or (
+                            isinstance(target, ast.Attribute)
+                            and target.attr == "error_code"
+                        ):
+                            extracted = _extract_reason_code_value(
+                                node.value,
+                                file_constants,
+                            )
                             if extracted:
                                 all_reason_codes.add(extracted)
 
                 # dict key: {"error_code": "XYZ"} or {"error_code": CONSTANT}
                 elif isinstance(node, ast.Dict):
-                    for key, val in zip(node.keys, node.values, strict=True):
+                    for key, val in zip(node.keys, node.values, strict=False):
                         if isinstance(key, ast.Constant) and key.value == "error_code":
-                            extracted = _extract_val(val)
+                            extracted = _extract_reason_code_value(val, file_constants)
                             if extracted:
                                 all_reason_codes.add(extracted)
         except SyntaxError:

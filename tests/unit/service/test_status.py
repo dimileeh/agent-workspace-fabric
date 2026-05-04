@@ -10,6 +10,7 @@ import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -31,6 +32,7 @@ from awf.service.status import (
     _docker_socket_path,
     _fail,
     _http_get,
+    _is_legacy_open_default_workspace,
     _orphan_resources_check_payload,
     _run_docker_command,
     _run_subprocess,
@@ -371,6 +373,34 @@ def test_workspace_cleanup_status_reports_plan_unavailable_without_engine_dispos
 
 
 @pytest.mark.unit
+def test_workspace_cleanup_status_disposes_engine_when_plan_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    disposed = False
+
+    class _Engine:
+        async def dispose(self) -> None:
+            nonlocal disposed
+            disposed = True
+
+    async def fail_plan(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        raise RuntimeError("planner failed")
+
+    monkeypatch.setattr(status_mod, "make_engine", lambda _url: _Engine())
+    monkeypatch.setattr(status_mod, "make_session_factory", lambda _engine: object())
+    monkeypatch.setattr(status_mod, "plan_terminal_workspace_gc", fail_plan)
+
+    cleanup = asyncio.run(collect_workspace_cleanup_status(_settings(tmp_path)))
+
+    assert cleanup["ok"] is True
+    assert cleanup["status"] == "unavailable"
+    assert cleanup["reason"] == "CLEANUP_PLAN_UNAVAILABLE"
+    assert "planner failed" in cleanup["detail"]
+    assert disposed is True
+
+
+@pytest.mark.unit
 def test_status_db_helpers_handle_engine_construction_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -386,6 +416,53 @@ def test_status_db_helpers_handle_engine_construction_failures(
     assert db["ok"] is False
     assert db["reason"] == "DB_CONNECTION_FAILED"
     assert view.available is False
+
+
+@pytest.mark.unit
+def test_check_database_disposes_engine_when_probe_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disposed = False
+
+    class _Connection:
+        async def __aenter__(self) -> _Connection:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("select failed")
+
+    class _Engine:
+        def connect(self) -> _Connection:
+            return _Connection()
+
+        async def dispose(self) -> None:
+            nonlocal disposed
+            disposed = True
+
+    monkeypatch.setattr(status_mod, "make_engine", lambda _url: _Engine())
+
+    db = asyncio.run(check_database("sqlite+aiosqlite:///fake.db"))
+
+    assert db["ok"] is False
+    assert db["reason"] == "DB_CONNECTION_FAILED"
+    assert "select failed" in str(db["detail"])
+    assert disposed is True
+
+
+@pytest.mark.unit
+def test_legacy_open_default_treats_non_datetime_rows_as_legacy() -> None:
+    cutoff = datetime(2026, 5, 4, tzinfo=UTC)
+
+    assert (
+        _is_legacy_open_default_workspace(
+            "legacy-string-created-at",
+            legacy_open_default_cutoff=cutoff,
+        )
+        is True
+    )
 
 
 @pytest.mark.unit

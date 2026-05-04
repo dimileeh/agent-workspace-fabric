@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import pytest_mock
 import structlog
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -42,6 +43,8 @@ from awf.runtime.pr_monitor import (
     SyncBase,
 )
 from awf.runtime.pr_monitor_runner import (
+    BaseBehindCountError,
+    BaseFetchError,
     MonitorRunnerConfig,
     ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
@@ -833,6 +836,100 @@ async def test_pre_merge_recheck_github_error_fails_workspace(
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert "pre-merge recheck" in (ws.failure_message or "")
+
+
+@pytest.mark.unit
+async def test_pre_merge_recheck_base_fetch_error_fails_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        pre_merge_settle_seconds=2,
+    )
+    mocker.patch.object(
+        runner,
+        "_fetch_status_for_decision",
+        mocker.AsyncMock(side_effect=BaseFetchError("base fetch died")),
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert sleep_fn.calls == [2]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert "could not refresh base branch" in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == "GIT_FETCH_BASE_FAILED"
+
+
+@pytest.mark.unit
+async def test_pre_merge_recheck_base_behind_error_fails_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        pre_merge_settle_seconds=2,
+    )
+    mocker.patch.object(
+        runner,
+        "_fetch_status_for_decision",
+        mocker.AsyncMock(side_effect=BaseBehindCountError("rev-list died")),
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert sleep_fn.calls == [2]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert "could not calculate base-behind count" in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == "GIT_BASE_BEHIND_FAILED"
 
 
 @pytest.mark.unit
@@ -2477,7 +2574,7 @@ async def test_monitor_sync_base_cleanup_failure_terminates_without_push(
     assert terminal is True
     assert [call.args[-2:] for call in cmd.calls] == [
         ["merge", "--abort"],
-        ["origin", "development"],
+        ["origin", "+refs/heads/development:refs/remotes/origin/development"],
         ["--no-edit", "origin/development"],
         ["status", "--porcelain"],
     ]
@@ -2731,7 +2828,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
     assert "src/conflict.py" in adapter.calls[0]
     assert [call.args[-2:] for call in cmd.calls[:2]] == [
         ["merge", "--abort"],
-        ["origin", "development"],
+        ["origin", "+refs/heads/development:refs/remotes/origin/development"],
     ]
     assert cmd.calls[-1].args[-2:] == ["origin", "HEAD:refs/heads/awf/ws_sync_conflict"]
 
@@ -2797,12 +2894,100 @@ async def test_git_helpers_handle_bad_base_count_and_push_rejection_recovery(
     )
     worktree = tmp_path / "worktrees" / "ws_git"
 
-    assert await runner._count_base_behind(worktree_path=worktree, base_branch="main") == 0
-    assert await runner._count_base_behind(worktree_path=worktree, base_branch="main") == 0
+    with pytest.raises(BaseBehindCountError):
+        await runner._count_base_behind(worktree_path=worktree, base_branch="main")
+    with pytest.raises(BaseBehindCountError):
+        await runner._count_base_behind(worktree_path=worktree, base_branch="main")
     assert await runner._git_push(worktree_path=worktree, remote_branch="awf/ws_git") is False
 
     assert cmd.calls[-2].args[-2:] == ["origin", "awf/ws_git"]
     assert cmd.calls[-1].args[-2:] == ["--hard", "origin/awf/ws_git"]
+
+
+@pytest.mark.unit
+async def test_fetch_base_repairs_multiple_broken_awf_refs_before_failing_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fetch_base_once = mocker.patch.object(
+        runner,
+        "_fetch_base_once",
+        mocker.AsyncMock(
+            side_effect=[
+                CommandResult(returncode=1, stdout="", stderr="bad ref ws_old_1"),
+                CommandResult(returncode=1, stdout="", stderr="bad ref ws_old_2"),
+                CommandResult(returncode=0, stdout="", stderr=""),
+            ]
+        ),
+    )
+    repair = mocker.patch.object(
+        runner,
+        "_repair_orphaned_broken_awf_ref",
+        mocker.AsyncMock(side_effect=[True, True]),
+    )
+
+    await runner._fetch_base(
+        workspace_id="ws_current",
+        worktree_path=tmp_path / "worktrees" / "ws_current",
+        base_branch="development",
+    )
+
+    assert fetch_base_once.await_count == 3
+    assert repair.await_count == 2
+    assert [call.kwargs["stderr"] for call in repair.await_args_list] == [
+        "bad ref ws_old_1",
+        "bad ref ws_old_2",
+    ]
+
+
+@pytest.mark.unit
+async def test_fetch_base_wraps_broken_ref_repair_exceptions_as_base_fetch_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fetch_base_once = mocker.patch.object(
+        runner,
+        "_fetch_base_once",
+        mocker.AsyncMock(
+            return_value=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="fatal: bad object refs/heads/awf/ws_old",
+            )
+        ),
+    )
+    repair = mocker.patch.object(
+        runner,
+        "_repair_orphaned_broken_awf_ref",
+        mocker.AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+
+    with pytest.raises(BaseFetchError, match="broken AWF ref repair failed") as exc:
+        await runner._fetch_base(
+            workspace_id="ws_current",
+            worktree_path=tmp_path / "worktrees" / "ws_current",
+            base_branch="development",
+        )
+
+    assert "database unavailable" in str(exc.value)
+    assert fetch_base_once.await_count == 1
+    repair.assert_awaited_once()
 
 
 @pytest.mark.unit
@@ -3544,6 +3729,27 @@ async def test_merge_gate_legacy_head_support_modern_fallback_and_typeerror(
     )
     assert modern_calls == [("ws_modern", True, "head1")]
 
+    plain_calls: list[tuple[str, bool]] = []
+
+    async def plain_gate(
+        workspace_id: str,
+        *,
+        check_policy: bool = False,
+    ) -> object:
+        plain_calls.append((workspace_id, check_policy))
+        return sentinel
+
+    monkeypatch.setattr(runner, "_merge_gate_for_workspace", plain_gate)
+    assert (
+        await runner._merge_gate_with_legacy_head_support(
+            "ws_plain",
+            check_policy=True,
+            current_head_sha=None,
+        )
+        is sentinel
+    )
+    assert plain_calls == [("ws_plain", True)]
+
     legacy_calls: list[tuple[str, bool]] = []
 
     async def legacy_gate(
@@ -3719,6 +3925,102 @@ async def test_protected_scope_repair_returns_none_when_recheck_fails(
         is None
     )
     assert len(adapter.calls) == 1
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_stops_when_protected_scope_repair_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_fails(**_kwargs: object) -> object | None:
+        return None
+
+    monkeypatch.setattr(
+        runner,
+        "_repair_protected_scope_changes_before_commit",
+        _repair_fails,
+    )
+
+    assert not await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: repair protected scope",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+    assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
+async def test_protected_scope_repair_raises_provider_retry_before_cli(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await session.commit()
+
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch.object(
+        runner,
+        "_provider_recovery_suppresses_cli",
+        mocker.AsyncMock(return_value=True),
+    )
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._repair_protected_scope_changes_before_commit(
+            workspace_id=workspace_id,
+            status_stdout=" M .github/workflows/ci.yml\n",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+    assert adapter.calls == []
+
+
+@pytest.mark.unit
+async def test_protected_scope_violations_skip_empty_status(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert (
+        await runner._protected_scope_violations_for_status(
+            workspace_id="ws_without_changes",
+            status_stdout="",
+        )
+        == []
+    )
 
 
 @pytest.mark.unit

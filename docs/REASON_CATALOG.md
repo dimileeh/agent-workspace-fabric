@@ -93,6 +93,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `gh auth login`
 **Docs Link:** [docs/REASON_CATALOG.md#github_token_env_missing](#github_token_env_missing)
 
+### GIT_FETCH_BASE_FAILED
+**Problem:** The PR monitor could not refresh the target branch ref for a workspace.
+**Likely Cause:** The shared git mirror has a broken AWF ref, network access to the remote failed, or the target branch no longer exists.
+**Operator Fix:** Inspect the workspace monitor log and run `git fsck` on the AWF mirror. If AWF reports a repaired orphan ref, restart or remonitor the workspace; otherwise repair GitHub/network access before retrying.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#git_fetch_base_failed](#git_fetch_base_failed)
+
 ### INSUFFICIENT_DISK
 **Problem:** Free disk is below the configured AWF threshold.
 **Likely Cause:** Too many stopped containers, volumes, or large workspaces.

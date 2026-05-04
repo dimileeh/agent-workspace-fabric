@@ -28,6 +28,7 @@ from awf.service.gc import (
     _default_worktree_remover,
     _pr_has_merged,
     _release_gc_reservations,
+    _run_worktree_remove,
     plan_terminal_workspace_gc,
     run_terminal_workspace_gc,
     run_workspace_filesystem_gc,
@@ -627,6 +628,36 @@ def test_worktree_remove_result_to_dict_with_error():
     assert payload["status"] == "failed"
     assert payload["reason_code"] == "GIT_WORKTREE_REMOVE_FAILED"
     assert payload["error"] == "mirror not accessible"
+
+
+async def test_run_worktree_remove_skips_when_callback_absent() -> None:
+    candidate = WorkspaceGCCandidate(
+        workspace_id="ws_no_remover",
+        status=WorkspaceStatus.completed.value,
+        updated_at=datetime(2026, 4, 26, 12, tzinfo=UTC),
+        age_hours=200,
+        reason_code="COMPLETED_PR_RETENTION_EXPIRED",
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=Path("/tmp/awf/worktrees/ws_no_remover"),
+            exists=True,
+            estimated_bytes=1,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=Path("/tmp/awf/compose/ws_no_remover"),
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth",
+            path=Path("/tmp/awf/auth/ws_no_remover"),
+            exists=False,
+            estimated_bytes=0,
+        ),
+    )
+
+    assert await _run_worktree_remove(candidate, None) is None
 
 
 async def test_gc_worktree_remover_with_awaitable_callback(

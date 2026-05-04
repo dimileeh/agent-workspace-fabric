@@ -71,6 +71,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       isDraft
       closed
       merged
+      mergeCommit { oid }
       baseRef { name target { ... on Commit { oid } } }
       commits(last: 1) {
         nodes {
@@ -347,6 +348,7 @@ class GitHubClient:
             changed_paths=changed_paths,
             closed=bool(pr.get("closed")),
             merged=bool(pr.get("merged")),
+            merge_commit_sha=_clean_optional_str(_dig(pr, "mergeCommit", "oid")),
         )
 
     async def _fetch_changed_paths(

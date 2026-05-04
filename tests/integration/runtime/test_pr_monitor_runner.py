@@ -110,6 +110,7 @@ def _pr_payload(
     *,
     closed: bool = False,
     merged: bool = False,
+    merge_commit_sha: str = "mergecommit1234567890",
     mergeable: str = "MERGEABLE",
     merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
@@ -129,6 +130,7 @@ def _pr_payload(
                         "isDraft": False,
                         "closed": closed,
                         "merged": merged,
+                        "mergeCommit": {"oid": merge_commit_sha} if merged else None,
                         "baseRef": {"name": "development", "target": {"oid": "base0"}},
                         "commits": {
                             "nodes": [{"commit": {"statusCheckRollup": {"state": check_state}}}]
@@ -514,7 +516,7 @@ class TestMergeBlockedFallsBackToNotify:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
-            assert ws.pr_merge_sha is None
+            assert ws.pr_merge_sha == "mergecommit1234567890"
         # gh pr comment was invoked with the human-attention body.
         comment_args = next(c.args for c in cmd.calls if c.args[:3] == ["gh", "pr", "comment"])
         body = comment_args[comment_args.index("--body") + 1]
@@ -1531,7 +1533,7 @@ class TestAgentRunErrorResilience:
 
 class TestBaseBehindEdges:
     @pytest.mark.unit
-    async def test_rev_list_error_treats_base_as_up_to_date(
+    async def test_rev_list_error_fails_monitor_instead_of_assuming_up_to_date(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -1539,14 +1541,10 @@ class TestBaseBehindEdges:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """Failed rev-list (e.g. origin/<base> not yet fetched) should not
-        trip the monitor — we just get base_behind=0 and carry on."""
+        """Failed rev-list means AWF cannot trust local base freshness."""
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=1, stderr="unknown revision")  # base-behind fails
-        cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR green
-        cmd.queue_result(returncode=0)  # merge
-        cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
@@ -1562,10 +1560,12 @@ class TestBaseBehindEdges:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_message is not None
+            assert "unknown revision" in ws.failure_message
 
     @pytest.mark.unit
-    async def test_rev_list_garbage_output_treats_base_as_up_to_date(
+    async def test_rev_list_garbage_output_fails_monitor_instead_of_assuming_zero(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -1576,9 +1576,6 @@ class TestBaseBehindEdges:
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="not-a-number\n")  # garbage
-        cmd.queue_result(returncode=0, stdout=_pr_payload())
-        cmd.queue_result(returncode=0)
-        cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
@@ -1594,7 +1591,9 @@ class TestBaseBehindEdges:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_message is not None
+            assert "not-a-number" in ws.failure_message
 
 
 class TestResumePreservesMonitorStartedAt:

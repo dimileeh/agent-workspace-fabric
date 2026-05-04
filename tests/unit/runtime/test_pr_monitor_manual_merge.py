@@ -293,6 +293,7 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
     assert ws.status == WorkspaceStatus.completed.value
     assert events[-1].new_state == WorkspaceStatus.completed.value
     assert events[-1].reason_code == "MONITOR_DONE"
+    assert ws.pr_merge_sha == "mergecommit1234567890"
     assert candidate.status == "merged"
     assert candidate.merged_at is not None
     assert not candidate.manual_merge_required

@@ -387,6 +387,127 @@ def test_chown_tree_returns_after_chowning_plain_file(
     assert chowned == [file_path]
 
 
+@pytest.mark.unit
+def test_chown_tree_directories_only_repairs_object_fanout_dirs_not_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    objects = tmp_path / "objects"
+    fanout = objects / "c4"
+    pack = objects / "pack"
+    fanout.mkdir(parents=True)
+    pack.mkdir()
+    loose_object = fanout / "abcdef"
+    loose_object.write_text("object\n", encoding="utf-8")
+    pack_file = pack / "pack-test.pack"
+    pack_file.write_text("pack\n", encoding="utf-8")
+    chowned: list[Path] = []
+
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, _uid, _gid: chowned.append(Path(path)),
+    )
+
+    git_manager._chown_tree(objects, 1000, 1000, directories_only=True)  # noqa: SLF001
+
+    assert objects in chowned
+    assert fanout in chowned
+    assert pack in chowned
+    assert loose_object not in chowned
+    assert pack_file not in chowned
+
+
+@pytest.mark.unit
+def test_repair_agent_writable_worktree_falls_back_when_mirror_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    captured: list[tuple[tuple[git_manager._ChownTarget, ...], int, int]] = []  # noqa: SLF001
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        git_manager,
+        "_chown_targets",
+        lambda targets, uid, gid: captured.append((targets, uid, gid)),
+    )
+
+    git_manager.repair_agent_writable_worktree(None, worktree, uid=123, gid=456)
+
+    assert captured == [
+        ((git_manager._ChownTarget(worktree, recursive=True),), 123, 456)  # noqa: SLF001
+    ]
+
+
+@pytest.mark.unit
+def test_repair_agent_writable_worktree_fallback_repairs_linked_git_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    linked_git_dir = tmp_path / "mirror.git" / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    captured: list[tuple[git_manager._ChownTarget, ...]] = []  # noqa: SLF001
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(git_manager, "mirror_path_for_worktree", lambda _path: None)
+    monkeypatch.setattr(
+        git_manager,
+        "_chown_targets",
+        lambda targets, _uid, _gid: captured.append(targets),
+    )
+
+    git_manager.repair_agent_writable_worktree(None, worktree)
+
+    assert captured == [
+        (
+            git_manager._ChownTarget(worktree, recursive=True),  # noqa: SLF001
+            git_manager._ChownTarget(linked_git_dir, recursive=True),  # noqa: SLF001
+        )
+    ]
+
+
+@pytest.mark.unit
+def test_mirror_path_for_worktree_handles_commondir_and_unreadable_commondir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mirror = tmp_path / "mirror.git"
+    linked_git_dir = mirror / "worktrees" / "ws"
+    linked_git_dir.mkdir(parents=True)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+
+    assert git_manager.mirror_path_for_worktree(worktree) == mirror.resolve()
+
+    (linked_git_dir / "commondir").write_text("../..", encoding="utf-8")
+    assert git_manager.mirror_path_for_worktree(worktree) == mirror.resolve()
+
+    absolute_common_dir = tmp_path / "absolute-common.git"
+    absolute_common_dir.mkdir()
+    (linked_git_dir / "commondir").write_text(str(absolute_common_dir), encoding="utf-8")
+    assert git_manager.mirror_path_for_worktree(worktree) == absolute_common_dir.resolve()
+
+    original_read_text = Path.read_text
+
+    def _raise_for_commondir(path: Path, *args: object, **kwargs: object) -> str:
+        if path == linked_git_dir / "commondir":
+            raise OSError("unreadable")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_commondir)
+    assert git_manager.mirror_path_for_worktree(worktree) == mirror.resolve()
+
+    no_git = tmp_path / "no-git"
+    no_git.mkdir()
+    assert git_manager.mirror_path_for_worktree(no_git) is None
+
+
 class TestAgentWorktreeWritable:
     """Regression coverage for the local UID/GID strategy.
 

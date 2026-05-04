@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,11 +12,15 @@ import pytest
 
 import awf.control.executor as executor_mod
 from awf.adapters.base import AgentDefaults
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 from awf.control.executor import (
+    GIT_OBJECT_MISSING_REASON_CODE,
+    GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+    PLAN_ONLY_OUTPUT_REASON_CODE,
     ExecutorConfig,
     WorkspaceExecutor,
     _agent_defaults_for_workspace,
+    _agent_git_writability_preflight_script,
     _agent_model_for_workspace,
     _agent_pr_identity,
     _apply_baseline_coverage_ratchet,
@@ -26,11 +32,15 @@ from awf.control.executor import (
     _failure_salvage_payload,
     _format_failing_test_evidence,
     _get_active_recovery_payload,
+    _git_error_indicates_missing_head_object,
+    _GitObjectRecoveryResult,
     _MonitorRebaseRecoveryError,
     _profile_with_planning_iteration_default,
     _raw_profile_has_explicit_planning_max_iterations,
+    _read_ref_sha,
     _read_text_if_present,
     _RebaseRecoveryResult,
+    _recover_missing_head_from_filesystem,
     _validate_only_recovery_needs_existing_pr_push,
     _validation_command_count,
     _validation_failure_message,
@@ -47,6 +57,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
+    WorkspaceEventRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
@@ -824,6 +835,7 @@ async def test_final_coverage_gate_reuses_exact_fresh_evidence(
     assert result.evidence_status == "reused"
     assert result.source_run_id == source_run_id
     assert validation.calls == []
+    await engine.dispose()
 
 
 @pytest.mark.unit
@@ -1484,6 +1496,693 @@ async def test_changed_paths_raises_when_git_status_fails(tmp_path: Path) -> Non
 
     with pytest.raises(RuntimeError, match="git status failed"):
         await executor._changed_paths(tmp_path / "worktree")
+
+
+@pytest.mark.unit
+def test_git_error_indicates_missing_head_object() -> None:
+    assert _git_error_indicates_missing_head_object("fatal: bad object HEAD\n")
+    assert _git_error_indicates_missing_head_object("fatal: not a valid object name HEAD\n")
+    assert not _git_error_indicates_missing_head_object("fatal: not a git repository\n")
+
+
+@pytest.mark.unit
+def test_agent_git_writability_preflight_script_exercises_object_and_ref_writes() -> None:
+    script = _agent_git_writability_preflight_script("ws_preflight")
+
+    assert "git status --porcelain" in script
+    assert "git hash-object -w --stdin" in script
+    assert "git cat-file -e \"$blob^{blob}\"" in script
+    assert "git update-ref \"$ref\" HEAD" in script
+    assert "git update-ref -d \"$ref\"" in script
+
+
+@pytest.mark.unit
+async def test_agent_git_writability_preflight_runs_inside_agent_container(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    executor = _executor_with_runner(runner, tmp_path)
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    (worktree_path / ".git").write_text("gitdir: /tmp/mirror/worktrees/ws_preflight\n")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    ok = await executor._run_agent_git_writability_preflight(
+        workspace_id="ws_preflight",
+        compose_project="awf_ws_preflight",
+        compose_file=compose_file,
+        worktree_path=worktree_path,
+    )
+
+    assert ok is True
+    assert runner.calls
+    call = runner.calls[0]
+    assert call.input_bytes == b""
+    assert call.args[:2] == ["docker", "compose"]
+    assert call.args[call.args.index("-p") + 1] == "awf_ws_preflight"
+    assert call.args[call.args.index("-f") + 1] == str(compose_file)
+    assert "agent_git_writability_preflight" not in " ".join(call.args[:10])
+    assert "git hash-object -w --stdin" in " ".join(call.args)
+
+
+@pytest.mark.unit
+async def test_agent_git_writability_preflight_skips_non_provisioned_fakes(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    executor = _executor_with_runner(runner, tmp_path)
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+
+    assert await executor._run_agent_git_writability_preflight(
+        workspace_id="ws_no_git",
+        compose_project="awf_ws_no_git",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+    )
+
+    (worktree_path / ".git").write_text("gitdir: /tmp/mirror/worktrees/ws_no_git\n")
+    assert await executor._run_agent_git_writability_preflight(
+        workspace_id="ws_no_compose",
+        compose_project="awf_ws_no_compose",
+        compose_file=tmp_path / "missing-compose.yml",
+        worktree_path=worktree_path,
+    )
+    assert runner.calls == []
+
+
+@pytest.mark.unit
+async def test_agent_git_writability_preflight_fails_when_repair_fails(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    executor = _executor_with_runner(runner, tmp_path)
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    (worktree_path / ".git").write_text("gitdir: /tmp/mirror/worktrees/ws_repair_fail\n")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    executor._repair_agent_git_ownership = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    ok = await executor._run_agent_git_writability_preflight(
+        workspace_id="ws_repair_fail",
+        compose_project="awf_ws_repair_fail",
+        compose_file=compose_file,
+        worktree_path=worktree_path,
+    )
+
+    assert ok is False
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    assert runner.calls == []
+
+
+@pytest.mark.unit
+async def test_agent_git_writability_preflight_records_container_failure(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="fatal: cannot write object")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    (worktree_path / ".git").write_text("gitdir: /tmp/mirror/worktrees/ws_git_fail\n")
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+
+    ok = await executor._run_agent_git_writability_preflight(
+        workspace_id="ws_git_fail",
+        compose_project="awf_ws_git_fail",
+        compose_file=compose_file,
+        worktree_path=worktree_path,
+    )
+
+    assert ok is False
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["reason_code"] == "GIT_AGENT_WRITABILITY_FAILED"
+    assert kwargs["details"]["stderr"] == "fatal: cannot write object"
+
+
+@pytest.mark.unit
+async def test_repair_agent_git_ownership_reports_repair_exceptions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("cannot repair")
+
+    monkeypatch.setattr(executor_mod, "repair_agent_writable_worktree", _raise)
+
+    assert not await executor._repair_agent_git_ownership(
+        workspace_id="ws_repair_exception",
+        worktree_path=tmp_path / "worktree",
+        reason="test",
+    )
+
+
+def _fake_linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    mirror = tmp_path / "mirror.git"
+    linked_git_dir = mirror / "worktrees" / "ws_missing_head"
+    linked_git_dir.mkdir(parents=True)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    return mirror, worktree
+
+
+@pytest.mark.unit
+def test_read_ref_sha_returns_none_for_missing_ref(tmp_path: Path) -> None:
+    assert _read_ref_sha(tmp_path, "refs/heads/missing") is None
+
+
+@pytest.mark.unit
+def test_read_ref_sha_reads_packed_ref_when_loose_ref_is_missing(tmp_path: Path) -> None:
+    sha = "a" * 40
+    (tmp_path / "packed-refs").write_text(
+        "# pack-refs with: peeled fully-peeled sorted\n"
+        f"{sha} refs/heads/awf/ws_packed\n",
+        encoding="utf-8",
+    )
+
+    assert _read_ref_sha(tmp_path, "refs/heads/awf/ws_packed") == sha
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("queued", "expected_call_count"),
+    [
+        ([(1, "", "base missing")], 1),
+        ([(0, "", ""), (1, "", "update failed")], 2),
+        ([(0, "", ""), (0, "", ""), (1, "", "reset failed")], 3),
+        ([(0, "", ""), (0, "", ""), (0, "", ""), (1, "", "add failed")], 4),
+        ([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (0, "", "")], 5),
+        ([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (2, "", "diff failed")], 5),
+        (
+            [(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (1, "", ""), (1, "", "commit failed")],
+            6,
+        ),
+        (
+            [
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (1, "", ""),
+                (0, "", ""),
+                (1, "", "head failed"),
+            ],
+            7,
+        ),
+        (
+            [
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (1, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+            ],
+            7,
+        ),
+    ],
+)
+async def test_missing_head_recovery_returns_none_for_each_unrecoverable_step(
+    tmp_path: Path,
+    queued: list[tuple[int, str, str]],
+    expected_call_count: int,
+) -> None:
+    _mirror, worktree = _fake_linked_worktree(tmp_path)
+    runner = FakeCommandRunner()
+    for returncode, stdout, stderr in queued:
+        runner.queue_result(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    result = await _recover_missing_head_from_filesystem(
+        runner=runner,
+        workspace_id="ws_missing_head",
+        worktree_path=worktree,
+        base_commit="a" * 40,
+        branch_name="awf/ws_missing_head",
+    )
+
+    assert result is None
+    assert len(runner.calls) == expected_call_count
+
+
+@pytest.mark.unit
+async def test_missing_head_recovery_returns_none_without_linked_git_dir(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    result = await _recover_missing_head_from_filesystem(
+        runner=runner,
+        workspace_id="ws_missing_head",
+        worktree_path=worktree,
+        base_commit="a" * 40,
+        branch_name="awf/ws_missing_head",
+    )
+
+    assert result is None
+    assert runner.calls == []
+
+
+@pytest.mark.unit
+async def test_recover_missing_git_head_or_mark_failed_handles_terminal_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    executor._record_git_object_recovery_event = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._recover_missing_git_head_or_mark_failed(
+        workspace_id="ws_no_base",
+        worktree_path=tmp_path,
+        base_commit=None,
+        branch_name="awf/ws_no_base",
+        from_status=WorkspaceStatus.running,
+        stage="agent_run",
+        error=RuntimeError("fatal: bad object HEAD"),
+    )
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+
+    executor._mark_failed.reset_mock()  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        executor_mod,
+        "_recover_missing_head_from_filesystem",
+        AsyncMock(return_value=None),
+    )
+    assert not await executor._recover_missing_git_head_or_mark_failed(
+        workspace_id="ws_unrecoverable",
+        worktree_path=tmp_path,
+        base_commit="a" * 40,
+        branch_name="awf/ws_unrecoverable",
+        from_status=WorkspaceStatus.running,
+        stage="post_agent_commit",
+        error=RuntimeError("fatal: bad object HEAD"),
+    )
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+
+    executor._mark_failed.reset_mock()  # type: ignore[attr-defined]
+    recovery = _GitObjectRecoveryResult(
+        broken_head_sha="b" * 40,
+        recovered_head_sha="c" * 40,
+    )
+    monkeypatch.setattr(
+        executor_mod,
+        "_recover_missing_head_from_filesystem",
+        AsyncMock(return_value=recovery),
+    )
+    assert await executor._recover_missing_git_head_or_mark_failed(
+        workspace_id="ws_recovered",
+        worktree_path=tmp_path,
+        base_commit="a" * 40,
+        branch_name="awf/ws_recovered",
+        from_status=WorkspaceStatus.running,
+        stage="post_agent_commit",
+        error=RuntimeError("fatal: bad object HEAD"),
+    )
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
+    executor._record_git_object_recovery_event.assert_awaited_once_with(  # type: ignore[attr-defined]
+        workspace_id="ws_recovered",
+        stage="post_agent_commit",
+        recovery=recovery,
+    )
+
+
+@pytest.mark.unit
+async def test_recover_missing_git_head_or_mark_failed_fails_when_event_recording_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    recovery = _GitObjectRecoveryResult(
+        broken_head_sha="b" * 40,
+        recovered_head_sha="c" * 40,
+    )
+    monkeypatch.setattr(
+        executor_mod,
+        "_recover_missing_head_from_filesystem",
+        AsyncMock(return_value=recovery),
+    )
+    executor._record_git_object_recovery_event = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("database unavailable")
+    )
+
+    recovered = await executor._recover_missing_git_head_or_mark_failed(
+        workspace_id="ws_recovery_event_failed",
+        worktree_path=tmp_path,
+        base_commit="a" * 40,
+        branch_name="awf/ws_recovery_event_failed",
+        from_status=WorkspaceStatus.running,
+        stage="post_agent_commit",
+        error=RuntimeError("fatal: bad object HEAD"),
+    )
+
+    assert not recovered
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["workspace_id"] == "ws_recovery_event_failed"
+    assert kwargs["failure_reason"] == FailureReason.infrastructure_failure
+    assert kwargs["reason_code"] == GIT_OBJECT_MISSING_REASON_CODE
+    assert "could not record the recovery event" in kwargs["message"]
+    assert "database unavailable" in kwargs["message"]
+
+
+@pytest.mark.unit
+async def test_recover_missing_git_head_or_mark_failed_fails_when_filesystem_recovery_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    executor._record_git_object_recovery_event = AsyncMock()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        executor_mod,
+        "_recover_missing_head_from_filesystem",
+        AsyncMock(side_effect=RuntimeError("repair exploded")),
+    )
+
+    recovered = await executor._recover_missing_git_head_or_mark_failed(
+        workspace_id="ws_recovery_raised",
+        worktree_path=tmp_path,
+        base_commit="a" * 40,
+        branch_name="awf/ws_recovery_raised",
+        from_status=WorkspaceStatus.running,
+        stage="agent_run",
+        error=RuntimeError("fatal: bad object HEAD"),
+    )
+
+    assert not recovered
+    executor._record_git_object_recovery_event.assert_not_awaited()  # type: ignore[attr-defined]
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["workspace_id"] == "ws_recovery_raised"
+    assert kwargs["failure_reason"] == FailureReason.infrastructure_failure
+    assert kwargs["reason_code"] == GIT_OBJECT_MISSING_REASON_CODE
+    assert "could not run filesystem recovery" in kwargs["message"]
+    assert "repair exploded" in kwargs["message"]
+
+
+@pytest.mark.unit
+async def test_record_git_object_recovery_event_persists_workspace_event(
+    tmp_path: Path,
+) -> None:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:x/y.git",
+            branch_base="development",
+            task_title="recover",
+            task_prompt="recover",
+            agent="codex",
+            test_commands=[],
+            requires_database=False,
+        )
+        await session.commit()
+        workspace_id = ws.id
+
+    executor = WorkspaceExecutor(
+        session_factory=factory,
+        runner=FakeCommandRunner(),
+        compose=object(),  # type: ignore[arg-type]
+        validation=object(),  # type: ignore[arg-type]
+        pr_creator=object(),  # type: ignore[arg-type]
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "worktrees",
+            compose_projects_root=tmp_path / "compose",
+        ),
+    )
+    await executor._record_git_object_recovery_event(
+        workspace_id=workspace_id,
+        stage="agent_run",
+        recovery=_GitObjectRecoveryResult(
+            broken_head_sha="b" * 40,
+            recovered_head_sha="c" * 40,
+        ),
+    )
+
+    async with factory() as session:
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+    await engine.dispose()
+    recovery_events = [
+        event for event in events if event.event_type == "workspace.git_object_missing_recovered"
+    ]
+
+    assert len(recovery_events) == 1
+    assert recovery_events[0].reason_code == "GIT_OBJECT_MISSING_RECOVERED"
+    assert recovery_events[0].payload["stage"] == "agent_run"
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_rejects_protected_paths(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path(".awf/workspace.yml")}
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_policy",
+        worktree_path=tmp_path / "worktree",
+        base_commit="a" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.policy_failure
+    assert kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_rejects_empty_recovery(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._committed_paths_since = AsyncMock(return_value=set())  # type: ignore[method-assign]
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_empty",
+        worktree_path=tmp_path / "worktree",
+        base_commit="d" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.agent_failure
+    assert kwargs["reason_code"] == GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
+    assert kwargs["details"] == {"recovered_stage": "post_agent_commit"}
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_rejects_plan_only_recovery(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("docs/awf-plans/ws_plan_only.md")}
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_plan_only",
+        worktree_path=tmp_path / "worktree",
+        base_commit="e" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.agent_failure
+    assert kwargs["reason_code"] == PLAN_ONLY_OUTPUT_REASON_CODE
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_rejects_orphaned_history(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=1, stderr="not an ancestor")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("src/app.py")}
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_orphan",
+        worktree_path=tmp_path / "worktree",
+        base_commit="b" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["failure_reason"] == FailureReason.agent_failure
+    assert "does not descend from base commit" in kwargs["message"]
+
+
+@pytest.mark.unit
+async def test_verify_recovered_post_agent_commit_accepts_policy_clean_commit(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0)
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("src/app.py")}
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert await executor._verify_recovered_post_agent_commit(
+        workspace_id="ws_recovered_clean",
+        worktree_path=tmp_path / "worktree",
+        base_commit="c" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_recovered_post_agent_commit_verification_exceptions_mark_failed(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._verify_recovered_post_agent_commit = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("git diff failed")
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit_or_mark_failed(
+        workspace_id="ws_recovered_verify_error",
+        worktree_path=tmp_path / "worktree",
+        base_commit="f" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["from_status"] == WorkspaceStatus.running
+    assert kwargs["failure_reason"] == FailureReason.infrastructure_failure
+    assert kwargs["reason_code"] == GIT_OBJECT_MISSING_REASON_CODE
+    assert "git diff failed" in kwargs["message"]
+
+
+@pytest.mark.unit
+async def test_missing_head_recovery_rebuilds_canonical_commit_from_filesystem(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin"
+    mirror = tmp_path / "mirror.git"
+    worktree = tmp_path / "worktree"
+    alternate_objects = tmp_path / "alternate-objects"
+    alternate_objects.mkdir()
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(origin)], check=True)
+    subprocess.run(["git", "-C", str(origin), "config", "user.name", "AWF Test"], check=True)
+    subprocess.run(["git", "-C", str(origin), "config", "user.email", "awf@test.local"], check=True)
+    (origin / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(origin), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(origin), "commit", "-q", "-m", "base"], check=True)
+    base_commit = subprocess.run(
+        ["git", "-C", str(origin), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    subprocess.run(["git", "clone", "--mirror", str(origin), str(mirror)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(mirror),
+            "worktree",
+            "add",
+            "-b",
+            "awf/ws_missing_object",
+            str(worktree),
+            "main",
+        ],
+        check=True,
+    )
+
+    (worktree / "IMPLEMENTATION.md").write_text("agent work\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "GIT_OBJECT_DIRECTORY": str(alternate_objects),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(mirror / "objects"),
+        "GIT_AUTHOR_NAME": "AWF Agent",
+        "GIT_AUTHOR_EMAIL": "awf@example.com",
+        "GIT_COMMITTER_NAME": "AWF Agent",
+        "GIT_COMMITTER_EMAIL": "awf@example.com",
+    }
+    subprocess.run(["git", "-C", str(worktree), "add", "IMPLEMENTATION.md"], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-q", "-m", "hidden alternate commit"],
+        check=True,
+        env=env,
+    )
+
+    broken = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert broken.returncode != 0
+    assert "bad object HEAD" in broken.stderr
+
+    result = await _recover_missing_head_from_filesystem(
+        runner=AsyncioSubprocessRunner(),
+        workspace_id="ws_missing_object",
+        worktree_path=worktree,
+        base_commit=base_commit,
+        branch_name="awf/ws_missing_object",
+    )
+
+    assert result is not None
+    assert result.recovered_head_sha
+    assert result.broken_head_sha != result.recovered_head_sha
+    status = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == ""
+    changed = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--name-only", f"{base_commit}..HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert changed.stdout.splitlines() == ["IMPLEMENTATION.md"]
 
 
 @pytest.mark.unit

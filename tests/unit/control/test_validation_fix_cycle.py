@@ -195,6 +195,26 @@ class TestBuildFixPrompt:
         assert "raise coverage" not in prompt.lower()
         assert "add meaningful tests for the relevant code paths" not in prompt.lower()
 
+    @pytest.mark.unit
+    def test_retry_prompt_prioritizes_failing_tests_before_coverage_work_when_both_fail(
+        self,
+    ) -> None:
+        prompt = build_fix_prompt(
+            self._ctx(
+                failed_command="pytest --cov=awf --cov-report=term",
+                reason_code="COVERAGE_BELOW_THRESHOLD",
+                coverage_percent=98.7,
+                coverage_minimum_percent=99.0,
+                failing_test_node_ids=("tests/unit/test_widget.py::test_handles_edges",),
+                failing_test_evidence=(
+                    "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError",
+                ),
+            )
+        ).lower()
+
+        assert "fix the failing pytest tests first, then revisit coverage" in prompt
+        assert "tests/unit/test_widget.py::test_handles_edges" in prompt
+
 
 class TestValidationFixContext:
     @pytest.mark.unit

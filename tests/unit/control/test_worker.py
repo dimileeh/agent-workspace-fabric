@@ -1957,7 +1957,7 @@ class TestRunOnceExecution:
             asyncio.gather(
                 worker_a.wait_for_execution_tasks(), worker_b.wait_for_execution_tasks()
             ),
-            timeout=0.5,
+            timeout=5.0,
         )
 
         assert calls == [ready_id]

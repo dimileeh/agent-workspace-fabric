@@ -57,6 +57,7 @@ def _sample_pr_payload(
     head_sha: str = "abc123",
     closed: bool = False,
     merged: bool = False,
+    merge_commit_sha: str = "mergecommit1234567890",
     mergeable: str = "MERGEABLE",
     merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
@@ -82,6 +83,7 @@ def _sample_pr_payload(
                         "isDraft": False,
                         "closed": closed,
                         "merged": merged,
+                        "mergeCommit": {"oid": merge_commit_sha} if merged else None,
                         "baseRef": {"name": "development", "target": {"oid": "base0"}},
                         "commits": {
                             "nodes": [
@@ -846,6 +848,7 @@ class TestFetchPrStatus:
         )
         assert status.closed is True
         assert status.merged is True
+        assert status.merge_commit_sha == "mergecommit1234567890"
 
     @pytest.mark.unit
     async def test_graphql_argv_shape(self) -> None:

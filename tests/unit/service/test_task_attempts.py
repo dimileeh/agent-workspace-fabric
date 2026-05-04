@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -12,6 +14,7 @@ from awf.api.schemas import WorkspaceCreateV2Request
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.session import make_engine, make_session_factory
+from awf.service.tasks import _pricing_from_workspace
 from awf.service.workspaces import WorkspaceService
 
 
@@ -86,6 +89,39 @@ async def test_create_v2_creates_task_and_attempt(
     assert attempts[0].repo_url == "git@github.com:example/app.git"
     assert attempts[0].base_branch == "development"
     assert attempts[0].title == "Add task attempts"
+
+
+@pytest.mark.unit
+def test_pricing_from_workspace_serializes_current_profile_pricing() -> None:
+    timestamp = datetime.now(UTC)
+    workspace = SimpleNamespace(
+        resolved_profile={
+            "pricing": {
+                "pricing": {
+                    "provider": "openai",
+                    "model": "gpt-5.5",
+                    "currency": "USD",
+                    "unit": "per_1M_tokens",
+                    "price_per_unit": 1.25,
+                    "timestamp": timestamp.isoformat(),
+                    "version": 2,
+                }
+            }
+        }
+    )
+
+    pricing = _pricing_from_workspace(workspace)  # type: ignore[arg-type]
+
+    assert pricing == {
+        "provider": "openai",
+        "model": "gpt-5.5",
+        "currency": "USD",
+        "unit": "per_1M_tokens",
+        "price_per_unit": 1.25,
+        "timestamp": timestamp,
+        "version": 2,
+        "is_current": True,
+    }
 
 
 @pytest.mark.unit

@@ -511,7 +511,7 @@ class TestMonitorActionLogging:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
-            assert ws.pr_merge_sha is None
+            assert ws.pr_merge_sha == "mergecommit1234567890"
 
     @pytest.mark.unit
     async def test_short_circuit_completed_emits_log_line(

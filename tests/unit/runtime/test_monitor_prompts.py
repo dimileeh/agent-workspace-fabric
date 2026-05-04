@@ -68,6 +68,20 @@ class TestAddressThread:
         assert "inside the file under review" in prompt
 
     @pytest.mark.unit
+    def test_thread_evidence_location_keeps_path_when_line_is_absent(self) -> None:
+        thread = ReviewThread(
+            thread_id="T",
+            path="src/app.py",
+            line=None,
+            body_excerpt="check the file",
+        )
+        prompt = address_thread_prompt(pr_number=7, repo_slug="a/b", thread=thread)
+
+        assert "- location: a/b#7 src/app.py" in prompt
+        assert "- path: src/app.py" in prompt
+        assert "- line:" not in prompt
+
+    @pytest.mark.unit
     def test_review_thread_adversarial_body_is_quoted_evidence_not_policy(self) -> None:
         thread = ReviewThread(
             thread_id="PRRT_attack",

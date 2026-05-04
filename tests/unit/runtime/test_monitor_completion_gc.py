@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
@@ -15,6 +16,7 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import SecretLeaseIssue, SecretLeaseRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.service.gc import WorkspaceGCWorktreeRemoveResult
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -55,6 +57,18 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _mock_worktree_remove_success() -> object:
+    return patch(
+        "awf.service.gc._default_worktree_remover",
+        new=AsyncMock(
+            return_value=WorkspaceGCWorktreeRemoveResult(
+                status="succeeded",
+                reason_code="WORKTREE_REMOVE_SUCCEEDED",
+            )
+        ),
+    )
+
+
 async def _seed_old_completed_pr_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -74,7 +88,7 @@ async def _seed_old_completed_pr_workspace(
         workspace.updated_at = updated_at
         workspace.pr_url = "https://github.com/dimileeh/aira-web/pull/42"
         workspace.pr_number = 42
-        workspace.pr_merge_sha = "m" * 40
+        workspace.pr_merge_sha = "mergecommit1234567890"
         await session.commit()
         return workspace.id
 
@@ -160,6 +174,7 @@ async def test_completed_monitor_defers_recent_workspace_pressure_dir_cleanup(
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.completed.value
+        assert ws.pr_merge_sha == "mergecommit1234567890"
 
 
 @pytest.mark.unit
@@ -191,7 +206,7 @@ async def test_completed_monitor_filesystem_gc_logs_success_for_retained_old_wor
         worktrees_root=worktrees_root,
     )
 
-    with structlog.testing.capture_logs() as captured:
+    with _mock_worktree_remove_success(), structlog.testing.capture_logs() as captured:
         await runner._gc_completed_workspace_filesystem(ws_id)
 
     assert not worktree.exists()
@@ -267,7 +282,7 @@ async def test_completed_monitor_filesystem_gc_logs_structured_delete_errors(
         worktrees_root=worktrees_root,
     )
 
-    with structlog.testing.capture_logs() as captured:
+    with _mock_worktree_remove_success(), structlog.testing.capture_logs() as captured:
         await runner._gc_completed_workspace_filesystem(ws_id)
 
     assert worktree.exists()
@@ -370,8 +385,6 @@ async def test_completed_monitor_filesystem_gc_logs_failure_on_reservation_relea
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
-    from unittest.mock import AsyncMock, patch
-
     from awf.service.gc import (
         WorkspaceGCCandidate,
         WorkspaceGCPath,

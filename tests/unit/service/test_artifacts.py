@@ -8,6 +8,10 @@ from typing import Any
 import pytest
 
 import awf.service.artifacts as artifacts_module
+from awf.common.config import get_settings
+from awf.db.base import Base
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_engine, make_session_factory
 from awf.service.artifacts import (
     ArtifactNotFoundError,
     ArtifactPathError,
@@ -29,6 +33,25 @@ class TestArtifactService:
         assert workspace_artifact_dir(tmp_path / "awf-state", "ws_123") == (
             tmp_path / "awf-state" / "artifacts" / "ws_123"
         )
+
+    @pytest.mark.unit
+    def test_workspace_artifact_dir_private_helper_uses_explicit_or_settings_work_dir(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "settings-work"))
+        get_settings.cache_clear()
+        try:
+            assert artifacts_module._workspace_artifact_dir(  # noqa: SLF001
+                "ws_123",
+                work_dir=tmp_path / "explicit-work",
+            ) == tmp_path / "explicit-work" / "artifacts" / "ws_123"
+            assert artifacts_module._workspace_artifact_dir("ws_123") == (  # noqa: SLF001
+                tmp_path / "settings-work" / "artifacts" / "ws_123"
+            )
+        finally:
+            get_settings.cache_clear()
 
     @pytest.mark.unit
     def test_safe_nested_relative_path_resolves_download_metadata(self, tmp_path: Path) -> None:
@@ -272,6 +295,292 @@ class TestArtifactService:
         assert items[0].workspace_id == "ws_artifacts"
         assert items[0].kind == "txt"
         assert items[0].content_type == "text/plain"
+
+    @pytest.mark.unit
+    def test_listing_skips_file_lost_between_classification_and_stat(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        flaky = artifact_dir / "flaky.txt"
+        flaky.write_text("flaky\n", encoding="utf-8")
+        flaky_resolved = flaky.resolve()
+        original_resolve = Path.resolve
+        original_is_file = Path.is_file
+        original_stat = Path.stat
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == flaky:
+                return flaky_resolved
+            return original_resolve(self, *args, **kwargs)
+
+        def is_file_candidate(self: Path, *args: Any, **kwargs: Any) -> bool:
+            if self == flaky_resolved:
+                return True
+            return original_is_file(self, *args, **kwargs)
+
+        def stat_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == flaky_resolved:
+                raise FileNotFoundError(str(self))
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+        monkeypatch.setattr(Path, "is_file", is_file_candidate)
+        monkeypatch.setattr(Path, "stat", stat_candidate)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_listing_skips_file_when_explicit_stat_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        stat_error = artifact_dir / "stat-error.txt"
+        stat_error.write_text("flaky\n", encoding="utf-8")
+        stable = artifact_dir / "stable.txt"
+        stable.write_text("kept\n", encoding="utf-8")
+        stat_error_resolved = stat_error.resolve()
+        original_resolve = Path.resolve
+        stat_failures = 0
+
+        class FlakyResolvedArtifact:
+            def is_relative_to(self, _root: Path) -> bool:
+                return True
+
+            def is_file(self) -> bool:
+                return True
+
+            def stat(self) -> Any:
+                nonlocal stat_failures
+                stat_failures += 1
+                raise OSError("cannot stat artifact")
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == stat_error_resolved:
+                return FlakyResolvedArtifact()
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "stable.txt"
+        ]
+        assert stat_failures == 1
+
+    @pytest.mark.unit
+    def test_private_listing_helpers_return_response_models_and_pages(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "a.txt").write_text("a\n", encoding="utf-8")
+        (artifact_dir / "b.txt").write_text("b\n", encoding="utf-8")
+
+        items = artifacts_module._list_artifacts("ws_artifacts", artifact_dir)  # noqa: SLF001
+        page = artifacts_module._list_artifacts_page(  # noqa: SLF001
+            "ws_artifacts",
+            artifact_dir,
+            limit=1,
+            cursor=None,
+        )
+
+        assert [item.relative_path for item in items] == ["a.txt", "b.txt"]
+        assert items[0].path.endswith("/a.txt")
+        assert page.items[0].relative_path == "a.txt"
+        assert page.has_more is True
+        assert page.next_cursor is not None
+
+    @pytest.mark.unit
+    def test_listing_skips_entries_that_change_during_traversal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        flaky_dir = artifact_dir / "flaky-dir"
+        flaky_dir.mkdir()
+        flaky_file = artifact_dir / "flaky-file.txt"
+        flaky_file.write_text("file\n", encoding="utf-8")
+        stable = artifact_dir / "stable.txt"
+        stable.write_text("stable\n", encoding="utf-8")
+        original_resolve = Path.resolve
+        original_is_symlink = Path.is_symlink
+
+        symlink_checks: dict[Path, int] = {}
+
+        def is_symlink_candidate(self: Path) -> bool:
+            if self == flaky_file:
+                symlink_checks[self] = symlink_checks.get(self, 0) + 1
+                return symlink_checks[self] > 1
+            return original_is_symlink(self)
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == flaky_dir:
+                raise OSError("directory disappeared")
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "is_symlink", is_symlink_candidate)
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "stable.txt"
+        ]
+
+    @pytest.mark.unit
+    def test_directory_entry_push_fails_closed_on_iterdir_and_is_dir_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        flaky = artifact_dir / "flaky"
+        flaky.write_text("file\n", encoding="utf-8")
+        original_iterdir = Path.iterdir
+        original_is_dir = Path.is_dir
+
+        def iterdir_candidate(self: Path) -> Any:
+            if self == artifact_dir:
+                raise OSError("cannot list")
+            return original_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", iterdir_candidate)
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+        monkeypatch.setattr(Path, "iterdir", original_iterdir)
+
+        def is_dir_candidate(self: Path, *args: Any, **kwargs: Any) -> bool:
+            if self == flaky:
+                raise OSError("cannot classify")
+            return original_is_dir(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "is_dir", is_dir_candidate)
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_listing_skips_directory_and_file_races_without_leaving_artifact_root(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        valid_dir = artifact_dir / "valid-dir"
+        valid_dir.mkdir()
+        (valid_dir / "nested.txt").write_text("nested\n", encoding="utf-8")
+        dir_becomes_symlink = artifact_dir / "dir-becomes-symlink"
+        dir_becomes_symlink.mkdir()
+        dir_outside = artifact_dir / "dir-outside"
+        dir_outside.mkdir()
+        file_outside = artifact_dir / "file-outside.txt"
+        file_outside.write_text("outside\n", encoding="utf-8")
+        file_stat_error = artifact_dir / "file-stat-error.txt"
+        file_stat_error.write_text("stat error\n", encoding="utf-8")
+        outside_dir = tmp_path / "outside-dir"
+        outside_dir.mkdir()
+        outside_file = tmp_path / "outside-file.txt"
+        outside_file.write_text("outside\n", encoding="utf-8")
+        (artifact_dir / "symlink-skipped-in-push").symlink_to(outside_file)
+        file_stat_error_resolved = file_stat_error.resolve()
+        original_is_symlink = Path.is_symlink
+        original_resolve = Path.resolve
+        original_stat = Path.stat
+        symlink_checks: dict[Path, int] = {}
+
+        def is_symlink_candidate(self: Path) -> bool:
+            if self == dir_becomes_symlink:
+                symlink_checks[self] = symlink_checks.get(self, 0) + 1
+                return symlink_checks[self] > 1
+            return original_is_symlink(self)
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == dir_outside:
+                return outside_dir
+            if self == file_outside:
+                return outside_file
+            return original_resolve(self, *args, **kwargs)
+
+        def stat_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == file_stat_error_resolved:
+                raise OSError("cannot stat")
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "is_symlink", is_symlink_candidate)
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+        monkeypatch.setattr(Path, "stat", stat_candidate)
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "valid-dir/nested.txt"
+        ]
+
+    @pytest.mark.unit
+    async def test_list_workspace_artifacts_metadata_returns_none_for_missing_workspace(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = make_session_factory(engine)
+        try:
+            async with factory() as session:
+                assert (
+                    await artifacts_module.list_workspace_artifacts_metadata(
+                        session,
+                        workspace_id="ws_missing",
+                        work_dir=tmp_path / "work",
+                    )
+                    is None
+                )
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.unit
+    async def test_list_workspace_artifacts_metadata_pages_existing_workspace(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = make_session_factory(engine)
+        work_dir = tmp_path / "work"
+        try:
+            async with factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.create(
+                    repo_url="git@github.com:x/y.git",
+                    branch_base="main",
+                    task_title="artifacts",
+                    task_prompt="artifacts",
+                    agent="codex",
+                    test_commands=[],
+                    requires_database=False,
+                )
+                artifact_dir = workspace_artifact_dir(work_dir, ws.id)
+                artifact_dir.mkdir(parents=True)
+                (artifact_dir / "report.txt").write_text("report\n", encoding="utf-8")
+                await session.commit()
+
+                response = await artifacts_module.list_workspace_artifacts_metadata(
+                    session,
+                    workspace_id=ws.id,
+                    work_dir=work_dir,
+                    limit=1,
+                )
+        finally:
+            await engine.dispose()
+
+        assert response is not None
+        assert [item.relative_path for item in response.items] == ["report.txt"]
+        assert response.has_more is False
 
     @pytest.mark.unit
     def test_resolved_artifact_root_must_remain_a_directory(
