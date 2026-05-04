@@ -524,16 +524,7 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     from sqlalchemy import inspect
     insp = inspect(workspace, raiseerr=False)
     if insp is not None and "operations" in insp.unloaded:
-        return LlmUsageSummary(
-            input_tokens=None,
-            output_tokens=None,
-            total_tokens=None,
-            cost_estimate=None,
-            currency=None,
-            status="unavailable",
-            source="none",
-            reason="operations_not_preloaded",
-        )
+        raise RuntimeError("Workspace.operations must be eager-loaded to compute usage summary")
 
     operations = getattr(workspace, "operations", [])
 

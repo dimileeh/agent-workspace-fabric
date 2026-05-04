@@ -2614,7 +2614,11 @@ class WorkspaceRepository:
             stmt = stmt.where(Workspace.agent == agent)
         if repo_url is not None:
             stmt = stmt.where(Workspace.repo_url == repo_url)
-        stmt = stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc()).limit(limit)
+        stmt = (
+            stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc())
+            .options(selectinload(Workspace.operations))
+            .limit(limit)
+        )
         return list((await self._session.execute(stmt)).scalars())
 
     async def list_merge_queue(
