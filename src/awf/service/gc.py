@@ -1119,7 +1119,7 @@ def _gc_result(
         reservation_releases=res_releases,
         status=status,
         reason_code=(
-            CLEANUP_EXECUTION_PARTIAL if delete_errors else CLEANUP_EXECUTION_SUCCEEDED
+            CLEANUP_EXECUTION_PARTIAL if has_errors else CLEANUP_EXECUTION_SUCCEEDED
         ),
     )
 

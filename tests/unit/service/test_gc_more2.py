@@ -392,6 +392,7 @@ async def test_gc_reservation_release_failure_does_not_block_other_cleanup(
         )
 
     assert result.status == "partial"
+    assert result.reason_code == "CLEANUP_EXECUTION_PARTIAL"
     assert not worktree.exists()
     assert not compose.exists()
     assert not auth.exists()
