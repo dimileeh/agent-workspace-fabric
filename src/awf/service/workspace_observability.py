@@ -524,7 +524,16 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     from sqlalchemy import inspect
     insp = inspect(workspace, raiseerr=False)
     if insp is not None and "operations" in insp.unloaded:
-        raise ValueError("operations relationship must be preloaded to compute usage summary")
+        return LlmUsageSummary(
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            cost_estimate=None,
+            currency=None,
+            status="unavailable",
+            source="none",
+            reason="operations_not_preloaded",
+        )
 
     operations = getattr(workspace, "operations", [])
 
