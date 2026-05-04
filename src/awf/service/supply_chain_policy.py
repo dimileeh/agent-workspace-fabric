@@ -144,6 +144,23 @@ _NODE_SCP_GIT_SPEC_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^:\s
 _PIP_REGISTRY_ENV_VARS: Final[frozenset[str]] = frozenset(
     {"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"}
 )
+_PIP_GLOBAL_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
+    {
+        "--cache-dir",
+        "--cert",
+        "--client-cert",
+        "--exists-action",
+        "--keyring-provider",
+        "--log",
+        "--proxy",
+        "--python",
+        "--retries",
+        "--timeout",
+        "--trusted-host",
+        "--use-deprecated",
+        "--use-feature",
+    }
+)
 _SHELL_CONTROL_OPERATORS: Final[frozenset[str]] = frozenset({";", "&&", "||"})
 _SHELL_PIPE_OPERATORS: Final[frozenset[str]] = frozenset({"|", "|&"})
 _SHELL_PACKAGE_BOUNDARIES: Final[frozenset[str]] = (
@@ -798,9 +815,10 @@ def _pip_command(
     manager: str,
     env_assignments: Sequence[str] = (),
 ) -> _PackageCommand | None:
-    if not tokens or tokens[0] != "install":
+    install_index = _pip_install_index(tokens)
+    if install_index is None:
         return None
-    args = tokens[1:]
+    args = tokens[install_index + 1 :]
     packages = tuple(_package_args(args, manager="pip"))
     registries = tuple(
         _registry_hosts(args, manager="pip", env_assignments=env_assignments)
@@ -811,6 +829,17 @@ def _pip_command(
         package_specs=packages,
         registry_hosts=registries,
     )
+
+
+def _pip_install_index(tokens: list[str]) -> int | None:
+    skipped = _skip_wrapper_options(
+        tokens,
+        0,
+        value_flags=set(_PIP_GLOBAL_VALUE_FLAGS),
+    )
+    if skipped.index >= len(tokens) or tokens[skipped.index] != "install":
+        return None
+    return skipped.index
 
 
 def _node_package_command(tokens: list[str], *, manager: str) -> _PackageCommand | None:
