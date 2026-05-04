@@ -514,9 +514,9 @@ def workspace_lifecycle_summary(
 
 
 def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
-    input_tokens = 0
-    output_tokens = 0
-    total_tokens = 0
+    input_tokens = None
+    output_tokens = None
+    total_tokens = None
     cost_estimate: float | None = None
     currency = None
     has_usage = False
@@ -544,12 +544,17 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
             if isinstance(usage, dict):
                 has_usage = True
                 if isinstance(usage.get("input_tokens"), int):
+                    if input_tokens is None:
+                        input_tokens = 0
                     input_tokens += usage["input_tokens"]
                 if isinstance(usage.get("output_tokens"), int):
+                    if output_tokens is None:
+                        output_tokens = 0
                     output_tokens += usage["output_tokens"]
                 if isinstance(usage.get("total_tokens"), int):
-                    total_tokens += usage["total_tokens"]
-                
+                    if total_tokens is None:
+                        total_tokens = 0
+                    total_tokens += usage["total_tokens"]                
                 op_cost = usage.get("cost_estimate")
                 if isinstance(op_cost, (int, float)):
                     if cost_estimate is None:

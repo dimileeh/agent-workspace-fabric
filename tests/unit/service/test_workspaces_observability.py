@@ -1926,8 +1926,8 @@ def test_workspace_usage_summary_safely_ignores_malformed_usage() -> None:
     )
     usage = workspace_usage_summary(workspace)
 
-    assert usage.input_tokens == 0
-    assert usage.output_tokens == 0
+    assert usage.input_tokens is None
+    assert usage.output_tokens is None
     assert usage.total_tokens == 10
     assert usage.cost_estimate is None
     assert usage.currency is None
