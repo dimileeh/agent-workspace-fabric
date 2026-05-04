@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -3052,6 +3052,44 @@ async def test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed(
 
 
 @pytest.mark.unit
+async def test_refresh_supply_chain_policy_before_push_propagates_type_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _raise_type_error(
+        self: SupplyChainPolicyRefreshService,
+        workspace_id: str,
+        *,
+        command_evidence: Sequence[str],
+        changed_paths: Sequence[str],
+    ) -> object:
+        del self, workspace_id, command_evidence, changed_paths
+        raise TypeError("policy refresh passed the wrong argument type")
+
+    monkeypatch.setattr(
+        SupplyChainPolicyRefreshService,
+        "refresh_workspace_open_candidate",
+        _raise_type_error,
+    )
+
+    with pytest.raises(TypeError, match="wrong argument type"):
+        await runner._refresh_supply_chain_policy_before_push(
+            workspace_id="ws_type_error",
+            command_evidence=(),
+            changed_paths=(),
+        )
+
+
+@pytest.mark.unit
 async def test_git_push_result_blocks_existing_supply_chain_finding_before_git_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -3097,7 +3135,7 @@ async def test_git_push_result_blocks_existing_supply_chain_finding_before_git_p
 
 
 @pytest.mark.unit
-async def test_active_policy_block_message_ignores_legacy_runner_without_session_factory(
+async def test_active_policy_block_message_propagates_session_factory_type_error(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -3114,7 +3152,39 @@ async def test_active_policy_block_message_ignores_legacy_runner_without_session
 
     runner._deps.session_factory = _legacy_session_factory  # type: ignore[assignment]
 
-    assert await runner._active_policy_block_message("ws_legacy") is None
+    with pytest.raises(TypeError, match="legacy test double"):
+        await runner._active_policy_block_message("ws_legacy")
+
+
+@pytest.mark.unit
+async def test_active_policy_block_message_propagates_repository_type_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _raise_type_error(
+        self: PolicyFindingRepository,
+        workspace_id: str,
+    ) -> object:
+        del self, workspace_id
+        raise TypeError("policy finding query passed the wrong argument type")
+
+    monkeypatch.setattr(
+        PolicyFindingRepository,
+        "list_active_for_workspace",
+        _raise_type_error,
+    )
+
+    with pytest.raises(TypeError, match="wrong argument type"):
+        await runner._active_policy_block_message("ws_type_error")
 
 
 @pytest.mark.unit

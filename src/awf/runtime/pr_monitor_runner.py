@@ -2178,8 +2178,6 @@ class PullRequestMonitorRunner:
                     changed_paths=changed_paths,
                 )
                 await s.commit()
-        except TypeError:
-            return None
         except SupplyChainPolicyRefreshError:
             _log.warning(
                 "monitor.supply_chain_policy_refresh_skipped",
@@ -2199,13 +2197,10 @@ class PullRequestMonitorRunner:
     async def _active_policy_block_message(self, workspace_id: str) -> str | None:
         from awf.db.repositories import PolicyFindingRepository
 
-        try:
-            async with self._deps.session_factory() as s:
-                active_findings = await PolicyFindingRepository(s).list_active_for_workspace(
-                    workspace_id
-                )
-        except TypeError:
-            return None
+        async with self._deps.session_factory() as s:
+            active_findings = await PolicyFindingRepository(s).list_active_for_workspace(
+                workspace_id
+            )
         blocking_codes = [
             finding.reason_code
             for finding in active_findings
