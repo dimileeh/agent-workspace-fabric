@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,9 +21,11 @@ from awf.api.schemas import (
     WorkspaceOverviewListResponse,
     WorkspaceOverviewResponse,
 )
+from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
+from awf.profiles.pricing import PRICING_MAX_AGE_DAYS, PricingMetadata
 from awf.service.bounded_list import (
     bounded_list_limit,
     decode_bounded_list_cursor,
@@ -38,6 +41,8 @@ from awf.service.provider_recovery import (
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
 LlmUsageStatus = Literal["available", "unavailable"]
+_log = get_logger(__name__)
+
 DEFAULT_STALE_REASON_LIMIT = 50
 MAX_STALE_REASON_LIMIT = 500
 
@@ -323,6 +328,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         lifecycle=observability["lifecycle"],
         llm_usage=observability["llm_usage"],
+        pricing=_overview_pricing_metadata(ws),
         recovery=observability["recovery"],
         coordination_warnings=coordination_warnings_from_task_policy(ws.task_policy),
         provider_readiness_preflight=_provider_readiness_preflight_from_task_policy(
@@ -342,6 +348,22 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         created_at=ws.created_at,
         updated_at=ws.updated_at,
     )
+
+
+def _overview_pricing_metadata(ws: Workspace) -> dict[str, object] | None:
+    pricing = workspace_pricing_metadata(ws)
+    if pricing is None:
+        return None
+    return {
+        "provider": pricing.provider,
+        "model": pricing.model,
+        "currency": pricing.currency,
+        "unit": pricing.unit,
+        "price_per_unit": pricing.price_per_unit,
+        "timestamp": pricing.timestamp,
+        "version": pricing.version,
+        "is_current": pricing.is_current(),
+    }
 
 
 def _provider_readiness_preflight_from_task_policy(
@@ -606,6 +628,79 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     )
 
 
+def workspace_pricing_metadata(workspace: Workspace) -> PricingMetadata | None:
+    profile_raw = getattr(workspace, "resolved_profile", None)
+    if not isinstance(profile_raw, Mapping):
+        return None
+    pricing_stanza = profile_raw.get("pricing")
+    if not isinstance(pricing_stanza, dict):
+        return None
+    inner = pricing_stanza.get("pricing")
+    if not isinstance(inner, dict):
+        return None
+    try:
+        return PricingMetadata.model_validate(inner)
+    except Exception:
+        _log.warning(
+            "Failed to parse pricing metadata from profile",
+            exc_info=True,
+            workspace_id=getattr(workspace, "id", None),
+        )
+        return None
+
+
+_PRICING_UNIT_PATTERN = re.compile(
+    r"per_(?P<multiplier>\d+)(?P<suffix>[kKmMbB]?)_tokens$"
+)
+
+_SUFFIX_MULTIPLIERS: dict[str, int] = {
+    "k": 10**3,
+    "K": 10**3,
+    "m": 10**6,
+    "M": 10**6,
+    "b": 10**9,
+    "B": 10**9,
+}
+
+
+def _token_divisor_from_unit(unit: str) -> int | None:
+    match = _PRICING_UNIT_PATTERN.match(unit)
+    if match is None:
+        return None
+    base = int(match.group("multiplier"))
+    if base == 0:
+        return None
+    suffix = match.group("suffix")
+    return base * _SUFFIX_MULTIPLIERS.get(suffix, 1)
+
+
+def compute_cost_estimate(
+    usage: LlmUsageSummary,
+    pricing: PricingMetadata | None,
+    *,
+    now: datetime | None = None,
+) -> tuple[float | None, str | None]:
+    if pricing is None:
+        return None, "pricing_not_configured"
+    if not pricing.is_current(now=now, max_age_days=PRICING_MAX_AGE_DAYS):
+        return None, "pricing_stale"
+    if pricing.price_per_unit is None:
+        return None, "pricing_rates_unavailable"
+    if usage.total_tokens is not None:
+        total_tokens = usage.total_tokens
+    elif usage.input_tokens is not None and usage.output_tokens is not None:
+        total_tokens = usage.input_tokens + usage.output_tokens
+    else:
+        return None, "no_token_data"
+    if total_tokens < 0:
+        return None, "negative_token_count"
+    divisor = _token_divisor_from_unit(pricing.unit)
+    if divisor is None:
+        return None, "unsupported_pricing_unit"
+    cost = (total_tokens / divisor) * pricing.price_per_unit
+    return cost, None
+
+
 def agent_identity_payload(workspace: Workspace) -> AgentIdentityPayload:
     identity = effective_agent_identity_for_workspace(workspace)
     return {
@@ -640,15 +735,17 @@ def lifecycle_payload(
 
 def usage_payload(workspace: Workspace) -> LlmUsagePayload:
     usage = workspace_usage_summary(workspace)
+    pricing = workspace_pricing_metadata(workspace)
+    cost, reason = compute_cost_estimate(usage, pricing)
     return {
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "total_tokens": usage.total_tokens,
-        "cost_estimate": usage.cost_estimate,
-        "currency": usage.currency,
-        "status": usage.status,
+        "cost_estimate": cost,
+        "currency": usage.currency or (pricing.currency if pricing is not None else None),
+        "status": "available" if cost is not None else usage.status,
         "source": usage.source,
-        "reason": usage.reason,
+        "reason": usage.reason or reason,
     }
 
 

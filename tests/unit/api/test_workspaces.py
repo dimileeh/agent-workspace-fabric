@@ -271,6 +271,7 @@ def _assert_usage_unavailable(row: dict[str, Any]) -> None:
         "source": "none",
         "reason": "usage_not_reported",
     }
+    assert row.get("pricing") is None
 
 
 @pytest.fixture
@@ -2329,6 +2330,72 @@ class TestGetWorkspace:
             "current_target_head_sha": None,
             "latest_validation": None,
         }
+
+    @pytest.mark.unit
+    async def test_pricing_metadata_null_when_no_pricing_configured(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body.get("pricing") is None
+
+    @pytest.mark.unit
+    async def test_pricing_included_when_profile_has_pricing_stanza(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        pricing_ts = datetime.now(UTC).isoformat()
+        profile = {
+            "name": "pricing-test",
+            "runtime": {},
+            "pricing": {
+                "pricing": {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-20250514",
+                    "currency": "USD",
+                    "unit": "per_1M_tokens",
+                    "timestamp": pricing_ts,
+                    "version": 1,
+                }
+            },
+        }
+        payload = {
+            "repo": {
+                "url": "git@github.com:example/pricing.git",
+                "base_branch": "main",
+            },
+            "task": {
+                "title": "Pricing test",
+                "prompt": "Test pricing metadata.",
+                "kind": "feature_branch_pr",
+                "agent": "codex",
+                "external_id": "PRICE-1",
+            },
+            "workspace": {"profile_ref": "auto", "profile": profile},
+            "validation": {"commands": ["pytest -q"], "requested_tier": 1},
+            "resources": {},
+        }
+        create = await client.post("/v2/workspaces", json=payload)
+        assert create.status_code == 202
+        ws_id = create.json()["workspace_id"]
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+        assert response.status_code == 200
+        body = response.json()
+        pricing = body.get("pricing")
+        assert pricing is not None
+        assert pricing["provider"] == "anthropic"
+        assert pricing["model"] == "claude-sonnet-4-20250514"
+        assert pricing["currency"] == "USD"
+        assert pricing["unit"] == "per_1M_tokens"
+        assert pricing["version"] == 1
+        assert pricing["is_current"] is True
 
     @pytest.mark.unit
     async def test_returns_404_for_unknown_id(self, client: AsyncClient) -> None:

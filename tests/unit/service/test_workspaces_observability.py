@@ -26,16 +26,20 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.models import WorkspaceProfile
+from awf.profiles.pricing import PricingMetadata
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.workspace_observability import (
     InvalidWorkspaceOverviewCursorError,
     _decode_overview_cursor,
     _json_safe_value,
     _latest_reverse_state_event,
+    _token_divisor_from_unit,
+    compute_cost_estimate,
     effective_agent_identity,
     workspace_identity_usage_payload,
     workspace_lifecycle_summary,
     workspace_observability_payload,
+    workspace_pricing_metadata,
     workspace_recovery_summary,
     workspace_usage_summary,
 )
@@ -1884,6 +1888,549 @@ def test_workspace_usage_summary_is_explicitly_unavailable_without_adapter_usage
     assert usage.source == "none"
     assert usage.reason == "usage_not_reported"
 
+
+class TestWorkspacePricingMetadata:
+    @pytest.mark.unit
+    def test_returns_none_when_no_pricing_stanza(self) -> None:
+        workspace = SimpleNamespace(
+            id="ws_no_pricing",
+            resolved_profile={},
+        )
+        result = workspace_pricing_metadata(workspace)
+        assert result is None
+
+    @pytest.mark.unit
+    def test_returns_none_when_resolved_profile_is_none(self) -> None:
+        workspace = SimpleNamespace(
+            id="ws_no_profile",
+            resolved_profile=None,
+        )
+        result = workspace_pricing_metadata(workspace)
+        assert result is None
+
+    @pytest.mark.unit
+    def test_returns_pricing_metadata_when_valid_stanza_exists(self) -> None:
+        ts = datetime(2026, 1, 1, tzinfo=UTC)
+        workspace = SimpleNamespace(
+            id="ws_with_pricing",
+            resolved_profile={
+                "name": "test",
+                "pricing": {
+                    "pricing": {
+                        "provider": "openai",
+                        "model": "gpt-5.5",
+                        "currency": "USD",
+                        "unit": "per_1k_tokens",
+                        "timestamp": ts,
+                    }
+                },
+            },
+        )
+        result = workspace_pricing_metadata(workspace)
+        assert result is not None
+        assert result.provider == "openai"
+        assert result.model == "gpt-5.5"
+        assert result.currency == "USD"
+        assert result.unit == "per_1k_tokens"
+        assert result.timestamp == ts
+
+    @pytest.mark.unit
+    def test_returns_none_when_pricing_stanza_missing_required_fields(self) -> None:
+        workspace = SimpleNamespace(
+            id="ws_bad_pricing",
+            resolved_profile={
+                "name": "test",
+                "pricing": {
+                    "pricing": {
+                        "provider": "openai",
+                    }
+                },
+            },
+        )
+        result = workspace_pricing_metadata(workspace)
+        assert result is None
+
+    @pytest.mark.unit
+    def test_returns_none_when_resolved_profile_not_a_dict(self) -> None:
+        workspace = SimpleNamespace(
+            id="ws_bad_type",
+            resolved_profile="not-a-dict",
+        )
+        result = workspace_pricing_metadata(workspace)
+        assert result is None
+
+
+class TestComputeCostEstimate:
+    @pytest.mark.unit
+    def test_returns_none_when_pricing_is_none(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, None)
+        assert cost is None
+        assert reason == "pricing_not_configured"
+
+    @pytest.mark.unit
+    def test_returns_none_when_pricing_is_stale(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        stale_ts = datetime.now(UTC) - timedelta(days=100)
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=stale_ts,
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "pricing_stale"
+
+    @pytest.mark.unit
+    def test_returns_none_when_tokens_are_all_none(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            cost_estimate=None,
+            currency=None,
+            status="unavailable",
+            source="none",
+            reason="usage_not_reported",
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "no_token_data"
+
+    @pytest.mark.unit
+    def test_computes_cost_from_total_tokens_when_input_and_output_are_none(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=2000,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is not None
+        assert reason is None
+        assert cost == pytest.approx(0.002)
+
+    @pytest.mark.unit
+    def test_computes_cost_when_tokens_and_current_pricing_exist(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is not None
+        assert reason is None
+        assert cost > 0.0
+
+    @pytest.mark.unit
+    def test_computes_zero_cost_for_zero_tokens(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is not None
+        assert reason is None
+        assert cost == 0.0
+
+    @pytest.mark.unit
+    def test_rejects_negative_total_tokens(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=-1000,
+            output_tokens=-500,
+            total_tokens=-1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "negative_token_count"
+
+    @pytest.mark.unit
+    def test_rejects_negative_summed_tokens_when_total_is_none(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=-1000,
+            output_tokens=-500,
+            total_tokens=None,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "negative_token_count"
+
+    @pytest.mark.unit
+    def test_respects_explicit_now_for_staleness(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=500,
+            output_tokens=250,
+            total_tokens=750,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost_ok, reason_ok = compute_cost_estimate(
+            usage, pricing, now=datetime(2026, 1, 30, tzinfo=UTC)
+        )
+        assert cost_ok is not None
+        assert reason_ok is None
+
+        cost_stale, reason_stale = compute_cost_estimate(
+            usage, pricing, now=datetime(2026, 4, 2, tzinfo=UTC)
+        )
+        assert cost_stale is None
+        assert reason_stale == "pricing_stale"
+
+    @pytest.mark.unit
+    def test_cost_estimate_is_null_when_only_input_tokens_are_zero_and_output_null(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=0,
+            output_tokens=None,
+            total_tokens=0,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is not None
+        assert reason is None
+        assert cost == 0.0
+
+    @pytest.mark.unit
+    def test_prefers_total_tokens_when_directional_field_is_missing(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=None,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is not None
+        assert reason is None
+        assert cost == pytest.approx(0.0015)
+
+    @pytest.mark.unit
+    def test_returns_reason_when_pricing_rates_are_unavailable(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=None,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "pricing_rates_unavailable"
+
+
+class TestTokenDivisorFromUnit:
+    @pytest.mark.unit
+    def test_per_1k_tokens_returns_1000(self) -> None:
+        assert _token_divisor_from_unit("per_1k_tokens") == 1000
+
+    @pytest.mark.unit
+    def test_per_1_m_tokens_returns_1000000(self) -> None:
+        assert _token_divisor_from_unit("per_1M_tokens") == 1_000_000
+
+    @pytest.mark.unit
+    def test_per_1m_tokens_returns_1000000(self) -> None:
+        assert _token_divisor_from_unit("per_1m_tokens") == 1_000_000
+
+    @pytest.mark.unit
+    def test_per_1_b_tokens_returns_1000000000(self) -> None:
+        assert _token_divisor_from_unit("per_1B_tokens") == 1_000_000_000
+
+    @pytest.mark.unit
+    def test_custom_numeric_unit(self) -> None:
+        assert _token_divisor_from_unit("per_500_tokens") == 500
+
+    @pytest.mark.unit
+    def test_unknown_unit_returns_none(self) -> None:
+        assert _token_divisor_from_unit("per_token") is None
+
+    @pytest.mark.unit
+    def test_unknown_unit_returns_none_for_garbage(self) -> None:
+        assert _token_divisor_from_unit("garbage") is None
+
+    @pytest.mark.unit
+    def test_zero_multiplier_returns_none(self) -> None:
+        assert _token_divisor_from_unit("per_0_tokens") is None
+
+    @pytest.mark.unit
+    def test_non_token_unit_with_requests_suffix_rejected(self) -> None:
+        assert _token_divisor_from_unit("per_1k_requests") is None
+
+    @pytest.mark.unit
+    def test_unit_without_tokens_suffix_rejected(self) -> None:
+        assert _token_divisor_from_unit("per_1k") is None
+
+    @pytest.mark.unit
+    def test_bare_suffix_without_tokens_rejected(self) -> None:
+        assert _token_divisor_from_unit("per_1K") is None
+
+
+class TestComputeCostEstimatePerUnit:
+    @pytest.mark.unit
+    def test_per_1_m_tokens_computes_correct_cost(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="anthropic",
+            model="claude",
+            currency="USD",
+            unit="per_1M_tokens",
+            price_per_unit=15.0,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1_000_000,
+            output_tokens=0,
+            total_tokens=1_000_000,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert reason is None
+        assert cost == pytest.approx(15.0)
+
+    @pytest.mark.unit
+    def test_per_1k_tokens_still_works_correctly(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert reason is None
+        assert cost == pytest.approx(0.0015)
+
+    @pytest.mark.unit
+    def test_unsupported_unit_returns_reason(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="test",
+            model="test-model",
+            currency="USD",
+            unit="per_token",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "unsupported_pricing_unit"
+
+    @pytest.mark.unit
+    def test_zero_divisor_unit_returns_unsupported(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="test",
+            model="test-model",
+            currency="USD",
+            unit="per_0_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "unsupported_pricing_unit"
+
 @pytest.mark.unit
 def test_workspace_usage_summary_aggregates_from_operations() -> None:
     workspace = SimpleNamespace(
@@ -1911,6 +2458,134 @@ def test_workspace_usage_summary_aggregates_from_operations() -> None:
     assert usage.status == "available"
     assert usage.source == "operations"
 
+
+@pytest.mark.unit
+def test_usage_payload_surfaces_pricing_failure_reason() -> None:
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    usage = LlmUsageSummary(
+        input_tokens=1000,
+        output_tokens=500,
+        total_tokens=1500,
+        cost_estimate=None,
+        currency=None,
+        status="available",
+        source="adapter_reported",
+        reason=None,
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: None,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["reason"] == "pricing_not_configured"
+    assert result["cost_estimate"] is None
+    assert result["currency"] is None
+
+
+@pytest.mark.unit
+def test_usage_payload_preserves_adapter_currency_when_pricing_absent() -> None:
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    usage = LlmUsageSummary(
+        input_tokens=1000,
+        output_tokens=500,
+        total_tokens=1500,
+        cost_estimate=None,
+        currency="USD",
+        status="available",
+        source="adapter_reported",
+        reason=None,
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: None,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["currency"] == "USD"
+    assert result["cost_estimate"] is None
+
+
+@pytest.mark.unit
+def test_usage_payload_prefers_adapter_currency_over_pricing_currency() -> None:
+    from awf.profiles.pricing import PricingMetadata
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    usage = LlmUsageSummary(
+        input_tokens=1000,
+        output_tokens=500,
+        total_tokens=1500,
+        cost_estimate=0.05,
+        currency="EUR",
+        status="available",
+        source="adapter_reported",
+        reason=None,
+    )
+
+    pricing = PricingMetadata(
+        provider="openai",
+        model="gpt-4",
+        currency="USD",
+        unit="per_1000_tokens",
+        price_per_unit=0.03,
+        timestamp=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: pricing,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["currency"] == "EUR"
+
+
+@pytest.mark.unit
+def test_usage_payload_preserves_usage_not_reported_when_pricing_absent() -> None:
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    usage = LlmUsageSummary(
+        input_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+        cost_estimate=None,
+        currency=None,
+        status="unavailable",
+        source="adapter",
+        reason="usage_not_reported",
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: None,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["reason"] == "usage_not_reported"
+    assert result["status"] == "unavailable"
+    assert result["cost_estimate"] is None
+
+
 @pytest.mark.unit
 def test_workspace_usage_summary_safely_ignores_malformed_usage() -> None:
     workspace = SimpleNamespace(
@@ -1933,4 +2608,3 @@ def test_workspace_usage_summary_safely_ignores_malformed_usage() -> None:
     assert usage.currency is None
     assert usage.status == "available"
     assert usage.source == "operations"
-

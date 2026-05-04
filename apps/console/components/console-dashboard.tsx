@@ -59,6 +59,8 @@ import {
   statusTone,
   toneClass,
   toneFillClass,
+  formatCostWithPricing,
+  pricingAvailabilityReason,
 } from "@/lib/format";
 import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "@/lib/agent-format";
 import { omitUndefined } from "@/lib/api-payload";
@@ -122,6 +124,7 @@ import type {
   CapacityDimension,
   ConcurrencyLane,
   PolicyFinding,
+  PricingMetadata,
   ResourceSaturationSummary,
   RuntimeService,
   Workspace,
@@ -1798,7 +1801,10 @@ function WorkspaceSummary({
           state={operatorActionState}
           onAction={onOperatorAction}
         />
-        <UsageSummaryBlock usage={workspace?.llm_usage ?? overview.llm_usage} />
+        <UsageSummaryBlock
+          usage={workspace?.llm_usage ?? overview.llm_usage}
+          pricing={workspace?.pricing ?? overview.pricing ?? null}
+        />
         <ProviderReadinessPreflightBlock
           preflight={workspace?.provider_readiness_preflight ?? overview.provider_readiness_preflight ?? null}
         />
@@ -2042,8 +2048,16 @@ function OperatorControlIcon({
   return <CheckCircle2 size={13} aria-hidden />;
 }
 
-function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] | null | undefined }) {
+function UsageSummaryBlock({
+  usage,
+  pricing,
+}: {
+  usage: Workspace["llm_usage"] | null | undefined;
+  pricing: PricingMetadata | null | undefined;
+}) {
   const safeUsage = fallbackLlmUsage(usage);
+  const pricingReason = pricingAvailabilityReason(pricing);
+  const showCost = safeUsage.cost_estimate !== null && pricing && pricing.is_current;
   
   if (safeUsage.status === "unavailable" || (safeUsage.input_tokens == null && safeUsage.output_tokens == null && safeUsage.total_tokens == null && safeUsage.cost_estimate == null)) {
     return (
@@ -2058,21 +2072,45 @@ function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] | null | u
       </div>
     );
   }
-
   return (
     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold text-slate-900">LLM usage</span>
-        <Badge value={safeUsage.status} />
+        <div className="flex items-center gap-1.5">
+          {pricing ? (
+            <span
+              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${pricing.is_current ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}
+              title={`${pricing.provider} / ${pricing.model} — ${pricing.unit}`}
+            >
+              {pricing.provider} / {pricing.model}
+            </span>
+          ) : null}
+          <Badge value={safeUsage.status} />
+        </div>
       </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-4">
         {safeUsage.input_tokens != null && <UsageMetric label="Input" value={formatTokenCount(safeUsage.input_tokens)} />}
         {safeUsage.output_tokens != null && <UsageMetric label="Output" value={formatTokenCount(safeUsage.output_tokens)} />}
         {safeUsage.total_tokens != null && <UsageMetric label="Total" value={formatTokenCount(safeUsage.total_tokens)} />}
-        {safeUsage.cost_estimate != null && <UsageMetric label="Cost" value={formatCost(safeUsage.cost_estimate, safeUsage.currency)} />}
+        <UsageMetric
+          label="Cost"
+          value={
+            showCost
+              ? formatCostWithPricing(safeUsage.cost_estimate, safeUsage.currency, pricing)
+              : "—"
+          }
+        />
       </div>
-      <div className="mt-2 truncate text-[11px] text-slate-500">
-        {safeUsage.source}{safeUsage.reason ? ` / ${safeUsage.reason}` : ""}
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+        {safeUsage.status === "unavailable"
+          ? (safeUsage.reason ?? "usage unavailable")
+          : `${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
+        {pricingReason ? (
+          <>
+            <span className="text-slate-300">|</span>
+            <span className="text-amber-600">{pricingReason}</span>
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -4236,17 +4274,6 @@ function formatTokenCount(value: number | null): string {
     return "—";
   }
   return new Intl.NumberFormat().format(value);
-}
-
-function formatCost(value: number | null, currency: string | null): string {
-  if (value === null || !Number.isFinite(value) || !currency) {
-    return "—";
-  }
-  return new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 4,
-  }).format(value);
 }
 
 function toggleWorkspaceSelection(current: string[], workspaceId: string, checked: boolean): string[] {
