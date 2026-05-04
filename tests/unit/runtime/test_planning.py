@@ -20,6 +20,7 @@ from awf.runtime.planning import (
     ConformanceStallKind,
     ConformanceStallPolicy,
     PlanConformanceStatus,
+    _evidence_strings,
     _gaps_from_payload,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
@@ -668,6 +669,51 @@ def test_classify_conformance_stall_returns_no_output_for_idle_timeout() -> None
 
 
 @pytest.mark.unit
+def test_classify_conformance_stall_returns_none_without_history() -> None:
+    assert (
+        classify_conformance_stall(
+            history=[],
+            policy=_stall_policy(),
+            plan_path=Path("docs/awf-plans/ws_empty.md"),
+            report_path=Path("docs/awf-plans/ws_empty.conformance.json"),
+            latest_error=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_classify_conformance_stall_uses_error_stdout_when_stderr_is_empty() -> None:
+    history = [
+        _iter_record(
+            iteration=0,
+            elapsed_seconds=600.0,
+            report_digest=None,
+            worktree_changed=False,
+            stdout="",
+            error_reason_code="AGENT_TIMEOUT",
+        )
+    ]
+    error = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=124, stdout="stdout-only failure", stderr=""),
+        reason_code="AGENT_TIMEOUT",
+    )
+
+    evidence = classify_conformance_stall(
+        history=history,
+        policy=_stall_policy(over_duration_seconds=300),
+        plan_path=Path("docs/awf-plans/ws_stdout.md"),
+        report_path=Path("docs/awf-plans/ws_stdout.conformance.json"),
+        latest_error=error,
+    )
+
+    assert evidence is not None
+    assert evidence.kind == ConformanceStallKind.over_duration
+    assert "stdout-only failure" in evidence.last_output_excerpt
+
+
+@pytest.mark.unit
 def test_classify_conformance_stall_redacts_secrets_in_last_output_excerpt() -> None:
     # Stall evidence is persisted as durable failure details and surfaced into
     # recovery prompts; raw agent stderr/stdout can include provider tokens or
@@ -710,6 +756,11 @@ def test_classify_conformance_stall_redacts_secrets_in_last_output_excerpt() -> 
     )
     assert leaked_token not in payload["last_output_excerpt"]
     assert "<redacted>" in payload["last_output_excerpt"]
+
+
+@pytest.mark.unit
+def test_evidence_strings_ignores_non_list_payloads() -> None:
+    assert _evidence_strings({"gaps": ["not", "a", "list"]}) == ()
 
 
 @pytest.mark.unit

@@ -15,9 +15,11 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import re
+import shlex
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -41,6 +43,7 @@ from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
+    build_tracked_compose_exec,
     cleanup_failure_message,
 )
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
@@ -78,6 +81,7 @@ from awf.db.repositories import (
     sync_candidate_readiness,
 )
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
+from awf.node.git_manager import mirror_path_for_worktree, repair_agent_writable_worktree
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.alembic_validation import (
@@ -164,6 +168,9 @@ _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_PR_CREATED_EVENT = "workspace.audit.pr_created"
 _GIT_PUSH_FAILED_REASON_CODE = "GIT_PUSH_FAILED"
 _PR_CREATE_FAILED_REASON_CODE = "PR_CREATE_FAILED"
+GIT_AGENT_WRITABILITY_FAILED_REASON_CODE = "GIT_AGENT_WRITABILITY_FAILED"
+GIT_OBJECT_MISSING_REASON_CODE = "GIT_OBJECT_MISSING"
+GIT_OBJECT_MISSING_RECOVERED_REASON_CODE = "GIT_OBJECT_MISSING_RECOVERED"
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -206,6 +213,125 @@ class _PlanningRunFailure:
     message: str
     reason_code: str | None = None
     details: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _GitObjectRecoveryResult:
+    broken_head_sha: str | None
+    recovered_head_sha: str
+    strategy: str = "filesystem_tree_commit"
+
+
+def _git_error_indicates_missing_head_object(text: str) -> bool:
+    lower = text.lower()
+    return (
+        "bad object head" in lower
+        or "not a valid object name head" in lower
+        or "could not parse object 'head'" in lower
+    )
+
+
+def _agent_git_writability_preflight_script(workspace_id: str) -> str:
+    quoted_workspace_id = shlex.quote(workspace_id)
+    return f"""
+set -eu
+workspace_id={quoted_workspace_id}
+git status --porcelain >/dev/null
+blob=$(printf 'awf git preflight %s\\n' "$workspace_id" | git hash-object -w --stdin)
+git cat-file -e "$blob^{{blob}}"
+ref="refs/awf/preflight/$workspace_id"
+git update-ref "$ref" HEAD
+git update-ref -d "$ref"
+""".strip()
+
+
+async def _recover_missing_head_from_filesystem(
+    *,
+    runner: AsyncCommandRunner,
+    workspace_id: str,
+    worktree_path: Path,
+    base_commit: str,
+    branch_name: str,
+) -> _GitObjectRecoveryResult | None:
+    """Rebuild a valid AWF branch commit from files when HEAD points to a missing object."""
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is None:
+        return None
+    branch_ref = branch_name if branch_name.startswith("refs/") else f"refs/heads/{branch_name}"
+    broken_head_sha = _read_ref_sha(mirror_path, branch_ref)
+
+    async def mirror_git(args: list[str]) -> CommandResult:
+        return await runner.run(["git", "--git-dir", str(mirror_path), *args])
+
+    async def worktree_git(args: list[str]) -> CommandResult:
+        return await runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                *args,
+            ]
+        )
+
+    base_ok = await mirror_git(["cat-file", "-e", f"{base_commit}^{{commit}}"])
+    if not base_ok.ok:
+        return None
+    reset_ref = await mirror_git(["update-ref", branch_ref, base_commit])
+    if not reset_ref.ok:
+        return None
+    reset_index = await worktree_git(["reset", "--mixed", "HEAD"])
+    if not reset_index.ok:
+        return None
+    add = await worktree_git(["add", "-A"])
+    if not add.ok:
+        return None
+    diff = await worktree_git(["diff", "--cached", "--quiet"])
+    if diff.returncode == 0:
+        return None
+    if diff.returncode not in {0, 1}:
+        return None
+    commit = await runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            *git_identity_config_args(),
+            "commit",
+            "-m",
+            f"awf: recover {workspace_id} from missing git object"[:72],
+            "-m",
+            (
+                f"AWF recovered workspace {workspace_id} after HEAD pointed at "
+                "a commit object missing from the canonical mirror. The commit "
+                f"squashes the workspace filesystem state onto base {base_commit[:10]}."
+            ),
+        ]
+    )
+    if not commit.ok:
+        return None
+    repair_agent_writable_worktree(mirror_path, worktree_path)
+    status = await worktree_git(["status", "--porcelain=v1", "--untracked-files=all"])
+    if not status.ok:
+        return None
+    head = await worktree_git(["rev-parse", "HEAD"])
+    recovered_head_sha = head.stdout.strip()
+    if not head.ok or not recovered_head_sha:
+        return None
+    return _GitObjectRecoveryResult(
+        broken_head_sha=broken_head_sha,
+        recovered_head_sha=recovered_head_sha,
+    )
+
+
+def _read_ref_sha(mirror_path: Path, ref: str) -> str | None:
+    ref_path = mirror_path / ref
+    try:
+        value = ref_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
 
 
 def _build_planning_scope_failure(
@@ -787,6 +913,14 @@ class WorkspaceExecutor:
                     ws.task_prompt = salvage_result.prompt_override
         rebase_recovery_result: _RebaseRecoveryResult | None = None
         baseline_coverage: ValidationCoverageResult | None = None
+        profile: WorkspaceProfile | None = None
+        agent_exit_note: str | None = None
+        agent_run_reason_code: str | None = None
+        agent_run_details: Mapping[str, Any] | None = None
+        expected_branch = ws.branch_name or f"awf/{workspace_id}"
+        adapter: AgentAdapter | None = None
+        defaults: AgentDefaults | None = None
+        default_model: str | None = None
         try:
             agent = AgentRuntime(ws.agent)
             defaults = self._defaults_for(agent)
@@ -840,6 +974,13 @@ class WorkspaceExecutor:
                 )
                 return
             if recovery is None:
+                if not await self._run_agent_git_writability_preflight(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    worktree_path=worktree_path,
+                ):
+                    return
                 baseline_coverage = await self._run_baseline_coverage_preflight(
                     workspace_id=workspace_id,
                     compose_project=compose_project,
@@ -903,9 +1044,6 @@ class WorkspaceExecutor:
                     recovery_mode=recovery.get("recovery_mode"),
                     reason=recovery.get("reason"),
                 )
-            agent_exit_note = None
-            agent_run_reason_code = None
-            agent_run_details = None
         except ComposeExecCleanupError as exc:
             _log.error(
                 "executor.exec_process_cleanup_failed",
@@ -952,13 +1090,45 @@ class WorkspaceExecutor:
                 returncode=exc.result.returncode,
                 reason_code=exc.reason_code,
             )
+            await self._repair_agent_git_ownership(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                reason="agent_nonzero_exit_salvage",
+            )
         except Exception as exc:  # unexpected — surface with generic reason
-            _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
+            if _git_error_indicates_missing_head_object(str(exc)):
+                if await self._recover_missing_git_head_or_mark_failed(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    base_commit=ws.base_commit,
+                    branch_name=expected_branch,
+                    from_status=WorkspaceStatus.running,
+                    stage="agent_run",
+                    error=exc,
+                ):
+                    agent_exit_note = (
+                        "AWF recovered a missing Git HEAD object during the agent run; "
+                        "continuing to salvage filesystem work"
+                    )
+                    agent_run_reason_code = GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
+                    agent_run_details = {"recovered_stage": "agent_run"}
+                else:
+                    return
+            else:
+                _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=f"unexpected error during agent run: {exc!r}"[:2000],
+                )
+                return
+        if adapter is None:
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
                 failure_reason=FailureReason.infrastructure_failure,
-                message=f"unexpected error during agent run: {exc!r}"[:2000],
+                message="executor could not initialize agent adapter before post-agent capture",
             )
             return
 
@@ -1015,7 +1185,6 @@ class WorkspaceExecutor:
                 ]
             )
 
-        expected_branch = ws.branch_name or f"awf/{workspace_id}"
         has_known_non_plan_output = False
 
         try:
@@ -1159,7 +1328,17 @@ class WorkspaceExecutor:
                         wip_stashed=has_wip,
                     )
 
-                await _git_in_worktree(["add", "-A"])
+                add_result = await _git_in_worktree(["add", "-A"])
+                await self._repair_agent_git_ownership(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    reason="post_agent_git_add",
+                )
+                if not add_result.ok:
+                    raise RuntimeError(
+                        f"post-agent git add failed (exit={add_result.returncode}): "
+                        f"{add_result.stderr}"
+                    )
                 cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
                 if cached.stdout.strip():
                     staged_paths = _git_name_lines(cached.stdout)
@@ -1212,6 +1391,11 @@ class WorkspaceExecutor:
                             "-m",
                             commit_body,
                         ],
+                    )
+                    await self._repair_agent_git_ownership(
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        reason="post_agent_git_commit",
                     )
                     if not commit_result.ok:
                         raise RuntimeError(
@@ -1273,6 +1457,11 @@ class WorkspaceExecutor:
                         base_commit=base_commit,
                     )
                     reset = await _git_in_worktree(["reset", "--soft", base_commit])
+                    await self._repair_agent_git_ownership(
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        reason="orphan_history_reset",
+                    )
                     if reset.ok:
                         recovery_msg = f"awf: {ws.task_title} (recovered from orphan)"[:72]
                         recovery_body = (
@@ -1293,6 +1482,11 @@ class WorkspaceExecutor:
                                 "-m",
                                 recovery_body,
                             ],
+                        )
+                        await self._repair_agent_git_ownership(
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                            reason="orphan_history_recovery_commit",
                         )
                         if recover_commit.ok:
                             ancestor = await _git_in_worktree(
@@ -1346,14 +1540,31 @@ class WorkspaceExecutor:
                     )
                     return
         except Exception as exc:  # unexpected — mark infrastructure
-            _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
-                failure_reason=FailureReason.infrastructure_failure,
-                message=f"post-agent commit step failed: {exc!r}"[:2000],
-            )
-            return
+            if _git_error_indicates_missing_head_object(str(exc)):
+                if await self._recover_missing_git_head_or_mark_failed(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    base_commit=ws.base_commit,
+                    branch_name=expected_branch,
+                    from_status=WorkspaceStatus.running,
+                    stage="post_agent_commit",
+                    error=exc,
+                ):
+                    _log.warning(
+                        "executor.commit_step_missing_head_recovered",
+                        workspace_id=workspace_id,
+                    )
+                else:
+                    return
+            else:
+                _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=f"post-agent commit step failed: {exc!r}"[:2000],
+                )
+                return
 
         # ── Step 2: validation (tests + optional Alembic), with fix-cycle ──
         if not await self._transition_if_current(
@@ -1737,6 +1948,11 @@ class WorkspaceExecutor:
             # here (HEAD already descends from base after the initial run
             # succeeded); zero-change fix passes are allowed.
             fix_add = await _git_in_worktree(["add", "-A"])
+            await self._repair_agent_git_ownership(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                reason="validation_fix_git_add",
+            )
             if not fix_add.ok:
                 _log.warning(
                     "executor.fix_pass_add_failed",
@@ -1827,6 +2043,11 @@ class WorkspaceExecutor:
                         "-m",
                         commit_body,
                     ],
+                )
+                await self._repair_agent_git_ownership(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    reason="validation_fix_git_commit",
                 )
                 if not fix_commit.ok:
                     _log.warning(
@@ -2354,6 +2575,168 @@ class WorkspaceExecutor:
     async def _load_workspace(self, workspace_id: str) -> Workspace | None:
         async with self._session_factory() as session:
             return await WorkspaceRepository(session).get(workspace_id)
+
+    async def _repair_agent_git_ownership(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+    ) -> bool:
+        try:
+            await asyncio.to_thread(repair_agent_writable_worktree, None, worktree_path)
+        except Exception:
+            _log.exception(
+                "executor.agent_git_ownership_repair_failed",
+                workspace_id=workspace_id,
+                worktree_path=str(worktree_path),
+                reason=reason,
+            )
+            return False
+        return True
+
+    async def _run_agent_git_writability_preflight(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        worktree_path: Path,
+    ) -> bool:
+        # Unit tests often use a plain temp directory as a fake worktree. Real
+        # AWF-linked worktrees always have a .git control file, so keep the
+        # production preflight active without making those fakes shell out.
+        if not (worktree_path / ".git").exists():
+            return True
+        if not compose_file.exists():
+            return True
+        if not await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="agent_git_writability_preflight",
+        ):
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "agent Git writability preflight failed before container "
+                    "execution: control-plane ownership repair raised an error"
+                ),
+                reason_code=GIT_AGENT_WRITABILITY_FAILED_REASON_CODE,
+            )
+            return False
+
+        invocation = build_tracked_compose_exec(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            cli_args=[
+                "sh",
+                "-lc",
+                _agent_git_writability_preflight_script(workspace_id),
+            ],
+            source="executor",
+            label="agent_git_writability_preflight",
+        )
+        result = await self._runner.run(invocation.args, input_bytes=b"")
+        if result.ok:
+            _log.info(
+                "executor.agent_git_writability_preflight_ok",
+                workspace_id=workspace_id,
+            )
+            return True
+        output = (result.stderr.strip() or result.stdout.strip() or "<no output>")[:1200]
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=(
+                "agent Git writability preflight failed "
+                f"(exit={result.returncode}): {output}"
+            )[:2000],
+            reason_code=GIT_AGENT_WRITABILITY_FAILED_REASON_CODE,
+            details={
+                "returncode": result.returncode,
+                "stdout": result.stdout[:1000],
+                "stderr": result.stderr[:1000],
+            },
+        )
+        return False
+
+    async def _recover_missing_git_head_or_mark_failed(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        base_commit: str | None,
+        branch_name: str,
+        from_status: WorkspaceStatus,
+        stage: str,
+        error: BaseException,
+    ) -> bool:
+        if base_commit is None:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=from_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "Git object recovery failed: workspace HEAD points at a "
+                    "missing object and base_commit is not available"
+                ),
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
+            return False
+        recovery = await _recover_missing_head_from_filesystem(
+            runner=self._runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_commit=base_commit,
+            branch_name=branch_name,
+        )
+        if recovery is None:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=from_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "Git object recovery failed: workspace HEAD points at a "
+                    f"missing object during {stage}, and AWF could not rebuild "
+                    f"a valid commit from the filesystem state: {error!r}"
+                )[:2000],
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
+            return False
+        await self._record_git_object_recovery_event(
+            workspace_id=workspace_id,
+            stage=stage,
+            recovery=recovery,
+        )
+        return True
+
+    async def _record_git_object_recovery_event(
+        self,
+        *,
+        workspace_id: str,
+        stage: str,
+        recovery: _GitObjectRecoveryResult,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - destroyed mid-flight
+                return
+            await repo.add_event(
+                ws,
+                event_type="workspace.git_object_missing_recovered",
+                reason_code=GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
+                payload={
+                    "stage": stage,
+                    "strategy": recovery.strategy,
+                    "broken_head_sha": recovery.broken_head_sha,
+                    "recovered_head_sha": recovery.recovered_head_sha,
+                },
+            )
+            await session.commit()
 
     async def _recover_feature_branch_remote_push_branch(
         self,

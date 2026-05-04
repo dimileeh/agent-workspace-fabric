@@ -447,6 +447,200 @@ def test_cli_auth_probe_failure_modes_are_structured_and_redacted() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_cli_probe_failure_modes_are_structured_and_redacted(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+    settings = _settings(tmp_path)
+
+    def _missing(_args: list[str], **_kwargs: object) -> Any:
+        raise FileNotFoundError("docker")
+
+    def _timeout(args: list[str], **_kwargs: object) -> Any:
+        raise subprocess.TimeoutExpired(args, timeout=0.1)
+
+    def _unexpected(_args: list[str], **_kwargs: object) -> Any:
+        raise RuntimeError("runtime probe leaked sk-proj-runtime-secret")
+
+    missing = provider_readiness._probe_agent_runtime_cli(
+        settings,
+        executable="codex",
+        provider="codex",
+        environ={},
+        run_subprocess=_missing,
+        secrets=frozenset(),
+    )
+    timeout = provider_readiness._probe_agent_runtime_cli(
+        settings,
+        executable="claude",
+        provider="claude_code",
+        environ={},
+        run_subprocess=_timeout,
+        secrets=frozenset(),
+    )
+    unexpected = provider_readiness._probe_agent_runtime_cli(
+        settings,
+        executable="gemini",
+        provider="gemini",
+        environ={},
+        run_subprocess=_unexpected,
+        secrets=frozenset({"sk-proj-runtime-secret"}),
+    )
+
+    assert missing["reason_code"] == "DOCKER_CLI_NOT_FOUND"
+    assert timeout["reason_code"] == "CLAUDE_RUNTIME_CLI_PROBE_TIMEOUT"
+    assert unexpected["reason_code"] == "GEMINI_RUNTIME_CLI_PROBE_ERROR"
+    assert "sk-proj-runtime-secret" not in json.dumps(unexpected, sort_keys=True)
+    assert "<redacted>" in unexpected["detail"]
+    assert "provider_readiness.agent_runtime_cli_probe_exception" in caplog.text
+    assert "sk-proj-runtime-secret" not in caplog.text
+
+
+@pytest.mark.unit
+def test_agent_runtime_cli_probe_reports_success_and_missing_cli(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    ok = provider_readiness._probe_agent_runtime_cli(
+        settings,
+        executable="opencode",
+        provider="opencode",
+        environ={},
+        run_subprocess=lambda _args, **_kwargs: _completed(stdout="/usr/bin/opencode\n"),
+        secrets=frozenset(),
+    )
+    missing = provider_readiness._probe_agent_runtime_cli(
+        settings,
+        executable="opencode",
+        provider="opencode",
+        environ={},
+        run_subprocess=lambda _args, **_kwargs: _completed(
+            returncode=127,
+            stderr="opencode: not found with token sk-proj-opencode-secret",
+        ),
+        secrets=frozenset({"sk-proj-opencode-secret"}),
+    )
+
+    assert ok == {
+        "status": "ok",
+        "reason_code": "OPENCODE_RUNTIME_CLI_AVAILABLE",
+        "detail": "/usr/bin/opencode",
+    }
+    assert missing["status"] == "fail"
+    assert missing["reason_code"] == "OPENCODE_RUNTIME_CLI_NOT_FOUND"
+    assert "awf-agent-runtime:latest" in missing["message"]
+    assert "sk-proj-opencode-secret" not in json.dumps(missing, sort_keys=True)
+    assert "<redacted>" in missing["detail"]
+
+
+@pytest.mark.unit
+def test_cli_auth_probe_reports_success_and_unusable_auth() -> None:
+    success = provider_readiness._probe_cli_auth_status(
+        provider_label="Probe",
+        args=["probe", "auth", "status"],
+        failure_reason="PROBE_AUTH_FAILED",
+        timeout_reason="PROBE_AUTH_TIMEOUT",
+        missing_reason="PROBE_CLI_NOT_FOUND",
+        error_reason="PROBE_AUTH_ERROR",
+        environ={},
+        run_subprocess=lambda _args, **_kwargs: _completed(stdout="ok"),
+        secrets=frozenset(),
+    )
+    failure = provider_readiness._probe_cli_auth_status(
+        provider_label="Probe",
+        args=["probe", "auth", "status"],
+        failure_reason="PROBE_AUTH_FAILED",
+        timeout_reason="PROBE_AUTH_TIMEOUT",
+        missing_reason="PROBE_CLI_NOT_FOUND",
+        error_reason="PROBE_AUTH_ERROR",
+        environ={},
+        run_subprocess=lambda _args, **_kwargs: _completed(
+            returncode=1,
+            stderr="invalid token sk-proj-auth-secret",
+        ),
+        secrets=frozenset({"sk-proj-auth-secret"}),
+    )
+
+    assert success == {"status": "ok", "reason_code": "PROBE_AUTH_OK"}
+    assert failure["reason_code"] == "PROBE_AUTH_FAILED"
+    assert "sk-proj-auth-secret" not in json.dumps(failure, sort_keys=True)
+    assert "<redacted>" in failure["detail"]
+
+
+@pytest.mark.unit
+def test_provider_readiness_rejects_unreachable_internal_provider(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="unsupported provider"):
+        provider_readiness._check_provider_readiness(  # type: ignore[arg-type]
+            "not_a_provider",
+            _settings(tmp_path),
+            environ={},
+            host_home=tmp_path / "home",
+            strict=False,
+            run_subprocess=_unexpected_subprocess,
+            http_get=_ollama_ok,
+            secrets=frozenset(),
+        )
+
+
+@pytest.mark.unit
+def test_selected_launch_probe_skips_when_provider_or_model_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    assert provider_readiness._selected_launch_probe(
+        "codex",
+        settings=_settings(tmp_path),
+        provider_result={"ok": False},
+        model="gpt-5.5",
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_ollama_ok,
+        secrets=frozenset(),
+    ) == {"status": "skipped"}
+    assert provider_readiness._selected_launch_probe(
+        "codex",
+        settings=_settings(tmp_path),
+        provider_result={"ok": True},
+        model=None,
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_ollama_ok,
+        secrets=frozenset(),
+    ) == {"status": "skipped"}
+
+
+@pytest.mark.unit
+def test_selected_launch_probe_returns_runtime_failure_and_unavailable_provider(
+    tmp_path: Path,
+) -> None:
+    runtime_failure = provider_readiness._selected_launch_probe(
+        "codex",
+        settings=_settings(tmp_path),
+        provider_result={"ok": True},
+        model="gpt-5.5",
+        environ={},
+        run_subprocess=lambda _args, **_kwargs: _completed(returncode=127, stderr="missing"),
+        http_get=_ollama_ok,
+        secrets=frozenset(),
+    )
+    unavailable = provider_readiness._selected_launch_probe(
+        "docker",
+        settings=_settings(tmp_path),
+        provider_result={"ok": True},
+        model="docker-host",
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_ollama_ok,
+        secrets=frozenset(),
+    )
+
+    assert runtime_failure["reason_code"] == "CODEX_RUNTIME_CLI_NOT_FOUND"
+    assert unavailable == {
+        "status": "unavailable",
+        "reason_code": "PROVIDER_PROBE_UNAVAILABLE",
+    }
+
+
+@pytest.mark.unit
 def test_selected_gemini_preflight_requires_usable_non_secret_probe(
     tmp_path: Path,
 ) -> None:
@@ -618,6 +812,48 @@ def test_preflight_reason_and_message_report_missing_model() -> None:
         probe=probe,
         model=None,
     ) == "No effective model was selected for the workspace agent."
+
+
+@pytest.mark.unit
+def test_provider_readiness_preflight_snapshot_and_text_redaction(tmp_path: Path) -> None:
+    snapshot = {"provider": "codex", "reason_code": "PROVIDER_READY"}
+
+    assert provider_readiness.provider_readiness_preflight_from_task_policy(
+        {"provider_readiness_preflight": snapshot}
+    ) == snapshot
+    assert provider_readiness.provider_readiness_preflight_from_task_policy(
+        {"provider_readiness_preflight": "bad-shape"}
+    ) is None
+    redacted = provider_readiness.redact_launch_preflight_text(
+        _settings(tmp_path),
+        "token sk-proj-redact-text-secret",
+        environ={"OPENAI_API_KEY": "sk-proj-redact-text-secret"},
+    )
+    assert redacted == "token <redacted>"
+
+
+@pytest.mark.unit
+def test_preflight_payload_records_redacted_override_reason_parts() -> None:
+    payload = provider_readiness._launch_preflight_payload(
+        agent="codex",
+        provider="codex",
+        model="gpt-5.5",
+        model_source="default",
+        provider_result={"ok": False, "status": "fail", "reason": "CODEX_AUTH_MISSING"},
+        probe={"status": "skipped"},
+        reason_code="CODEX_AUTH_MISSING",
+        message="missing",
+        override=True,
+        override_reason="operator checked sk-proj-override-secret manually",
+        checked_at=provider_readiness.datetime(2026, 5, 4, tzinfo=provider_readiness.UTC),
+        secrets=frozenset({"sk-proj-override-secret"}),
+    )
+
+    assert payload["override_reason"] == "operator checked <redacted> manually"
+    assert payload["override_reason_redaction_parts"] == [
+        "operator checked ",
+        " manually",
+    ]
 
 
 @pytest.mark.unit
@@ -1753,6 +1989,31 @@ def test_ollama_model_probe_checks_fallback_tags_urls_before_missing() -> None:
 
 
 @pytest.mark.unit
+def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://primary.local/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"other-model:latest"}]}',
+            )
+        return SimpleNamespace(status_code=503, text="busy")
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset(),
+    )
+
+    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
+    assert result["detail"] == (
+        "selected=llama3; available_count=1; "
+        "probe_failures=http://secondary.local/api/tags: HTTP 503: busy"
+    )
+
+
+@pytest.mark.unit
 def test_ollama_model_probe_rejects_invalid_json() -> None:
     def _http_get(_url: str, *, timeout: float) -> Any:
         assert timeout > 0
@@ -1941,6 +2202,66 @@ def test_provider_readiness_preserves_long_diagnostic_ids_in_details(
     assert image_digest in detail
     assert container_id in detail
     assert error_payload_id in detail
+
+
+@pytest.mark.unit
+def test_provider_readiness_redaction_parts_preserve_literal_context() -> None:
+    rendered, parts = provider_readiness._redact_with_redaction_parts(
+        (
+            "prefix sk-proj-literal-secret "
+            "https://user:ghp_url_secret@github.com/org/repo "
+            "and token sk-ant-token-secret suffix"
+        ),
+        frozenset({"sk-proj-literal-secret"}),
+    )
+
+    assert rendered == (
+        "prefix <redacted> https://<redacted>@github.com/org/repo "
+        "and token <redacted> suffix"
+    )
+    assert parts == [
+        "prefix ",
+        " https://",
+        "@github.com/org/repo and token ",
+        " suffix",
+    ]
+
+
+@pytest.mark.unit
+def test_provider_readiness_redaction_segment_helpers_cover_overlap_edges() -> None:
+    segments = [
+        ("literal", "alpha"),
+        ("redaction", ""),
+        ("literal", "beta"),
+        ("literal", ""),
+        ("literal", "gamma"),
+    ]
+
+    assert provider_readiness._replace_literal_redaction_spans(segments, "") is segments
+    assert provider_readiness._slice_redaction_segments(segments, 8, 8) == []
+    assert provider_readiness._slice_redaction_segments(segments, 0, 17) == [
+        ("literal", "alpha"),
+        ("redaction", ""),
+        ("literal", "be"),
+    ]
+    assert provider_readiness._merge_literal_redaction_segments(segments) == [
+        ("literal", "alpha"),
+        ("redaction", ""),
+        ("literal", "betagamma"),
+    ]
+    assert provider_readiness._replace_literal_redaction_spans(
+        [("literal", "unchanged"), ("redaction", ""), ("literal", "alpha-alpha")],
+        "alpha",
+    ) == [
+        ("literal", "unchanged"),
+        ("redaction", ""),
+        ("redaction", ""),
+        ("literal", "-"),
+        ("redaction", ""),
+    ]
+    assert provider_readiness._slice_redaction_segments(segments, 6, 14) == [
+        ("literal", "redacted")
+    ]
 
 
 @pytest.mark.unit

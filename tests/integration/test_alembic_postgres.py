@@ -1,8 +1,8 @@
 """Integration test: Alembic migrations apply cleanly against real Postgres.
 
-Runs against ``AWF_DATABASE_URL`` (expected to point at a live Postgres instance
-in CI). Skipped locally if no Postgres URL is configured, so developers don't
-need to run ``docker compose up postgres`` just to run the test suite.
+Runs against the live Postgres server configured by ``AWF_TEST_DATABASE_URL`` or
+``AWF_DATABASE_URL``. The test creates a temporary database on that server so
+the migration round-trip never downgrades the operator's real AWF database.
 
 What this covers:
 - asyncpg driver + ``async_engine_from_config`` path in migrations/env.py
@@ -13,30 +13,77 @@ What this covers:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
+import uuid
 from pathlib import Path
 
+import asyncpg
 import pytest
+from sqlalchemy.engine import URL, make_url
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _database_url() -> str | None:
-    url = os.environ.get("AWF_DATABASE_URL")
-    if url and url.startswith("postgresql"):
-        return url
-    return None
+def _postgres_database_url() -> URL:
+    raw_url = os.environ.get("AWF_TEST_DATABASE_URL") or os.environ.get("AWF_DATABASE_URL")
+    if not raw_url:
+        pytest.fail(
+            "AWF_TEST_DATABASE_URL or AWF_DATABASE_URL must point at a live PostgreSQL "
+            "server for the full integration suite."
+        )
+    url = make_url(raw_url)
+    if url.get_backend_name() != "postgresql":
+        pytest.fail(
+            "AWF_TEST_DATABASE_URL/AWF_DATABASE_URL must use a PostgreSQL backend for "
+            "the full integration suite."
+        )
+    return url
+
+
+def _asyncpg_url(url: URL) -> str:
+    return url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+
+def _maintenance_database_url(url: URL) -> URL:
+    return url.set(database="postgres")
+
+
+async def _create_database(maintenance_url: URL, database_name: str) -> None:
+    conn = await asyncpg.connect(dsn=_asyncpg_url(maintenance_url))
+    try:
+        await conn.execute(f'CREATE DATABASE "{database_name}"')
+    finally:
+        await conn.close()
+
+
+async def _drop_database(maintenance_url: URL, database_name: str) -> None:
+    conn = await asyncpg.connect(dsn=_asyncpg_url(maintenance_url))
+    try:
+        await conn.execute(
+            """
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()
+            """,
+            database_name,
+        )
+        await conn.execute(f'DROP DATABASE IF EXISTS "{database_name}"')
+    finally:
+        await conn.close()
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(
-    _database_url() is None,
-    reason="AWF_DATABASE_URL not set to a postgres URL (CI-only by default)",
-)
 def test_alembic_upgrade_downgrade_upgrade_on_postgres() -> None:
     """Apply → revert → re-apply the full migration chain against live Postgres."""
-    env = {**os.environ}
+    configured_url = _postgres_database_url()
+    maintenance_url = _maintenance_database_url(configured_url)
+    database_name = f"awf_test_alembic_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    database_url = configured_url.set(database=database_name)
+    asyncio.run(_create_database(maintenance_url, database_name))
+
+    env = {**os.environ, "AWF_DATABASE_URL": database_url.render_as_string(hide_password=False)}
     cwd = str(_REPO_ROOT)
 
     def _alembic(*args: str) -> subprocess.CompletedProcess[str]:
@@ -49,13 +96,15 @@ def test_alembic_upgrade_downgrade_upgrade_on_postgres() -> None:
             text=True,
         )
 
-    # Start from a known-clean state — if CI re-runs on the same DB, make sure
-    # prior state doesn't leak in.
-    _alembic("downgrade", "base")
+    try:
+        # Start from a known-clean state.
+        _alembic("downgrade", "base")
 
-    # Full chain up.
-    _alembic("upgrade", "head")
-    # Full chain back down.
-    _alembic("downgrade", "base")
-    # And up again — proves the down migrations are correct inverses.
-    _alembic("upgrade", "head")
+        # Full chain up.
+        _alembic("upgrade", "head")
+        # Full chain back down.
+        _alembic("downgrade", "base")
+        # And up again — proves the down migrations are correct inverses.
+        _alembic("upgrade", "head")
+    finally:
+        asyncio.run(_drop_database(maintenance_url, database_name))

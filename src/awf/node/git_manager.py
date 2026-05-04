@@ -31,6 +31,9 @@ from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
 
+AGENT_RUNTIME_UID = 1000
+AGENT_RUNTIME_GID = 1000
+
 
 class GitOperationError(Exception):
     """Raised when a git subprocess exits non-zero or a precondition fails.
@@ -437,13 +440,10 @@ class GitManager:
             return
         if os.geteuid() != 0:
             return
-        targets = _agent_writable_git_targets(
-            layout_mirror=layout_mirror,
-            worktree_path=worktree_path,
-        )
         await asyncio.to_thread(
-            _chown_targets,
-            targets,
+            repair_agent_writable_worktree,
+            layout_mirror,
+            worktree_path,
             self._worktree_owner_uid,
             self._worktree_owner_gid,
         )
@@ -491,6 +491,56 @@ def _agent_writable_git_targets(
     if worktrees.exists():
         targets.append(_ChownTarget(worktrees, recursive=False))
     return tuple(targets)
+
+
+def repair_agent_writable_worktree(
+    layout_mirror: Path | None,
+    worktree_path: Path,
+    uid: int = AGENT_RUNTIME_UID,
+    gid: int = AGENT_RUNTIME_GID,
+) -> None:
+    """Repair linked-worktree Git ownership for the agent-runtime user.
+
+    The mirror object DB is intentionally repaired in directories-only mode:
+    loose object files and pack files may be immutable through Docker Desktop
+    on macOS, while fanout directories must be writable on Linux so the agent
+    can add new objects.
+    """
+    if os.geteuid() != 0:
+        return
+    mirror = layout_mirror or mirror_path_for_worktree(worktree_path)
+    if mirror is None:
+        targets = [_ChownTarget(worktree_path, recursive=True)]
+        linked_git_dir = _linked_worktree_git_dir(worktree_path)
+        if linked_git_dir is not None:
+            targets.append(_ChownTarget(linked_git_dir, recursive=True))
+    else:
+        targets = list(
+            _agent_writable_git_targets(
+                layout_mirror=mirror,
+                worktree_path=worktree_path,
+            )
+        )
+    _chown_targets(tuple(targets), uid, gid)
+
+
+def mirror_path_for_worktree(worktree_path: Path) -> Path | None:
+    """Return the bare mirror path backing a linked worktree, when discoverable."""
+    linked_git_dir = _linked_worktree_git_dir(worktree_path)
+    if linked_git_dir is None:
+        return None
+    commondir = linked_git_dir / "commondir"
+    if commondir.is_file():
+        try:
+            raw = commondir.read_text(encoding="utf-8").strip()
+        except OSError:
+            raw = ""
+        if raw:
+            common = Path(raw)
+            if not common.is_absolute():
+                common = linked_git_dir / common
+            return common.resolve()
+    return linked_git_dir.parent.parent.resolve()
 
 
 def _linked_worktree_git_dir(worktree_path: Path) -> Path | None:
