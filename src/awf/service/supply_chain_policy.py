@@ -88,6 +88,7 @@ _REMOTE_SCRIPT_INTERPRETERS: Final[frozenset[str]] = frozenset(
 _URL_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(https?://)[^/@\s]+(?::[^/@\s]+)?@"
 )
+_PIP_VCS_SPEC_PREFIXES: Final[tuple[str, ...]] = ("git+", "hg+", "svn+", "bzr+")
 
 
 @dataclass(frozen=True)
@@ -647,7 +648,14 @@ def _is_local_spec(spec: str) -> bool:
 
 
 def _looks_like_requirements_file(spec: str) -> bool:
+    if _looks_like_pip_url_install_target(spec):
+        return False
     return spec.endswith((".txt", ".in", ".lock")) or "/" in spec
+
+
+def _looks_like_pip_url_install_target(spec: str) -> bool:
+    normalized = spec.strip().lower()
+    return "://" in normalized or normalized.startswith(_PIP_VCS_SPEC_PREFIXES)
 
 
 def _has_any_flag(args: Sequence[str], flags: set[str]) -> bool:

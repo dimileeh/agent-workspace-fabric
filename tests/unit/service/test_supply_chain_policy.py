@@ -263,6 +263,28 @@ def test_pip_argument_parser_handles_editable_requirements_and_registry_edge_cas
 
 
 @pytest.mark.unit
+def test_pip_url_install_targets_are_evaluated_for_pinning() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ pip install git+https://github.com/example/repo "
+            "https://files.example.invalid/packages/demo-1.0.0.tar.gz\n"
+            "$ pip install requirements.txt\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+    ]
+    assert findings[0].details["unpinned_specs"] == [
+        "git+https://github.com/example/repo",
+        "https://files.example.invalid/packages/demo-1.0.0.tar.gz",
+    ]
+
+
+@pytest.mark.unit
 def test_credentialed_registry_url_still_reports_unexpected_host() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
