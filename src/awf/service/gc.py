@@ -578,6 +578,7 @@ def _workspace_gc_candidate_predicate(
         return and_(
             Workspace.status == WorkspaceStatus.completed.value,
             Workspace.updated_at <= cutoff_at,
+            _workspace_has_pr_metadata_predicate(),
             _workspace_has_pr_merge_predicate(),
         )
     return and_(

@@ -146,6 +146,20 @@ class _StaticRuntimeInspector:
 
 
 @pytest.mark.unit
+def test_default_candidate_predicate_requires_pr_metadata():
+    cutoff = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    predicate = gc._workspace_gc_candidate_predicate(
+        eligible_statuses={WorkspaceStatus.completed.value},
+        cutoff_at=cutoff,
+        default_policy=True,
+        cleanup_enabled=True,
+    )
+    assert predicate is not None
+    compiled = str(predicate.compile(compile_kwargs={"literal_binds": True}))
+    assert "pr_number" in compiled or "pr_url" in compiled
+
+
+@pytest.mark.unit
 def test_default_gc_predicates_handle_status_subsets() -> None:
     cutoff = datetime(2026, 4, 26, 12, tzinfo=UTC)
 
@@ -2034,3 +2048,73 @@ async def test_no_work_superseded_gc_candidate_includes_recovery_metadata_refere
 
         events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
         assert any(e.event_type == "workspace.provider_recovery_requested" for e in events)
+
+
+@pytest.mark.unit
+async def test_completed_workspace_with_merge_sha_but_no_pr_metadata_is_preserved(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+    )
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.pr_merge_sha = "d" * 40
+        await session.commit()
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert plan.candidates == []
+    assert len(plan.preserved) == 1
+    assert plan.preserved[0].workspace_id == workspace_id
+    assert plan.preserved[0].reason_code == "COMPLETED_WORKSPACE_WITHOUT_PR"
+
+
+@pytest.mark.unit
+async def test_completed_workspace_without_pr_metadata_does_not_consume_candidate_slot(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    without_pr_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=300),
+        title="no pr metadata",
+    )
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, without_pr_id)
+        assert workspace is not None
+        workspace.pr_merge_sha = "a" * 40
+        await session.commit()
+
+    with_pr_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        title="has pr metadata",
+        pr=True,
+        pr_merge_sha="b" * 40,
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        limit=1,
+        now=now,
+    )
+
+    assert [c.workspace_id for c in plan.candidates] == [with_pr_id]
+    preserved_ids = {p.workspace_id for p in plan.preserved}
+    assert without_pr_id in preserved_ids
