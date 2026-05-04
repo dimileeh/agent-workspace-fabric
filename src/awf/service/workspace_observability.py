@@ -539,26 +539,31 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
                 usage = payload.get("usage")
 
             if isinstance(usage, dict):
+                in_tok = usage.get("input_tokens")
+                out_tok = usage.get("output_tokens")
+                tot_tok = usage.get("total_tokens")
+                op_cost = usage.get("cost_estimate")
+
                 has_valid_metric = (
-                    isinstance(usage.get("input_tokens"), int)
-                    or isinstance(usage.get("output_tokens"), int)
-                    or isinstance(usage.get("total_tokens"), int)
-                    or isinstance(usage.get("cost_estimate"), (int, float))
+                    (isinstance(in_tok, int) and not isinstance(in_tok, bool))
+                    or (isinstance(out_tok, int) and not isinstance(out_tok, bool))
+                    or (isinstance(tot_tok, int) and not isinstance(tot_tok, bool))
+                    or (isinstance(op_cost, (int, float)) and not isinstance(op_cost, bool))
                 )
                 if has_valid_metric:
                     has_usage = True
-                if isinstance(usage.get("input_tokens"), int):
+                if isinstance(in_tok, int) and not isinstance(in_tok, bool):
                     if input_tokens is None:
                         input_tokens = 0
-                    input_tokens += usage["input_tokens"]
-                if isinstance(usage.get("output_tokens"), int):
+                    input_tokens += in_tok
+                if isinstance(out_tok, int) and not isinstance(out_tok, bool):
                     if output_tokens is None:
                         output_tokens = 0
-                    output_tokens += usage["output_tokens"]
-                if isinstance(usage.get("total_tokens"), int):
+                    output_tokens += out_tok
+                if isinstance(tot_tok, int) and not isinstance(tot_tok, bool):
                     if total_tokens is None:
                         total_tokens = 0
-                    total_tokens += usage["total_tokens"]
+                    total_tokens += tot_tok
                 op_currency = usage.get("currency")
                 if isinstance(op_currency, str):
                     if currency is None:
@@ -567,8 +572,7 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
                         currency = "MIXED"
                         cost_estimate = None
 
-                op_cost = usage.get("cost_estimate")
-                if isinstance(op_cost, (int, float)) and currency != "MIXED":
+                if isinstance(op_cost, (int, float)) and not isinstance(op_cost, bool) and currency != "MIXED":
                     if cost_estimate is None:
                         cost_estimate = 0.0
                     cost_estimate += float(op_cost)
