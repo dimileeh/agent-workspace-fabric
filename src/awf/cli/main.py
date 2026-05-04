@@ -793,13 +793,14 @@ def service_doctor(
         _emit(report.to_dict(), fmt)
     else:
         typer.echo(render_doctor_pretty(report), nl=False)
+        if report.status == "fail":
+            typer.echo(
+                "\nDiagnostics reported failures. To collect a safe support bundle, run:\n"
+                "  awf service doctor --bundle\n"
+                "\nFor bug reports, use the template at:\n"
+                "  .github/ISSUE_TEMPLATE/bug_report.yml"
+            )
     if report.status == "fail":
-        typer.echo(
-            "\nDiagnostics reported failures. To collect a safe support bundle, run:\n"
-            "  awf service doctor --bundle\n"
-            "\nFor bug reports, use the template at:\n"
-            "  .github/ISSUE_TEMPLATE/bug_report.yml"
-        )
         raise typer.Exit(code=1)
 
 
