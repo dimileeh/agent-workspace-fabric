@@ -333,6 +333,46 @@ class TestArtifactService:
         assert list_artifacts("ws_artifacts", artifact_dir) == []
 
     @pytest.mark.unit
+    def test_listing_skips_file_when_explicit_stat_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        stat_error = artifact_dir / "stat-error.txt"
+        stat_error.write_text("flaky\n", encoding="utf-8")
+        stable = artifact_dir / "stable.txt"
+        stable.write_text("kept\n", encoding="utf-8")
+        stat_error_resolved = stat_error.resolve()
+        original_resolve = Path.resolve
+        stat_failures = 0
+
+        class FlakyResolvedArtifact:
+            def is_relative_to(self, _root: Path) -> bool:
+                return True
+
+            def is_file(self) -> bool:
+                return True
+
+            def stat(self) -> Any:
+                nonlocal stat_failures
+                stat_failures += 1
+                raise OSError("cannot stat artifact")
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == stat_error_resolved:
+                return FlakyResolvedArtifact()
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "stable.txt"
+        ]
+        assert stat_failures == 1
+
+    @pytest.mark.unit
     def test_private_listing_helpers_return_response_models_and_pages(
         self,
         tmp_path: Path,

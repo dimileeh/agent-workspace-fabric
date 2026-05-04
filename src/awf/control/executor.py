@@ -287,9 +287,9 @@ async def _recover_missing_head_from_filesystem(
     if not add.ok:
         return None
     diff = await worktree_git(["diff", "--cached", "--quiet"])
-    if diff.returncode == 0:
-        return None
     if diff.returncode not in {0, 1}:
+        return None
+    if diff.returncode == 0:
         return None
     commit = await runner.run(
         [
@@ -311,10 +311,7 @@ async def _recover_missing_head_from_filesystem(
     )
     if not commit.ok:
         return None
-    repair_agent_writable_worktree(mirror_path, worktree_path)
-    status = await worktree_git(["status", "--porcelain=v1", "--untracked-files=all"])
-    if not status.ok:
-        return None
+    await asyncio.to_thread(repair_agent_writable_worktree, mirror_path, worktree_path)
     head = await worktree_git(["rev-parse", "HEAD"])
     recovered_head_sha = head.stdout.strip()
     if not head.ok or not recovered_head_sha:
@@ -330,8 +327,20 @@ def _read_ref_sha(mirror_path: Path, ref: str) -> str | None:
     try:
         value = ref_path.read_text(encoding="utf-8").strip()
     except OSError:
+        value = ""
+    if value:
+        return value
+    packed_refs = mirror_path / "packed-refs"
+    try:
+        for line in packed_refs.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith(("#", "^")):
+                continue
+            parts = line.split(" ", 1)
+            if len(parts) == 2 and parts[1] == ref:
+                return parts[0]
+    except OSError:
         return None
-    return value or None
+    return None
 
 
 def _build_planning_scope_failure(

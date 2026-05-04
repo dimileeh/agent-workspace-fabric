@@ -832,6 +832,7 @@ async def test_final_coverage_gate_reuses_exact_fresh_evidence(
     assert result.evidence_status == "reused"
     assert result.source_run_id == source_run_id
     assert validation.calls == []
+    await engine.dispose()
 
 
 @pytest.mark.unit
@@ -1661,6 +1662,18 @@ def test_read_ref_sha_returns_none_for_missing_ref(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_read_ref_sha_reads_packed_ref_when_loose_ref_is_missing(tmp_path: Path) -> None:
+    sha = "a" * 40
+    (tmp_path / "packed-refs").write_text(
+        "# pack-refs with: peeled fully-peeled sorted\n"
+        f"{sha} refs/heads/awf/ws_packed\n",
+        encoding="utf-8",
+    )
+
+    assert _read_ref_sha(tmp_path, "refs/heads/awf/ws_packed") == sha
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("queued", "expected_call_count"),
     [
@@ -1682,7 +1695,7 @@ def test_read_ref_sha_returns_none_for_missing_ref(tmp_path: Path) -> None:
                 (0, "", ""),
                 (1, "", ""),
                 (0, "", ""),
-                (1, "", "status failed"),
+                (1, "", "head failed"),
             ],
             7,
         ),
@@ -1695,22 +1708,8 @@ def test_read_ref_sha_returns_none_for_missing_ref(tmp_path: Path) -> None:
                 (1, "", ""),
                 (0, "", ""),
                 (0, "", ""),
-                (1, "", "head failed"),
             ],
-            8,
-        ),
-        (
-            [
-                (0, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-                (1, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-                (0, "", ""),
-            ],
-            8,
+            7,
         ),
     ],
 )

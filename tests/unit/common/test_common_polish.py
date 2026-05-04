@@ -106,6 +106,16 @@ class TestSettings:
         assert s.service_name == "awf"
         assert s.env == "local"
 
+    @pytest.mark.unit
+    def test_empty_network_posture_cutoff_is_unset(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
+            network_posture_open_legacy_cutoff="",
+        )
+
+        assert settings.network_posture_open_legacy_cutoff is None
+
 
 class TestRedaction:
     @pytest.mark.unit
