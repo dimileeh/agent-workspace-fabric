@@ -513,16 +513,96 @@ def workspace_lifecycle_summary(
     return summaries
 
 
-def workspace_usage_summary(_workspace: Workspace) -> LlmUsageSummary:
+def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
+    input_tokens = None
+    output_tokens = None
+    total_tokens = None
+    cost_estimate: float | None = None
+    currency = None
+    has_usage = False
+
+    from sqlalchemy import inspect
+    insp = inspect(workspace, raiseerr=False)
+    if insp is not None and "operations" in insp.unloaded:
+        raise RuntimeError("Workspace.operations must be eager-loaded to compute usage summary")
+
+    operations = getattr(workspace, "operations", [])
+
+    if operations:
+        for operation in operations:
+            payload = getattr(operation, "payload", None) or {}
+            result = getattr(operation, "result", None) or {}
+
+            # Check result first, then payload for usage metadata
+            usage = result.get("usage")
+            if not isinstance(usage, dict):
+                usage = payload.get("usage")
+
+            if isinstance(usage, dict):
+                in_tok = usage.get("input_tokens")
+                out_tok = usage.get("output_tokens")
+                tot_tok = usage.get("total_tokens")
+                op_cost = usage.get("cost_estimate")
+
+                has_valid_metric = (
+                    (isinstance(in_tok, int) and not isinstance(in_tok, bool))
+                    or (isinstance(out_tok, int) and not isinstance(out_tok, bool))
+                    or (isinstance(tot_tok, int) and not isinstance(tot_tok, bool))
+                    or (isinstance(op_cost, (int, float)) and not isinstance(op_cost, bool))
+                )
+                if has_valid_metric:
+                    has_usage = True
+                if isinstance(in_tok, int) and not isinstance(in_tok, bool):
+                    if input_tokens is None:
+                        input_tokens = 0
+                    input_tokens += in_tok
+                if isinstance(out_tok, int) and not isinstance(out_tok, bool):
+                    if output_tokens is None:
+                        output_tokens = 0
+                    output_tokens += out_tok
+                if isinstance(tot_tok, int) and not isinstance(tot_tok, bool):
+                    if total_tokens is None:
+                        total_tokens = 0
+                    total_tokens += tot_tok
+                op_currency = usage.get("currency")
+                if isinstance(op_currency, str):
+                    if currency is None:
+                        currency = op_currency
+                    elif currency != op_currency and currency != "MIXED":
+                        currency = "MIXED"
+                        cost_estimate = None
+
+                if isinstance(op_cost, (int, float)) and not isinstance(op_cost, bool) and currency != "MIXED":
+                    if cost_estimate is None:
+                        cost_estimate = 0.0
+                    cost_estimate += float(op_cost)
+
+    if not has_usage or (
+        input_tokens is None
+        and output_tokens is None
+        and total_tokens is None
+        and cost_estimate is None
+    ):
+        return LlmUsageSummary(
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            cost_estimate=None,
+            currency=None,
+            status="unavailable",
+            source="none",
+            reason="usage_not_reported",
+        )
+
     return LlmUsageSummary(
-        input_tokens=None,
-        output_tokens=None,
-        total_tokens=None,
-        cost_estimate=None,
-        currency=None,
-        status="unavailable",
-        source="none",
-        reason="usage_not_reported",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cost_estimate=cost_estimate,
+        currency=currency,
+        status="available",
+        source="operations",
+        reason=None,
     )
 
 
@@ -783,6 +863,11 @@ def _latest_recovery_operation(
     *,
     active_only: bool,
 ) -> _RecoveryOperationLike | None:
+    from sqlalchemy import inspect
+    insp = inspect(workspace, raiseerr=False)
+    if insp is not None and "operations" in insp.unloaded:
+        raise ValueError("operations relationship must be preloaded")
+
     operations = cast(Sequence[object], getattr(workspace, "operations", None) or [])
     matching: list[_RecoveryOperationLike] = []
     for operation in operations:

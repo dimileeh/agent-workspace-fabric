@@ -2044,6 +2044,21 @@ function OperatorControlIcon({
 
 function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] | null | undefined }) {
   const safeUsage = fallbackLlmUsage(usage);
+  
+  if (safeUsage.status === "unavailable" || (safeUsage.input_tokens == null && safeUsage.output_tokens == null && safeUsage.total_tokens == null && safeUsage.cost_estimate == null)) {
+    return (
+      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-semibold text-slate-900">LLM usage</span>
+          <Badge value="unavailable" />
+        </div>
+        <div className="mt-2 truncate text-[11px] text-slate-500">
+          {safeUsage.reason ?? "usage unavailable"}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
@@ -2051,15 +2066,13 @@ function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] | null | u
         <Badge value={safeUsage.status} />
       </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-4">
-        <UsageMetric label="Input" value={formatTokenCount(safeUsage.input_tokens)} />
-        <UsageMetric label="Output" value={formatTokenCount(safeUsage.output_tokens)} />
-        <UsageMetric label="Total" value={formatTokenCount(safeUsage.total_tokens)} />
-        <UsageMetric label="Cost" value={formatCost(safeUsage.cost_estimate, safeUsage.currency)} />
+        {safeUsage.input_tokens != null && <UsageMetric label="Input" value={formatTokenCount(safeUsage.input_tokens)} />}
+        {safeUsage.output_tokens != null && <UsageMetric label="Output" value={formatTokenCount(safeUsage.output_tokens)} />}
+        {safeUsage.total_tokens != null && <UsageMetric label="Total" value={formatTokenCount(safeUsage.total_tokens)} />}
+        {safeUsage.cost_estimate != null && <UsageMetric label="Cost" value={formatCost(safeUsage.cost_estimate, safeUsage.currency)} />}
       </div>
       <div className="mt-2 truncate text-[11px] text-slate-500">
-        {safeUsage.status === "unavailable"
-          ? (safeUsage.reason ?? "usage unavailable")
-          : `${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
+        {safeUsage.source}{safeUsage.reason ? ` / ${safeUsage.reason}` : ""}
       </div>
     </div>
   );
