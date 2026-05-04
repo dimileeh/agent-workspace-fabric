@@ -261,34 +261,37 @@ class TestFetchPullRequestAdoptionMetadata:
             assert excinfo.value.reason_code == "PR_METADATA_INVALID"
 
     @pytest.mark.unit
-    async def test_blank_or_non_string_optional_shas_are_normalized_to_none(self) -> None:
+    @pytest.mark.parametrize(
+        "sha_fields, expected_field",
+        [
+            ({"headRefOid": "  "}, "headRefOid"),
+            ({"headRefOid": None}, "headRefOid"),
+            ({"baseRefOid": "  "}, "baseRefOid"),
+            ({"baseRefOid": None}, "baseRefOid"),
+        ],
+    )
+    async def test_blank_or_non_string_required_shas_are_invalid(
+        self,
+        sha_fields: dict[str, object],
+        expected_field: str,
+    ) -> None:
         fake = FakeCommandRunner()
+        payload = json.loads(_adoption_pr_payload())
+        payload.update(sha_fields)
         fake.queue_result(
             returncode=0,
-            stdout=json.dumps(
-                {
-                    "number": 277,
-                    "headRefName": "feature",
-                    "baseRefName": "development",
-                    "headRefOid": "  ",
-                    "baseRefOid": None,
-                    "state": "OPEN",
-                    "author": "octocat",
-                    "url": "https://github.com/dimileeh/aira-web/pull/277",
-                    "title": "feature",
-                }
-            ),
+            stdout=json.dumps(payload),
         )
 
-        metadata = await fetch_pull_request_adoption_metadata(
-            runner=fake,
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=277,
-        )
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await fetch_pull_request_adoption_metadata(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
 
-        assert metadata.head_sha is None
-        assert metadata.base_sha is None
-        assert metadata.author is None
+        assert excinfo.value.reason_code == "PR_METADATA_INVALID"
+        assert expected_field in excinfo.value.message
 
 
 # ── fetch_pr_status ────────────────────────────────────────────────────────

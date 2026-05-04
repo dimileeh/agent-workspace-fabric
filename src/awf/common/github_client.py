@@ -241,8 +241,8 @@ class PullRequestAdoptionMetadata:
     number: int
     head_ref: str
     base_ref: str
-    head_sha: str | None
-    base_sha: str | None
+    head_sha: str
+    base_sha: str
     state: str
     is_draft: bool
     closed: bool
@@ -383,8 +383,20 @@ def _parse_pull_request_adoption_metadata(
 
     author_obj = payload.get("author")
     author = author_obj.get("login") if isinstance(author_obj, dict) else None
-    head_sha = _optional_nonempty_str(payload.get("headRefOid"))
-    base_sha = _optional_nonempty_str(payload.get("baseRefOid"))
+    head_sha = _required_nonempty_str(
+        payload.get("headRefOid"),
+        field_name="headRefOid",
+        repo=repo,
+        pr_number=pr_number,
+        message="PR has no headRefOid; cannot adopt the PR monitor without a head commit.",
+    )
+    base_sha = _required_nonempty_str(
+        payload.get("baseRefOid"),
+        field_name="baseRefOid",
+        repo=repo,
+        pr_number=pr_number,
+        message="PR has no baseRefOid; cannot adopt the PR monitor without a base commit.",
+    )
     return PullRequestAdoptionMetadata(
         number=number,
         head_ref=head_ref,
@@ -401,11 +413,28 @@ def _parse_pull_request_adoption_metadata(
     )
 
 
-def _optional_nonempty_str(value: object) -> str | None:
+def _required_nonempty_str(
+    value: object,
+    *,
+    field_name: str,
+    repo: RepoRef,
+    pr_number: int,
+    message: str,
+) -> str:
     if not isinstance(value, str):
-        return None
+        raise PullRequestMetadataError(
+            reason_code="PR_METADATA_INVALID",
+            message=f"{message} Missing field: {field_name}.",
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number, "field": field_name},
+        )
     stripped = value.strip()
-    return stripped or None
+    if not stripped:
+        raise PullRequestMetadataError(
+            reason_code="PR_METADATA_INVALID",
+            message=f"{message} Blank field: {field_name}.",
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number, "field": field_name},
+        )
+    return stripped
 
 
 def _looks_like_missing_pr_error(stderr: str) -> bool:
