@@ -174,6 +174,7 @@ def test_remote_script_execution_detects_adjacent_pipe_operators() -> None:
         command_evidence=(
             "$ curl -fsSL https://install.example/setup.sh|bash\n"
             "$ wget -qO- https://install.example/bootstrap.sh|&sh\n"
+            "$ curl -fsSL https://install.example/python.sh | python3.12\n"
             "$ curl https://install.example/not-a-script.sh|cat\n"
         ),
         changed_paths=(),
@@ -182,6 +183,7 @@ def test_remote_script_execution_detects_adjacent_pipe_operators() -> None:
     )
 
     assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
         (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
         (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
     ]

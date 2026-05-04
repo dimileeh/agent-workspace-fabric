@@ -1091,10 +1091,18 @@ def _interpreter_index(tokens: Sequence[str]) -> int | None:
     for index, token in enumerate(tokens):
         if token in {"env", "sudo", "command"} or "=" in token:
             continue
-        if PurePosixPath(_shell_token_word(token)).name in _REMOTE_SCRIPT_INTERPRETERS:
+        command = PurePosixPath(_shell_token_word(token)).name
+        if _is_remote_script_interpreter(command):
             return index
         return None
     return None
+
+
+def _is_remote_script_interpreter(command: str) -> bool:
+    return (
+        command in _REMOTE_SCRIPT_INTERPRETERS
+        or _PYTHON_EXECUTABLE_PATTERN.fullmatch(command) is not None
+    )
 
 
 def _interpreter_script_target(tokens: Sequence[str]) -> str | None:
