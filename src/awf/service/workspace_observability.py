@@ -562,15 +562,20 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
                         if total_tokens is None:
                             total_tokens = 0
                         total_tokens += (usage.get("input_tokens") if has_in else 0) + (usage.get("output_tokens") if has_out else 0)
+                op_currency = usage.get("currency")
+                if isinstance(op_currency, str):
+                    if currency is None:
+                        currency = op_currency
+                    elif currency != op_currency and currency != "MIXED":
+                        currency = "MIXED"
+                        cost_estimate = None
+
                 op_cost = usage.get("cost_estimate")
                 if isinstance(op_cost, (int, float)):
-                    if cost_estimate is None:
-                        cost_estimate = 0.0
-                    cost_estimate += float(op_cost)
-
-                op_currency = usage.get("currency")
-                if isinstance(op_currency, str) and currency is None:
-                    currency = op_currency
+                    if currency != "MIXED":
+                        if cost_estimate is None:
+                            cost_estimate = 0.0
+                        cost_estimate += float(op_cost)
 
     if not has_usage:
         return LlmUsageSummary(
