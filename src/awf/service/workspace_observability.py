@@ -650,7 +650,7 @@ def workspace_pricing_metadata(workspace: Workspace) -> PricingMetadata | None:
 
 
 _PRICING_UNIT_PATTERN = re.compile(
-    r"per_(?P<multiplier>\d+)(?P<suffix>[kKmMbB]?)($|_)"
+    r"per_(?P<multiplier>\d+)(?P<suffix>[kKmMbB]?)_tokens$"
 )
 
 _SUFFIX_MULTIPLIERS: dict[str, int] = {

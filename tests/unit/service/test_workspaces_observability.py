@@ -2261,6 +2261,18 @@ class TestTokenDivisorFromUnit:
     def test_zero_multiplier_returns_none(self) -> None:
         assert _token_divisor_from_unit("per_0_tokens") is None
 
+    @pytest.mark.unit
+    def test_non_token_unit_with_requests_suffix_rejected(self) -> None:
+        assert _token_divisor_from_unit("per_1k_requests") is None
+
+    @pytest.mark.unit
+    def test_unit_without_tokens_suffix_rejected(self) -> None:
+        assert _token_divisor_from_unit("per_1k") is None
+
+    @pytest.mark.unit
+    def test_bare_suffix_without_tokens_rejected(self) -> None:
+        assert _token_divisor_from_unit("per_1K") is None
+
 
 class TestComputeCostEstimatePerUnit:
     @pytest.mark.unit
