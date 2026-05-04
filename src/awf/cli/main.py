@@ -746,11 +746,17 @@ def service_doctor(
         "--provider",
         help=_PROVIDER_HELP,
     ),
+    bundle: bool = typer.Option(
+        False,
+        "--bundle",
+        help="Write a telemetry-free redacted support bundle to the current directory.",
+    ),
 ) -> None:
     """Run operator-friendly local AWF diagnostics."""
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.doctor import collect_doctor_report, render_doctor_pretty
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+    from awf.service.support_bundle import collect_support_bundle, write_support_bundle
 
     try:
         strict_providers = validate_provider_names(provider)
@@ -760,6 +766,23 @@ def service_doctor(
 
     settings = resolve_service_settings()
     service_env = local_service_environ()
+
+    if bundle:
+        bundle_payload = asyncio.run(
+            collect_support_bundle(
+                settings,
+                strict_providers=strict_providers,
+                provider_environ=service_env,
+                environ=service_env,
+            )
+        )
+        path = write_support_bundle(bundle_payload)
+        if fmt == OutputFormat.json:
+            _emit({"support_bundle_path": str(path)}, fmt)
+        else:
+            typer.echo(f"Support bundle written to: {path}")
+        return
+
     report = asyncio.run(
         collect_doctor_report(
             settings,
@@ -773,6 +796,13 @@ def service_doctor(
         _emit(report.to_dict(), fmt)
     else:
         typer.echo(render_doctor_pretty(report), nl=False)
+        if report.status == "fail":
+            typer.echo(
+                "\nDiagnostics reported failures. To collect a safe support bundle, run:\n"
+                "  awf service doctor --bundle\n"
+                "\nFor bug reports, use the template at:\n"
+                "  .github/ISSUE_TEMPLATE/bug_report.yml"
+            )
     if report.status == "fail":
         raise typer.Exit(code=1)
 
