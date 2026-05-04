@@ -573,7 +573,12 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
                         cost_estimate = 0.0
                     cost_estimate += float(op_cost)
 
-    if not has_usage:
+    if not has_usage or (
+        input_tokens is None
+        and output_tokens is None
+        and total_tokens is None
+        and cost_estimate is None
+    ):
         return LlmUsageSummary(
             input_tokens=None,
             output_tokens=None,
