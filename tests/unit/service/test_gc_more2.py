@@ -1058,3 +1058,69 @@ async def test_default_worktree_remover_handles_git_error(
         assert result.status == "failed"
         assert result.reason_code == "GIT_WORKTREE_REMOVE_FAILED"
         assert "mirror missing" in result.error
+
+
+async def test_release_gc_reservations_rollback_on_db_exception(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    ws_a = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="ra" * 20,
+    )
+    ws_b = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="rb" * 20,
+    )
+    for wid in (ws_a, ws_b):
+        _write(work_dir / "git" / "worktrees" / wid / "repo.txt", "repo")
+
+    async with session_factory() as session:
+        repo = ResourceReservationRepository(session)
+        await repo.create(
+            workspace_id=ws_b,
+            attempt_id="attempt_b1",
+            node_id="node_b1",
+            steady_cpu=1.0,
+            steady_memory_gb=2.0,
+            peak_cpu=2.0,
+            peak_memory_gb=4.0,
+            disk_mb=1024,
+            phase="steady",
+            reserved_at=now - timedelta(hours=300),
+        )
+        await session.commit()
+
+    call_count = 0
+    original_release = ResourceReservationRepository.release_active_for_workspace
+
+    async def _flaky_release(self: ResourceReservationRepository, workspace_id: str, **kwargs: object) -> list[ResourceReservation]:
+        nonlocal call_count
+        call_count += 1
+        if workspace_id == ws_a:
+            raise RuntimeError("simulated db error")
+        return await original_release(self, workspace_id, **kwargs)
+
+    with patch.object(ResourceReservationRepository, "release_active_for_workspace", _flaky_release):
+        result = await run_terminal_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            min_age_hours=24,
+            execute=True,
+            now=now,
+        )
+
+    assert result.status == "partial"
+    assert ws_a in result.reservation_releases
+    assert result.reservation_releases[ws_a].get("error") is not None
+    assert ws_b in result.reservation_releases
+    assert result.reservation_releases[ws_b].get("released_count", 0) >= 1

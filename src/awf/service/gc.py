@@ -1025,6 +1025,7 @@ async def _release_gc_reservations(
                     "reason_code": "TERMINAL_GC",
                 }
             except Exception as exc:
+                await session.rollback()
                 summaries[workspace_id] = {
                     "released_count": 0,
                     "reason_code": "TERMINAL_GC",
