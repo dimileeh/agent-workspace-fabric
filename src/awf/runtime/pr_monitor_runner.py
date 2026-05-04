@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -2850,7 +2851,7 @@ class PullRequestMonitorRunner:
         initial_reviews: tuple[ReviewComment, ...],
         state: MonitorState,
         remote_branch: str,
-        remote_push_url: str | None,
+        remote_push_url: str | None = None,
         compose_project: str,
         compose_file: Path,
         monitor_log: WorkspaceLogSink | None = None,
@@ -3186,7 +3187,7 @@ class PullRequestMonitorRunner:
         pr_number: int,
         base_branch: str,
         remote_branch: str,
-        remote_push_url: str | None,
+        remote_push_url: str | None = None,
         compose_project: str,
         compose_file: Path,
     ) -> _GitPushResult:
@@ -3276,7 +3277,7 @@ class PullRequestMonitorRunner:
         compose_file: Path,
         workspace_id: str,
         remote_branch: str,
-        remote_push_url: str | None,
+        remote_push_url: str | None = None,
     ) -> _GitPushResult:
         prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
         agent_run_err = None
@@ -5117,6 +5118,15 @@ def _github_repo_url_like(repo_url: str, repo: RepoRef) -> str:
     stripped = repo_url.strip()
     if stripped.startswith("git@github.com:") or stripped.startswith("ssh://git@github.com/"):
         return f"git@github.com:{repo.owner}/{repo.name}.git"
+    parsed = urlsplit(stripped)
+    if (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname is not None
+        and parsed.hostname.lower() == "github.com"
+    ):
+        userinfo, sep, _host = parsed.netloc.rpartition("@")
+        if sep and userinfo:
+            return f"https://{userinfo}@github.com/{repo.owner}/{repo.name}.git"
     return repo.https_url()
 
 

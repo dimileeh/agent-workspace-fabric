@@ -217,7 +217,9 @@ class RepoRef:
 
         parsed = urlsplit(value)
         http_github_url = (
-            parsed.scheme in {"http", "https"} and parsed.netloc.lower() == "github.com"
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname is not None
+            and parsed.hostname.lower() == "github.com"
         )
         ssh_github_url = (
             parsed.scheme == "ssh"

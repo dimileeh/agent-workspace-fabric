@@ -69,6 +69,7 @@ from awf.runtime.pr_monitor_runner import (
     _NonCheckReviewerSettleDecision,
     _notify_human_reason,
     _redact_and_truncate_github_error,
+    _remote_push_url_for_workspace,
     _stale_pending_check_warnings,
     _target_reconcile_failure_payload,
     _target_reconcile_payload,
@@ -3601,6 +3602,38 @@ def test_candidate_stale_required_action_maps_validation_reason() -> None:
     assert _candidate_stale_required_action(None) is None
     assert _candidate_stale_required_action("validation_insufficient_tier") == "validate"
     assert _candidate_stale_required_action("STALE_TARGET_ADVANCED") == "rebase"
+
+
+@pytest.mark.unit
+def test_remote_push_url_for_adopted_fork_preserves_https_credentials() -> None:
+    workspace = Workspace(
+        id="ws_https_fork_credentials",
+        status=WorkspaceStatus.monitoring_pr.value,
+        repo_url=(
+            "https://x-access-token:credential-value@github.com/base/aira-web.git"
+        ),
+        branch_base="development",
+        branch_name="feature-sync/ws_https_fork_credentials",
+        remote_push_branch="fix/review",
+        task_title="fork credentials",
+        task_prompt="x",
+        task_kind="sync_feature_pr",
+        task_policy={
+            "pr_adoption": {
+                "head_repo_slug": "contributor/aira-web",
+            }
+        },
+        agent="claude_code",
+        test_commands=[],
+    )
+
+    assert _remote_push_url_for_workspace(
+        workspace,
+        base_repo=RepoRef(owner="base", name="aira-web"),
+    ) == (
+        "https://x-access-token:credential-value@github.com/"
+        "contributor/aira-web.git"
+    )
 
 
 @pytest.mark.unit
