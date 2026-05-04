@@ -151,7 +151,7 @@ async def collect_support_bundle(
         "provider_readiness_summary": _redact_value(provider_readiness_summary, secrets),
         "orphan_cleanup_posture": _redact_value(orphan_cleanup_posture, secrets),
         "recent_failure_summary": recent_failure_summary,
-        "config_fingerprint": config_fingerprint,
+        "config_fingerprint": _redact_value(config_fingerprint, secrets),
         "log_pointers": [_redact_text(ptr, secrets) for ptr in log_pointers],
         "issue_template_pointer": ISSUE_TEMPLATE_PATH,
     }
