@@ -588,6 +588,8 @@ def _token_divisor_from_unit(unit: str) -> int | None:
     if match is None:
         return None
     base = int(match.group("multiplier"))
+    if base == 0:
+        return None
     suffix = match.group("suffix")
     return base * _SUFFIX_MULTIPLIERS.get(suffix, 1)
 
