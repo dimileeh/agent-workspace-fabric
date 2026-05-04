@@ -745,7 +745,7 @@ def usage_payload(workspace: Workspace) -> LlmUsagePayload:
         "currency": usage.currency or (pricing.currency if pricing is not None else None),
         "status": "available" if cost is not None else usage.status,
         "source": usage.source,
-        "reason": reason or usage.reason,
+        "reason": usage.reason or reason,
     }
 
 

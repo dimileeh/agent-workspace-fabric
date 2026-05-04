@@ -2556,7 +2556,37 @@ def test_usage_payload_prefers_adapter_currency_over_pricing_currency() -> None:
     assert result["currency"] == "EUR"
 
 
-@ pytest.mark.unit
+@pytest.mark.unit
+def test_usage_payload_preserves_usage_not_reported_when_pricing_absent() -> None:
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    usage = LlmUsageSummary(
+        input_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+        cost_estimate=None,
+        currency=None,
+        status="unavailable",
+        source="adapter",
+        reason="usage_not_reported",
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: None,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["reason"] == "usage_not_reported"
+    assert result["status"] == "unavailable"
+    assert result["cost_estimate"] is None
+
+
+@pytest.mark.unit
 def test_workspace_usage_summary_safely_ignores_malformed_usage() -> None:
     workspace = SimpleNamespace(
         id="ws_usage",
