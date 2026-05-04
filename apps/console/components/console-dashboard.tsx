@@ -3820,7 +3820,7 @@ function Panel({
 
   return (
     <section className={`min-w-0 w-full max-w-full ${isGhost ? "" : "rounded-md border border-[var(--border)] bg-white"}`}>
-      <div className={`flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 border-slate-100 ${isGhost ? "px-1 py-2 border-b" : "px-3 py-2 border-b"}`}>
+      <div className={`flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 border-slate-100 ${isGhost ? "px-1 py-2" : "px-3 py-2 border-b"}`}>
         <h2 className="flex items-center gap-2 text-sm font-semibold">
           {icon}
           {title}
