@@ -75,12 +75,17 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Local Packaging And Upgrade Path | Auto-prune completed and merged workspace worktrees | `ws_e90d1b2cf47a45cf920f01a0` | _pending_ | running | OpenCode/Ollama `glm-5.1:cloud` with AWF `xhigh`; MacBook feature batch, launched after registering the Ollama cloud model manifest and passing provider preflight. |
+| P1 Developer Experience And Public Core Surface | Redacted first-time support bundle | `ws_02a6a86cac9a492c8562d164` | _pending_ | running | OpenCode/Ollama `kimi-k2.6:cloud` with AWF `xhigh`; owns telemetry-free `doctor`/support-bundle evidence and redaction behavior. |
+| P1 Operator Console Completion | Token usage surfacing | `ws_61dcb9386b83477a9a6efbce` | _pending_ | provisioning | Gemini `gemini-3.1-pro-preview` with AWF `xhigh`; retry of `ws_68935277abb74e619a06b232` after planning-phase scope violation. |
+| P1 Operator Console Completion | Reliable cost estimate surfacing | `ws_f0c067d4523f480ea6d7c8ec` | _pending_ | running | OpenCode/Ollama `deepseek-v4-pro:cloud` with AWF `xhigh`; owns cost display only when trusted pricing metadata and token usage are present. |
+| P1 Operator Console Completion | Stable wide-screen embedded inspector | `ws_f33b10c9e5f8445aaaaced7d` | _pending_ | running | Gemini `gemini-3.1-pro-preview` with AWF `xhigh`; owns console layout behavior so dashboard panes stay stable while workspace inspector opens/closes. |
 | P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_068773cee8f34463820c3d7d` | _pending_ | running | OpenCode/Ollama `glm-5.1:cloud` with AWF `xhigh`; retry of reschedule-required `ws_ea414c0722a74815bc474d13`. |
 | P1 Operator Console Completion | Live workspace activity signals | `ws_04048a6809004fa0ab3d8f79` | _pending_ | running | Gemini `gemini-3.1-pro-preview` with AWF `xhigh`; launched with provider-readiness override because agent runtime has Gemini CLI but control-plane probe image lacks it. Retry of `ws_451cc5007fa845ad85a0f7b3`. |
 | P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_02ae413a8c8341e089e0020a` | _pending_ | running | OpenCode/Ollama `deepseek-v4-pro:cloud` with AWF `xhigh`; Ollama cloud model manifest registered before launch. |
-| P1 Security, Secrets, And Egress Policy | Supply-chain guardrails for agent package installs | `ws_a1357eb1d1db498a9ed499ed` | _pending_ | running | Codex `gpt-5.5` with AWF `xhigh`; owns profile-selectable warn/block supply-chain policy. |
+| P1 Security, Secrets, And Egress Policy | Supply-chain guardrails for agent package installs | `ws_a1357eb1d1db498a9ed499ed` | [#197](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/197) | monitoring_pr | Codex `gpt-5.5` with AWF `xhigh`; owns profile-selectable warn/block supply-chain policy. |
 | P1 MCP And Project Onboarding Client Parity | MCP safe operator action tools | `ws_1f89a8c10b1d497d9c912ccb` | _pending_ | running | OpenCode/Ollama `kimi-k2.6:cloud` with AWF `xhigh`; owns safe MCP control tools for existing API operations. |
-| P1 MCP And Project Onboarding Client Parity | PR monitor adoption for existing GitHub PRs | `ws_23dd9badf9fe4290a51113e7` | _pending_ | running | Codex `gpt-5.5` with AWF `xhigh`; owns first-class service-managed adoption flow for existing PRs. |
+| P1 MCP And Project Onboarding Client Parity | PR monitor adoption for existing GitHub PRs | `ws_23dd9badf9fe4290a51113e7` | [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198) | monitoring_pr | Codex `gpt-5.5` with AWF `xhigh`; owns first-class service-managed adoption flow for existing PRs. |
 | P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_e7365dffc3a243a2b8f7e775` | _pending_ | running | Codex `gpt-5.3-codex-spark` with AWF `xhigh`; owns CLI parity with canonical REST/MCP operations. |
 | P1 MCP And Project Onboarding Client Parity | REST CLI MCP contract alignment tests | `ws_7c04a361c7564bc28163baa0` | _pending_ | running | Claude Code `claude-opus-4-7` with AWF `xhigh` mapped to Claude `max`; launched with provider-readiness override because agent runtime has Claude Code but control-plane probe image lacks it. |
 
@@ -99,6 +104,11 @@ not listed here.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Developer Experience And Public Core Surface | Searchable reason-code catalog | `ws_46678fbed83645709bfa6771` | [#196](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/196) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
+| P1 Developer Experience And Public Core Surface | README split into focused public Core docs | `ws_f598e969bed54d17be999e62` | [#195](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/195) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
+| P1 Developer Experience And Public Core Surface | First-time CLI help text | `ws_a062174bfc9948e480d05c2b` | [#194](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/194) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
+| P1 Developer Experience And Public Core Surface | SDK stance for Core release | `ws_70cbcbca1ce94e908015b9b6` | [#193](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/193) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
+| P1 Developer Experience And Public Core Surface | Start Here quickstart | `ws_961c1b63e36d461ea3bb14dd` | [#192](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/192) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
 | P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_b8f4de29ba874a3092f1b7f6` | [#191](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/191) | merged | Codex `gpt-5.5`; first Linux-machine completed AWF workspace. Recovered after local false `PLAN_ONLY_OUTPUT` fix, then AWF validated 4,089 tests with 99.03% coverage and merged PR #191 on 2026-05-03. |
 | P1 MCP And Project Onboarding Client Parity | Local control-plane UID/GID strategy | `ws_add274bc03eb49c28a00dd3d` | [#186](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/186) | merged | Manually salvaged 2026-05-03: dropped the out-of-scope workflow edit, addressed the image-missing review inside the integration test, force-pushed cleaned head `655ad145`, requested AWF remonitor, and PR merged 2026-05-03. |
 | P1 MCP And Project Onboarding Client Parity | Launch-time provider readiness preflight | `ws_6dcca29a9a4e47cd89e0c8c7` | [#189](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/189) | merged | Codex `gpt-5.5`; recovered on 2026-05-03 after local AWF monitor fix `ebfad0a` stopped active-recovery remonitor loops and operator remonitor cancelled stale monitor recovery op `op_4daeba7e12904635a68bd8ea`. AWF synced base, revalidated, waited non-check reviewer settle, and merged PR #189 at `3f938345`. |
@@ -206,9 +216,9 @@ not listed here.
 
 ### Failed / Superseded Slices
 
-No retained rows. Historical superseded/no-work/failed attempts were removed
-after confirming the intended slices either landed in the Completed Slices
-ledger or are tracked as unfinished under Reschedule Required Slices.
+| TODO area | Slice | Workspace | PR | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| P1 Operator Console Completion | Token usage surfacing | `ws_68935277abb74e619a06b232` | _none_ | failed / retried | Failed with `AGENT_PLAN_PHASE_SCOPE_VIOLATION`: Gemini edited implementation files during the planning-only phase. Retried cleanly as `ws_61dcb9386b83477a9a6efbce`; failed attempt resources were cleaned after the retry. |
 
 ## Foundations Already In Place
 
@@ -312,6 +322,22 @@ ledger or are tracked as unfinished under Reschedule Required Slices.
 - [x] Add integration tests for Alembic multi-head detection and automatic merge revision generation.
 - [x] Add integration tests for Dockerized project profiles with sidecar services.
 - [x] Forbid empty tests, fake assertions, and broad monkeypatching that skips behavior under test.
+
+## P1: Validation Runtime Performance
+
+- [ ] Add safe parallel final coverage support for AWF self-dogfood and large
+  projects. Acceptance: `pytest-xdist` is available in the dev/test runtime;
+  profiles can declare `validation.coverage.parallel_workers`; AWF injects a
+  bounded `pytest -n <workers>` only when the profile opts in, never `-n auto`;
+  worker count is capped by workspace CPU reservation or an explicit policy
+  maximum; known xdist-unsafe tests are isolated with serial markers, grouping,
+  or fixture cleanup rather than hidden skips; coverage evidence identity
+  includes the parallel-worker policy; and the AWF self-profile proves the full
+  final coverage gate passes at 99%+ with `parallel_workers: 3` before enabling
+  it by default. Background experiment on 2026-05-04: full
+  `pytest -n 3 --dist=loadscope --cov=awf --cov-report=term-missing` finished
+  in about 4m33s but failed with 30 xdist/shared-state failures, so this slice
+  must first make the suite parallel-safe.
 
 ## P1: Security, Secrets, And Egress Policy
 
@@ -591,12 +617,12 @@ operator-controlled internal system. A new evaluator should be able to install
 AWF, run one proof, understand failures, and discover API/CLI/MCP contracts
 without reading the whole repo.
 
-- [ ] Add a top-level "Start Here" quickstart that gets a fresh evaluator from
+- [x] Add a top-level "Start Here" quickstart that gets a fresh evaluator from
   clone/install to meaningful AWF proof in under five minutes. Acceptance:
   three commands or fewer for the recommended path, expected output snippets,
   prerequisites called out before the first command, and links to deeper docs
   only after the first successful proof.
-- [ ] Split the README into a short product landing plus focused docs:
+- [x] Split the README into a short product landing plus focused docs:
   getting started, concepts, CLI reference, REST API reference, MCP reference,
   troubleshooting, trust model, and contributor guide. Acceptance: README
   remains scannable under roughly 300 lines and points to one canonical doc for
@@ -616,16 +642,16 @@ without reading the whole repo.
   the quickstart and API/CLI/MCP docs show the supported command/API call,
   required GitHub auth, idempotency behavior, monitor policy choice, and how to
   inspect adopted monitor logs/events/merge-queue state from the console.
-- [ ] Decide the SDK stance before open-source Core release: either ship a
+- [x] Decide the SDK stance before open-source Core release: either ship a
   minimal Python client for the stable operator flows or explicitly document
   that REST + CLI + MCP are the supported client surfaces for v0.1. Acceptance:
   the decision is reflected in README, API docs, and the parity matrix so
   integrators do not write against accidental internal modules.
-- [ ] Add a searchable reason-code and error-code catalog. Acceptance: common
+- [x] Add a searchable reason-code and error-code catalog. Acceptance: common
   API/CLI/MCP failures include problem, likely cause, operator fix, related
   command, and docs link; release readiness fails if new public reason codes
   lack catalog coverage.
-- [ ] Improve CLI help text for first-time users. Acceptance: `awf --help`,
+- [x] Improve CLI help text for first-time users. Acceptance: `awf --help`,
   `awf init --help`, `awf service bootstrap --help`, and workspace commands
   explain the recommended first path, safety defaults, dry-run behavior, and
   whether the command mutates local state, Docker, GitHub, or Git branches.
