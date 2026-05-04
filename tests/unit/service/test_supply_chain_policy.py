@@ -249,6 +249,37 @@ def test_pinned_lockfile_aware_and_allowed_registry_cases_are_allowed() -> None:
 
 
 @pytest.mark.unit
+def test_package_install_detection_skips_shell_wrappers_and_env_assignments() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ sudo npm install left-pad\n"
+            "$ env PIP_DISABLE_PIP_VERSION_CHECK=1 pip install requests\n"
+            "$ command yarn add lodash\n"
+            "$ PIP_INDEX_URL=https://pypi.org/simple uv pip install httpx\n"
+            "$ env -u NODE_AUTH_TOKEN pnpm add fixture\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+    ]
+    assert [finding.details["manager"] for finding in findings] == [
+        "npm",
+        "pip",
+        "yarn",
+        "uv pip",
+        "pnpm",
+    ]
+
+
+@pytest.mark.unit
 def test_additional_package_manager_forms_are_classified_without_noise() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(

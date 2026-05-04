@@ -99,6 +99,9 @@ _REMOTE_SCRIPT_INTERPRETERS: Final[frozenset[str]] = frozenset(
 _URL_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(https?://)[^/@\s]+(?::[^/@\s]+)?@"
 )
+_SHELL_ASSIGNMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*="
+)
 _PIP_VCS_SPEC_PREFIXES: Final[tuple[str, ...]] = ("git+", "hg+", "svn+", "bzr+")
 _SHELL_CONTROL_OPERATORS: Final[frozenset[str]] = frozenset({";", "&&", "||"})
 _SHELL_PIPE_OPERATORS: Final[frozenset[str]] = frozenset({"|", "|&"})
@@ -539,18 +542,118 @@ def _unexpected_registry_finding(
 
 def _package_command(command: str, tokens: list[str]) -> _PackageCommand | None:
     del command
+    tokens = _strip_package_command_prefixes(tokens)
     if not tokens:
         return None
-    if tokens[:3] in (["python", "-m", "pip"], ["python3", "-m", "pip"]):
+    first = PurePosixPath(_shell_token_word(tokens[0])).name
+    if len(tokens) >= 3 and first in {"python", "python3"} and tokens[1:3] == [
+        "-m",
+        "pip",
+    ]:
         return _pip_command(tokens[3:], manager="pip")
-    if len(tokens) >= 2 and tokens[0] == "uv" and tokens[1] == "pip":
+    if len(tokens) >= 2 and first == "uv" and tokens[1] == "pip":
         return _pip_command(tokens[2:], manager="uv pip")
-    first = tokens[0]
     if first in {"pip", "pip3"}:
         return _pip_command(tokens[1:], manager="pip")
     if first in {"npm", "pnpm", "yarn", "bun"}:
         return _node_package_command(tokens[1:], manager=first)
     return None
+
+
+def _strip_package_command_prefixes(tokens: list[str]) -> list[str]:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        command = PurePosixPath(_shell_token_word(token)).name
+        if _is_shell_assignment(token):
+            index += 1
+            continue
+        if command == "sudo":
+            index += 1
+            index = _skip_wrapper_options(
+                tokens,
+                index,
+                value_flags={
+                    "-a",
+                    "--auth-type",
+                    "-C",
+                    "--close-from",
+                    "-c",
+                    "--login-class",
+                    "-g",
+                    "--group",
+                    "-h",
+                    "--host",
+                    "-p",
+                    "--prompt",
+                    "-R",
+                    "--chroot",
+                    "-r",
+                    "--role",
+                    "-t",
+                    "--type",
+                    "-U",
+                    "--other-user",
+                    "-u",
+                    "--user",
+                },
+            )
+            continue
+        if command == "env":
+            index += 1
+            index = _skip_wrapper_options(
+                tokens,
+                index,
+                value_flags={
+                    "--argv0",
+                    "-C",
+                    "--chdir",
+                    "-S",
+                    "--split-string",
+                    "-u",
+                    "--unset",
+                },
+                skip_assignments=True,
+            )
+            continue
+        if command == "command":
+            index += 1
+            index = _skip_wrapper_options(tokens, index)
+            continue
+        break
+    return tokens[index:]
+
+
+def _skip_wrapper_options(
+    tokens: list[str],
+    index: int,
+    *,
+    value_flags: set[str] | None = None,
+    skip_assignments: bool = False,
+) -> int:
+    flags_with_values = value_flags or set()
+    while index < len(tokens):
+        token = tokens[index]
+        if skip_assignments and _is_shell_assignment(token):
+            index += 1
+            continue
+        if token == "--":
+            return index + 1
+        if token in flags_with_values:
+            index += 2
+            continue
+        if any(token.startswith(f"{flag}=") for flag in flags_with_values):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return index
+    return index
+
+
+def _is_shell_assignment(token: str) -> bool:
+    return _SHELL_ASSIGNMENT_PATTERN.match(token) is not None
 
 
 def _pip_command(tokens: list[str], *, manager: str) -> _PackageCommand | None:
