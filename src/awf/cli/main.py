@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 import urllib.parse
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
@@ -240,7 +241,7 @@ async def _run_terminal_workspace_worktree_remove(
         return WorkspaceGCWorktreeRemoveResult(
             status="failed",
             reason_code="GIT_WORKTREE_REMOVE_FAILED",
-            error=str(exc)[:1000],
+            error="".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[:1000],
         )
 
 
