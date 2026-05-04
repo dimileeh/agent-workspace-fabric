@@ -14,6 +14,7 @@ import awf.control.executor as executor_mod
 from awf.adapters.base import AgentDefaults
 from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 from awf.control.executor import (
+    GIT_OBJECT_MISSING_REASON_CODE,
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
     PLAN_ONLY_OUTPUT_REASON_CODE,
     ExecutorConfig,
@@ -1993,6 +1994,32 @@ async def test_verify_recovered_post_agent_commit_accepts_policy_clean_commit(
     )
 
     executor._mark_failed.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_recovered_post_agent_commit_verification_exceptions_mark_failed(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._verify_recovered_post_agent_commit = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("git diff failed")
+    )
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+
+    assert not await executor._verify_recovered_post_agent_commit_or_mark_failed(
+        workspace_id="ws_recovered_verify_error",
+        worktree_path=tmp_path / "worktree",
+        base_commit="f" * 40,
+        owned_paths=[],
+        expected_status=WorkspaceStatus.running,
+    )
+
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["from_status"] == WorkspaceStatus.running
+    assert kwargs["failure_reason"] == FailureReason.infrastructure_failure
+    assert kwargs["reason_code"] == GIT_OBJECT_MISSING_REASON_CODE
+    assert "git diff failed" in kwargs["message"]
 
 
 @pytest.mark.unit

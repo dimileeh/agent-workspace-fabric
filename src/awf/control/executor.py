@@ -1563,7 +1563,7 @@ class WorkspaceExecutor:
                         "executor.commit_step_missing_head_recovered",
                         workspace_id=workspace_id,
                     )
-                    if not await self._verify_recovered_post_agent_commit(
+                    if not await self._verify_recovered_post_agent_commit_or_mark_failed(
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
                         base_commit=base_commit,
@@ -3637,6 +3637,40 @@ class WorkspaceExecutor:
             )
             return False
         return True
+
+    async def _verify_recovered_post_agent_commit_or_mark_failed(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        base_commit: str,
+        owned_paths: list[str],
+        expected_status: WorkspaceStatus,
+    ) -> bool:
+        try:
+            return await self._verify_recovered_post_agent_commit(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_commit=base_commit,
+                owned_paths=owned_paths,
+                expected_status=expected_status,
+            )
+        except Exception as exc:
+            _log.exception(
+                "executor.commit_step_missing_head_recovery_verification_failed",
+                workspace_id=workspace_id,
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=expected_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "post-agent missing HEAD recovery verification failed: "
+                    f"{exc!r}"
+                )[:2000],
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
+            return False
 
     async def _fail_if_plan_only_paths(
         self,
