@@ -816,12 +816,39 @@ def _is_pinned_or_local_spec(manager: str, spec: str) -> bool:
         return True
     if manager in {"npm", "pnpm", "yarn", "bun"}:
         return _is_pinned_node_spec(spec)
+    return _is_pinned_pip_spec(spec)
+
+
+def _is_pinned_pip_spec(spec: str) -> bool:
     return (
         "==" in spec
         or "===" in spec
         or spec.startswith(("-r", "--requirement"))
         or spec.startswith(("file:", "git+file:"))
+        or _is_pinned_pip_vcs_spec(spec)
     )
+
+
+def _is_pinned_pip_vcs_spec(spec: str) -> bool:
+    direct_ref = " @ "
+    target = spec.split(direct_ref, maxsplit=1)[1] if direct_ref in spec else spec
+    normalized = target.strip()
+    prefix = next(
+        (
+            candidate
+            for candidate in _PIP_VCS_SPEC_PREFIXES
+            if normalized.startswith(candidate)
+        ),
+        None,
+    )
+    if prefix is None:
+        return False
+    vcs_url = normalized.removeprefix(prefix).split("#", maxsplit=1)[0]
+    parsed = urlsplit(vcs_url)
+    if "@" not in parsed.path:
+        return False
+    revision = parsed.path.rsplit("@", maxsplit=1)[1]
+    return bool(revision.strip())
 
 
 def _is_pinned_node_spec(spec: str) -> bool:

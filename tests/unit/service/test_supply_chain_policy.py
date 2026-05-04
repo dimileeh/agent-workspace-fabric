@@ -382,6 +382,21 @@ def test_pip_url_install_targets_are_evaluated_for_pinning() -> None:
 
 
 @pytest.mark.unit
+def test_pip_remote_vcs_url_with_revision_is_treated_as_pinned() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ pip install git+https://github.com/example/repo.git@v1.0.0\n"
+            "$ uv pip install git+ssh://git@github.com/example/private.git@abc123\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert findings == []
+
+
+@pytest.mark.unit
 def test_credentialed_registry_url_still_reports_unexpected_host() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
