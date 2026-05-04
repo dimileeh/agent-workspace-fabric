@@ -2408,7 +2408,7 @@ def test_workspace_usage_summary_aggregates_from_operations() -> None:
 
 
 @pytest.mark.unit
-def test_usage_payload_does_not_leak_pricing_reason_into_usage_reason() -> None:
+def test_usage_payload_surfaces_pricing_failure_reason() -> None:
     from awf.service.workspace_observability import LlmUsageSummary, usage_payload
 
     usage = LlmUsageSummary(
@@ -2432,9 +2432,8 @@ def test_usage_payload_does_not_leak_pricing_reason_into_usage_reason() -> None:
             lambda _: None,
         )
         result = usage_payload(SimpleNamespace(id="ws_test"))
-    assert result["reason"] is None
+    assert result["reason"] == "pricing_not_configured"
     assert result["cost_estimate"] is None
-    # Adapter-reported currency is preserved even when pricing is absent
     assert result["currency"] is None
 
 
