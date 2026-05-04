@@ -373,6 +373,7 @@ def _normalize_request_identity(
                 message="PR URL and pr_number refer to different pull requests.",
                 status_code=422,
             )
+        _raise_if_repo_identity_conflicts(canonical_repo=repo, request=request)
         return repo, pr_number
 
     repo_value = request.repo_slug or request.repo_url
@@ -391,7 +392,41 @@ def _normalize_request_identity(
             status_code=422,
             detail={"repo": repo_value},
         ) from exc
+    _raise_if_repo_identity_conflicts(canonical_repo=repo, request=request)
     return repo, request.pr_number
+
+
+def _raise_if_repo_identity_conflicts(
+    *,
+    canonical_repo: RepoRef,
+    request: PullRequestMonitorAdoptionRequest,
+) -> None:
+    for field_name, repo_value in (
+        ("repo_url", request.repo_url),
+        ("repo_slug", request.repo_slug),
+    ):
+        if not repo_value:
+            continue
+        try:
+            requested_repo = RepoRef.from_url(repo_value)
+        except ValueError as exc:
+            raise PRMonitorAdoptionError(
+                error_code="INVALID_GITHUB_REPO",
+                message="Could not parse GitHub repository identity.",
+                status_code=422,
+                detail={"repo": repo_value, "field": field_name},
+            ) from exc
+        if requested_repo.slug().lower() != canonical_repo.slug().lower():
+            raise PRMonitorAdoptionError(
+                error_code="PR_ADOPTION_INPUT_REQUIRED",
+                message="PR adoption repository identities refer to different repositories.",
+                status_code=422,
+                detail={
+                    "expected_repo_slug": canonical_repo.slug(),
+                    "actual_repo_slug": requested_repo.slug(),
+                    "field": field_name,
+                },
+            )
 
 
 def _adoption_task_policy(

@@ -423,6 +423,37 @@ class TestPullRequestMonitorAdoptionService:
         assert excinfo.value.status_code == 422
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("identity_field", "identity_value"),
+        [
+            ("repo_url", "https://github.com/dimileeh/stale-repo.git"),
+            ("repo_slug", "dimileeh/stale-repo"),
+        ],
+    )
+    async def test_pr_url_rejects_conflicting_repo_identity_before_metadata_fetch(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        identity_field: str,
+        identity_value: str,
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                        **{identity_field: identity_value},
+                    )
+                )
+
+            assert await _count(session, Workspace) == 0
+
+        assert excinfo.value.error_code == "PR_ADOPTION_INPUT_REQUIRED"
+        assert excinfo.value.status_code == 422
+        assert fetcher.calls == []
+
+    @pytest.mark.unit
     async def test_invalid_repo_identity_raises_structured_input_error(
         self,
         factory: async_sessionmaker[AsyncSession],
