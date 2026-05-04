@@ -20,6 +20,7 @@ from awf.api.schemas import (
     WorkspaceOverviewListResponse,
     WorkspaceOverviewResponse,
 )
+from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
@@ -39,6 +40,8 @@ from awf.service.provider_recovery import (
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
 LlmUsageStatus = Literal["available", "unavailable"]
+_log = get_logger(__name__)
+
 DEFAULT_STALE_REASON_LIMIT = 50
 MAX_STALE_REASON_LIMIT = 500
 
@@ -556,6 +559,11 @@ def workspace_pricing_metadata(workspace: Workspace) -> PricingMetadata | None:
     try:
         return PricingMetadata.model_validate(inner)
     except Exception:
+        _log.warning(
+            "Failed to parse pricing metadata from profile",
+            exc_info=True,
+            workspace_id=getattr(workspace, "id", None),
+        )
         return None
 
 
