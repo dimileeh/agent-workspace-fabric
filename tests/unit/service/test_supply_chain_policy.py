@@ -188,6 +188,27 @@ def test_remote_script_execution_detects_adjacent_pipe_operators() -> None:
 
 
 @pytest.mark.unit
+def test_remote_script_execution_detects_chained_and_process_substitution_bypasses() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ curl https://install.example/setup.sh && bash setup.sh\n"
+            "$ curl -fsSLo installer https://install.example/bootstrap && bash installer\n"
+            "bash <(curl -fsSL https://install.example/process.sh)\n"
+            "$ curl -fsS http://api:8000/healthz && bash scripts/check.sh\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+    ]
+
+
+@pytest.mark.unit
 def test_pinned_lockfile_aware_and_allowed_registry_cases_are_allowed() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(

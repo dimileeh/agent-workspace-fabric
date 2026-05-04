@@ -80,6 +80,17 @@ _KNOWN_COMMANDS: Final[frozenset[str]] = frozenset(
         "python3",
         "curl",
         "wget",
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "fish",
+        "ruby",
+        "perl",
+        "node",
+        "sudo",
+        "env",
+        "command",
     }
 )
 _REMOTE_SCRIPT_INTERPRETERS: Final[frozenset[str]] = frozenset(
@@ -371,6 +382,31 @@ def _remote_script_execution(
     *,
     policy: ProfileSupplyChainPolicy,
 ) -> SupplyChainFinding | None:
+    if not (
+        _has_piped_remote_script_execution(tokens)
+        or _has_chained_remote_script_execution(tokens)
+        or _has_process_substitution_remote_script_execution(tokens)
+    ):
+        return None
+    severity = _severity(policy.remote_script_execution.mode.value)
+    return SupplyChainFinding(
+        reason_code=SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
+        severity=severity,
+        subject_path=None,
+        explanation="Remote script execution through an interpreter was detected.",
+        details={
+            "guardrail": "remote_script_execution",
+            "command_excerpt": _redact_command_excerpt(command),
+            "mode": policy.remote_script_execution.mode.value,
+            "recovery_guidance": (
+                "Download the remote script, inspect and pin its source, then "
+                "run a local checked-in script or documented installer step."
+            ),
+        },
+    )
+
+
+def _has_piped_remote_script_execution(tokens: Sequence[str]) -> bool:
     for index, token in enumerate(tokens):
         if token not in {"|", "|&"}:
             continue
@@ -378,23 +414,45 @@ def _remote_script_execution(
             continue
         if not _pipe_target_is_interpreter(tokens[index + 1 :]):
             continue
-        severity = _severity(policy.remote_script_execution.mode.value)
-        return SupplyChainFinding(
-            reason_code=SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
-            severity=severity,
-            subject_path=None,
-            explanation="Remote script execution piped into a shell was detected.",
-            details={
-                "guardrail": "remote_script_execution",
-                "command_excerpt": _redact_command_excerpt(command),
-                "mode": policy.remote_script_execution.mode.value,
-                "recovery_guidance": (
-                    "Download the remote script, inspect and pin its source, then "
-                    "run a local checked-in script or documented installer step."
-                ),
-            },
-        )
-    return None
+        return True
+    return False
+
+
+def _has_chained_remote_script_execution(tokens: Sequence[str]) -> bool:
+    for index, token in enumerate(tokens):
+        if token != "&&":
+            continue
+        artifact_names = _remote_fetch_artifact_names(tokens[:index])
+        if not artifact_names:
+            continue
+        target = _interpreter_script_target(tokens[index + 1 :])
+        if target is None:
+            continue
+        if PurePosixPath(target).name in artifact_names:
+            return True
+    return False
+
+
+def _has_process_substitution_remote_script_execution(tokens: Sequence[str]) -> bool:
+    if not _pipe_target_is_interpreter(tokens):
+        return False
+    for index, token in enumerate(tokens):
+        fetch_tokens: Sequence[str]
+        if token == "<(":
+            fetch_tokens = tokens[index + 1 :]
+        elif token.startswith("<("):
+            fetch_tokens = (token[2:], *tokens[index + 1 :])
+        else:
+            continue
+        if not fetch_tokens:
+            continue
+        command = PurePosixPath(_shell_token_word(fetch_tokens[0])).name
+        if command not in {"curl", "wget"}:
+            continue
+        for arg in _process_substitution_args(fetch_tokens[1:]):
+            if _is_remote_url_token(arg):
+                return True
+    return False
 
 
 def _unpinned_dependency_install_finding(
@@ -658,6 +716,63 @@ def _looks_like_pip_url_install_target(spec: str) -> bool:
     return "://" in normalized or normalized.startswith(_PIP_VCS_SPEC_PREFIXES)
 
 
+def _remote_fetch_artifact_names(tokens: Sequence[str]) -> set[str]:
+    if not _is_remote_fetch(tokens):
+        return set()
+    artifact_names: set[str] = set()
+    for token in tokens[1:]:
+        url = _remote_url_value(token)
+        if url is None:
+            continue
+        name = PurePosixPath(urlsplit(url).path).name
+        if name:
+            artifact_names.add(name)
+    for target in _remote_fetch_output_targets(tokens):
+        name = PurePosixPath(target).name
+        if name:
+            artifact_names.add(name)
+    return artifact_names
+
+
+def _remote_fetch_output_targets(tokens: Sequence[str]) -> list[str]:
+    if not tokens:
+        return []
+    command = PurePosixPath(_shell_token_word(tokens[0])).name
+    targets: list[str] = []
+    args = list(tokens[1:])
+    for index, arg in enumerate(args):
+        if command == "curl":
+            if arg in {"-o", "--output"} and index + 1 < len(args):
+                targets.append(args[index + 1])
+            elif arg.startswith("--output="):
+                targets.append(arg.split("=", maxsplit=1)[1])
+            elif arg.startswith("-") and not arg.startswith("--"):
+                option_tail = arg[1:]
+                output_flag_index = option_tail.rfind("o")
+                if output_flag_index == -1:
+                    continue
+                attached_value = option_tail[output_flag_index + 1 :]
+                if attached_value:
+                    targets.append(attached_value)
+                elif index + 1 < len(args):
+                    targets.append(args[index + 1])
+        elif command == "wget":
+            if arg in {"-O", "--output-document"} and index + 1 < len(args):
+                targets.append(args[index + 1])
+            elif arg.startswith("--output-document="):
+                targets.append(arg.split("=", maxsplit=1)[1])
+            elif arg.startswith("-") and not arg.startswith("--"):
+                output_flag_index = arg.rfind("O")
+                if output_flag_index == -1:
+                    continue
+                attached_value = arg[output_flag_index + 1 :]
+                if attached_value:
+                    targets.append(attached_value)
+                elif index + 1 < len(args):
+                    targets.append(args[index + 1])
+    return [target for target in targets if target != "-"]
+
+
 def _has_any_flag(args: Sequence[str], flags: set[str]) -> bool:
     return any(arg in flags or any(arg.startswith(f"{flag}=") for flag in flags) for arg in args)
 
@@ -665,20 +780,59 @@ def _has_any_flag(args: Sequence[str], flags: set[str]) -> bool:
 def _is_remote_fetch(tokens: Sequence[str]) -> bool:
     if not tokens:
         return False
-    command = PurePosixPath(tokens[0]).name
+    command = PurePosixPath(_shell_token_word(tokens[0])).name
     if command not in {"curl", "wget"}:
         return False
-    return any(token.startswith(("http://", "https://")) for token in tokens[1:])
+    return any(_is_remote_url_token(token) for token in tokens[1:])
 
 
 def _pipe_target_is_interpreter(tokens: Sequence[str]) -> bool:
+    return _interpreter_index(tokens) is not None
+
+
+def _interpreter_index(tokens: Sequence[str]) -> int | None:
     if not tokens:
-        return False
-    for token in tokens:
+        return None
+    for index, token in enumerate(tokens):
         if token in {"env", "sudo", "command"} or "=" in token:
             continue
-        return PurePosixPath(token).name in _REMOTE_SCRIPT_INTERPRETERS
-    return False
+        if PurePosixPath(_shell_token_word(token)).name in _REMOTE_SCRIPT_INTERPRETERS:
+            return index
+        return None
+    return None
+
+
+def _interpreter_script_target(tokens: Sequence[str]) -> str | None:
+    interpreter_index = _interpreter_index(tokens)
+    if interpreter_index is None:
+        return None
+    for token in tokens[interpreter_index + 1 :]:
+        if token.startswith("-") or token in {"<", ">", ">>", "2>", "1>"}:
+            continue
+        return token
+    return None
+
+
+def _process_substitution_args(tokens: Sequence[str]) -> Iterable[str]:
+    for token in tokens:
+        yield token
+        if token.endswith(")"):
+            return
+
+
+def _is_remote_url_token(token: str) -> bool:
+    return _remote_url_value(token) is not None
+
+
+def _remote_url_value(token: str) -> str | None:
+    value = _shell_token_word(token)
+    if value.startswith(("http://", "https://")):
+        return value
+    return None
+
+
+def _shell_token_word(token: str) -> str:
+    return token.strip().strip("()[]{};,")
 
 
 def _command_lines(command_evidence: str | Sequence[str]) -> list[str]:
