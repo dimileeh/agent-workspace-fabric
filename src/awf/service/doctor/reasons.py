@@ -277,6 +277,20 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf doctor",
         "docs/REASON_CATALOG.md#service_status_collection_failed",
     ),
+    "COMPLETED_WORKSPACE_WITHOUT_PR": _ReasonText(
+        "A completed workspace has no associated PR metadata.",
+        "No action needed; the workspace is preserved by GC policy until explicitly destroyed.",
+        "The workspace completed without ever creating or linking a PR.",
+        "awf service gc",
+        "docs/REASON_CATALOG.md#completed_workspace_without_pr",
+    ),
+    "COMPLETED_PR_NOT_MERGED": _ReasonText(
+        "A completed workspace has a PR, but the PR has not been merged.",
+        "Verify PR status; if merged, ensure pr_merge_sha is populated. GC preserves the workspace until the PR is confirmed merged.",
+        "The PR is still open, was closed without merging, or the merge SHA was not recorded.",
+        "awf service gc",
+        "docs/REASON_CATALOG.md#completed_pr_not_merged",
+    ),
 }
 
 

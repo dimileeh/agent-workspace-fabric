@@ -310,6 +310,7 @@ async def test_plan_applies_min_age_filter_and_limit_oldest_first(
         updated_at=now - timedelta(hours=300),
         title="oldest",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     await _workspace(
         session_factory,
@@ -317,6 +318,7 @@ async def test_plan_applies_min_age_filter_and_limit_oldest_first(
         updated_at=now - timedelta(hours=100),
         title="middle",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     await _workspace(
         session_factory,
@@ -324,6 +326,7 @@ async def test_plan_applies_min_age_filter_and_limit_oldest_first(
         updated_at=now - timedelta(hours=2),
         title="fresh",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
 
     plan = await plan_terminal_workspace_gc(
@@ -360,6 +363,7 @@ async def test_plan_applies_limit_to_workspace_queries(
             updated_at=now - timedelta(hours=300 - index),
             title=f"candidate {index}",
             pr=True,
+            pr_merge_sha="a" * 40,
         )
 
     workspace_selects: list[str] = []
@@ -406,6 +410,7 @@ async def test_plan_classifies_workspace_paths_in_threads(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=48),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     preserved_id = await _workspace(
         session_factory,
@@ -454,6 +459,7 @@ async def test_plan_tolerates_missing_workspace_paths(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=48),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
 
     plan = await plan_terminal_workspace_gc(
@@ -486,6 +492,7 @@ async def test_run_defaults_to_dry_run_and_keeps_candidate_directories(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=48),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     compose = work_dir / "compose" / workspace_id
@@ -594,6 +601,7 @@ async def test_recent_completed_pr_workspace_is_preserved(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=2),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     compose = work_dir / "compose" / workspace_id
@@ -924,6 +932,7 @@ async def test_cleanup_disabled_preserves_completed_pr_workspace(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
 
     plan = await plan_terminal_workspace_gc(
@@ -999,6 +1008,7 @@ async def test_explicit_status_filter_can_select_old_terminal_non_pr_workspace(
         "retention_hours": 24,
         "eligible_statuses": [WorkspaceStatus.failed.value],
         "requires_pr_metadata": False,
+        "requires_pr_merge": False,
         "preserves_failed_workspaces": False,
     }
 
@@ -1015,6 +1025,7 @@ async def test_single_workspace_gc_deletes_only_requested_completed_workspace_af
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     other_id = await _workspace(
         session_factory,
@@ -1022,6 +1033,7 @@ async def test_single_workspace_gc_deletes_only_requested_completed_workspace_af
         updated_at=now,
         title="other completed workspace",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     target_worktree = work_dir / "git" / "worktrees" / target_id
     target_auth = work_dir / "auth" / target_id
@@ -1063,6 +1075,7 @@ async def test_single_workspace_gc_revokes_active_secret_leases_before_auth_clea
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     await _issue_gc_secret_lease(session_factory, workspace_id, now=now)
     auth = work_dir / "auth" / workspace_id
@@ -1109,12 +1122,14 @@ async def test_batch_terminal_gc_revokes_each_candidate_and_is_retry_safe(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     second_id = await _workspace(
         session_factory,
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=210),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     await _issue_gc_secret_lease(session_factory, first_id, now=now)
     await _issue_gc_secret_lease(session_factory, second_id, now=now)
@@ -1214,6 +1229,7 @@ async def test_execute_gc_deletes_workspace_paths_in_threads(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     _write(work_dir / "git" / "worktrees" / workspace_id / "repo.txt", "repo")
     _write(work_dir / "compose" / workspace_id / "compose.yml", "compose")
@@ -1267,6 +1283,7 @@ async def test_cleanup_is_idempotent_after_partial_compose_failure(
         updated_at=now - timedelta(hours=200),
         compose_file_path=str(work_dir / "compose" / compose_slug / "compose.yml"),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     compose = work_dir / "compose" / compose_slug
     worktree = work_dir / "git" / "worktrees" / workspace_id
@@ -1363,6 +1380,7 @@ async def test_single_workspace_cleanup_is_idempotent_after_partial_compose_fail
         updated_at=now - timedelta(hours=200),
         compose_file_path=str(work_dir / "compose" / compose_slug / "compose.yml"),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     compose = work_dir / "compose" / compose_slug
     worktree = work_dir / "git" / "worktrees" / workspace_id
@@ -1470,6 +1488,7 @@ async def test_gc_accepts_sync_compose_teardown_result(
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=200),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     _write(worktree / "repo.txt", "repo")
@@ -1515,6 +1534,7 @@ async def test_default_gc_policy_ignores_non_pr_terminal_and_unknown_statuses(
         updated_at=now - timedelta(hours=200),
         title="future status",
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     async with session_factory() as session:
         unknown = await session.get(Workspace, unknown_id)
@@ -1621,6 +1641,7 @@ async def test_gc_execution_reports_refused_file_symlink_and_out_of_root_paths(
         updated_at=now - timedelta(hours=200),
         compose_file_path=str(outside_dir / "compose.yml"),
         pr=True,
+        pr_merge_sha="a" * 40,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     auth = work_dir / "auth" / workspace_id

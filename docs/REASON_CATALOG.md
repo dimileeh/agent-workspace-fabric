@@ -23,6 +23,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#codex_auth_missing](#codex_auth_missing)
 
+### COMPLETED_PR_NOT_MERGED
+**Problem:** A completed workspace has a PR, but the PR has not been merged.
+**Likely Cause:** The PR is still open, was closed without merging, or the merge SHA was not recorded.
+**Operator Fix:** Verify PR status; if merged, ensure pr_merge_sha is populated. GC preserves the workspace until the PR is confirmed merged.
+**Related Command:** `awf service gc`
+**Docs Link:** [docs/REASON_CATALOG.md#completed_pr_not_merged](#completed_pr_not_merged)
+
+### COMPLETED_WORKSPACE_WITHOUT_PR
+**Problem:** A completed workspace has no associated PR metadata.
+**Likely Cause:** The workspace completed without ever creating or linking a PR.
+**Operator Fix:** No action needed; the workspace is preserved by GC policy until explicitly destroyed.
+**Related Command:** `awf service gc`
+**Docs Link:** [docs/REASON_CATALOG.md#completed_workspace_without_pr](#completed_workspace_without_pr)
+
 ### DISK_USAGE_UNAVAILABLE
 **Problem:** Free disk could not be inspected for the AWF work directory.
 **Likely Cause:** Permission denied or path does not exist.

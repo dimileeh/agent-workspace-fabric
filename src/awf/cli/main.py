@@ -29,7 +29,7 @@ import typer
 from click.core import ParameterSource
 
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
-from awf.service.gc import WorkspaceGCComposeTeardownResult
+from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 _DX_FIRST_PATH_HELP = """
@@ -189,6 +189,57 @@ def _run_terminal_workspace_compose_teardown(
         reason_code="DOCKER_COMPOSE_DOWN_FAILED",
         error=(result.stderr or result.stdout or "docker compose down failed")[:1000],
     )
+
+
+async def _run_terminal_workspace_worktree_remove(
+    candidate: Any,
+) -> WorkspaceGCWorktreeRemoveResult:
+    """Remove the git worktree for a terminal workspace candidate.
+
+    This keeps the ``service gc`` cleanup command consistent with operational
+    expectations: the GC path calls ``git worktree remove`` before issuing
+    ``shutil.rmtree``, so stale worktree metadata in the bare mirror is
+    cleaned up atomically.
+    """
+    from awf.db.session import make_engine, make_session_factory
+    from awf.node.git_manager import GitManager
+    from awf.service.config import resolve_service_settings
+
+    workspace_id = getattr(candidate, "workspace_id", None)
+    if not isinstance(workspace_id, str):
+        return WorkspaceGCWorktreeRemoveResult(
+            status="skipped",
+            reason_code="NO_WORKSPACE_ID",
+        )
+    settings = resolve_service_settings()
+    engine = make_engine(settings.database_url)
+    session_factory = make_session_factory(engine)
+    from awf.db.models import Workspace as WsModel
+
+    async with session_factory() as session:
+        workspace = await session.get(WsModel, workspace_id)
+    await engine.dispose()
+    if workspace is None or not workspace.repo_url:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="skipped",
+            reason_code="NO_REPO_URL",
+        )
+    git_manager = GitManager(Path(settings.work_dir).expanduser().resolve() / "git")
+    try:
+        await git_manager.remove_worktree(
+            workspace_id=workspace_id,
+            repo_url=workspace.repo_url,
+        )
+        return WorkspaceGCWorktreeRemoveResult(
+            status="succeeded",
+            reason_code="WORKTREE_REMOVE_SUCCEEDED",
+        )
+    except Exception as exc:
+        return WorkspaceGCWorktreeRemoveResult(
+            status="failed",
+            reason_code="GIT_WORKTREE_REMOVE_FAILED",
+            error=str(exc)[:1000],
+        )
 
 
 def _emit(payload: object, fmt: OutputFormat) -> None:
@@ -1028,6 +1079,7 @@ def service_gc(
                 execute=execute,
                 cleanup_enabled=settings.workspace_cleanup_enabled,
                 compose_teardown=_run_terminal_workspace_compose_teardown,
+                worktree_remover=_run_terminal_workspace_worktree_remove,
             )
             return result.to_dict()
         finally:
