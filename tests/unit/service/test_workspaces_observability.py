@@ -2114,6 +2114,58 @@ class TestComputeCostEstimate:
         assert cost == 0.0
 
     @pytest.mark.unit
+    def test_rejects_negative_total_tokens(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=-1000,
+            output_tokens=-500,
+            total_tokens=-1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "negative_token_count"
+
+    @pytest.mark.unit
+    def test_rejects_negative_summed_tokens_when_total_is_none(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_unit=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=-1000,
+            output_tokens=-500,
+            total_tokens=None,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is None
+        assert reason == "negative_token_count"
+
+    @pytest.mark.unit
     def test_respects_explicit_now_for_staleness(self) -> None:
         from awf.service.workspace_observability import LlmUsageSummary
 

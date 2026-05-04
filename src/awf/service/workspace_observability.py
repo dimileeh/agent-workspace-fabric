@@ -692,6 +692,8 @@ def compute_cost_estimate(
         total_tokens = usage.input_tokens + usage.output_tokens
     else:
         return None, "no_token_data"
+    if total_tokens < 0:
+        return None, "negative_token_count"
     divisor = _token_divisor_from_unit(pricing.unit)
     if divisor is None:
         return None, "unsupported_pricing_unit"
