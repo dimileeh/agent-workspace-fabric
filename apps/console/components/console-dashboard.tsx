@@ -33,6 +33,11 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import { useSearchParams } from "next/navigation";
+import { createContext, useContext } from "react";
+import { WorkspaceInspector } from "./workspace-inspector";
+
+export const PanelContext = createContext<"default" | "ghost">("default");
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   bytes,
@@ -310,7 +315,26 @@ export function ConsoleDashboard() {
   );
   const [operatorPreferencesHydrated, setOperatorPreferencesHydrated] = useState(false);
   const [overview, setOverview] = useState<WorkspaceOverview[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+const searchParams = useSearchParams();
+  const [selectedId, setSelectedIdState] = useState<string | null>(searchParams.get("workspaceId"));
+
+const setSelectedId = useCallback((action: React.SetStateAction<string | null>) => {
+    setSelectedIdState(action);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const currentParam = params.get("workspaceId");
+    if (selectedId !== currentParam) {
+      if (selectedId) {
+        params.set("workspaceId", selectedId);
+      } else {
+        params.delete("workspaceId");
+      }
+      const newQuery = params.toString();
+      window.history.replaceState(null, "", newQuery ? `?${newQuery}` : window.location.pathname);
+    }
+  }, [selectedId]);
   const [detail, setDetail] = useState<DetailState>(emptyDetail);
   const [selectedStreams, setSelectedStreams] = useState<string[]>([]);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
@@ -410,7 +434,7 @@ export function ConsoleDashboard() {
         ? current
         : null,
     );
-  }, [overviewPath]);
+  }, [overviewPath, setSelectedId]);
 
   const loadResourceSaturation = useCallback(async () => {
     const result = await apiGet<ResourceSaturationSummary>("/api/awf/metrics/resources/saturation");
@@ -684,7 +708,7 @@ export function ConsoleDashboard() {
     setStreamOffsets({});
     setRetryState({ status: "idle" });
     setOperatorActionState({ status: "idle" });
-  }, [selectedId]);
+  }, [selectedId, setSelectedId]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -828,12 +852,10 @@ export function ConsoleDashboard() {
   }, [overview, searchText, modelFilter, sortDirection, sortKey]);
 
   useEffect(() => {
-    if (selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
+    if (overview.length > 0 && selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
       setSelectedId(filteredOverview[0]?.workspace_id ?? null);
-    } else if (!selectedId && filteredOverview.length > 0) {
-      setSelectedId(filteredOverview[0].workspace_id);
     }
-  }, [filteredOverview, selectedId]);
+  }, [overview.length, filteredOverview, selectedId, setSelectedId]);
 
   const selectedOverview = overview.find((item) => item.workspace_id === selectedId) ?? null;
   const selectedMergeQueueItem = useMemo(
@@ -895,7 +917,7 @@ export function ConsoleDashboard() {
       setFullscreenWorkspaceIds([workspaceId]);
       setLogsFullscreen(true);
     },
-    [selectedId],
+    [selectedId, setSelectedId],
   );
   const openSelectedWorkspaceLogs = useCallback(() => {
     if (workspaceLogSelection.length === 0) {
@@ -1006,9 +1028,17 @@ export function ConsoleDashboard() {
               />
             </div>
           </div>
+</section>
+
+      <WorkspaceInspector
+        isOpen={!!(selectedId && selectedOverview)}
+        onClose={() => setSelectedId(null)}
+        title={selectedOverview ? selectedOverview.title : "Workspace Details"}
+      >
+        <PanelContext.Provider value="ghost">
           {selectedId && selectedOverview ? (
-            <div className="grid min-w-0 gap-4 p-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(420px,0.9fr)]">
-              <div className="grid min-w-0 gap-4">
+            <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(400px,0.8fr)]">
+              <div className="grid min-w-0 content-start gap-4">
                 <WorkspaceSummary
                   overview={selectedOverview}
                   workspace={detail.workspace}
@@ -1040,7 +1070,7 @@ export function ConsoleDashboard() {
                 />
                 <OperationsPanel operations={detail.operations} />
               </div>
-              <div className="grid min-w-0 gap-4">
+              <div className="grid min-w-0 content-start gap-4">
                 <EventsPanel events={detail.events} />
                 <LogsPanel
                   streams={detail.streams}
@@ -1062,10 +1092,9 @@ export function ConsoleDashboard() {
                 />
               </div>
             </div>
-          ) : (
-            <EmptyState apiState={apiState} />
-          )}
-        </section>
+          ) : null}
+        </PanelContext.Provider>
+      </WorkspaceInspector>
       </div>
       {logsFullscreen && fullscreenWorkspaces.length > 0 ? (
         <MultiWorkspaceLogsFullscreen
@@ -3772,16 +3801,19 @@ function Panel({
   action?: React.ReactNode;
   children: React.ReactNode;
 }) {
+  const variant = useContext(PanelContext);
+  const isGhost = variant === "ghost";
+
   return (
-    <section className="min-w-0 w-full max-w-full rounded-md border border-[var(--border)] bg-white">
-      <div className="flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-3 py-2">
+    <section className={`min-w-0 w-full max-w-full ${isGhost ? "" : "rounded-md border border-[var(--border)] bg-white"}`}>
+      <div className={`flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 border-slate-100 ${isGhost ? "px-1 py-2 border-b" : "px-3 py-2 border-b"}`}>
         <h2 className="flex items-center gap-2 text-sm font-semibold">
           {icon}
           {title}
         </h2>
         {action}
       </div>
-      <div className="min-w-0 p-3">{children}</div>
+      <div className={`min-w-0 ${isGhost ? "py-3" : "p-3"}`}>{children}</div>
     </section>
   );
 }
@@ -3882,24 +3914,6 @@ function ErrorBanner({ message }: { message: string }) {
     <div className="m-4 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
       <XCircle className="mt-0.5 shrink-0" size={16} aria-hidden />
       <div>{message}</div>
-    </div>
-  );
-}
-
-function EmptyState({ apiState }: { apiState: "checking" | "ok" | "error" }) {
-  return (
-    <div className="grid min-h-[calc(100vh-58px)] place-items-center p-6 text-center">
-      <div className="max-w-md rounded-md border border-slate-200 bg-white p-6">
-        <Server className="mx-auto mb-3 text-slate-400" size={28} aria-hidden />
-        <h2 className="text-base font-semibold">
-          {apiState === "error" ? "AWF API unavailable" : "No workspace selected"}
-        </h2>
-        <p className="mt-2 text-sm text-slate-600">
-          {apiState === "error"
-            ? "Start the AWF API and confirm AWF_API_BASE_URL plus AWF_API_TOKEN in apps/console/.env.local."
-            : "Create or select a workspace to inspect lifecycle, runtime, events, and logs."}
-        </p>
-      </div>
     </div>
   );
 }
