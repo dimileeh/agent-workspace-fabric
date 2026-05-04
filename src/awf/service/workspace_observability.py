@@ -521,15 +521,7 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     currency = None
     has_usage = False
 
-    try:
-        from sqlalchemy import inspect
-        state = inspect(workspace, raiseerr=False)
-        if state is not None and "operations" in state.unloaded:
-            operations = []
-        else:
-            operations = getattr(workspace, "operations", [])
-    except Exception:
-        operations = getattr(workspace, "operations", [])
+    operations = getattr(workspace, "operations", [])
 
     if operations:
         for operation in operations:

@@ -2421,6 +2421,7 @@ class WorkspaceRepository:
         # ``workspace.events`` collection are populated. A bare ``session.add(event)``
         # would only add the row; callers reading ``workspace.events`` would then
         # trigger a lazy load, which fails in async contexts.
+        workspace.operations = []
         workspace.events.append(
             WorkspaceEvent(
                 id=new_event_id(),
