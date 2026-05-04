@@ -32,6 +32,7 @@ ALLOWLIST = {
     "CALLBACKS_DISABLED": "Grandfathered",
     "CALLBACK_DISABLED": "Grandfathered",
     "CALLBACK_REQUEST_FAILED": "Grandfathered",
+    "f'CALLBACK_HTTP_{result.status_code}'": "Grandfathered",
     "CLEANUP_FAILED": "Grandfathered",
     "GITHUB_ERROR": "Grandfathered",
     "GITHUB_MERGE_FAILED": "Grandfathered",
@@ -95,32 +96,38 @@ def test_catalog_coverage() -> None:
                         if isinstance(target, ast.Name):
                             file_constants[target.id] = node.value.value
 
+            def _extract_val(val_node: ast.expr) -> str | None:
+                if isinstance(val_node, ast.Constant) and isinstance(val_node.value, str):
+                    return val_node.value
+                elif isinstance(val_node, ast.Name) and val_node.id in file_constants:
+                    return file_constants[val_node.id]
+                elif isinstance(val_node, ast.JoinedStr):
+                    return ast.unparse(val_node)
+                return None
+
             for node in ast.walk(tree):
                 # keyword arg: error_code="XYZ" or error_code=CONSTANT
                 if isinstance(node, ast.keyword) and node.arg == "error_code":
-                    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                        all_reason_codes.add(node.value.value)
-                    elif isinstance(node.value, ast.Name) and node.value.id in file_constants:
-                        all_reason_codes.add(file_constants[node.value.id])
+                    extracted = _extract_val(node.value)
+                    if extracted:
+                        all_reason_codes.add(extracted)
                 
                 # assignment: error_code = "XYZ" or self.error_code = "XYZ"
                 elif isinstance(node, ast.Assign):
                     for target in node.targets:
                         if (isinstance(target, ast.Name) and target.id == "error_code") or \
                            (isinstance(target, ast.Attribute) and target.attr == "error_code"):
-                            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                                all_reason_codes.add(node.value.value)
-                            elif isinstance(node.value, ast.Name) and node.value.id in file_constants:
-                                all_reason_codes.add(file_constants[node.value.id])
+                            extracted = _extract_val(node.value)
+                            if extracted:
+                                all_reason_codes.add(extracted)
                 
                 # dict key: {"error_code": "XYZ"} or {"error_code": CONSTANT}
                 elif isinstance(node, ast.Dict):
                     for key, val in zip(node.keys, node.values):
                         if isinstance(key, ast.Constant) and key.value == "error_code":
-                            if isinstance(val, ast.Constant) and isinstance(val.value, str):
-                                all_reason_codes.add(val.value)
-                            elif isinstance(val, ast.Name) and val.id in file_constants:
-                                all_reason_codes.add(file_constants[val.id])
+                            extracted = _extract_val(val)
+                            if extracted:
+                                all_reason_codes.add(extracted)
         except SyntaxError:
             pass
 
