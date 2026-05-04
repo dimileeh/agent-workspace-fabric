@@ -236,6 +236,7 @@ def test_pinned_lockfile_aware_and_allowed_registry_cases_are_allowed() -> None:
             "$ npm ci\n"
             "$ pnpm install --frozen-lockfile\n"
             "$ npm install left-pad@1.3.0 --registry https://registry.npmjs.org\n"
+            "$ npm install https://github.com/example/widget.git#v1.0.0\n"
             "$ pip install requests==2.32.3 --require-hashes "
             "--index-url https://pypi.org/simple\n"
             "$ uv pip install -e .\n"
@@ -246,6 +247,29 @@ def test_pinned_lockfile_aware_and_allowed_registry_cases_are_allowed() -> None:
     )
 
     assert findings == []
+
+
+@pytest.mark.unit
+def test_node_dependency_tags_and_wildcards_are_not_treated_as_pins() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ npm install left-pad@latest right-pad@* @scope/pkg@latest "
+            "https://github.com/example/widget.git\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+    ]
+    assert findings[0].details["unpinned_specs"] == [
+        "left-pad@latest",
+        "right-pad@*",
+        "@scope/pkg@latest",
+        "https://github.com/example/widget.git",
+    ]
 
 
 @pytest.mark.unit

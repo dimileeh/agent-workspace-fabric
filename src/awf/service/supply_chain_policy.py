@@ -103,6 +103,21 @@ _SHELL_ASSIGNMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*="
 )
 _PIP_VCS_SPEC_PREFIXES: Final[tuple[str, ...]] = ("git+", "hg+", "svn+", "bzr+")
+_NODE_REMOTE_SPEC_PREFIXES: Final[tuple[str, ...]] = (
+    "git+",
+    "git://",
+    "http://",
+    "https://",
+    "ssh://",
+    "github:",
+    "gitlab:",
+    "bitbucket:",
+)
+_NODE_LOCAL_SPEC_PREFIXES: Final[tuple[str, ...]] = ("workspace:", "link:")
+_NODE_UNPINNED_VERSION_MARKERS: Final[frozenset[str]] = frozenset(
+    {"", "*", "latest"}
+)
+_NODE_SCP_GIT_SPEC_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^:\s]+:.+")
 _SHELL_CONTROL_OPERATORS: Final[frozenset[str]] = frozenset({";", "&&", "||"})
 _SHELL_PIPE_OPERATORS: Final[frozenset[str]] = frozenset({"|", "|&"})
 _SHELL_PACKAGE_BOUNDARIES: Final[frozenset[str]] = (
@@ -800,15 +815,58 @@ def _is_pinned_or_local_spec(manager: str, spec: str) -> bool:
     if _is_local_spec(spec):
         return True
     if manager in {"npm", "pnpm", "yarn", "bun"}:
-        if spec.startswith("@"):
-            return "@" in spec[1:]
-        return "@" in spec or spec.startswith(("file:", "workspace:", "link:"))
+        return _is_pinned_node_spec(spec)
     return (
         "==" in spec
         or "===" in spec
         or spec.startswith(("-r", "--requirement"))
         or spec.startswith(("file:", "git+file:"))
     )
+
+
+def _is_pinned_node_spec(spec: str) -> bool:
+    if spec.startswith(_NODE_LOCAL_SPEC_PREFIXES):
+        return True
+    fragment = _node_spec_fragment(spec)
+    if fragment is not None:
+        return _node_pin_value_is_pinned(fragment)
+    if _looks_like_node_remote_spec(spec):
+        return False
+    version = _node_package_version(spec)
+    return version is not None and _node_pin_value_is_pinned(version)
+
+
+def _node_spec_fragment(spec: str) -> str | None:
+    if "#" not in spec:
+        return None
+    return spec.rsplit("#", maxsplit=1)[1]
+
+
+def _looks_like_node_remote_spec(spec: str) -> bool:
+    return spec.startswith(_NODE_REMOTE_SPEC_PREFIXES) or (
+        _NODE_SCP_GIT_SPEC_PATTERN.match(spec) is not None
+    )
+
+
+def _node_package_version(spec: str) -> str | None:
+    alias_marker = "@npm:"
+    if alias_marker in spec:
+        return _node_package_version(spec.split(alias_marker, maxsplit=1)[1])
+    if spec.startswith("@"):
+        _, _, package_part = spec.partition("/")
+        if "@" not in package_part:
+            return None
+        return package_part.rsplit("@", maxsplit=1)[1]
+    if "@" not in spec:
+        return None
+    return spec.rsplit("@", maxsplit=1)[1]
+
+
+def _node_pin_value_is_pinned(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized.startswith("semver:"):
+        normalized = normalized.removeprefix("semver:").strip()
+    return normalized not in _NODE_UNPINNED_VERSION_MARKERS
 
 
 def _is_local_spec(spec: str) -> bool:
