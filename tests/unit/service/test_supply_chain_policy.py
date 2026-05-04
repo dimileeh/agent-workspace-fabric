@@ -238,7 +238,7 @@ def test_pinned_lockfile_aware_and_allowed_registry_cases_are_allowed() -> None:
             "$ npm ci\n"
             "$ pnpm install --frozen-lockfile\n"
             "$ npm install left-pad@1.3.0 --registry https://registry.npmjs.org\n"
-            "$ npm install https://github.com/example/widget.git#v1.0.0\n"
+            "$ npm install https://github.com/example/widget.git#8f14e45fceea167a5a36dedd4bea2543d0555b2a\n"
             "$ pip install requests==2.32.3 --require-hashes "
             "--index-url https://pypi.org/simple\n"
             "$ uv pip install -e .\n"
@@ -306,6 +306,34 @@ def test_node_semver_ranges_are_not_treated_as_pins() -> None:
         "hyphen@1.0.0 - 2.0.0",
         "bounded@1.0.0 <2.0.0",
         "https://github.com/example/widget.git#semver:^1.0.0",
+    ]
+
+
+@pytest.mark.unit
+def test_node_git_ref_fragments_must_be_commit_hashes() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ npm install git+https://github.com/example/widget.git#main "
+            "https://github.com/example/widget.git#v1.0.0 "
+            "github:example/widget#release "
+            "gitlab:example/widget#semver:1.0.0 "
+            "git@github.com:example/widget.git#feature/login "
+            "https://github.com/example/widget.git#8f14e45fceea167a5a36dedd4bea2543d0555b2a\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+    ]
+    assert findings[0].details["unpinned_specs"] == [
+        "git+https://github.com/example/widget.git#main",
+        "https://github.com/example/widget.git#v1.0.0",
+        "github:example/widget#release",
+        "gitlab:example/widget#semver:1.0.0",
+        "git@github.com:example/widget.git#feature/login",
     ]
 
 

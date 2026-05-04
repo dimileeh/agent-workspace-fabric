@@ -128,6 +128,10 @@ _NODE_SEMVER_WILDCARD_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(^|[.\-])(?:x|\*)($|[.\-])",
     re.IGNORECASE,
 )
+_NODE_GIT_COMMIT_FRAGMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+    re.IGNORECASE,
+)
 _NODE_SCP_GIT_SPEC_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^:\s]+:.+")
 _PIP_REGISTRY_ENV_VARS: Final[frozenset[str]] = frozenset(
     {"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"}
@@ -946,7 +950,7 @@ def _is_pinned_node_spec(spec: str) -> bool:
         return True
     fragment = _node_spec_fragment(spec)
     if fragment is not None:
-        return _node_pin_value_is_pinned(fragment)
+        return _node_git_fragment_is_pinned(fragment)
     if _looks_like_node_remote_spec(spec):
         return False
     version = _node_package_version(spec)
@@ -977,6 +981,10 @@ def _node_package_version(spec: str) -> str | None:
     if "@" not in spec:
         return None
     return spec.rsplit("@", maxsplit=1)[1]
+
+
+def _node_git_fragment_is_pinned(fragment: str) -> bool:
+    return _NODE_GIT_COMMIT_FRAGMENT_PATTERN.fullmatch(fragment.strip()) is not None
 
 
 def _node_pin_value_is_pinned(value: str) -> bool:
