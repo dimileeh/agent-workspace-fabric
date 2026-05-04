@@ -177,7 +177,7 @@ _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
 _PR_ADOPTION_METADATA_MISSING_REASON_CODE = "PR_ADOPTION_METADATA_MISSING"
 _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE = "PR_ADOPTION_MONITOR_UNAVAILABLE"
-_EXCEPTION_TRACEBACK_REDACTION_SLACK = 1024
+_EXCEPTION_TRACEBACK_LIMIT = 4000
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -5050,10 +5050,7 @@ def _sync_feature_pr_missing_metadata_message(missing: Sequence[str]) -> str:
 
 def _redacted_exception_traceback(exc: BaseException) -> str:
     formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    return redact_audit_text(
-        formatted,
-        limit=max(len(formatted) + _EXCEPTION_TRACEBACK_REDACTION_SLACK, 1000),
-    )
+    return redact_audit_text(formatted, limit=_EXCEPTION_TRACEBACK_LIMIT)
 
 
 def _required_metadata_str(metadata: Mapping[str, object], key: str) -> str:

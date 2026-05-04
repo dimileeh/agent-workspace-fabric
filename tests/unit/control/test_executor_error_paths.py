@@ -3166,6 +3166,23 @@ class TestExecutorCoverageEdges:
         assert secret not in redacted_traceback
 
     @pytest.mark.unit
+    def test_redacted_exception_traceback_truncates_large_tracebacks(self) -> None:
+        secret = "ghp_tracebacksecret123456"
+        try:
+            raise RuntimeError(
+                f"factory exploded Authorization: Bearer {secret}\n" + ("x" * 5000)
+            )
+        except RuntimeError as exc:
+            redacted_traceback = executor_module._redacted_exception_traceback(exc)
+
+        assert "Authorization: Bearer [redacted]" in redacted_traceback
+        assert secret not in redacted_traceback
+        assert redacted_traceback.endswith("...[truncated]")
+        assert len(redacted_traceback) <= executor_module._EXCEPTION_TRACEBACK_LIMIT + len(
+            "...[truncated]"
+        )
+
+    @pytest.mark.unit
     async def test_sync_feature_pr_persisted_metadata_loss_fails_before_monitor_run(
         self,
         monkeypatch: pytest.MonkeyPatch,
