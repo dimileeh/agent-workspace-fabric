@@ -14,7 +14,10 @@ from awf.api.schemas import (
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import MergeCandidate, TaskAttempt, Workspace
 from awf.db.repositories import TaskAttemptRepository, TaskRepository, WorkspaceRepository
-from awf.service.workspace_observability import workspace_identity_usage_payload
+from awf.service.workspace_observability import (
+    workspace_identity_usage_payload,
+    workspace_pricing_metadata,
+)
 
 
 def _readiness_from_candidate(
@@ -31,6 +34,21 @@ def _readiness_from_candidate(
         not_canonical=candidate.not_canonical,
         stale=candidate.stale,
     )
+
+
+def _pricing_from_workspace(workspace: Workspace) -> dict[str, object] | None:
+    pricing = workspace_pricing_metadata(workspace)
+    if pricing is None:
+        return None
+    return {
+        "provider": pricing.provider,
+        "model": pricing.model,
+        "currency": pricing.currency,
+        "unit": pricing.unit,
+        "timestamp": pricing.timestamp,
+        "version": pricing.version,
+        "is_current": pricing.is_current(),
+    }
 
 
 def _task_from_attempt(
@@ -65,6 +83,7 @@ def _task_from_attempt(
         agent_model_source=observability["agent_model_source"],
         agent_effort_source=observability["agent_effort_source"],
         llm_usage=observability["llm_usage"],
+        pricing=_pricing_from_workspace(workspace),
         status=WorkspaceStatus(workspace.status),
         pr_url=workspace.pr_url,
         failure_reason=workspace.failure_reason,
@@ -123,6 +142,7 @@ def _task_from_workspace(row: Workspace) -> TaskResponse:
         agent_model_source=observability["agent_model_source"],
         agent_effort_source=observability["agent_effort_source"],
         llm_usage=observability["llm_usage"],
+        pricing=_pricing_from_workspace(row),
         status=WorkspaceStatus(row.status),
         pr_url=row.pr_url,
         failure_reason=row.failure_reason,

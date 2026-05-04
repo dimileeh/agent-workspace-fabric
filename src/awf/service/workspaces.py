@@ -114,7 +114,10 @@ from awf.service.validation_observability import (
     validation_freshness_summary,
     validation_provenance_unavailable,
 )
-from awf.service.workspace_observability import workspace_observability_payload
+from awf.service.workspace_observability import (
+    workspace_observability_payload,
+    workspace_pricing_metadata,
+)
 from awf.service.workspace_runtime_health import (
     RUNTIME_STRANDED_EVENT_TYPE,
     classify_runtime_snapshot,
@@ -1304,6 +1307,7 @@ def workspace_response(
     computed_fields["provider_readiness_preflight"] = (
         workspace_provider_readiness_preflight(workspace)
     )
+    computed_fields["pricing"] = _pricing_metadata_response(workspace)
     return WorkspaceResponse.model_validate(
         _WorkspaceResponseSource(workspace, computed_fields)
     )
@@ -1335,6 +1339,21 @@ def _console_safe_profile_snapshot(raw_profile: object) -> dict[str, Any] | None
         return None
     sanitized = _sanitize_profile_value(raw_profile, path=())
     return cast(dict[str, Any], sanitized)
+
+
+def _pricing_metadata_response(workspace: Workspace) -> dict[str, Any] | None:
+    pricing = workspace_pricing_metadata(workspace)
+    if pricing is None:
+        return None
+    return {
+        "provider": pricing.provider,
+        "model": pricing.model,
+        "currency": pricing.currency,
+        "unit": pricing.unit,
+        "timestamp": pricing.timestamp,
+        "version": pricing.version,
+        "is_current": pricing.is_current(),
+    }
 
 
 def _sanitize_profile_value(value: object, *, path: tuple[str, ...]) -> object:

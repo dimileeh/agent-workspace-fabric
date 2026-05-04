@@ -321,6 +321,16 @@ class WorkspaceLlmUsageSummaryResponse(BaseModel):
     reason: str | None = "usage_not_reported"
 
 
+class WorkspacePricingMetadataResponse(BaseModel):
+    provider: str
+    model: str
+    currency: str
+    unit: str
+    timestamp: datetime
+    version: int | None = None
+    is_current: bool = True
+
+
 class WorkspaceRecoveryCurrentOperationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -632,6 +642,7 @@ class WorkspaceResponse(BaseModel):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    pricing: WorkspacePricingMetadataResponse | None = None
     recovery: WorkspaceRecoverySummaryResponse | None = None
     validation_provenance: ValidationFreshnessSummaryResponse = Field(
         default_factory=lambda: ValidationFreshnessSummaryResponse()
@@ -750,6 +761,7 @@ class TaskResponse(BaseModel):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    pricing: WorkspacePricingMetadataResponse | None = None
     status: WorkspaceStatus
     pr_url: str | None
     failure_reason: str | None
@@ -815,6 +827,7 @@ class WorkspaceOverviewResponse(BaseModel):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    pricing: WorkspacePricingMetadataResponse | None = None
     recovery: WorkspaceRecoverySummaryResponse | None = None
     coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(
         default_factory=list

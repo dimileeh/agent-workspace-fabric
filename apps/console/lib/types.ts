@@ -42,6 +42,16 @@ export interface LlmUsageSummary {
   reason: string | null;
 }
 
+export interface PricingMetadata {
+  provider: string;
+  model: string;
+  currency: string;
+  unit: string;
+  timestamp: string;
+  version: number | null;
+  is_current: boolean;
+}
+
 export interface WorkspaceRecoveryCurrentOperation {
   id: string;
   type: string;
@@ -176,6 +186,7 @@ export interface WorkspaceOverview {
   network_posture: NetworkPosture | null;
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
+  pricing?: PricingMetadata | null;
   recovery?: WorkspaceRecoverySummary | null;
   coordination_warnings: WorkspaceCoordinationWarning[];
   provider_readiness_preflight?: ProviderReadinessPreflight | null;
@@ -448,6 +459,7 @@ export interface Workspace {
   agent_effort_source: AgentIdentitySource;
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
+  pricing?: PricingMetadata | null;
   recovery?: WorkspaceRecoverySummary | null;
   coordination_warnings: WorkspaceCoordinationWarning[];
   provider_readiness_preflight: ProviderReadinessPreflight | null;

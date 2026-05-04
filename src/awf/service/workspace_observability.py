@@ -23,6 +23,7 @@ from awf.api.schemas import (
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
+from awf.profiles.pricing import PRICING_MAX_AGE_DAYS, PricingMetadata
 from awf.service.bounded_list import (
     bounded_list_limit,
     decode_bounded_list_cursor,
@@ -323,6 +324,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         lifecycle=observability["lifecycle"],
         llm_usage=observability["llm_usage"],
+        pricing=_overview_pricing_metadata(ws),
         recovery=observability["recovery"],
         coordination_warnings=coordination_warnings_from_task_policy(ws.task_policy),
         provider_readiness_preflight=_provider_readiness_preflight_from_task_policy(
@@ -342,6 +344,21 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         created_at=ws.created_at,
         updated_at=ws.updated_at,
     )
+
+
+def _overview_pricing_metadata(ws: Workspace) -> dict[str, object] | None:
+    pricing = workspace_pricing_metadata(ws)
+    if pricing is None:
+        return None
+    return {
+        "provider": pricing.provider,
+        "model": pricing.model,
+        "currency": pricing.currency,
+        "unit": pricing.unit,
+        "timestamp": pricing.timestamp,
+        "version": pricing.version,
+        "is_current": pricing.is_current(),
+    }
 
 
 def _provider_readiness_preflight_from_task_policy(
@@ -524,6 +541,42 @@ def workspace_usage_summary(_workspace: Workspace) -> LlmUsageSummary:
         source="none",
         reason="usage_not_reported",
     )
+
+
+def workspace_pricing_metadata(workspace: Workspace) -> PricingMetadata | None:
+    profile_raw = getattr(workspace, "resolved_profile", None)
+    if not isinstance(profile_raw, Mapping):
+        return None
+    pricing_stanza = profile_raw.get("pricing")
+    if not isinstance(pricing_stanza, dict):
+        return None
+    inner = pricing_stanza.get("pricing")
+    if not isinstance(inner, dict):
+        return None
+    try:
+        return PricingMetadata.model_validate(inner)
+    except Exception:
+        return None
+
+
+def compute_cost_estimate(
+    usage: LlmUsageSummary,
+    pricing: PricingMetadata | None,
+    *,
+    now: datetime | None = None,
+) -> tuple[float | None, str | None]:
+    if pricing is None:
+        return None, "pricing_not_configured"
+    if not pricing.is_current(now=now, max_age_days=PRICING_MAX_AGE_DAYS):
+        return None, "pricing_stale"
+    if usage.input_tokens is None and usage.output_tokens is None:
+        return None, "no_token_data"
+    input_t = usage.input_tokens or 0
+    output_t = usage.output_tokens or 0
+    total_tokens = input_t + output_t
+    cost_per_1k = 0.001
+    cost = (total_tokens / 1000.0) * cost_per_1k
+    return cost, None
 
 
 def agent_identity_payload(workspace: Workspace) -> AgentIdentityPayload:

@@ -170,6 +170,7 @@ class TestTaskList:
                 "source": "none",
                 "reason": "usage_not_reported",
             }
+            assert row.get("pricing") is None
 
     @pytest.mark.unit
     async def test_list_tasks_route_merges_attempt_and_legacy_rows_directly(
