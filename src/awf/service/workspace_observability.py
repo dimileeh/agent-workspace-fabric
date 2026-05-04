@@ -664,7 +664,7 @@ _SUFFIX_MULTIPLIERS: dict[str, int] = {
 
 
 def _token_divisor_from_unit(unit: str) -> int | None:
-    match = _PRICING_UNIT_PATTERN.search(unit)
+    match = _PRICING_UNIT_PATTERN.match(unit)
     if match is None:
         return None
     base = int(match.group("multiplier"))
