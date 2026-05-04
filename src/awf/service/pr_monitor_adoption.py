@@ -107,19 +107,6 @@ class PullRequestMonitorAdoptionService:
             return await self._response(existing, attached_existing=True)
 
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
-        if metadata.merged:
-            raise PRMonitorAdoptionError(
-                error_code="PR_ALREADY_MERGED",
-                message=f"PR {repo.slug()}#{pr_number} is already merged.",
-                detail={"repo_slug": repo.slug(), "pr_number": pr_number},
-            )
-        if metadata.closed:
-            raise PRMonitorAdoptionError(
-                error_code="PR_ALREADY_CLOSED",
-                message=f"PR {repo.slug()}#{pr_number} is closed.",
-                detail={"repo_slug": repo.slug(), "pr_number": pr_number},
-            )
-
         workspace = await self._create_adoption_workspace(
             request=request,
             repo=repo,
@@ -135,7 +122,7 @@ class PullRequestMonitorAdoptionService:
         pr_number: int,
     ) -> PullRequestAdoptionMetadata:
         try:
-            return await self._metadata_fetcher(repo=repo, pr_number=pr_number)
+            metadata = await self._metadata_fetcher(repo=repo, pr_number=pr_number)
         except PullRequestMetadataError as exc:
             raise PRMonitorAdoptionError(
                 error_code=exc.reason_code,
@@ -143,6 +130,27 @@ class PullRequestMonitorAdoptionService:
                 status_code=_metadata_error_status_code(exc.reason_code),
                 detail=exc.detail,
             ) from exc
+        if metadata.merged:
+            raise PRMonitorAdoptionError(
+                error_code="PR_ALREADY_MERGED",
+                message=f"PR {repo.slug()}#{pr_number} is already merged.",
+                detail={
+                    "repo_slug": repo.slug(),
+                    "pr_number": pr_number,
+                    "state": metadata.state,
+                },
+            )
+        if metadata.closed:
+            raise PRMonitorAdoptionError(
+                error_code="PR_ALREADY_CLOSED",
+                message=f"PR {repo.slug()}#{pr_number} is closed.",
+                detail={
+                    "repo_slug": repo.slug(),
+                    "pr_number": pr_number,
+                    "state": metadata.state,
+                },
+            )
+        return metadata
 
     async def _create_adoption_workspace(
         self,

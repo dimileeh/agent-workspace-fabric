@@ -305,6 +305,39 @@ class TestPullRequestMonitorAdoptionService:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "metadata, error_code",
+        [
+            (_metadata(state="CLOSED"), "PR_ALREADY_CLOSED"),
+            (_metadata(state="MERGED"), "PR_ALREADY_MERGED"),
+        ],
+    )
+    async def test_fetch_metadata_rejects_terminal_fetcher_results(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        metadata: PullRequestAdoptionMetadata,
+        error_code: str,
+    ) -> None:
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(metadata),
+            )
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service._fetch_metadata(
+                    repo=RepoRef(owner="dimileeh", name="aira-web"),
+                    pr_number=277,
+                )
+
+        assert excinfo.value.error_code == error_code
+        assert excinfo.value.status_code == 409
+        assert excinfo.value.detail == {
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "state": metadata.state,
+        }
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         "payload",
         [
             PullRequestMonitorAdoptionRequest(pr_url="https://example.com/x/y/pull/1"),
