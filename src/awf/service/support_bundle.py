@@ -33,7 +33,7 @@ def _redact_value(value: object, secrets: frozenset[str]) -> Any:
     if isinstance(value, str):
         return _redact_text(value, secrets)
     if isinstance(value, Mapping):
-        return {str(key): _redact_value(nested, secrets) for key, nested in value.items()}
+        return {str(_redact_value(key, secrets)): _redact_value(nested, secrets) for key, nested in value.items()}
     if isinstance(value, list | tuple):
         return [_redact_value(item, secrets) for item in value]
     if value is None or isinstance(value, bool | int | float):

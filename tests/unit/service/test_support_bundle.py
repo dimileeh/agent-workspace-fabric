@@ -192,6 +192,7 @@ def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
         "status": "fail",
         "reason": "API_UNREACHABLE",
         "detail": f"token={openai_secret} db=postgresql://awf:{db_secret}@localhost/awf",
+        openai_secret: "value under secret key",
     }
     readiness = status["agent_readiness"]
     assert isinstance(readiness, dict)
