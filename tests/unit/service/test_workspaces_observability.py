@@ -2175,6 +2175,33 @@ class TestComputeCostEstimate:
         assert cost == 0.0
 
     @pytest.mark.unit
+    def test_prefers_total_tokens_when_directional_field_is_missing(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_1k_tokens=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=None,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is not None
+        assert reason is None
+        assert cost == pytest.approx(0.0015)
+
+    @pytest.mark.unit
     def test_returns_reason_when_pricing_rates_are_unavailable(self) -> None:
         from awf.service.workspace_observability import LlmUsageSummary
 

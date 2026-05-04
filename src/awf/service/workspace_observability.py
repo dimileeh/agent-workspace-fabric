@@ -686,14 +686,12 @@ def compute_cost_estimate(
         return None, "pricing_stale"
     if pricing.price_per_1k_tokens is None:
         return None, "pricing_rates_unavailable"
-    if usage.input_tokens is None and usage.output_tokens is None:
-        if usage.total_tokens is None:
-            return None, "no_token_data"
+    if usage.total_tokens is not None:
         total_tokens = usage.total_tokens
+    elif usage.input_tokens is not None and usage.output_tokens is not None:
+        total_tokens = usage.input_tokens + usage.output_tokens
     else:
-        input_t = usage.input_tokens or 0
-        output_t = usage.output_tokens or 0
-        total_tokens = input_t + output_t
+        return None, "no_token_data"
     divisor = _token_divisor_from_unit(pricing.unit)
     if divisor is None:
         return None, "unsupported_pricing_unit"
