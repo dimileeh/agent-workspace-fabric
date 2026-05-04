@@ -3550,11 +3550,26 @@ class PullRequestMonitorRunner:
         result = await self._fetch_base_once(worktree_path=worktree_path, base_branch=base_branch)
         repairs_attempted = 0
         while not result.ok and repairs_attempted < _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS:
-            repaired = await self._repair_orphaned_broken_awf_ref(
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                stderr=result.stderr,
-            )
+            try:
+                repaired = await self._repair_orphaned_broken_awf_ref(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    stderr=result.stderr,
+                )
+            except Exception as exc:
+                _log.exception(
+                    "monitor.git_mirror_broken_ref_repair_failed",
+                    workspace_id=workspace_id,
+                    base_branch=base_branch,
+                    repairs_attempted=repairs_attempted,
+                )
+                raise BaseFetchError(
+                    redact_audit_text(
+                        "git fetch base failed: broken AWF ref repair failed "
+                        f"after fetch failure: {exc!r}",
+                        limit=2000,
+                    )
+                ) from exc
             if not repaired:
                 break
             repairs_attempted += 1

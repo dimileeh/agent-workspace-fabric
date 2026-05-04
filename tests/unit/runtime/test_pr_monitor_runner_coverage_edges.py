@@ -2949,6 +2949,48 @@ async def test_fetch_base_repairs_multiple_broken_awf_refs_before_failing_worksp
 
 
 @pytest.mark.unit
+async def test_fetch_base_wraps_broken_ref_repair_exceptions_as_base_fetch_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fetch_base_once = mocker.patch.object(
+        runner,
+        "_fetch_base_once",
+        mocker.AsyncMock(
+            return_value=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="fatal: bad object refs/heads/awf/ws_old",
+            )
+        ),
+    )
+    repair = mocker.patch.object(
+        runner,
+        "_repair_orphaned_broken_awf_ref",
+        mocker.AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+
+    with pytest.raises(BaseFetchError, match="broken AWF ref repair failed") as exc:
+        await runner._fetch_base(
+            workspace_id="ws_current",
+            worktree_path=tmp_path / "worktrees" / "ws_current",
+            base_branch="development",
+        )
+
+    assert "database unavailable" in str(exc.value)
+    assert fetch_base_once.await_count == 1
+    repair.assert_awaited_once()
+
+
+@pytest.mark.unit
 async def test_missing_workspace_terminal_helpers_return_without_side_effects(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
