@@ -273,6 +273,41 @@ def test_node_dependency_tags_and_wildcards_are_not_treated_as_pins() -> None:
 
 
 @pytest.mark.unit
+def test_node_semver_ranges_are_not_treated_as_pins() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ npm install lodash@^4.17.21 alias@npm:@scope/pkg@~1.2.3 "
+            "partial@1.2 wildcard@1.x comparator@>=1.0.0\n"
+            "$ yarn add react@~18.2.0 'either@1.0.0 || 2.0.0' "
+            "'hyphen@1.0.0 - 2.0.0' 'bounded@1.0.0 <2.0.0' "
+            "https://github.com/example/widget.git#semver:^1.0.0\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+    ]
+    assert findings[0].details["unpinned_specs"] == [
+        "lodash@^4.17.21",
+        "alias@npm:@scope/pkg@~1.2.3",
+        "partial@1.2",
+        "wildcard@1.x",
+        "comparator@>=1.0.0",
+    ]
+    assert findings[1].details["unpinned_specs"] == [
+        "react@~18.2.0",
+        "either@1.0.0 || 2.0.0",
+        "hyphen@1.0.0 - 2.0.0",
+        "bounded@1.0.0 <2.0.0",
+        "https://github.com/example/widget.git#semver:^1.0.0",
+    ]
+
+
+@pytest.mark.unit
 def test_package_install_detection_skips_shell_wrappers_and_env_assignments() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(

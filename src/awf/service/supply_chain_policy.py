@@ -117,6 +117,14 @@ _NODE_LOCAL_SPEC_PREFIXES: Final[tuple[str, ...]] = ("workspace:", "link:")
 _NODE_UNPINNED_VERSION_MARKERS: Final[frozenset[str]] = frozenset(
     {"", "*", "latest"}
 )
+_NODE_SEMVER_RANGE_PREFIXES: Final[tuple[str, ...]] = ("^", "~", ">", "<")
+_NODE_PARTIAL_SEMVER_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^v?\d+(?:\.\d+)?$"
+)
+_NODE_SEMVER_WILDCARD_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(^|[.\-])(?:x|\*)($|[.\-])",
+    re.IGNORECASE,
+)
 _NODE_SCP_GIT_SPEC_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^:\s]+:.+")
 _SHELL_CONTROL_OPERATORS: Final[frozenset[str]] = frozenset({";", "&&", "||"})
 _SHELL_PIPE_OPERATORS: Final[frozenset[str]] = frozenset({"|", "|&"})
@@ -893,7 +901,21 @@ def _node_pin_value_is_pinned(value: str) -> bool:
     normalized = value.strip().lower()
     if normalized.startswith("semver:"):
         normalized = normalized.removeprefix("semver:").strip()
-    return normalized not in _NODE_UNPINNED_VERSION_MARKERS
+    return (
+        normalized not in _NODE_UNPINNED_VERSION_MARKERS
+        and not _node_pin_value_is_semver_range(normalized)
+    )
+
+
+def _node_pin_value_is_semver_range(value: str) -> bool:
+    return (
+        value.startswith(_NODE_SEMVER_RANGE_PREFIXES)
+        or "||" in value
+        or " - " in value
+        or any(character.isspace() for character in value)
+        or _NODE_PARTIAL_SEMVER_PATTERN.fullmatch(value) is not None
+        or _NODE_SEMVER_WILDCARD_PATTERN.search(value) is not None
+    )
 
 
 def _is_local_spec(spec: str) -> bool:
