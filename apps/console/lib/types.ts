@@ -47,7 +47,7 @@ export interface PricingMetadata {
   model: string;
   currency: string;
   unit: string;
-  price_per_1k_tokens: number | null;
+  price_per_unit: number | null;
   timestamp: string;
   version: number | null;
   is_current: boolean;
