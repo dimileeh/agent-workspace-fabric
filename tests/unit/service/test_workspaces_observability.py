@@ -2032,6 +2032,33 @@ class TestComputeCostEstimate:
         assert reason == "no_token_data"
 
     @pytest.mark.unit
+    def test_computes_cost_from_total_tokens_when_input_and_output_are_none(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_1k_tokens=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=2000,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert cost is not None
+        assert reason is None
+        assert cost == pytest.approx(0.002)
+
+    @pytest.mark.unit
     def test_computes_cost_when_tokens_and_current_pricing_exist(self) -> None:
         from awf.service.workspace_observability import LlmUsageSummary
 

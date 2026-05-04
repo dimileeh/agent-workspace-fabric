@@ -580,10 +580,13 @@ def compute_cost_estimate(
     if pricing.price_per_1k_tokens is None:
         return None, "pricing_rates_unavailable"
     if usage.input_tokens is None and usage.output_tokens is None:
-        return None, "no_token_data"
-    input_t = usage.input_tokens or 0
-    output_t = usage.output_tokens or 0
-    total_tokens = input_t + output_t
+        if usage.total_tokens is None:
+            return None, "no_token_data"
+        total_tokens = usage.total_tokens
+    else:
+        input_t = usage.input_tokens or 0
+        output_t = usage.output_tokens or 0
+        total_tokens = input_t + output_t
     cost = (total_tokens / 1000.0) * pricing.price_per_1k_tokens
     return cost, None
 
