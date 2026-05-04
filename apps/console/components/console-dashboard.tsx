@@ -2058,6 +2058,20 @@ function UsageSummaryBlock({
   const safeUsage = fallbackLlmUsage(usage);
   const pricingReason = pricingAvailabilityReason(pricing);
   const showCost = safeUsage.cost_estimate !== null && pricing && pricing.is_current;
+  
+  if (safeUsage.status === "unavailable" || (safeUsage.input_tokens == null && safeUsage.output_tokens == null && safeUsage.total_tokens == null && safeUsage.cost_estimate == null)) {
+    return (
+      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-semibold text-slate-900">LLM usage</span>
+          <Badge value="unavailable" />
+        </div>
+        <div className="mt-2 truncate text-[11px] text-slate-500">
+          {safeUsage.reason ?? "usage unavailable"}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
@@ -2075,9 +2089,9 @@ function UsageSummaryBlock({
         </div>
       </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-4">
-        <UsageMetric label="Input" value={formatTokenCount(safeUsage.input_tokens)} />
-        <UsageMetric label="Output" value={formatTokenCount(safeUsage.output_tokens)} />
-        <UsageMetric label="Total" value={formatTokenCount(safeUsage.total_tokens)} />
+        {safeUsage.input_tokens != null && <UsageMetric label="Input" value={formatTokenCount(safeUsage.input_tokens)} />}
+        {safeUsage.output_tokens != null && <UsageMetric label="Output" value={formatTokenCount(safeUsage.output_tokens)} />}
+        {safeUsage.total_tokens != null && <UsageMetric label="Total" value={formatTokenCount(safeUsage.total_tokens)} />}
         <UsageMetric
           label="Cost"
           value={
