@@ -199,6 +199,7 @@ class PullRequestMonitorAdoptionService:
         )
         workspace.pr_url = metadata.url
         workspace.pr_number = metadata.number
+        workspace.base_commit = metadata.base_sha
         workspace.monitor_last_commit_sha = metadata.head_sha
 
         task = await TaskRepository(self._session).create_or_get(

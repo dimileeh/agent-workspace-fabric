@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.app import configure_database, create_app
 from awf.common.config import Settings, get_settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
+from awf.db.models import Workspace
 from awf.db.session import make_session_factory
 
 
@@ -91,6 +93,7 @@ async def test_adopt_pr_requires_api_token(adoption_client: tuple[AsyncClient, _
 @pytest.mark.unit
 async def test_adopt_pr_accepts_repo_slug_and_pr_number(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
 ) -> None:
     client, fetcher = adoption_client
 
@@ -118,6 +121,11 @@ async def test_adopt_pr_accepts_repo_slug_and_pr_number(
     assert body["attached_existing"] is False
     assert body["validation_provenance"]["freshness_status"] == "unavailable"
     assert fetcher.calls == [("dimileeh/aira-web", 277)]
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        workspace = (await session.execute(select(Workspace))).scalar_one()
+    assert workspace.monitor_last_commit_sha == "h" * 40
+    assert workspace.base_commit == "b" * 40
 
 
 @pytest.mark.unit
