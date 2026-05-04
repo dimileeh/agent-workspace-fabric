@@ -740,7 +740,7 @@ def usage_payload(workspace: Workspace) -> LlmUsagePayload:
         "output_tokens": usage.output_tokens,
         "total_tokens": usage.total_tokens,
         "cost_estimate": cost,
-        "currency": pricing.currency if pricing is not None else None,
+        "currency": usage.currency or (pricing.currency if pricing is not None else None),
         "status": "available" if cost is not None else usage.status,
         "source": usage.source,
         "reason": usage.reason,

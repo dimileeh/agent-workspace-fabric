@@ -2434,6 +2434,75 @@ def test_usage_payload_does_not_leak_pricing_reason_into_usage_reason() -> None:
         result = usage_payload(SimpleNamespace(id="ws_test"))
     assert result["reason"] is None
     assert result["cost_estimate"] is None
+    # Adapter-reported currency is preserved even when pricing is absent
+    assert result["currency"] is None
+
+
+@pytest.mark.unit
+def test_usage_payload_preserves_adapter_currency_when_pricing_absent() -> None:
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    usage = LlmUsageSummary(
+        input_tokens=1000,
+        output_tokens=500,
+        total_tokens=1500,
+        cost_estimate=None,
+        currency="USD",
+        status="available",
+        source="adapter_reported",
+        reason=None,
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: None,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["currency"] == "USD"
+    assert result["cost_estimate"] is None
+
+
+@pytest.mark.unit
+def test_usage_payload_prefers_adapter_currency_over_pricing_currency() -> None:
+    from awf.profiles.pricing import PricingMetadata
+    from awf.service.workspace_observability import LlmUsageSummary, usage_payload
+
+    usage = LlmUsageSummary(
+        input_tokens=1000,
+        output_tokens=500,
+        total_tokens=1500,
+        cost_estimate=0.05,
+        currency="EUR",
+        status="available",
+        source="adapter_reported",
+        reason=None,
+    )
+
+    pricing = PricingMetadata(
+        provider="openai",
+        model="gpt-4",
+        currency="USD",
+        unit="per_1000_tokens",
+        price_per_unit=0.03,
+        timestamp=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_usage_summary",
+            lambda _: usage,
+        )
+        mp.setattr(
+            "awf.service.workspace_observability.workspace_pricing_metadata",
+            lambda _: pricing,
+        )
+        result = usage_payload(SimpleNamespace(id="ws_test"))
+    assert result["currency"] == "EUR"
 
 
 @ pytest.mark.unit
