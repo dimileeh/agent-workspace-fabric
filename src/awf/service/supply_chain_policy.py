@@ -93,6 +93,9 @@ _KNOWN_COMMANDS: Final[frozenset[str]] = frozenset(
         "command",
     }
 )
+_PYTHON_EXECUTABLE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^python(?:\d+(?:\.\d+)*)?$"
+)
 _REMOTE_SCRIPT_INTERPRETERS: Final[frozenset[str]] = frozenset(
     {"sh", "bash", "zsh", "dash", "fish", "python", "python3", "ruby", "perl", "node"}
 )
@@ -569,7 +572,7 @@ def _package_command(command: str, tokens: list[str]) -> _PackageCommand | None:
     if not tokens:
         return None
     first = PurePosixPath(_shell_token_word(tokens[0])).name
-    if len(tokens) >= 3 and first in {"python", "python3"} and tokens[1:3] == [
+    if len(tokens) >= 3 and _is_python_executable(first) and tokens[1:3] == [
         "-m",
         "pip",
     ]:
@@ -1077,7 +1080,12 @@ def _command_from_line(line: str) -> str | None:
     if lower.startswith("run "):
         return stripped[4:].strip()
     first = stripped.split(maxsplit=1)[0]
-    return stripped if PurePosixPath(first).name in _KNOWN_COMMANDS else None
+    command = PurePosixPath(first).name
+    return stripped if command in _KNOWN_COMMANDS or _is_python_executable(command) else None
+
+
+def _is_python_executable(command: str) -> bool:
+    return _PYTHON_EXECUTABLE_PATTERN.fullmatch(command) is not None
 
 
 def _shell_tokens(command: str) -> list[str]:
