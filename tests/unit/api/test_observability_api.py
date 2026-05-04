@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -56,6 +57,9 @@ _V2_POLICY_BODY = {
         "external_id": "TICKET-456",
         "task_class": "test_task",
         "owned_paths": ["src/awf/api/**", "tests/unit/api/**"],
+    },
+    "preflight": {
+        "provider_readiness_override": True,
     },
     "workspace": {"profile_ref": "auto", "profile": None},
     "validation": {"commands": ["pytest -q"], "requested_tier": 1},

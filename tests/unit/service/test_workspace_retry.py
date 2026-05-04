@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -112,6 +113,9 @@ def _ollama_provider_environ() -> dict[str, str]:
         "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
     }
 
+
+def _docker_ok(args: list[str], **kwargs: object) -> SimpleNamespace:
+    return SimpleNamespace(returncode=0, stdout="/usr/bin/cli\n", stderr="")
 
 def _ollama_ok(url: str, *, timeout: float) -> SimpleNamespace:
     text = (
@@ -245,6 +249,7 @@ async def test_create_v2_runs_provider_preflight_probe_off_event_loop(
             _opencode_request(),
             settings=settings,
             provider_environ=_ollama_provider_environ(),
+            run_subprocess=_docker_ok,
             http_get=_ollama_ok_requiring_worker_thread,
         )
 
@@ -301,6 +306,7 @@ async def test_create_v2_successful_provider_preflight_emits_event(
             session,
             _request(provider_readiness_override=False),
             settings=settings,
+            run_subprocess=_docker_ok,
         )
         events = list(
             (
@@ -358,6 +364,7 @@ async def test_retry_runs_provider_preflight_probe_off_event_loop(
             _opencode_request(),
             settings=settings,
             provider_environ=provider_environ,
+            run_subprocess=_docker_ok,
             http_get=_ollama_ok,
         )
         await session.commit()
@@ -369,6 +376,7 @@ async def test_retry_runs_provider_preflight_probe_off_event_loop(
             first.id,
             settings=settings,
             provider_environ=provider_environ,
+            run_subprocess=_docker_ok,
             http_get=_ollama_ok_requiring_worker_thread,
         )
 

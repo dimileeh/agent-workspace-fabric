@@ -9,6 +9,8 @@ tests/unit/db/test_workspace_repository.py) which uses the same pattern.
 from __future__ import annotations
 
 import asyncio
+import subprocess
+from collections import namedtuple
 from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 
@@ -89,3 +91,15 @@ async def client(engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
+
+@pytest.fixture
+def mock_docker_cli_probe(monkeypatch):
+    """Safely mock docker CLI probes."""
+    original_run = subprocess.run
+    def _mock_run(args, **kwargs):
+        if len(args) > 0 and args[0] == "docker" and any("command -v" in str(a) for a in args):
+            CompletedProcess = namedtuple('CompletedProcess', ['returncode', 'stdout', 'stderr'])
+            return CompletedProcess(returncode=0, stdout="/usr/bin/cli\n", stderr="")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _mock_run)

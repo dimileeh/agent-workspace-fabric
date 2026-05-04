@@ -76,3 +76,4 @@ workspaces/
 *.dump
 *.sql.bak
 query.json
+*.log
