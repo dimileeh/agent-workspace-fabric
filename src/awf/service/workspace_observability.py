@@ -535,12 +535,12 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
         for operation in operations:
             payload = getattr(operation, "payload", None) or {}
             result = getattr(operation, "result", None) or {}
-            
+
             # Check result first, then payload for usage metadata
             usage = result.get("usage")
             if not isinstance(usage, dict):
                 usage = payload.get("usage")
-                
+
             if isinstance(usage, dict):
                 has_usage = True
                 if isinstance(usage.get("input_tokens"), int):
@@ -554,17 +554,23 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
                 if isinstance(usage.get("total_tokens"), int):
                     if total_tokens is None:
                         total_tokens = 0
-                    total_tokens += usage["total_tokens"]                
+                    total_tokens += usage["total_tokens"]
+                else:
+                    has_in = isinstance(usage.get("input_tokens"), int)
+                    has_out = isinstance(usage.get("output_tokens"), int)
+                    if has_in or has_out:
+                        if total_tokens is None:
+                            total_tokens = 0
+                        total_tokens += (usage.get("input_tokens") if has_in else 0) + (usage.get("output_tokens") if has_out else 0)
                 op_cost = usage.get("cost_estimate")
                 if isinstance(op_cost, (int, float)):
                     if cost_estimate is None:
                         cost_estimate = 0.0
                     cost_estimate += float(op_cost)
-                    
+
                 op_currency = usage.get("currency")
-                if isinstance(op_currency, str):
-                    if currency is None:
-                        currency = op_currency
+                if isinstance(op_currency, str) and currency is None:
+                    currency = op_currency
 
     if not has_usage:
         return LlmUsageSummary(
