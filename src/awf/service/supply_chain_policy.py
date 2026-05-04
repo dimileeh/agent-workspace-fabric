@@ -829,6 +829,7 @@ def _registry_hosts(
         if manager in {"npm", "pnpm", "yarn", "bun"}
         else {"--index-url", "--extra-index-url", "-i"}
     )
+    attached_short_flags = {"-i"} if manager == "pip" else set()
     for index, arg in enumerate(args):
         value: str | None = None
         if arg in flags and index + 1 < len(args):
@@ -838,6 +839,9 @@ def _registry_hosts(
                 prefix = f"{flag}="
                 if arg.startswith(prefix):
                     value = arg[len(prefix) :]
+                    break
+                if flag in attached_short_flags and arg.startswith(flag):
+                    value = arg[len(flag) :]
                     break
         if value is None:
             continue

