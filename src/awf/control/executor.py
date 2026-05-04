@@ -1553,7 +1553,7 @@ class WorkspaceExecutor:
                 if await self._recover_missing_git_head_or_mark_failed(
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    base_commit=ws.base_commit,
+                    base_commit=base_commit,
                     branch_name=expected_branch,
                     from_status=WorkspaceStatus.running,
                     stage="post_agent_commit",
@@ -2723,11 +2723,29 @@ class WorkspaceExecutor:
                 reason_code=GIT_OBJECT_MISSING_REASON_CODE,
             )
             return False
-        await self._record_git_object_recovery_event(
-            workspace_id=workspace_id,
-            stage=stage,
-            recovery=recovery,
-        )
+        try:
+            await self._record_git_object_recovery_event(
+                workspace_id=workspace_id,
+                stage=stage,
+                recovery=recovery,
+            )
+        except Exception as exc:
+            _log.exception(
+                "executor.git_object_recovery_event_record_failed",
+                workspace_id=workspace_id,
+                stage=stage,
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=from_status,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "Git object recovery failed: rebuilt HEAD during "
+                    f"{stage}, but could not record the recovery event: {exc!r}"
+                )[:2000],
+                reason_code=GIT_OBJECT_MISSING_REASON_CODE,
+            )
+            return False
         return True
 
     async def _record_git_object_recovery_event(

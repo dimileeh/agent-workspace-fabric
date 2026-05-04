@@ -1104,7 +1104,7 @@ class PullRequestMonitorRunner:
             )
             await self._terminate_completed(
                 workspace_id,
-                pr_merge_sha=None,
+                pr_merge_sha=status.merge_commit_sha or status.head_sha,
                 repo_url=repo_url,
                 base_branch=base_branch,
                 compose_project=compose_project,
@@ -1730,6 +1730,7 @@ class PullRequestMonitorRunner:
             merge_blocker: GitHubClientError | None = None
             merge_operation: MonitorOperationHandle | None = None
             recheck_error: GitHubClientError | None = None
+            recheck_base_error: BaseFetchError | None = None
             merge_status = status
             queue_blockers_after_lock: list[MergeQueueBlocker] = []
             merge_gate_after_lock: _MergeGateResult | None = None
@@ -1757,6 +1758,8 @@ class PullRequestMonitorRunner:
                         )
                     except GitHubClientError as exc:
                         recheck_error = exc
+                    except BaseFetchError as exc:
+                        recheck_base_error = exc
                     else:
                         checked_action = decide(checked_status, state, self._config)
                         if not isinstance(checked_action, Merge):
@@ -1781,7 +1784,11 @@ class PullRequestMonitorRunner:
                         else:
                             merge_status = checked_status
 
-                if recheck_error is None and fresh_action is None:
+                if (
+                    recheck_error is None
+                    and recheck_base_error is None
+                    and fresh_action is None
+                ):
                     queue_blockers_after_lock = await self._merge_queue_blockers_for_workspace(
                         workspace_id
                     )
@@ -1924,6 +1931,17 @@ class PullRequestMonitorRunner:
                 if handled is None:  # pragma: no cover - defensive invariant
                     raise RuntimeError("merge gate blocker was not handled")
                 return handled
+
+            if recheck_base_error is not None:
+                await self._terminate_failed(
+                    workspace_id,
+                    message=(
+                        f"monitor: could not refresh base branch during pre-merge recheck: "
+                        f"{recheck_base_error}"
+                    )[:2000],
+                    reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                )
+                return True
 
             if recheck_error is not None:
                 if await self._wait_after_transient_github_error(

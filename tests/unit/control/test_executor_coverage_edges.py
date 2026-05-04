@@ -1823,6 +1823,46 @@ async def test_recover_missing_git_head_or_mark_failed_handles_terminal_paths(
 
 
 @pytest.mark.unit
+async def test_recover_missing_git_head_or_mark_failed_fails_when_event_recording_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
+    recovery = _GitObjectRecoveryResult(
+        broken_head_sha="b" * 40,
+        recovered_head_sha="c" * 40,
+    )
+    monkeypatch.setattr(
+        executor_mod,
+        "_recover_missing_head_from_filesystem",
+        AsyncMock(return_value=recovery),
+    )
+    executor._record_git_object_recovery_event = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("database unavailable")
+    )
+
+    recovered = await executor._recover_missing_git_head_or_mark_failed(
+        workspace_id="ws_recovery_event_failed",
+        worktree_path=tmp_path,
+        base_commit="a" * 40,
+        branch_name="awf/ws_recovery_event_failed",
+        from_status=WorkspaceStatus.running,
+        stage="post_agent_commit",
+        error=RuntimeError("fatal: bad object HEAD"),
+    )
+
+    assert not recovered
+    executor._mark_failed.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = executor._mark_failed.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["workspace_id"] == "ws_recovery_event_failed"
+    assert kwargs["failure_reason"] == FailureReason.infrastructure_failure
+    assert kwargs["reason_code"] == GIT_OBJECT_MISSING_REASON_CODE
+    assert "could not record the recovery event" in kwargs["message"]
+    assert "database unavailable" in kwargs["message"]
+
+
+@pytest.mark.unit
 async def test_record_git_object_recovery_event_persists_workspace_event(
     tmp_path: Path,
 ) -> None:

@@ -174,6 +174,7 @@ class PRStatus:
     changed_paths: tuple[str, ...] = ()
     closed: bool = False
     merged: bool = False
+    merge_commit_sha: str | None = None
 
 
 # ── State — small, serialisable, lives on the workspace row ────────────────

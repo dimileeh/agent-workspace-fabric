@@ -110,6 +110,7 @@ def _pr_payload(
     *,
     closed: bool = False,
     merged: bool = False,
+    merge_commit_sha: str = "mergecommit1234567890",
     mergeable: str = "MERGEABLE",
     merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
@@ -129,6 +130,7 @@ def _pr_payload(
                         "isDraft": False,
                         "closed": closed,
                         "merged": merged,
+                        "mergeCommit": {"oid": merge_commit_sha} if merged else None,
                         "baseRef": {"name": "development", "target": {"oid": "base0"}},
                         "commits": {
                             "nodes": [{"commit": {"statusCheckRollup": {"state": check_state}}}]
@@ -514,7 +516,7 @@ class TestMergeBlockedFallsBackToNotify:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
-            assert ws.pr_merge_sha is None
+            assert ws.pr_merge_sha == "mergecommit1234567890"
         # gh pr comment was invoked with the human-attention body.
         comment_args = next(c.args for c in cmd.calls if c.args[:3] == ["gh", "pr", "comment"])
         body = comment_args[comment_args.index("--body") + 1]
