@@ -235,6 +235,34 @@ class TestPricingMetadataModel:
         assert meta.is_current(now=now) is False
 
     @pytest.mark.unit
+    def test_is_current_true_at_exact_max_age_boundary(self) -> None:
+        from awf.profiles.pricing import PricingMetadata
+
+        ts = datetime.now(UTC)
+        meta = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            timestamp=ts,
+        )
+        assert meta.is_current(now=ts + timedelta(days=90)) is True
+
+    @pytest.mark.unit
+    def test_is_current_false_just_past_max_age_boundary(self) -> None:
+        from awf.profiles.pricing import PricingMetadata
+
+        ts = datetime.now(UTC)
+        meta = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            timestamp=ts,
+        )
+        assert meta.is_current(now=ts + timedelta(days=90, seconds=1)) is False
+
+    @pytest.mark.unit
     def test_is_current_true_for_very_recent_past_timestamp(self) -> None:
         from awf.profiles.pricing import PricingMetadata
 
