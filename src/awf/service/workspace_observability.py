@@ -539,7 +539,14 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
                 usage = payload.get("usage")
 
             if isinstance(usage, dict):
-                has_usage = True
+                has_valid_metric = (
+                    isinstance(usage.get("input_tokens"), int)
+                    or isinstance(usage.get("output_tokens"), int)
+                    or isinstance(usage.get("total_tokens"), int)
+                    or isinstance(usage.get("cost_estimate"), (int, float))
+                )
+                if has_valid_metric:
+                    has_usage = True
                 if isinstance(usage.get("input_tokens"), int):
                     if input_tokens is None:
                         input_tokens = 0
@@ -561,11 +568,10 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
                         cost_estimate = None
 
                 op_cost = usage.get("cost_estimate")
-                if isinstance(op_cost, (int, float)):
-                    if currency != "MIXED":
-                        if cost_estimate is None:
-                            cost_estimate = 0.0
-                        cost_estimate += float(op_cost)
+                if isinstance(op_cost, (int, float)) and currency != "MIXED":
+                    if cost_estimate is None:
+                        cost_estimate = 0.0
+                    cost_estimate += float(op_cost)
 
     if not has_usage:
         return LlmUsageSummary(
