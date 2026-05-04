@@ -1883,3 +1883,54 @@ def test_workspace_usage_summary_is_explicitly_unavailable_without_adapter_usage
     assert usage.status == "unavailable"
     assert usage.source == "none"
     assert usage.reason == "usage_not_reported"
+
+@pytest.mark.unit
+def test_workspace_usage_summary_aggregates_from_operations() -> None:
+    workspace = SimpleNamespace(
+        id="ws_usage",
+        operations=[
+            SimpleNamespace(
+                result={"usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30, "cost_estimate": 0.05, "currency": "USD"}}
+            ),
+            SimpleNamespace(
+                payload={"usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10, "cost_estimate": 0.01}}
+            ),
+            SimpleNamespace(
+                result={"usage": {"input_tokens": 15}}
+            ),
+        ]
+    )
+    usage = workspace_usage_summary(workspace)
+
+    assert usage.input_tokens == 30
+    assert usage.output_tokens == 25
+    assert usage.total_tokens == 40
+    assert usage.cost_estimate is not None
+    assert abs(usage.cost_estimate - 0.06) < 1e-9
+    assert usage.currency == "USD"
+    assert usage.status == "available"
+    assert usage.source == "operations"
+
+@pytest.mark.unit
+def test_workspace_usage_summary_safely_ignores_malformed_usage() -> None:
+    workspace = SimpleNamespace(
+        id="ws_usage",
+        operations=[
+            SimpleNamespace(
+                result={"usage": "not a dict"}
+            ),
+            SimpleNamespace(
+                payload={"usage": {"input_tokens": "10", "output_tokens": None, "total_tokens": 10}}
+            )
+        ]
+    )
+    usage = workspace_usage_summary(workspace)
+
+    assert usage.input_tokens == 0
+    assert usage.output_tokens == 0
+    assert usage.total_tokens == 10
+    assert usage.cost_estimate is None
+    assert usage.currency is None
+    assert usage.status == "available"
+    assert usage.source == "operations"
+

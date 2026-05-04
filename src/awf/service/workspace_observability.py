@@ -513,16 +513,75 @@ def workspace_lifecycle_summary(
     return summaries
 
 
-def workspace_usage_summary(_workspace: Workspace) -> LlmUsageSummary:
+def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
+    input_tokens = 0
+    output_tokens = 0
+    total_tokens = 0
+    cost_estimate: float | None = None
+    currency = None
+    has_usage = False
+
+    try:
+        from sqlalchemy import inspect
+        state = inspect(workspace, raiseerr=False)
+        if state is not None and "operations" in state.unloaded:
+            operations = []
+        else:
+            operations = getattr(workspace, "operations", [])
+    except Exception:
+        operations = getattr(workspace, "operations", [])
+
+    if operations:
+        for operation in operations:
+            payload = getattr(operation, "payload", None) or {}
+            result = getattr(operation, "result", None) or {}
+            
+            # Check result first, then payload for usage metadata
+            usage = result.get("usage")
+            if not isinstance(usage, dict):
+                usage = payload.get("usage")
+                
+            if isinstance(usage, dict):
+                has_usage = True
+                if isinstance(usage.get("input_tokens"), int):
+                    input_tokens += usage["input_tokens"]
+                if isinstance(usage.get("output_tokens"), int):
+                    output_tokens += usage["output_tokens"]
+                if isinstance(usage.get("total_tokens"), int):
+                    total_tokens += usage["total_tokens"]
+                
+                op_cost = usage.get("cost_estimate")
+                if isinstance(op_cost, (int, float)):
+                    if cost_estimate is None:
+                        cost_estimate = 0.0
+                    cost_estimate += float(op_cost)
+                    
+                op_currency = usage.get("currency")
+                if isinstance(op_currency, str):
+                    if currency is None:
+                        currency = op_currency
+
+    if not has_usage:
+        return LlmUsageSummary(
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            cost_estimate=None,
+            currency=None,
+            status="unavailable",
+            source="none",
+            reason="usage_not_reported",
+        )
+
     return LlmUsageSummary(
-        input_tokens=None,
-        output_tokens=None,
-        total_tokens=None,
-        cost_estimate=None,
-        currency=None,
-        status="unavailable",
-        source="none",
-        reason="usage_not_reported",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cost_estimate=cost_estimate,
+        currency=currency,
+        status="available",
+        source="operations",
+        reason=None,
     )
 
 
