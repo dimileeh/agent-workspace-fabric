@@ -152,6 +152,9 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
     async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
         return _green_doctor()
 
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
     bundle = asyncio.run(
         collect_support_bundle(
             settings,
@@ -160,7 +163,7 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
             environ={},
             status_collector=_status_collector,
             doctor_collector=_doctor_collector,
-            failure_analysis_collector=lambda **_: _mock_failure_summary(),
+            failure_analysis_collector=_failure_collector,
         )
     )
 
@@ -211,6 +214,9 @@ def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
     async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
         return _green_doctor()
 
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return _mock_failure_summary()
+
     bundle = asyncio.run(
         collect_support_bundle(
             settings,
@@ -222,7 +228,7 @@ def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
             },
             status_collector=_status_collector,
             doctor_collector=_doctor_collector,
-            failure_analysis_collector=lambda **_: _mock_failure_summary(),
+            failure_analysis_collector=_failure_collector,
         )
     )
 
@@ -339,6 +345,9 @@ def test_support_bundle_is_repeatable(tmp_path: Path) -> None:
     async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
         return _green_doctor()
 
+    async def _failure_collector(**_: object) -> dict[str, object]:
+        return failure_summary
+
     bundle_a = asyncio.run(
         collect_support_bundle(
             settings,
@@ -347,7 +356,7 @@ def test_support_bundle_is_repeatable(tmp_path: Path) -> None:
             environ={},
             status_collector=_status_collector,
             doctor_collector=_doctor_collector,
-            failure_analysis_collector=lambda **_: failure_summary,
+            failure_analysis_collector=_failure_collector,
         )
     )
     bundle_b = asyncio.run(
@@ -358,7 +367,7 @@ def test_support_bundle_is_repeatable(tmp_path: Path) -> None:
             environ={},
             status_collector=_status_collector,
             doctor_collector=_doctor_collector,
-            failure_analysis_collector=lambda **_: failure_summary,
+            failure_analysis_collector=_failure_collector,
         )
     )
 
