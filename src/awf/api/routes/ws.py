@@ -96,7 +96,7 @@ async def _send_initial_state(
     tail_bytes: int,
 ) -> bool:
     async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
+        workspace = await WorkspaceRepository(session).get_with_operations(workspace_id)
         if workspace is None:
             await websocket.send_json(
                 {"type": "error", "error_code": "NOT_FOUND", "message": "workspace not found"}

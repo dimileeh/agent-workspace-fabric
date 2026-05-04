@@ -414,7 +414,7 @@ class WorkspaceService:
 
     async def get(self, workspace_id: str) -> WorkspaceResponse | None:
         async with self._factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
+            ws = await WorkspaceRepository(s).get_with_operations(workspace_id)
             if ws is None:
                 return None
             validation_runs = await ValidationRunRepository(s).list_for_workspace(workspace_id)
