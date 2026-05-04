@@ -11,6 +11,7 @@ import base64
 import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,7 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 import awf.api.routes.workspaces as workspaces_route
 import awf.service.workspace_observability as workspace_observability
 from awf.api.app import configure_database, create_app
-from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
+from awf.api.schemas import (
+    PullRequestMonitorAdoptionRequest,
+    WorkspaceCreateRequest,
+    WorkspaceCreateV2Request,
+)
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
@@ -199,6 +204,123 @@ def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() ->
         False,
         None,
     )
+
+
+@pytest.mark.unit
+def test_provider_readiness_override_reason_match_redaction_edges() -> None:
+    assert workspaces_route._override_reasons_match("same", "same") is True
+    assert workspaces_route._override_reasons_match(None, "reason") is False
+    assert workspaces_route._override_reasons_match("reason", None) is False
+    assert workspaces_route._override_reasons_match("stored", "requested") is False
+    assert (
+        workspaces_route._override_reasons_match(
+            "stored",
+            "prefix-secret-suffix",
+            stored_redaction_parts=["prefix-", "-suffix"],
+        )
+        is False
+    )
+
+    missing_preflight = SimpleNamespace(task_policy={})
+    malformed_parts = SimpleNamespace(
+        task_policy={
+            "provider_readiness_preflight": {
+                "override_reason_redaction_parts": ["prefix-only"]
+            }
+        }
+    )
+    non_string_parts = SimpleNamespace(
+        task_policy={
+            "provider_readiness_preflight": {
+                "override_reason_redaction_parts": ["prefix-", 42, "-suffix"]
+            }
+        }
+    )
+
+    assert (
+        workspaces_route._stored_task_provider_readiness_override_redaction_parts(
+            missing_preflight
+        )
+        is None
+    )
+    assert (
+        workspaces_route._stored_task_provider_readiness_override_redaction_parts(
+            malformed_parts
+        )
+        is None
+    )
+    assert (
+        workspaces_route._stored_task_provider_readiness_override_redaction_parts(
+            non_string_parts
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+async def test_workspace_stale_reasons_route_maps_invalid_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _raise_invalid_cursor(*_args: Any, **_kwargs: Any) -> object:
+        raise workspaces_route.InvalidBoundedListCursorError("bad cursor")
+
+    monkeypatch.setattr(
+        workspaces_route,
+        "list_workspace_stale_reasons_response",
+        _raise_invalid_cursor,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await workspaces_route.list_workspace_stale_reasons(
+            "ws_test",
+            cursor="bad",
+            session=object(),  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == {
+        "error_code": "INVALID_CURSOR",
+        "message": "Invalid stale reason cursor.",
+    }
+
+
+@pytest.mark.unit
+async def test_adopt_pr_route_maps_service_errors_to_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _FailingAdoptionService:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def adopt(self, _payload: PullRequestMonitorAdoptionRequest) -> object:
+            raise workspaces_route.PRMonitorAdoptionError(
+                error_code="PR_ALREADY_CLOSED",
+                message="PR is closed.",
+                status_code=409,
+                detail={"repo_slug": "x/y", "pr_number": 42},
+            )
+
+    monkeypatch.setattr(
+        workspaces_route,
+        "PullRequestMonitorAdoptionService",
+        _FailingAdoptionService,
+    )
+
+    response = await workspaces_route.adopt_pull_request_monitor(
+        PullRequestMonitorAdoptionRequest(repo_slug="x/y", pr_number=42),
+        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+        settings=Settings(_env_file=None, work_dir=str(tmp_path / "awf-state")),
+        session=object(),  # type: ignore[arg-type]
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 409
+    assert json.loads(response.body) == {
+        "error_code": "PR_ALREADY_CLOSED",
+        "message": "PR is closed.",
+        "detail": {"repo_slug": "x/y", "pr_number": 42},
+    }
 
 
 async def _create_workspace(client: AsyncClient, **overrides: object) -> str:

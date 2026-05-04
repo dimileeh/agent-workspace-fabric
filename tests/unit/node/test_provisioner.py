@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
     SecretLeaseRepository,
@@ -26,10 +27,16 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
+from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
-from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.node.provisioner import (
+    Provisioner,
+    ProvisionerConfig,
+    _provision_checkout_base_branch,
+    _provision_remote_push_branch,
+)
 from awf.node.stack_launcher import ComposeStackLauncher
-from awf.profiles.models import ProfileSecret, WorkspaceProfile
+from awf.profiles.models import EgressMode, ProfileSecret, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError
 
 
@@ -259,6 +266,34 @@ class TestSuccess:
             assert reloaded.branch_base == "development"
             assert reloaded.branch_name == f"feature-sync/{workspace_id}"
             assert reloaded.remote_push_branch == "feature/ready"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "task_kind, task_policy",
+        [
+            ("feature_branch_pr", {"pr_adoption": {"head_ref": "feature/ignored"}}),
+            ("sync_feature_pr", {}),
+            ("sync_feature_pr", {"pr_adoption": "not-a-dict"}),
+            ("sync_feature_pr", {"pr_adoption": {"head_ref": 123}}),
+            ("sync_feature_pr", {"pr_adoption": {"head_ref": " "}}),
+        ],
+    )
+    def test_sync_feature_pr_head_ref_helpers_fall_back_when_metadata_is_absent(
+        self,
+        task_kind: str,
+        task_policy: dict[str, Any],
+    ) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="awf/ws",
+            remote_push_branch="awf/ws",
+            task_kind=task_kind,
+            task_policy=task_policy,
+        )
+
+        assert _provision_checkout_base_branch(ws) == "development"
+        assert _provision_remote_push_branch(ws) == "awf/ws"
 
     @pytest.mark.unit
     async def test_profile_secret_leases_are_issued_before_launch_and_mounted_after_success(
@@ -830,6 +865,59 @@ class TestFailureHandling:
                 and event.new_state == WorkspaceStatus.failed.value
             ]
             assert failed_events[-1].reason_code == "PROFILE_RESOLUTION_FAILURE"
+
+    @pytest.mark.unit
+    async def test_local_egress_policy_error_marks_workspace_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _EgressFailingLauncher:
+            async def launch(self, _request: Any) -> object:
+                raise LocalEgressPolicyError(
+                    reason_code="LOCAL_EGRESS_MODE_UNSUPPORTED",
+                    mode=EgressMode.restricted,
+                    message="local backend cannot enforce this mode",
+                    details={"network_posture": "restricted"},
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_EgressFailingLauncher(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={"name": "restricted-local"},
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(LocalEgressPolicyError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "policy_failure"
+            assert reloaded.failure_message is not None
+            assert "LOCAL_EGRESS_MODE_UNSUPPORTED" in reloaded.failure_message
+            failed_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            ]
+            assert failed_events[-1].reason_code == "LOCAL_EGRESS_MODE_UNSUPPORTED"
 
     @pytest.mark.unit
     async def test_missing_base_branch_marks_workspace_failed(

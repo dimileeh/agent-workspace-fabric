@@ -52,6 +52,18 @@ class TestRepoRef:
         with pytest.raises(ValueError):
             RepoRef.from_url("git@gitlab.com:org/repo.git")
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "repo_url",
+        [
+            "https://github.com/dimileeh",
+            "https://github.com/dimileeh/.git",
+        ],
+    )
+    def test_rejects_incomplete_github_urls(self, repo_url: str) -> None:
+        with pytest.raises(ValueError):
+            RepoRef.from_url(repo_url)
+
 
 class TestPullRequestUrlParsing:
     @pytest.mark.unit
@@ -67,6 +79,18 @@ class TestPullRequestUrlParsing:
     def test_rejects_non_pr_url(self) -> None:
         with pytest.raises(ValueError):
             parse_github_pull_request_url("https://github.com/dimileeh/aira-web/issues/277")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "pr_url",
+        [
+            "https://github.com/dimileeh/aira-web/pull/not-a-number",
+            "https://github.com/dimileeh/aira-web/pull/0",
+        ],
+    )
+    def test_rejects_invalid_pr_numbers(self, pr_url: str) -> None:
+        with pytest.raises(ValueError):
+            parse_github_pull_request_url(pr_url)
 
 
 def _adoption_pr_payload(
@@ -166,6 +190,105 @@ class TestFetchPullRequestAdoptionMetadata:
             )
 
         assert excinfo.value.reason_code == "PR_NOT_FOUND"
+
+    @pytest.mark.unit
+    async def test_metadata_fetch_failure_raises_fetch_failed_reason(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="rate limit exceeded")
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await fetch_pull_request_adoption_metadata(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+
+        assert excinfo.value.reason_code == "PR_METADATA_FETCH_FAILED"
+        assert excinfo.value.detail["returncode"] == 1
+
+    @pytest.mark.unit
+    async def test_invalid_json_raises_invalid_metadata_reason(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="{not json")
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await fetch_pull_request_adoption_metadata(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+
+        assert excinfo.value.reason_code == "PR_METADATA_INVALID"
+
+    @pytest.mark.unit
+    async def test_blank_or_missing_required_payload_fields_are_invalid(self) -> None:
+        invalid_payloads = [
+            {"baseRefName": "development", "headRefName": "feature", "state": "OPEN"},
+            {
+                "number": 278,
+                "baseRefName": "development",
+                "headRefName": "feature",
+                "state": "OPEN",
+                "url": "https://github.com/dimileeh/aira-web/pull/278",
+            },
+            {
+                "number": 277,
+                "baseRefName": "development",
+                "headRefName": " ",
+                "state": "OPEN",
+                "url": "https://github.com/dimileeh/aira-web/pull/277",
+            },
+            {
+                "number": 277,
+                "baseRefName": " ",
+                "headRefName": "feature",
+                "state": "OPEN",
+                "url": "https://github.com/dimileeh/aira-web/pull/277",
+            },
+        ]
+
+        for payload in invalid_payloads:
+            fake = FakeCommandRunner()
+            fake.queue_result(returncode=0, stdout=json.dumps(payload))
+
+            with pytest.raises(PullRequestMetadataError) as excinfo:
+                await fetch_pull_request_adoption_metadata(
+                    runner=fake,
+                    repo=RepoRef(owner="dimileeh", name="aira-web"),
+                    pr_number=277,
+                )
+
+            assert excinfo.value.reason_code == "PR_METADATA_INVALID"
+
+    @pytest.mark.unit
+    async def test_blank_or_non_string_optional_shas_are_normalized_to_none(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 277,
+                    "headRefName": "feature",
+                    "baseRefName": "development",
+                    "headRefOid": "  ",
+                    "baseRefOid": None,
+                    "state": "OPEN",
+                    "author": "octocat",
+                    "url": "https://github.com/dimileeh/aira-web/pull/277",
+                    "title": "feature",
+                }
+            ),
+        )
+
+        metadata = await fetch_pull_request_adoption_metadata(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=277,
+        )
+
+        assert metadata.head_sha is None
+        assert metadata.base_sha is None
+        assert metadata.author is None
 
 
 # ── fetch_pr_status ────────────────────────────────────────────────────────

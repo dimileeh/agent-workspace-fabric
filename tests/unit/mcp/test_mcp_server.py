@@ -29,6 +29,7 @@ from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
 from awf.service.controls import WorkspaceControlError
+from awf.service.workspaces import WorkspaceRetryError
 
 _PROVIDER_AUTH_ENV_KEYS = (
     "OPENAI_API_KEY",
@@ -87,6 +88,33 @@ async def test_build_mcp_server_captures_default_settings_once(
         assert result.structuredContent is None
 
     assert calls == 1
+
+
+@pytest.mark.unit
+def test_workspace_retry_error_result_uses_structured_error_payload() -> None:
+    result = mcp_server._workspace_retry_error_result(
+        WorkspaceRetryError("retry refused", detail={"workspace_id": "ws_x"})
+    )
+
+    assert result.isError is True
+    assert result.structuredContent == {
+        "error_code": "WORKSPACE_RETRY_ERROR",
+        "message": "retry refused",
+        "detail": {"workspace_id": "ws_x"},
+    }
+
+
+@pytest.mark.unit
+async def test_core_release_readiness_rejects_invalid_provider_names(mcp) -> None:  # type: ignore[no-untyped-def]
+    result = await mcp.call_tool(
+        "awf_get_core_release_readiness",
+        {"providers": ["bogus-provider"]},
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error_code"] == "INVALID_PROVIDERS"
 
 
 _CREATE_ARGS: dict[str, object] = {

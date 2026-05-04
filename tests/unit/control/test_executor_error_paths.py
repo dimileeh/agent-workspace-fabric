@@ -35,7 +35,12 @@ from awf.adapters import registry as _registry  # noqa: F401 — populate regist
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
-from awf.control.executor import ExecutorConfig, WorkspaceExecutor, _call_pr_monitor_factory
+from awf.control.executor import (
+    ExecutorConfig,
+    WorkspaceExecutor,
+    _call_pr_monitor_factory,
+    _required_metadata_str,
+)
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
@@ -3014,6 +3019,390 @@ class TestExecutorCoverageEdges:
             assert candidate.head_sha == "h" * 40
             assert candidate.base_sha == "b" * 40
             assert candidate.pr_url == "https://github.com/x/y/pull/42"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_missing_initial_adoption_metadata_fails_cleanly(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        factory_calls: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={"pr_adoption": {"head_ref": " "}},
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.remote_push_branch = None
+            await s.commit()
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            factory_calls.append("called")
+            raise AssertionError("monitor factory must not run with missing metadata")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor.execute(ws_id)
+
+        assert factory_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "adopted PR workspace is missing" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "PR_ADOPTION_METADATA_MISSING"
+            missing = ws.events[-1].payload["details"]["missing"]
+            assert "pr_number" in missing
+            assert "pr_url" in missing
+            assert "remote_push_branch" in missing
+            assert "task_policy.pr_adoption.head_ref" in missing
+            assert "task_policy.pr_adoption.base_sha" in missing
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_without_monitor_configuration_fails_cleanly(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message == (
+                "adopted PR monitor handoff failed: no PR monitor configured"
+            )
+            assert ws.events[-1].reason_code == "PR_ADOPTION_MONITOR_UNAVAILABLE"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_monitor_factory_exception_fails_cleanly(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise RuntimeError("factory exploded")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "factory exploded" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "PR_ADOPTION_MONITOR_UNAVAILABLE"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_persisted_metadata_loss_fails_before_monitor_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        async def _ensure_available(**_kwargs: Any) -> bool:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                metadata = dict(ws.task_policy["pr_adoption"])
+                metadata.pop("base_sha")
+                ws.task_policy = {"pr_adoption": metadata}
+                await s.commit()
+            return True
+
+        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+
+        await executor.execute(ws_id)
+
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "task_policy.pr_adoption.base_sha" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "PR_ADOPTION_METADATA_MISSING"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_persisted_status_change_skips_handoff(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        async def _ensure_available(**_kwargs: Any) -> bool:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.status = WorkspaceStatus.cancelled.value
+                await s.commit()
+            return True
+
+        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+
+        await executor.execute(ws_id)
+
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+            assert ws.events[-1].payload["action"] == "sync_feature_pr_handoff"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_recheck_prevents_monitor_run_after_handoff(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            create_task_attempt=True,
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        async def _recheck_status(
+            workspace_id: str,
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+            reason_code: str = "EXECUTOR_STALE_STATUS",
+        ) -> bool:
+            del workspace_id, expected, reason_code
+            return action != "run_pr_monitor"
+
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+
+        await executor.execute(ws_id)
+
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.events[-1].reason_code == "PR_MONITOR_ADOPTED"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_unavailable_worktree_stops_before_monitor_factory(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        factory_calls: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+            create_worktree=False,
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            factory_calls.append("called")
+            raise AssertionError("monitor factory must not run without a worktree")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        async def _ensure_available(**_kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+
+        await executor.execute(ws_id)
+
+        assert factory_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+
+    @pytest.mark.unit
+    def test_exclude_agent_salvage_artifacts_handles_gitdir_file(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake, factory, tmp_path)
+        worktree = tmp_path / "worktree"
+        git_dir = tmp_path / "actual.git"
+        worktree.mkdir()
+        (worktree / ".git").write_text("gitdir: ../actual.git\n", encoding="utf-8")
+
+        executor._exclude_agent_salvage_artifacts(worktree)
+
+        assert (git_dir / "info" / "exclude").read_text(encoding="utf-8") == (
+            "/.awf/salvage/\n"
+        )
+
+    @pytest.mark.unit
+    def test_required_adoption_metadata_str_rejects_missing_key(self) -> None:
+        with pytest.raises(ValueError, match="missing adoption metadata key: head_sha"):
+            _required_metadata_str({}, "head_sha")
 
     @pytest.mark.unit
     async def test_adopted_sync_feature_pr_handoff_writes_monitor_log_and_redacts_reason(
