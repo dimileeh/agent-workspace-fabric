@@ -137,6 +137,7 @@ class TestPullRequestMonitorAdoptionService:
 
             workspace = await WorkspaceRepository(session).get(result.workspace_id)
             assert workspace is not None
+            assert workspace.task_title == "feature: ready"
             assert workspace.task_kind == "sync_feature_pr"
             assert workspace.pr_url == "https://github.com/dimileeh/aira-web/pull/277"
             assert workspace.pr_number == 277
@@ -167,6 +168,9 @@ class TestPullRequestMonitorAdoptionService:
             operations = list((await session.execute(select(Operation))).scalars())
             assert operations[0].type == OperationType.adopt_pr.value
             assert operations[0].status == "succeeded"
+
+            task = (await session.execute(select(Task))).scalar_one()
+            assert task.title == "feature: ready"
 
     @pytest.mark.unit
     async def test_idempotent_per_repo_pr_across_slug_and_url(

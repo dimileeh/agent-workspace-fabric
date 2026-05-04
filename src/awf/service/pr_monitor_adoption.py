@@ -179,6 +179,7 @@ class PullRequestMonitorAdoptionService:
             branch_base=metadata.base_ref,
             task_title=(
                 request.task_title
+                or metadata.title
                 or f"PR monitor adoption: {repo.slug()}#{metadata.number}"
             ),
             task_prompt=request.task_prompt
