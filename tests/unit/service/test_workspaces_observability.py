@@ -26,13 +26,14 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.models import WorkspaceProfile
-from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.profiles.pricing import PricingMetadata
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.workspace_observability import (
     InvalidWorkspaceOverviewCursorError,
     _decode_overview_cursor,
     _json_safe_value,
     _latest_reverse_state_event,
+    _token_divisor_from_unit,
     compute_cost_estimate,
     effective_agent_identity,
     workspace_identity_usage_payload,
@@ -2198,3 +2199,87 @@ class TestComputeCostEstimate:
         cost, reason = compute_cost_estimate(usage, pricing)
         assert cost is None
         assert reason == "pricing_rates_unavailable"
+
+
+class TestTokenDivisorFromUnit:
+    @pytest.mark.unit
+    def test_per_1k_tokens_returns_1000(self) -> None:
+        assert _token_divisor_from_unit("per_1k_tokens") == 1000
+
+    @pytest.mark.unit
+    def test_per_1_m_tokens_returns_1000000(self) -> None:
+        assert _token_divisor_from_unit("per_1M_tokens") == 1_000_000
+
+    @pytest.mark.unit
+    def test_per_1m_tokens_returns_1000000(self) -> None:
+        assert _token_divisor_from_unit("per_1m_tokens") == 1_000_000
+
+    @pytest.mark.unit
+    def test_per_1_b_tokens_returns_1000000000(self) -> None:
+        assert _token_divisor_from_unit("per_1B_tokens") == 1_000_000_000
+
+    @pytest.mark.unit
+    def test_custom_numeric_unit(self) -> None:
+        assert _token_divisor_from_unit("per_500_tokens") == 500
+
+    @pytest.mark.unit
+    def test_unknown_unit_defaults_to_1000(self) -> None:
+        assert _token_divisor_from_unit("per_token") == 1000
+
+    @pytest.mark.unit
+    def test_unknown_unit_defaults_to_1000_for_garbage(self) -> None:
+        assert _token_divisor_from_unit("garbage") == 1000
+
+
+class TestComputeCostEstimatePerUnit:
+    @pytest.mark.unit
+    def test_per_1_m_tokens_computes_correct_cost(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="anthropic",
+            model="claude",
+            currency="USD",
+            unit="per_1M_tokens",
+            price_per_1k_tokens=15.0,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1_000_000,
+            output_tokens=0,
+            total_tokens=1_000_000,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert reason is None
+        assert cost == pytest.approx(15.0)
+
+    @pytest.mark.unit
+    def test_per_1k_tokens_still_works_correctly(self) -> None:
+        from awf.service.workspace_observability import LlmUsageSummary
+
+        pricing = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_1k_tokens=0.001,
+            timestamp=datetime.now(UTC),
+        )
+        usage = LlmUsageSummary(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            cost_estimate=None,
+            currency=None,
+            status="available",
+            source="test",
+            reason=None,
+        )
+        cost, reason = compute_cost_estimate(usage, pricing)
+        assert reason is None
+        assert cost == pytest.approx(0.0015)

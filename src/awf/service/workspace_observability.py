@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -568,6 +569,29 @@ def workspace_pricing_metadata(workspace: Workspace) -> PricingMetadata | None:
         return None
 
 
+_PRICING_UNIT_PATTERN = re.compile(
+    r"per_(?P<multiplier>\d+)(?P<suffix>[kKmMbB]?)($|_)"
+)
+
+_SUFFIX_MULTIPLIERS: dict[str, int] = {
+    "k": 10**3,
+    "K": 10**3,
+    "m": 10**6,
+    "M": 10**6,
+    "b": 10**9,
+    "B": 10**9,
+}
+
+
+def _token_divisor_from_unit(unit: str) -> int:
+    match = _PRICING_UNIT_PATTERN.search(unit)
+    if match is None:
+        return 1000
+    base = int(match.group("multiplier"))
+    suffix = match.group("suffix")
+    return base * _SUFFIX_MULTIPLIERS.get(suffix, 1)
+
+
 def compute_cost_estimate(
     usage: LlmUsageSummary,
     pricing: PricingMetadata | None,
@@ -588,7 +612,8 @@ def compute_cost_estimate(
         input_t = usage.input_tokens or 0
         output_t = usage.output_tokens or 0
         total_tokens = input_t + output_t
-    cost = (total_tokens / 1000.0) * pricing.price_per_1k_tokens
+    divisor = _token_divisor_from_unit(pricing.unit)
+    cost = (total_tokens / divisor) * pricing.price_per_1k_tokens
     return cost, None
 
 
