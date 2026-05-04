@@ -329,7 +329,7 @@ class WorkspacePricingMetadataResponse(BaseModel):
     price_per_1k_tokens: float | None = None
     timestamp: datetime
     version: int | None = None
-    is_current: bool = True
+    is_current: bool
 
 
 class WorkspaceRecoveryCurrentOperationResponse(BaseModel):
