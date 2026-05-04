@@ -30,6 +30,7 @@ class PricingMetadata(BaseModel):
     model: Annotated[str, Field(min_length=1, max_length=256)]
     currency: Annotated[str, Field(min_length=1, max_length=16)]
     unit: Annotated[str, Field(min_length=1, max_length=64)]
+    price_per_1k_tokens: float | None = Field(default=None, ge=0)
     timestamp: datetime
     version: int | None = None
 

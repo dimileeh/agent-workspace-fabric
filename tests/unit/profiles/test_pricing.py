@@ -178,6 +178,50 @@ class TestPricingMetadataModel:
         )
         assert meta.is_current() is True
 
+    @pytest.mark.unit
+    def test_price_per_1k_tokens_defaults_to_none(self) -> None:
+        from awf.profiles.pricing import PricingMetadata
+
+        meta = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert meta.price_per_1k_tokens is None
+
+    @pytest.mark.unit
+    def test_accepts_valid_price_per_1k_tokens(self) -> None:
+        from awf.profiles.pricing import PricingMetadata
+
+        meta = PricingMetadata(
+            provider="openai",
+            model="gpt-5.5",
+            currency="USD",
+            unit="per_1k_tokens",
+            price_per_1k_tokens=0.015,
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert meta.price_per_1k_tokens == 0.015
+
+    @pytest.mark.unit
+    def test_rejects_negative_price_per_1k_tokens(self) -> None:
+        from awf.profiles.pricing import PricingMetadata
+
+        with pytest.raises(ValidationError) as exc_info:
+            PricingMetadata(
+                provider="openai",
+                model="gpt-5.5",
+                currency="USD",
+                unit="per_1k_tokens",
+                price_per_1k_tokens=-0.001,
+                timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        errors = exc_info.value.errors()
+        field_names = {e["loc"][0] for e in errors}
+        assert "price_per_1k_tokens" in field_names
+
 
 class TestPricingModuleConstants:
     @pytest.mark.unit

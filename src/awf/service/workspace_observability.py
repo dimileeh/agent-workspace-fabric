@@ -569,13 +569,14 @@ def compute_cost_estimate(
         return None, "pricing_not_configured"
     if not pricing.is_current(now=now, max_age_days=PRICING_MAX_AGE_DAYS):
         return None, "pricing_stale"
+    if pricing.price_per_1k_tokens is None:
+        return None, "pricing_rates_unavailable"
     if usage.input_tokens is None and usage.output_tokens is None:
         return None, "no_token_data"
     input_t = usage.input_tokens or 0
     output_t = usage.output_tokens or 0
     total_tokens = input_t + output_t
-    cost_per_1k = 0.001
-    cost = (total_tokens / 1000.0) * cost_per_1k
+    cost = (total_tokens / 1000.0) * pricing.price_per_1k_tokens
     return cost, None
 
 
