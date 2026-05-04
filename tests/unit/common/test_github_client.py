@@ -38,6 +38,7 @@ class TestRepoRef:
             ("dimileeh/aira-web", "dimileeh/aira-web"),
             ("git@github.com:dimileeh/aira-web.git", "dimileeh/aira-web"),
             ("git@github.com:dimileeh/aira-web", "dimileeh/aira-web"),
+            ("ssh://git@github.com/dimileeh/aira-web.git", "dimileeh/aira-web"),
             ("https://github.com/dimileeh/aira-agent.git", "dimileeh/aira-agent"),
             ("https://github.com/dimileeh/aira-agent/", "dimileeh/aira-agent"),
             ("https://github.com/dimileeh/aira-agent", "dimileeh/aira-agent"),

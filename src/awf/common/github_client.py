@@ -216,7 +216,16 @@ class RepoRef:
             return cls(owner=ssh_match.group(1), name=ssh_match.group(2))
 
         parsed = urlsplit(value)
-        if parsed.scheme in {"http", "https"} and parsed.netloc.lower() == "github.com":
+        http_github_url = (
+            parsed.scheme in {"http", "https"} and parsed.netloc.lower() == "github.com"
+        )
+        ssh_github_url = (
+            parsed.scheme == "ssh"
+            and parsed.hostname is not None
+            and parsed.hostname.lower() == "github.com"
+            and (parsed.username is None or parsed.username.lower() == "git")
+        )
+        if http_github_url or ssh_github_url:
             parts = [part for part in parsed.path.strip("/").split("/") if part]
             if len(parts) >= 2 and parts[0] and parts[1]:
                 name = parts[1][:-4] if parts[1].endswith(".git") else parts[1]
