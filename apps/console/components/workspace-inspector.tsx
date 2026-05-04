@@ -39,17 +39,19 @@ export function WorkspaceInspector({
         }`}
         inert={!isOpen ? true : undefined}
       >
-        <div className="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4">
-          <h2 className="text-sm font-semibold text-slate-900">{title || "Workspace Inspector"}</h2>
+        <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-5 sm:px-6">
+          <h2 className="min-w-0 truncate text-sm font-semibold text-slate-900">
+            {title || "Workspace Inspector"}
+          </h2>
           <button
             onClick={onClose}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900"
             aria-label="Close inspector"
           >
             <X size={18} />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-5 xl:px-6">
           {children}
         </div>
       </div>

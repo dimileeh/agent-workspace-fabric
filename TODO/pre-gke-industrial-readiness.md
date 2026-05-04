@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-03
+Last updated: 2026-05-05
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -75,11 +75,6 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Local Packaging And Upgrade Path | Auto-prune completed and merged workspace worktrees | `ws_e90d1b2cf47a45cf920f01a0` | _pending_ | running | OpenCode/Ollama `glm-5.1:cloud` with AWF `xhigh`; MacBook feature batch, launched after registering the Ollama cloud model manifest and passing provider preflight. |
-| P1 Developer Experience And Public Core Surface | Redacted first-time support bundle | `ws_02a6a86cac9a492c8562d164` | _pending_ | running | OpenCode/Ollama `kimi-k2.6:cloud` with AWF `xhigh`; owns telemetry-free `doctor`/support-bundle evidence and redaction behavior. |
-| P1 Operator Console Completion | Token usage surfacing | `ws_61dcb9386b83477a9a6efbce` | _pending_ | provisioning | Gemini `gemini-3.1-pro-preview` with AWF `xhigh`; retry of `ws_68935277abb74e619a06b232` after planning-phase scope violation. |
-| P1 Operator Console Completion | Reliable cost estimate surfacing | `ws_f0c067d4523f480ea6d7c8ec` | _pending_ | running | OpenCode/Ollama `deepseek-v4-pro:cloud` with AWF `xhigh`; owns cost display only when trusted pricing metadata and token usage are present. |
-| P1 Operator Console Completion | Stable wide-screen embedded inspector | `ws_f33b10c9e5f8445aaaaced7d` | _pending_ | running | Gemini `gemini-3.1-pro-preview` with AWF `xhigh`; owns console layout behavior so dashboard panes stay stable while workspace inspector opens/closes. |
 | P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_068773cee8f34463820c3d7d` | _pending_ | running | OpenCode/Ollama `glm-5.1:cloud` with AWF `xhigh`; retry of reschedule-required `ws_ea414c0722a74815bc474d13`. |
 | P1 Operator Console Completion | Live workspace activity signals | `ws_04048a6809004fa0ab3d8f79` | _pending_ | running | Gemini `gemini-3.1-pro-preview` with AWF `xhigh`; launched with provider-readiness override because agent runtime has Gemini CLI but control-plane probe image lacks it. Retry of `ws_451cc5007fa845ad85a0f7b3`. |
 | P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_02ae413a8c8341e089e0020a` | _pending_ | running | OpenCode/Ollama `deepseek-v4-pro:cloud` with AWF `xhigh`; Ollama cloud model manifest registered before launch. |
@@ -104,6 +99,11 @@ not listed here.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Local Packaging And Upgrade Path | Auto-prune completed and merged workspace worktrees | `ws_e90d1b2cf47a45cf920f01a0` | [#203](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/203) | merged | OpenCode/Ollama `glm-5.1:cloud`; merged 2026-05-04 and adds policy-safe completed/merged workspace worktree pruning with retention safeguards. |
+| P1 Developer Experience And Public Core Surface | Redacted first-time support bundle | `ws_02a6a86cac9a492c8562d164` | [#202](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/202) | merged | OpenCode/Ollama `kimi-k2.6:cloud`; merged 2026-05-04 and adds telemetry-free redacted doctor/support-bundle evidence for first-time evaluator issue reports. |
+| P1 Operator Console Completion | Reliable cost estimate surfacing | `ws_f0c067d4523f480ea6d7c8ec` | [#201](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/201) | merged | OpenCode/Ollama `deepseek-v4-pro:cloud`; merged 2026-05-04 and limits console cost estimates to trusted pricing and usage metadata. |
+| P1 Operator Console Completion | Token usage surfacing | `ws_61dcb9386b83477a9a6efbce` | [#200](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/200) | merged | Gemini `gemini-3.1-pro-preview`; retry of `ws_68935277abb74e619a06b232`, merged 2026-05-04 and surfaces nullable provider token usage without inventing values. |
+| P1 Operator Console Completion | Stable wide-screen embedded inspector | `ws_f33b10c9e5f8445aaaaced7d` | [#199](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/199) | merged | Gemini `gemini-3.1-pro-preview`; merged 2026-05-04 and keeps global dashboard panes stable while the embedded workspace inspector opens and closes. |
 | P1 Developer Experience And Public Core Surface | Searchable reason-code catalog | `ws_46678fbed83645709bfa6771` | [#196](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/196) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
 | P1 Developer Experience And Public Core Surface | README split into focused public Core docs | `ws_f598e969bed54d17be999e62` | [#195](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/195) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
 | P1 Developer Experience And Public Core Surface | First-time CLI help text | `ws_a062174bfc9948e480d05c2b` | [#194](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/194) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
@@ -218,7 +218,6 @@ not listed here.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Operator Console Completion | Token usage surfacing | `ws_68935277abb74e619a06b232` | _none_ | failed / retried | Failed with `AGENT_PLAN_PHASE_SCOPE_VIOLATION`: Gemini edited implementation files during the planning-only phase. Retried cleanly as `ws_61dcb9386b83477a9a6efbce`; failed attempt resources were cleaned after the retry. |
 
 ## Foundations Already In Place
 
@@ -664,7 +663,7 @@ without reading the whole repo.
   docs-status test confirms every public guide is linked from the docs index,
   key commands still exist in CLI help, and snippets marked copy-paste are
   syntactically valid.
-- [ ] Add a "first-time evaluator" telemetry-free feedback loop for local Core,
+- [x] Add a "first-time evaluator" telemetry-free feedback loop for local Core,
   such as a generated `awf doctor --bundle` redacted support artifact or a
   GitHub issue template path from failed readiness output. Acceptance: no
   secrets are included, and developers can file useful issues without manually
@@ -678,8 +677,8 @@ without reading the whole repo.
   defaulting to all workspaces.
 - [x] Show lifecycle stage start time, end time, and duration.
 - [x] Show validation tier, validation freshness, command hash, and target SHA.
-- [ ] Show token usage when providers expose it.
-- [ ] Show estimated cost only when reliable pricing metadata is configured.
+- [x] Show token usage when providers expose it.
+- [x] Show estimated cost only when reliable pricing metadata is configured.
 - [x] Add merge queue blocker drill-down.
 - [x] Add stale reason and recovery action drill-down.
 - [x] Add safe remonitor/refresh/revalidate controls after API hardening.
@@ -693,7 +692,7 @@ without reading the whole repo.
   preference, keyboard/focus-visible coverage, and browser-verified responsive
   screenshots for the main dashboard, workspace inspector, logs, and merge
   queue.
-- [ ] Restructure the wide-screen console so global dashboard panes stay
+- [x] Restructure the wide-screen console so global dashboard panes stay
   stable, while workspace-specific panes open in a dismissible embedded
   inspector that can be closed to reset the selected workspace.
 
@@ -708,7 +707,7 @@ without reading the whole repo.
 - [x] Add backup/restore instructions for AWF control-plane Postgres.
 - [x] Add local disaster recovery instructions for stuck containers, broken migrations, and corrupt work dirs.
 - [x] Keep `scripts/run_awf.py` compatibility documented until the API-backed runner fully replaces it.
-- [ ] Auto-prune git worktrees for completed and merged workspaces. AWF should
+- [x] Auto-prune git worktrees for completed and merged workspaces. AWF should
   detect terminal workspaces whose PR has landed, preserve retained
   logs/artifacts/audit metadata, release reservations, and safely prune linked
   git worktrees after the configured retention window or explicit operator

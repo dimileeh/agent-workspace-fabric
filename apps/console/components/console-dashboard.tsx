@@ -20,6 +20,7 @@ import {
   ListFilter,
   Loader2,
   Maximize2,
+  Monitor,
   Radio,
   RefreshCw,
   Search,
@@ -55,6 +56,7 @@ import {
   formatDateTime,
   lifecycleStages,
   relativeTime,
+  pickWorkspaceLogStreams,
   renderLogEntries,
   statusTone,
   toneClass,
@@ -112,7 +114,7 @@ import {
   operatorPreferenceAttributes,
 } from "@/lib/operator-preferences";
 import type { WorkspaceOperatorControl } from "@/lib/workspace-operator-controls";
-import type { OperatorPreferences } from "@/lib/operator-preferences";
+import type { OperatorPreferences, ResolvedOperatorTheme } from "@/lib/operator-preferences";
 import type {
   ApiEnvelope,
   AwfStreamFrame,
@@ -326,6 +328,7 @@ export function ConsoleDashboard() {
     DEFAULT_OPERATOR_PREFERENCES,
   );
   const [operatorPreferencesHydrated, setOperatorPreferencesHydrated] = useState(false);
+  const [systemTheme, setSystemTheme] = useState<ResolvedOperatorTheme>("light");
   const [overview, setOverview] = useState<WorkspaceOverview[]>([]);
 const searchParams = useSearchParams();
   const [selectedId, setSelectedIdState] = useState<string | null>(searchParams.get("workspaceId"));
@@ -400,12 +403,20 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   }, []);
 
   useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateSystemTheme = () => setSystemTheme(media.matches ? "dark" : "light");
+    updateSystemTheme();
+    media.addEventListener("change", updateSystemTheme);
+    return () => media.removeEventListener("change", updateSystemTheme);
+  }, []);
+
+  useEffect(() => {
     if (!operatorPreferencesHydrated) {
       return;
     }
-    applyOperatorPreferenceAttributes(operatorPreferences);
+    applyOperatorPreferenceAttributes(operatorPreferences, systemTheme);
     writeStoredOperatorPreferences(operatorPreferences);
-  }, [operatorPreferences, operatorPreferencesHydrated]);
+  }, [operatorPreferences, operatorPreferencesHydrated, systemTheme]);
 
   const updateOperatorPreferences = useCallback((next: Partial<OperatorPreferences>) => {
     setOperatorPreferences((current) => normalizeOperatorPreferences({ ...current, ...next }));
@@ -535,14 +546,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
 
     if (streams.ok) {
       setSelectedStreams((current) => {
-        const streamItems = streams.data.items;
-        const available = new Set(streamItems.map((stream) => stream.stream_id));
-        const retained = current.filter((streamId) => available.has(streamId));
-        const preferred =
-          streamItems.find((stream) => stream.stream_id === "agent.stdout") ??
-          streamItems.find((stream) => stream.byte_count > 0) ??
-          streamItems[0];
-        return retained.length > 0 ? retained : preferred ? [preferred.stream_id] : [];
+        return pickWorkspaceLogStreams(streams.data.items, current);
       });
     }
   }, []);
@@ -1172,7 +1176,7 @@ function TopBar({
         <PreferenceControls preferences={preferences} onChange={onPreferencesChange} />
         <StatePill icon={<HeartPulse size={13} />} label="API" state={apiState} />
         <StatePill icon={<Radio size={13} />} label="Stream" state={streamState} />
-        <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600">
+        <span className="inline-flex h-8 w-[24ch] items-center justify-center rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-center font-mono text-[11px] tabular-nums text-slate-600">
           refreshed {lastRefresh ? relativeTime(lastRefresh.toISOString()) : "—"}
         </span>
         <button
@@ -1213,6 +1217,13 @@ function PreferenceControls({
         onClick={() => onChange({ theme: "dark" })}
       >
         <Moon size={14} aria-hidden />
+      </PreferenceButton>
+      <PreferenceButton
+        label="Use system theme"
+        pressed={preferences.theme === "system"}
+        onClick={() => onChange({ theme: "system" })}
+      >
+        <Monitor size={14} aria-hidden />
       </PreferenceButton>
       <PreferenceButton
         label="Enable high contrast"
@@ -3959,9 +3970,12 @@ function writeStoredOperatorPreferences(preferences: OperatorPreferences) {
   }
 }
 
-function applyOperatorPreferenceAttributes(preferences: OperatorPreferences) {
+function applyOperatorPreferenceAttributes(
+  preferences: OperatorPreferences,
+  systemTheme: ResolvedOperatorTheme,
+) {
   const root = document.documentElement;
-  const attributes = operatorPreferenceAttributes(preferences);
+  const attributes = operatorPreferenceAttributes(preferences, systemTheme);
   for (const [name, value] of Object.entries(attributes)) {
     root.setAttribute(name, value);
   }
@@ -4288,19 +4302,6 @@ function toggleStream(current: string[], streamId: string, checked: boolean): st
     return current.includes(streamId) ? current : [...current, streamId];
   }
   return current.filter((item) => item !== streamId);
-}
-
-function pickWorkspaceLogStreams(streams: WorkspaceLogStream[], current: string[]): string[] {
-  const available = new Set(streams.map((stream) => stream.stream_id));
-  const retained = current.filter((streamId) => available.has(streamId));
-  if (retained.length > 0) {
-    return retained;
-  }
-  const preferred =
-    streams.find((stream) => stream.stream_id === "agent.stdout") ??
-    streams.find((stream) => stream.byte_count > 0) ??
-    streams[0];
-  return preferred ? [preferred.stream_id] : [];
 }
 
 function compareLogEntries(left: LogEntry, right: LogEntry): number {

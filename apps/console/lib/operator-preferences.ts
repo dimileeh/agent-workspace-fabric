@@ -1,7 +1,8 @@
 export const OPERATOR_PREFERENCES_STORAGE_KEY = "awf.operator.preferences.v1";
 export const OPERATOR_PREFERENCES_VERSION = 1;
 
-export type OperatorTheme = "light" | "dark";
+export type OperatorTheme = "light" | "dark" | "system";
+export type ResolvedOperatorTheme = "light" | "dark";
 export type OperatorContrast = "normal" | "high";
 export type OperatorFontSize = "standard" | "large";
 
@@ -18,7 +19,8 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
 };
 
 export type OperatorPreferenceAttributes = {
-  "data-awf-theme": OperatorTheme;
+  "data-awf-theme": ResolvedOperatorTheme;
+  "data-awf-theme-mode": OperatorTheme;
   "data-awf-contrast": OperatorContrast;
   "data-awf-font-size": OperatorFontSize;
 };
@@ -66,13 +68,23 @@ export function encodeOperatorPreferences(preferences: OperatorPreferences): str
 
 export function operatorPreferenceAttributes(
   preferences: OperatorPreferences,
+  systemTheme: ResolvedOperatorTheme = DEFAULT_OPERATOR_PREFERENCES.theme === "dark" ? "dark" : "light",
 ): OperatorPreferenceAttributes {
   const normalized = normalizeOperatorPreferences(preferences);
   return {
-    "data-awf-theme": normalized.theme,
+    "data-awf-theme": resolveOperatorTheme(normalized, systemTheme),
+    "data-awf-theme-mode": normalized.theme,
     "data-awf-contrast": normalized.contrast,
     "data-awf-font-size": normalized.fontSize,
   };
+}
+
+export function resolveOperatorTheme(
+  preferences: OperatorPreferences,
+  systemTheme: ResolvedOperatorTheme,
+): ResolvedOperatorTheme {
+  const normalized = normalizeOperatorPreferences(preferences);
+  return normalized.theme === "system" ? systemTheme : normalized.theme;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,7 +92,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isOperatorTheme(value: unknown): value is OperatorTheme {
-  return value === "dark" || value === "light";
+  return value === "dark" || value === "light" || value === "system";
 }
 
 function isOperatorContrast(value: unknown): value is OperatorContrast {

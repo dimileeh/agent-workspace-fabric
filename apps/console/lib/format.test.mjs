@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fallbackLifecycleStages, fallbackLlmUsage, renderLogEntries, toneFillClass } from "./format.ts";
+import {
+  fallbackLifecycleStages,
+  fallbackLlmUsage,
+  pickWorkspaceLogStreams,
+  renderLogEntries,
+  toneFillClass,
+} from "./format.ts";
 
 test("fallbackLifecycleStages marks terminal successors skipped", () => {
   const stages = Object.fromEntries(
@@ -124,4 +130,32 @@ test("renderLogEntries leaves chunk ordering to the caller", () => {
   );
 
   assert.equal(rendered, "[old] agent.stdout\nolder\n\n[new] agent.stdout\nnewer");
+});
+
+test("pickWorkspaceLogStreams defaults to all streams", () => {
+  assert.deepEqual(
+    pickWorkspaceLogStreams(
+      [
+        { stream_id: "validation.01_setup.stdout" },
+        { stream_id: "agent.stdout" },
+        { stream_id: "agent.stderr" },
+      ],
+      [],
+    ),
+    ["validation.01_setup.stdout", "agent.stdout", "agent.stderr"],
+  );
+});
+
+test("pickWorkspaceLogStreams preserves an existing valid stream selection", () => {
+  assert.deepEqual(
+    pickWorkspaceLogStreams(
+      [
+        { stream_id: "validation.01_setup.stdout" },
+        { stream_id: "agent.stdout" },
+        { stream_id: "agent.stderr" },
+      ],
+      ["agent.stdout", "deleted.stream"],
+    ),
+    ["agent.stdout"],
+  );
 });

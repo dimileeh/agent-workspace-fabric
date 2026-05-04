@@ -8,6 +8,7 @@ import {
   encodeOperatorPreferences,
   normalizeOperatorPreferences,
   operatorPreferenceAttributes,
+  resolveOperatorTheme,
 } from "./operator-preferences.ts";
 
 test("decodeOperatorPreferences defaults missing and invalid persisted payloads", () => {
@@ -18,7 +19,7 @@ test("decodeOperatorPreferences defaults missing and invalid persisted payloads"
     decodeOperatorPreferences(
       JSON.stringify({
         version: 1,
-        theme: "system",
+        theme: "sepia",
         contrast: "more",
         fontSize: "huge",
       }),
@@ -41,7 +42,7 @@ test("normalizeOperatorPreferences derives invalid field fallbacks from exported
 
     assert.deepEqual(
       normalizeOperatorPreferences({
-        theme: "system",
+        theme: "sepia",
         contrast: "more",
         fontSize: "huge",
       }),
@@ -54,7 +55,7 @@ test("normalizeOperatorPreferences derives invalid field fallbacks from exported
 
 test("operator preferences round-trip through stable serialization", () => {
   const preferences = {
-    theme: "dark",
+    theme: "system",
     contrast: "high",
     fontSize: "large",
   };
@@ -63,7 +64,7 @@ test("operator preferences round-trip through stable serialization", () => {
 
   assert.deepEqual(JSON.parse(encoded), {
     version: 1,
-    theme: "dark",
+    theme: "system",
     contrast: "high",
     fontSize: "large",
   });
@@ -73,16 +74,23 @@ test("operator preferences round-trip through stable serialization", () => {
 test("operator preference attributes map to stable html data attributes", () => {
   assert.deepEqual(
     operatorPreferenceAttributes({
-      theme: "dark",
+      theme: "system",
       contrast: "high",
       fontSize: "large",
-    }),
+    }, "dark"),
     {
       "data-awf-theme": "dark",
+      "data-awf-theme-mode": "system",
       "data-awf-contrast": "high",
       "data-awf-font-size": "large",
     },
   );
+});
+
+test("resolveOperatorTheme follows system theme only in system mode", () => {
+  assert.equal(resolveOperatorTheme({ ...DEFAULT_OPERATOR_PREFERENCES, theme: "system" }, "dark"), "dark");
+  assert.equal(resolveOperatorTheme({ ...DEFAULT_OPERATOR_PREFERENCES, theme: "system" }, "light"), "light");
+  assert.equal(resolveOperatorTheme({ ...DEFAULT_OPERATOR_PREFERENCES, theme: "dark" }, "light"), "dark");
 });
 
 test("normalizeOperatorPreferences preserves valid partial fields and defaults invalid fields", () => {

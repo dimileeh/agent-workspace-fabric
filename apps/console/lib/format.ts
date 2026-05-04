@@ -14,6 +14,10 @@ export type RenderableLogEntry = {
   occurredAt: string;
 };
 
+export type SelectableLogStream = {
+  stream_id: string;
+};
+
 export const lifecycleStages: WorkspaceStatus[] = [
   "requested",
   "provisioning",
@@ -197,6 +201,18 @@ export function renderLogEntries(
   direction: LogSortDirection,
 ): string {
   return entries.map((entry) => renderLogEntry(entry, direction)).join("\n\n");
+}
+
+export function pickWorkspaceLogStreams(
+  streams: readonly SelectableLogStream[],
+  current: readonly string[],
+): string[] {
+  const available = new Set(streams.map((stream) => stream.stream_id));
+  const retained = current.filter((streamId) => available.has(streamId));
+  if (retained.length > 0) {
+    return retained;
+  }
+  return streams.map((stream) => stream.stream_id);
 }
 
 export function renderLogEntry(
