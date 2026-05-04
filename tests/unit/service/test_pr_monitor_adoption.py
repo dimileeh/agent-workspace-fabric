@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -83,6 +85,21 @@ class _MetadataFetcher:
 
     async def __call__(self, *, repo: RepoRef, pr_number: int) -> PullRequestAdoptionMetadata:
         self.calls.append((repo.slug(), pr_number))
+        return self.metadata
+
+
+class _BlockingMetadataFetcher:
+    def __init__(self, metadata: PullRequestAdoptionMetadata) -> None:
+        self.metadata = metadata
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def __call__(self, *, repo: RepoRef, pr_number: int) -> PullRequestAdoptionMetadata:
+        del repo, pr_number
+        self.calls += 1
+        self.entered.set()
+        await self.release.wait()
         return self.metadata
 
 
@@ -315,6 +332,60 @@ class TestPullRequestMonitorAdoptionService:
         async with factory() as session:
             assert await _count(session, Workspace) == 1
             assert await _count(session, TaskAttempt) == 0
+
+    @pytest.mark.unit
+    async def test_concurrent_sqlite_adopt_requests_attach_to_one_workspace(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf-adopt.db'}")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = make_session_factory(engine)
+        fetcher = _BlockingMetadataFetcher(_metadata())
+        request = PullRequestMonitorAdoptionRequest(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+        )
+
+        async def _adopt_once() -> str:
+            async with factory() as session:
+                result = await PullRequestMonitorAdoptionService(
+                    session,
+                    metadata_fetcher=fetcher,
+                ).adopt(request)
+                await session.commit()
+                return result.workspace_id
+
+        try:
+            first = asyncio.create_task(_adopt_once())
+            await asyncio.wait_for(fetcher.entered.wait(), timeout=1.0)
+            second = asyncio.create_task(_adopt_once())
+            await asyncio.sleep(0.05)
+
+            assert fetcher.calls == 1
+
+            fetcher.release.set()
+            first_workspace_id, second_workspace_id = await asyncio.gather(
+                first,
+                second,
+            )
+        finally:
+            fetcher.release.set()
+            await engine.dispose()
+
+        assert first_workspace_id == second_workspace_id
+        assert fetcher.calls == 1
+
+        verify_engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf-adopt.db'}")
+        verify_factory = make_session_factory(verify_engine)
+        try:
+            async with verify_factory() as session:
+                assert await _count(session, Workspace) == 1
+                assert await _count(session, TaskAttempt) == 1
+                assert await _count(session, Operation) == 1
+        finally:
+            await verify_engine.dispose()
 
     @pytest.mark.unit
     async def test_replay_with_changed_monitor_policy_conflicts(

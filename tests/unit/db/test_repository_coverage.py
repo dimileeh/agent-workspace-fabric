@@ -398,7 +398,9 @@ async def test_postgres_only_repository_locks_are_skipped_or_executed_intentiona
     assert workspace_idempotency_session.executed[0][1] == {
         "lock_key": _workspace_idempotency_advisory_lock_key("key0")
     }
-    assert sqlite_workspace_idempotency_session.executed == []
+    assert len(sqlite_workspace_idempotency_session.executed) == 1
+    assert str(sqlite_workspace_idempotency_session.executed[0][0]) == "BEGIN IMMEDIATE"
+    assert sqlite_workspace_idempotency_session.executed[0][1] is None
     assert len(operation_session.executed) == 1
     assert operation_session.executed[0][1] == {
         "lock_key": _operation_idempotency_advisory_lock_key("key0")

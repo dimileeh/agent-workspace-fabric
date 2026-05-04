@@ -2479,7 +2479,14 @@ class WorkspaceRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:
-        """Serialize workspace idempotency decisions for one key on Postgres."""
+        """Serialize workspace idempotency decisions for one key."""
+        if self._dialect_name == "sqlite":
+            in_transaction = getattr(self._session, "in_transaction", None)
+            if callable(in_transaction) and in_transaction():
+                return
+            await self._session.execute(text("BEGIN IMMEDIATE"))
+            return
+
         if self._dialect_name != "postgresql":
             return
 

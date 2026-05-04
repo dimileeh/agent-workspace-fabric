@@ -103,11 +103,6 @@ class PullRequestMonitorAdoptionService:
             pr_number=pr_number,
         )
         workspace_repo = WorkspaceRepository(self._session)
-        existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
-        if existing is not None:
-            _raise_if_policy_conflicts(existing, request)
-            return await self._response(existing, attached_existing=True)
-
         await workspace_repo.acquire_idempotency_key_lock(idempotency_key)
         # Re-read under the transaction lock so a concurrent adopter that won
         # the race attaches here instead of surfacing the unique constraint.
