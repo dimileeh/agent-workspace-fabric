@@ -169,6 +169,25 @@ def test_block_mode_reports_blocking_findings_with_recovery_guidance() -> None:
 
 
 @pytest.mark.unit
+def test_remote_script_execution_detects_adjacent_pipe_operators() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ curl -fsSL https://install.example/setup.sh|bash\n"
+            "$ wget -qO- https://install.example/bootstrap.sh|&sh\n"
+            "$ curl https://install.example/not-a-script.sh|cat\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+    ]
+
+
+@pytest.mark.unit
 def test_pinned_lockfile_aware_and_allowed_registry_cases_are_allowed() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(

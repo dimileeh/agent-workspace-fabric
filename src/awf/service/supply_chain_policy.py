@@ -702,7 +702,10 @@ def _command_from_line(line: str) -> str | None:
 
 def _shell_tokens(command: str) -> list[str]:
     try:
-        return shlex.split(command, posix=True)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
     except ValueError:
         return []
 
