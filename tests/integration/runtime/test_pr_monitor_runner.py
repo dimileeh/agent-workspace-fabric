@@ -178,9 +178,12 @@ async def _seed_monitoring_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,
     agent: str = "claude_code",
+    repo_url: str = "git@github.com:dimileeh/aira-web.git",
     pr_number: int = 42,
     branch_name: str | None = None,
     remote_push_branch: str | None = None,
+    task_kind: str = "feature_branch_pr",
+    task_policy: dict[str, object] | None = None,
 ) -> str:
     """Insert a workspace already in ``monitoring_pr`` state.
 
@@ -192,13 +195,15 @@ async def _seed_monitoring_workspace(
     async with factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.create(
-            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo_url=repo_url,
             branch_base="development",
             task_title="monitor test",
             task_prompt="x",
             agent=agent,
             test_commands=["pytest -q"],
             requires_database=False,
+            task_kind=task_kind,
+            task_policy=task_policy or {},
         )
         attempt = await TaskAttemptRepository(s).create_for_workspace(
             task=await TaskRepository(s).create_or_get(
@@ -630,6 +635,88 @@ class TestAddressComments:
             assert ws.monitor_threads_addressed["T1"] == "fix_committed"
         assert len(adapter.calls) == 1
         assert "T1" in adapter.calls[0]
+
+    @pytest.mark.unit
+    async def test_adopted_fork_pr_pushes_comment_fix_to_head_repository(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(
+            factory,
+            repo_url="git@github.com:base/aira-web.git",
+            branch_name="feature-sync/ws_fork",
+            remote_push_branch="fix/fork-review",
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "base/aira-web",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/base/aira-web/pull/42",
+                    "head_ref": "fix/fork-review",
+                    "head_repo_slug": "contributor/aira-web",
+                    "head_repo_url": "https://github.com/contributor/aira-web.git",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        thread = {
+            "id": "T_fork",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {"nodes": [{"bodyText": "rename", "author": {"login": "cr"}}]},
+        }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # PR state
+        adapter.queue(stdout="fixed in commit abc")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # fetch in fix_cycle
+        cmd.queue_result(returncode=0, stderr="")  # git push
+        cmd.queue_result(returncode=0, stdout="newhead123\n")  # git rev-parse HEAD
+        cmd.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "resolveReviewThread": {
+                            "thread": {"id": "T_fork", "isResolved": True}
+                        }
+                    }
+                }
+            ),
+        )
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGE1\n")  # merge sha
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
+        assert len(push_calls) == 1
+        assert "git@github.com:contributor/aira-web.git" in push_calls[0].args
+        assert "HEAD:refs/heads/fix/fork-review" in push_calls[0].args
+        assert "origin" not in push_calls[0].args[push_calls[0].args.index("push") + 1 :]
 
     @pytest.mark.unit
     async def test_false_positive_verdict_does_not_trigger_resolve_mutation(

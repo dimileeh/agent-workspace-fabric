@@ -98,6 +98,7 @@ def _adoption_pr_payload(
     *,
     number: int = 277,
     head_ref: str = "feature/head",
+    head_repo_slug: str = "dimileeh/aira-web",
     base_ref: str = "development",
     head_sha: str = "h" * 40,
     base_sha: str = "b" * 40,
@@ -111,6 +112,11 @@ def _adoption_pr_payload(
         {
             "number": number,
             "headRefName": head_ref,
+            "headRepository": {
+                "name": head_repo_slug.split("/", 1)[1],
+                "nameWithOwner": head_repo_slug,
+            },
+            "isCrossRepository": head_repo_slug.lower() != "dimileeh/aira-web",
             "baseRefName": base_ref,
             "headRefOid": head_sha,
             "baseRefOid": base_sha,
@@ -137,6 +143,7 @@ class TestFetchPullRequestAdoptionMetadata:
 
         assert metadata.number == 277
         assert metadata.head_ref == "feature/head"
+        assert metadata.head_repo_slug == "dimileeh/aira-web"
         assert metadata.base_ref == "development"
         assert metadata.head_sha == "h" * 40
         assert metadata.base_sha == "b" * 40
@@ -148,10 +155,29 @@ class TestFetchPullRequestAdoptionMetadata:
         args = fake.calls[0].args
         assert args[:3] == ["gh", "pr", "view"]
         fields = args[args.index("--json") + 1].split(",")
+        assert "headRepository" in fields
+        assert "isCrossRepository" in fields
         assert "headRefOid" in fields
         assert "baseRefOid" in fields
         assert "closed" not in fields
         assert "merged" not in fields
+
+    @pytest.mark.unit
+    async def test_returns_head_repository_identity_for_fork_pr(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_adoption_pr_payload(head_repo_slug="contributor/aira-web"),
+        )
+
+        metadata = await fetch_pull_request_adoption_metadata(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=277,
+        )
+
+        assert metadata.head_ref == "feature/head"
+        assert metadata.head_repo_slug == "contributor/aira-web"
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

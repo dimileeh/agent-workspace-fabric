@@ -277,6 +277,8 @@ class PullRequestMonitorAdoptionService:
                 "pr_number": metadata.number,
                 "pr_url": metadata.url,
                 "head_ref": metadata.head_ref,
+                "head_repo_slug": metadata.head_repo_slug,
+                "head_repo_url": _github_repo_https_url(metadata.head_repo_slug),
                 "base_ref": metadata.base_ref,
                 "head_sha": metadata.head_sha,
                 "base_sha": metadata.base_sha,
@@ -442,6 +444,8 @@ def _adoption_task_policy(
             "pr_number": metadata.number,
             "pr_url": metadata.url,
             "head_ref": metadata.head_ref,
+            "head_repo_slug": metadata.head_repo_slug,
+            "head_repo_url": _github_repo_https_url(metadata.head_repo_slug),
             "base_ref": metadata.base_ref,
             "head_sha": metadata.head_sha,
             "base_sha": metadata.base_sha,
@@ -471,6 +475,10 @@ def _adoption_task_prompt(
 def _adoption_external_id(*, repo_slug: str, pr_number: int) -> str:
     digest = hashlib.sha256(f"{repo_slug.lower()}#{pr_number}".encode()).hexdigest()
     return f"pr-adopt-{digest[:40]}"
+
+
+def _github_repo_https_url(repo_slug: str) -> str:
+    return RepoRef.from_url(repo_slug).https_url()
 
 
 def _raise_if_policy_conflicts(

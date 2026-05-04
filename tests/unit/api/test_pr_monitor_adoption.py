@@ -32,6 +32,7 @@ def _metadata(
     return PullRequestAdoptionMetadata(
         number=number,
         head_ref="feature/ready",
+        head_repo_slug="dimileeh/aira-web",
         base_ref="development",
         head_sha="h" * 40,
         base_sha="b" * 40,

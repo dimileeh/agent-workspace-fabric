@@ -287,6 +287,7 @@ class TestToolRegistration:
             return PullRequestAdoptionMetadata(
                 number=277,
                 head_ref="feature/ready",
+                head_repo_slug="dimileeh/aira-web",
                 base_ref="development",
                 head_sha="h" * 40,
                 base_sha="b" * 40,
@@ -335,6 +336,7 @@ class TestToolRegistration:
             return PullRequestAdoptionMetadata(
                 number=277,
                 head_ref="feature/ready",
+                head_repo_slug="dimileeh/aira-web",
                 base_ref="development",
                 head_sha="h" * 40,
                 base_sha="b" * 40,

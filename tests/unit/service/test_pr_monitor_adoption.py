@@ -50,6 +50,7 @@ def _metadata(
     number: int = 277,
     state: str = "OPEN",
     head_ref: str = "feature/ready",
+    head_repo_slug: str = "dimileeh/aira-web",
     base_ref: str = "development",
     head_sha: str = "h" * 40,
     base_sha: str = "b" * 40,
@@ -61,6 +62,7 @@ def _metadata(
     return PullRequestAdoptionMetadata(
         number=number,
         head_ref=head_ref,
+        head_repo_slug=head_repo_slug,
         base_ref=base_ref,
         head_sha=head_sha,
         base_sha=base_sha,
@@ -149,6 +151,8 @@ class TestPullRequestMonitorAdoptionService:
                 "pr_number": 277,
                 "pr_url": "https://github.com/dimileeh/aira-web/pull/277",
                 "head_ref": "feature/ready",
+                "head_repo_slug": "dimileeh/aira-web",
+                "head_repo_url": "https://github.com/dimileeh/aira-web.git",
                 "base_ref": "development",
                 "head_sha": "h" * 40,
                 "base_sha": "b" * 40,
@@ -171,6 +175,34 @@ class TestPullRequestMonitorAdoptionService:
 
             task = (await session.execute(select(Task))).scalar_one()
             assert task.title == "feature: ready"
+
+    @pytest.mark.unit
+    async def test_persists_head_repo_identity_for_fork_pr(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata(head_repo_slug="contributor/aira-web"))
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            adoption = workspace.task_policy["pr_adoption"]
+            assert workspace.remote_push_branch == "feature/ready"
+            assert adoption["repo_slug"] == "dimileeh/aira-web"
+            assert adoption["head_ref"] == "feature/ready"
+            assert adoption["head_repo_slug"] == "contributor/aira-web"
+            assert adoption["head_repo_url"] == "https://github.com/contributor/aira-web.git"
 
     @pytest.mark.unit
     async def test_idempotent_per_repo_pr_across_slug_and_url(

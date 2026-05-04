@@ -249,6 +249,7 @@ class PullRequestAdoptionMetadata:
 
     number: int
     head_ref: str
+    head_repo_slug: str
     base_ref: str
     head_sha: str
     base_sha: str
@@ -262,7 +263,8 @@ class PullRequestAdoptionMetadata:
 
 
 _PR_ADOPTION_VIEW_JSON_FIELDS = (
-    "number,headRefName,baseRefName,headRefOid,baseRefOid,state,isDraft,author,url,title"
+    "number,headRefName,headRepository,isCrossRepository,baseRefName,"
+    "headRefOid,baseRefOid,state,isDraft,author,url,title"
 )
 
 
@@ -380,6 +382,11 @@ def _parse_pull_request_adoption_metadata(
 
     author_obj = payload.get("author")
     author = author_obj.get("login") if isinstance(author_obj, dict) else None
+    head_repo_slug = _head_repo_slug_from_adoption_payload(
+        payload,
+        repo=repo,
+        pr_number=pr_number,
+    )
     head_sha = _required_nonempty_str(
         payload.get("headRefOid"),
         field_name="headRefOid",
@@ -397,6 +404,7 @@ def _parse_pull_request_adoption_metadata(
     return PullRequestAdoptionMetadata(
         number=number,
         head_ref=head_ref,
+        head_repo_slug=head_repo_slug,
         base_ref=base_ref,
         head_sha=head_sha,
         base_sha=base_sha,
@@ -407,6 +415,39 @@ def _parse_pull_request_adoption_metadata(
         author=author,
         url=url,
         title=title,
+    )
+
+
+def _head_repo_slug_from_adoption_payload(
+    payload: dict[str, Any],
+    *,
+    repo: RepoRef,
+    pr_number: int,
+) -> str:
+    head_repo = payload.get("headRepository")
+    if isinstance(head_repo, dict):
+        name_with_owner = head_repo.get("nameWithOwner")
+        if isinstance(name_with_owner, str) and name_with_owner.strip():
+            try:
+                return RepoRef.from_url(name_with_owner).slug()
+            except ValueError as exc:
+                raise PullRequestMetadataError(
+                    reason_code="PR_METADATA_INVALID",
+                    message="PR headRepository.nameWithOwner is not a valid GitHub repository.",
+                    detail={
+                        "repo_slug": repo.slug(),
+                        "pr_number": pr_number,
+                        "field": "headRepository.nameWithOwner",
+                    },
+                ) from exc
+
+    if not bool(payload.get("isCrossRepository", False)):
+        return repo.slug()
+
+    raise PullRequestMetadataError(
+        reason_code="PR_METADATA_INVALID",
+        message="Fork PR has no headRepository identity; cannot update the PR head.",
+        detail={"repo_slug": repo.slug(), "pr_number": pr_number, "field": "headRepository"},
     )
 
 

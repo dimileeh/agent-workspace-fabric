@@ -3458,6 +3458,7 @@ class TestExecutorCoverageEdges:
             return PullRequestAdoptionMetadata(
                 number=42,
                 head_ref="feature/existing",
+                head_repo_slug="x/y",
                 base_ref="development",
                 head_sha="h" * 40,
                 base_sha="b" * 40,
