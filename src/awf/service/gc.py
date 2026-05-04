@@ -912,18 +912,37 @@ async def _delete_gc_plan_paths(
                         reason_code=wt_remove.reason_code,
                     )
                 )
-                for target in candidate.paths():
-                    path_outcomes.append(
-                        WorkspaceGCPathOutcome(
-                            workspace_id=candidate.workspace_id,
-                            kind=target.kind,
-                            path=target.path,
-                            status="skipped",
-                            reason_code=wt_remove.reason_code,
-                            error=wt_remove.error,
-                            estimated_bytes=target.estimated_bytes,
-                        )
+                path_outcomes.append(
+                    WorkspaceGCPathOutcome(
+                        workspace_id=candidate.workspace_id,
+                        kind=candidate.worktree.kind,
+                        path=candidate.worktree.path,
+                        status="skipped",
+                        reason_code=wt_remove.reason_code,
+                        error=wt_remove.error,
+                        estimated_bytes=candidate.worktree.estimated_bytes,
                     )
+                )
+                for target in (candidate.compose, candidate.auth):
+                    outcome = await asyncio.to_thread(
+                        _delete_gc_path_outcome,
+                        candidate,
+                        target,
+                        work_dir=plan.work_dir,
+                    )
+                    path_outcomes.append(outcome)
+                    if outcome.deleted:
+                        deleted_paths.append(target.path)
+                    if outcome.error is not None:
+                        delete_errors.append(
+                            WorkspaceGCDeleteError(
+                                workspace_id=candidate.workspace_id,
+                                kind=target.kind,
+                                path=target.path,
+                                error=outcome.error,
+                                reason_code=outcome.reason_code,
+                            )
+                        )
                 continue
         for target in candidate.paths():
             outcome = await asyncio.to_thread(
