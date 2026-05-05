@@ -226,7 +226,7 @@ def _executor_with_runner(
     *,
     validation: object | None = None,
 ) -> WorkspaceExecutor:
-    return WorkspaceExecutor(
+    executor = WorkspaceExecutor(
         session_factory=object(),  # type: ignore[arg-type]
         runner=runner,
         compose=object(),  # type: ignore[arg-type]
@@ -237,6 +237,8 @@ def _executor_with_runner(
             compose_projects_root=tmp_path / "compose",
         ),
     )
+    executor._update_subphase = AsyncMock()  # type: ignore[method-assign]
+    return executor
 
 
 @pytest.mark.unit

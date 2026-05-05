@@ -15,14 +15,13 @@ from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from awf.db.repositories import WorkspaceRepository
-
 from tests.unit.contracts._capabilities import (
     CAPABILITIES_BY_NAME,
     assert_envelope_shape,
     normalize_mcp_error_body,
     normalize_rest_error_body,
 )
-from tests.unit.contracts._stack import ContractStack, contract_stack  # noqa: F401
+from tests.unit.contracts._stack import ContractStack
 
 
 async def _seed_workspace(factory: async_sessionmaker[Any]) -> str:

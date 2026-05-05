@@ -24,10 +24,8 @@ from typer.testing import CliRunner
 import awf.api.routes.controls as controls_route
 from awf.cli.main import app as cli_app
 from awf.db.repositories import WorkspaceRepository
-
 from tests.unit.contracts._capabilities import CAPABILITIES_BY_NAME
-from tests.unit.contracts._stack import ContractStack, contract_stack  # noqa: F401
-
+from tests.unit.contracts._stack import ContractStack
 
 _runner = CliRunner()
 

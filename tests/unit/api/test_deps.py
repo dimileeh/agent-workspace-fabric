@@ -2,42 +2,31 @@
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
 import awf.api.deps as deps
-from awf.common.config import get_settings
+from awf.common.config import Settings
 
 
 @pytest.mark.unit
 def test_require_api_token_reports_missing_and_invalid_tokens() -> None:
-    previous = os.environ.get("AWF_API_TOKEN")
-    try:
-        os.environ["AWF_API_TOKEN"] = ""
-        get_settings.cache_clear()
-        with pytest.raises(HTTPException) as missing:
-            deps.require_api_token(None)
-        assert missing.value.status_code == 503
-        assert missing.value.detail["error_code"] == "API_TOKEN_NOT_CONFIGURED"
+    missing_settings = Settings(_env_file=None, api_token=None)
+    with pytest.raises(HTTPException) as missing:
+        deps.require_api_token(None, settings=missing_settings)
+    assert missing.value.status_code == 503
+    assert missing.value.detail["error_code"] == "API_TOKEN_NOT_CONFIGURED"
 
-        os.environ["AWF_API_TOKEN"] = "secret"
-        get_settings.cache_clear()
-        with pytest.raises(HTTPException) as unauthorized:
-            deps.require_api_token("Bearer wrong")
-        assert unauthorized.value.status_code == 401
-        assert unauthorized.value.detail["error_code"] == "UNAUTHORIZED"
-        assert unauthorized.value.headers == {"WWW-Authenticate": "Bearer"}
+    configured_settings = Settings(_env_file=None, api_token="secret")
+    with pytest.raises(HTTPException) as unauthorized:
+        deps.require_api_token("Bearer wrong", settings=configured_settings)
+    assert unauthorized.value.status_code == 401
+    assert unauthorized.value.detail["error_code"] == "UNAUTHORIZED"
+    assert unauthorized.value.headers == {"WWW-Authenticate": "Bearer"}
 
-        deps.require_api_token("Bearer secret")
-    finally:
-        if previous is None:
-            os.environ.pop("AWF_API_TOKEN", None)
-        else:
-            os.environ["AWF_API_TOKEN"] = previous
-        get_settings.cache_clear()
+    deps.require_api_token("Bearer secret", settings=configured_settings)
 
 
 @pytest.mark.unit

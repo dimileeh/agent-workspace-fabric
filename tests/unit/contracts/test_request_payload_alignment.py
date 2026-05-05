@@ -11,26 +11,18 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
-from awf.api.app import configure_database, create_app
 from awf.api.schemas import (
-    OperationResponse,
     PullRequestMonitorAdoptionRequest,
-    PullRequestMonitorAdoptionResponse,
     WorkspaceControlResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
 )
-from awf.common.config import Settings, get_settings
 from awf.db.enums import OperationStatus, WorkspaceStatus
-from awf.db.session import make_session_factory
 from awf.mcp.server import build_mcp_server
 from awf.service.workspaces import WorkspaceService
-from sqlalchemy.ext.asyncio import AsyncEngine
-
 from tests.unit.contracts._capabilities import CAPABILITIES_BY_NAME
-from tests.unit.contracts._stack import ContractStack, contract_stack  # noqa: F401
+from tests.unit.contracts._stack import ContractStack
 
 
 def _stub_control_response(workspace_id: str, operation_id: str = "op_stub") -> WorkspaceControlResponse:
@@ -57,6 +49,7 @@ class _RecordingWorkspaceService(WorkspaceService):
         reason: str | None = None,
         stop_stack: bool = True,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -66,6 +59,7 @@ class _RecordingWorkspaceService(WorkspaceService):
                     "reason": reason,
                     "stop_stack": stop_stack,
                     "idempotency_key": idempotency_key,
+                    "expected_version": expected_version,
                 },
             )
         )
@@ -77,6 +71,7 @@ class _RecordingWorkspaceService(WorkspaceService):
         *,
         reason: str | None = None,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -85,6 +80,7 @@ class _RecordingWorkspaceService(WorkspaceService):
                     "workspace_id": workspace_id,
                     "reason": reason,
                     "idempotency_key": idempotency_key,
+                    "expected_version": expected_version,
                 },
             )
         )
@@ -96,6 +92,7 @@ class _RecordingWorkspaceService(WorkspaceService):
         *,
         reason: str | None = None,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -104,6 +101,7 @@ class _RecordingWorkspaceService(WorkspaceService):
                     "workspace_id": workspace_id,
                     "reason": reason,
                     "idempotency_key": idempotency_key,
+                    "expected_version": expected_version,
                 },
             )
         )
@@ -117,6 +115,7 @@ class _RecordingWorkspaceService(WorkspaceService):
         remove_volumes: bool = True,
         remove_worktree: bool = True,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -127,6 +126,7 @@ class _RecordingWorkspaceService(WorkspaceService):
                     "remove_volumes": remove_volumes,
                     "remove_worktree": remove_worktree,
                     "idempotency_key": idempotency_key,
+                    "expected_version": expected_version,
                 },
             )
         )
@@ -172,6 +172,7 @@ async def test_mcp_cancel_invokes_service_with_canonical_kwargs(
             "reason": "operator audit",
             "stop_stack": False,
             "idempotency_key": "mcp-canonical",
+            "expected_version": 7,
         },
     )
     assert getattr(result, "isError", False) is False
@@ -183,6 +184,7 @@ async def test_mcp_cancel_invokes_service_with_canonical_kwargs(
                 "reason": "operator audit",
                 "stop_stack": False,
                 "idempotency_key": "mcp-canonical",
+                "expected_version": 7,
             },
         )
     ]
@@ -197,10 +199,8 @@ async def test_rest_and_mcp_cancel_call_control_service_with_equivalent_kwargs(
 
     Both surfaces ultimately funnel into the same backend method on
     ``WorkspaceControlService``. This test records every call to that method
-    and proves REST and MCP normalize their inputs identically (modulo the
-    REST-only ``expected_version`` argument, which today maps to the
-    ``If-Match`` header — see ``test_if_match_alignment.py`` for the
-    gap-tracked MCP side).
+    and proves REST and MCP normalize their inputs identically, including the
+    shared optimistic-concurrency version field.
     """
     from awf.service import controls as controls_module
 
@@ -249,12 +249,16 @@ async def test_rest_and_mcp_cancel_call_control_service_with_equivalent_kwargs(
     )
     contract_stack.service._project_stopper = _stub_project_stopper  # type: ignore[attr-defined]
 
-    rest_workspace_id = await _seed_workspace_for_cancel(contract_stack)
-    mcp_workspace_id = await _seed_workspace_for_cancel(contract_stack)
+    rest_workspace_id, rest_version = await _seed_workspace_for_cancel(contract_stack)
+    mcp_workspace_id, mcp_version = await _seed_workspace_for_cancel(contract_stack)
 
     rest_response = await contract_stack.client.post(
         f"/v1/workspaces/{rest_workspace_id}/cancel",
-        headers={**contract_stack.auth_headers, "Idempotency-Key": "rest-canonical"},
+        headers={
+            **contract_stack.auth_headers,
+            "Idempotency-Key": "rest-canonical",
+            "If-Match": str(rest_version),
+        },
         json={"reason": "shared canonical", "stop_stack": False},
     )
     assert rest_response.status_code == 200, rest_response.text
@@ -266,23 +270,21 @@ async def test_rest_and_mcp_cancel_call_control_service_with_equivalent_kwargs(
             "reason": "shared canonical",
             "stop_stack": False,
             "idempotency_key": "mcp-canonical",
+            "expected_version": mcp_version,
         },
     )
 
     assert len(calls) == 2, calls
     rest_call, mcp_call = calls
-    # The harness deliberately ignores workspace_id, idempotency_key, and the
-    # REST-only expected_version field (gap-tracked) so REST and MCP can be
-    # compared on the user-authored payload itself.
-    canonical_keys = {"reason", "stop_stack"}
+    # The harness deliberately ignores workspace_id and idempotency_key so REST
+    # and MCP can be compared on the user-authored payload itself.
+    canonical_keys = {"reason", "stop_stack", "expected_version"}
     assert {k: rest_call[k] for k in canonical_keys} == {
         k: mcp_call[k] for k in canonical_keys
     }
-    # MCP currently does not support expected_version (TODO§P1-if-match-parity).
-    assert mcp_call["expected_version"] is None
 
 
-async def _seed_workspace_for_cancel(contract_stack: ContractStack) -> str:
+async def _seed_workspace_for_cancel(contract_stack: ContractStack) -> tuple[str, int]:
     from awf.db.repositories import WorkspaceRepository
 
     async with contract_stack.factory() as session:
@@ -295,7 +297,7 @@ async def _seed_workspace_for_cancel(contract_stack: ContractStack) -> str:
             test_commands=["pytest -q"],
         )
         await session.commit()
-        return ws.id
+        return ws.id, ws.version
 
 
 @pytest.mark.unit
@@ -402,6 +404,7 @@ async def test_mcp_destroy_invokes_service_with_canonical_kwargs(
             "remove_volumes": False,
             "remove_worktree": False,
             "idempotency_key": "mcp-destroy",
+            "expected_version": 9,
         },
     )
     assert recorder.calls == [
@@ -413,6 +416,7 @@ async def test_mcp_destroy_invokes_service_with_canonical_kwargs(
                 "remove_volumes": False,
                 "remove_worktree": False,
                 "idempotency_key": "mcp-destroy",
+                "expected_version": 9,
             },
         )
     ]

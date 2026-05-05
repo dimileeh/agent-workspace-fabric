@@ -89,7 +89,7 @@ async def test_workspace_services_are_reachable_by_service_name(tmp_path: Path) 
         await manager._compose(  # noqa: SLF001 - integration smoke uses rendered file.
             project_name,
             paths.compose_file,
-            ["up", "-d", "--wait"],
+            ["up", "-d", "--wait", "--wait-timeout", "120"],
             operation="up",
         )
 

@@ -5,10 +5,8 @@ structured ``expected_version``/``actual_version`` detail when stale; never
 mutate stale state. CLI ``awf workspace remonitor --if-match`` must forward as
 ``If-Match``.
 
-MCP control tools currently do **not** accept an ``expected_version`` argument
-— that is the named ``TODO§P1-if-match-parity`` gap. The harness asserts the
-gap as a load-bearing contract claim so the next slice flips both halves of
-the assertion together when MCP ships ``expected_version`` arguments.
+MCP control tools expose an optional ``expected_version`` argument that maps to
+the same backend optimistic-concurrency guard.
 """
 
 from __future__ import annotations
@@ -23,14 +21,12 @@ from typer.testing import CliRunner
 
 from awf.cli.main import app as cli_app
 from awf.db.repositories import WorkspaceRepository
-
 from tests.unit.contracts._capabilities import (
     CAPABILITIES_BY_NAME,
     control_capabilities,
     normalize_rest_error_body,
 )
-from tests.unit.contracts._stack import ContractStack, contract_stack  # noqa: F401
-
+from tests.unit.contracts._stack import ContractStack
 
 _runner = CliRunner()
 
@@ -157,40 +153,25 @@ def test_cli_remonitor_forwards_if_match_header(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.unit
-async def test_mcp_control_tools_do_not_accept_expected_version_today(
+async def test_mcp_control_tools_expose_optional_expected_version(
     contract_stack: ContractStack,
 ) -> None:
-    """Gap-tracked: MCP control tools do NOT expose ``expected_version`` today.
-
-    The parity matrix Status row for "Optimistic concurrency on controls" is
-    ``MCP partial`` with backlog ``TODO§P1-if-match-parity``. When that slice
-    lands the MCP control tool input schemas will gain ``expected_version`` and
-    the assertions below should flip together.
-    """
+    """MCP control tools mirror REST ``If-Match`` through ``expected_version``."""
     tools = {tool.name: tool for tool in await contract_stack.mcp.list_tools()}
-    gap_slice = "TODO§P1-if-match-parity"
     affected_tools = sorted(
         {capability.mcp_tool for capability in control_capabilities() if capability.mcp_tool}
     )
-    assert affected_tools, "Registry must declare at least one MCP-partial control tool"
+    assert affected_tools, "Registry must declare at least one MCP control tool"
 
     for tool_name in affected_tools:
         assert tool_name in tools, tool_name
         properties = tools[tool_name].inputSchema.get("properties", {})
-        assert "expected_version" not in properties, (
-            f"{tool_name}: input schema unexpectedly already exposes "
-            f"'expected_version'. The {gap_slice} slice may have landed — "
-            "update tests/unit/contracts/_capabilities.py to flip these "
-            "rows from 'MCP partial' to 'MCP implemented'."
-        )
+        assert "expected_version" in properties, f"{tool_name}: missing expected_version"
+        assert "expected_version" not in tools[tool_name].inputSchema.get("required", [])
 
     for capability in control_capabilities():
-        if capability.is_mcp_partial:
-            assert capability.parity_backlog_slice == gap_slice, (
-                f"{capability.name}: MCP partial control rows must reference "
-                f"the {gap_slice} backlog slice; got "
-                f"{capability.parity_backlog_slice!r}"
-            )
+        assert capability.is_mcp_implemented
+        assert capability.parity_backlog_slice == "—"
 
 
 @pytest.mark.unit

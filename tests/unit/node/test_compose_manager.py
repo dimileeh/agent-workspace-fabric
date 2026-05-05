@@ -723,6 +723,34 @@ class TestRender:
         assert "docker" in exc.value.stderr
 
     @pytest.mark.unit
+    async def test_compose_command_times_out_and_kills_hung_process(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        process = _HangingProcess()
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _HangingProcess:
+            return process
+
+        monkeypatch.setattr(compose_module, "COMPOSE_CAPTURE_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._compose(  # noqa: SLF001
+                "awf_ws_hung_compose",
+                tmp_path / "compose.yml",
+                ["up", "-d", "--wait"],
+                operation="up",
+            )
+
+        assert process.kill_called is True
+        assert exc.value.returncode == 124
+        assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
+        assert "docker compose up exceeded" in exc.value.stderr
+
+    @pytest.mark.unit
     async def test_docker_capture_returns_stdout_on_success(
         self,
         manager: ComposeManager,

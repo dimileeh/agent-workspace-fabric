@@ -20,14 +20,12 @@ from typer.testing import CliRunner
 import awf.api.routes.controls as controls_route
 from awf.cli.main import app as cli_app
 from awf.db.repositories import WorkspaceRepository
-
 from tests.unit.contracts._capabilities import (
     CAPABILITIES_BY_NAME,
     normalize_mcp_error_body,
     normalize_rest_error_body,
 )
-from tests.unit.contracts._stack import ContractStack, contract_stack  # noqa: F401
-
+from tests.unit.contracts._stack import ContractStack
 
 _runner = CliRunner()
 
@@ -199,13 +197,12 @@ def test_cli_remonitor_forwards_idempotency_key(
         captured["url"] = url
         captured["headers"] = kwargs.get("headers", {})
         captured["json"] = kwargs.get("json")
-        response = httpx.Response(
+        return httpx.Response(
             status_code=200,
             content=json.dumps({"operation_id": "op_remon", "status": "running"}).encode(),
             headers={"content-type": "application/json"},
             request=httpx.Request(method, url),
         )
-        return response
 
     monkeypatch.setattr("awf.cli.main.httpx.request", _capture)
     monkeypatch.setenv("AWF_API_TOKEN", "secret")

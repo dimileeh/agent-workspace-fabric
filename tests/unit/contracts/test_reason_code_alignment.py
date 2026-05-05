@@ -11,11 +11,10 @@ from typing import Any
 
 import pytest
 from mcp.types import CallToolResult
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from tests.unit.contracts._capabilities import (
     CAPABILITIES_BY_NAME,
     collect_known_error_codes,
@@ -23,7 +22,7 @@ from tests.unit.contracts._capabilities import (
     normalize_rest_error_body,
     parity_matrix_error_codes,
 )
-from tests.unit.contracts._stack import ContractStack, contract_stack  # noqa: F401
+from tests.unit.contracts._stack import ContractStack
 
 
 async def _seed_basic_workspace(factory: async_sessionmaker[AsyncSession]) -> str:
