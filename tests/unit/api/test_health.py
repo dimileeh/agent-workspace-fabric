@@ -464,6 +464,35 @@ def test_readyz_does_not_force_task_scheduling_with_zero_sleep() -> None:
 
 
 @pytest.mark.unit
+def test_readyz_retention_defaults_use_shared_settings_constant() -> None:
+    source = inspect.getsource(health_route)
+    tree = ast.parse(source)
+    expected_default_name = "DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS"
+    expected_functions = {
+        "_workspace_view_for_readyz",
+        "_check_orphan_resources",
+    }
+
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in expected_functions
+    }
+
+    assert set(functions) == expected_functions
+    for function in functions.values():
+        defaults_by_name = dict(
+            zip(
+                [arg.arg for arg in function.args.kwonlyargs],
+                function.args.kw_defaults,
+                strict=True,
+            )
+        )
+        assert isinstance(defaults_by_name["min_retention_hours"], ast.Name)
+        assert defaults_by_name["min_retention_hours"].id == expected_default_name
+
+
+@pytest.mark.unit
 async def test_readyz_invalid_provider_returns_422(
     ready_app_and_client: tuple[Any, AsyncClient],
 ) -> None:
