@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -43,7 +44,11 @@ def main() -> None:
     try:
         spec = get_openapi_spec()
     except Exception as exc:
-        print(f"ERROR: Failed to generate OpenAPI spec: {exc}", file=sys.stderr)
+        print(
+            f"ERROR: Failed to generate OpenAPI spec: {exc}\n"
+            + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     current = json.dumps(spec, indent=2, sort_keys=True)
