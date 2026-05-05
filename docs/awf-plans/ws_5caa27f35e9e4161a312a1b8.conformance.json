@@ -1,0 +1,8 @@
+{
+  "status": "needs_iteration",
+  "summary": "The slice implementation and parity test coverage are present, but validation evidence has not yet been recorded. Requesting the missing focused validation artifacts under the validation phase before marking conformance satisfied.",
+  "gaps": [
+    "Missing focused validation artifacts (logs/outputs) for: `tests/unit/cli/test_cli.py`, `tests/unit/contracts/test_control_surface_parity_contract.py`, `tests/unit/mcp/test_mcp_client_parity_docs.py`, `tests/unit/mcp/test_mcp_parity_matrix_crossref.py`, `tests/unit/mcp/test_mcp_operator_surfaces.py`, `tests/unit/api/test_controls.py`, `tests/unit/api/test_workspace_controls_idempotency.py`.",
+    "Validation command block requested in validation phase:\n`uv run --python 3.12 --extra dev pytest tests/unit/cli/test_cli.py -q`\n`uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_control_surface_parity_contract.py -q`\n`uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_client_parity_docs.py tests/unit/mcp/test_mcp_parity_matrix_crossref.py -q`\n`uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_operator_surfaces.py -q`\n`uv run --python 3.12 --extra dev pytest tests/unit/api/test_controls.py tests/unit/api/test_workspace_controls_idempotency.py -q`"
+  ]
+}

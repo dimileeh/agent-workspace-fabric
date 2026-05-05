@@ -726,6 +726,13 @@ coding agent in any project to use AWF for a feature.
   `tests/unit/contracts/test_control_surface_parity_contract.py`; and
   `tests/unit/mcp/test_mcp_client_parity_docs.py` to pin parity documentation
   for intentional control-surface gaps.
+  Iteration 2 status: implementation-backed parity evidence is present, but focused
+  validation artifacts are still missing for this workspace and are requested under
+  the validation phase for:
+  `tests/unit/cli/test_cli.py`, `tests/unit/contracts/test_control_surface_parity_contract.py`,
+  `tests/unit/mcp/test_mcp_client_parity_docs.py`, `tests/unit/mcp/test_mcp_parity_matrix_crossref.py`,
+  `tests/unit/mcp/test_mcp_operator_surfaces.py`, `tests/unit/api/test_controls.py`,
+  `tests/unit/api/test_workspace_controls_idempotency.py`.
 - [x] Add contract tests proving REST API, CLI, and MCP stay aligned: request
   payloads, response payloads, reason codes, idempotency keys, `If-Match` /
   workspace-version concurrency, auth failures, and structured error semantics
