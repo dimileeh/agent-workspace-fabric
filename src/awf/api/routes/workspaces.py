@@ -77,6 +77,7 @@ from awf.service.workspaces import (
     create_workspace_v2_row,
     owned_path_overlap_warnings,
     retry_workspace_row,
+    _egress_audit_response,
     workspace_provider_readiness_preflight,
     workspace_response,
     workspace_retry_response,
