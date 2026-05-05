@@ -1,5 +1,5 @@
 {
   "status": "satisfied",
-  "summary": "The committed implementation adds the focused public-docs status tests, README discoverability links, narrow docs fixes for stale CLI command mentions, and checks off the exact TODO item. Iteration 1 attached validation evidence for the required docs-status pytest run, the combined docs-drift/docs-status pytest run, and ruff over both touched test modules. The missing strict-TDD failing-first artifact was not available and is explicitly recorded in docs/awf-plans/ws_0bc1d8f718bc480998d0a08d.validation.txt.",
+  "summary": "The committed implementation adds the focused public-docs status tests, README discoverability links, narrow docs fixes for stale CLI command mentions, and checks off the exact TODO item. Iteration 1 includes passing evidence for the required docs-status pytest run, the combined docs-drift/docs-status pytest run, and ruff over both touched test modules. Iteration 2 replayed the focused docs-status test against the pre-implementation base in a temporary archive copy, demonstrating the expected initial failures without switching branches.",
   "gaps": []
 }
