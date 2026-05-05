@@ -64,6 +64,7 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 async def _call(mcp, name: str, args: dict[str, object]) -> object:
     result = await mcp.call_tool(name, args)
     if isinstance(result, CallToolResult):
+        assert result.isError is False
         return result.structuredContent
     _, payload = result
     if isinstance(payload, dict) and list(payload.keys()) == ["result"]:
