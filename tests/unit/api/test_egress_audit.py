@@ -229,8 +229,17 @@ async def test_workspace_detail_egress_audit_redacts_secrets(
 @pytest.mark.unit
 async def test_readyz_includes_egress_audit_check(
     client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``/readyz`` must include an ``egress_audit`` check key."""
+    from awf.common.commands import FakeCommandRunner
+    from tests.unit.api.test_health import _queue_all_ok
+
+    app = client._transport.app  # noqa: SLF001
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
     resp = await client.get("/readyz")
     assert resp.status_code == 200
     body = resp.json()
