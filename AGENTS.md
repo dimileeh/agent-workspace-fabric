@@ -64,6 +64,12 @@ uv run --python 3.12 --extra dev mypy src/awf
 uv run --python 3.12 --extra dev pytest tests/unit -q
 ```
 
+OpenAPI spec drift check (fails if generated spec diverges from checked-in openapi.json):
+
+```bash
+python scripts/generate_openapi.py --check
+```
+
 Console:
 
 ```bash
