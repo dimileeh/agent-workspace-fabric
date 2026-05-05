@@ -1970,16 +1970,30 @@ class EgressAuditRepository:
         return result.scalar_one_or_none()
 
     async def summary_counts_by_posture(self) -> dict[str, int]:
+        latest_ranked = (
+            select(
+                EgressAuditRecord.workspace_id,
+                EgressAuditRecord.policy_posture,
+                func.row_number()
+                .over(
+                    partition_by=EgressAuditRecord.workspace_id,
+                    order_by=EgressAuditRecord.enforced_at.desc(),
+                )
+                .label("rn"),
+            ).subquery("latest_ranked")
+        )
         stmt = (
             select(
-                EgressAuditRecord.policy_posture,
-                func.count(EgressAuditRecord.id),
+                latest_ranked.c.policy_posture,
+                func.count(),
             )
-            .join(Workspace, EgressAuditRecord.workspace_id == Workspace.id)
+            .select_from(latest_ranked)
+            .join(Workspace, latest_ranked.c.workspace_id == Workspace.id)
             .where(
-                ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES)
+                latest_ranked.c.rn == 1,
+                ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES),
             )
-            .group_by(EgressAuditRecord.policy_posture)
+            .group_by(latest_ranked.c.policy_posture)
         )
         result = await self._session.execute(stmt)
         return {str(row[0]): row[1] for row in result.fetchall()}

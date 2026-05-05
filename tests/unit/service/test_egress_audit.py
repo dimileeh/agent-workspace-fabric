@@ -365,6 +365,61 @@ async def test_get_summary_counts_by_posture_excludes_terminal_workspaces(
 
 
 @pytest.mark.unit
+async def test_summary_counts_by_posture_uses_latest_audit_only(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A workspace with multiple audit records must contribute only once, using the latest."""
+    async with session_factory() as session:
+        wid_retried = await _workspace(
+            session_factory, network_posture="restricted"
+        )
+        r_old = EgressAuditRecord(
+            id=new_egress_audit_record_id(),
+            workspace_id=wid_retried,
+            policy_posture="open",
+            decision=EgressDecision.allow.value,
+            destination_category="public_internet",
+            reason_code="LOCAL_EGRESS_OPEN_UNRESTRICTED",
+            details={},
+            enforced_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        session.add(r_old)
+
+        r_new = EgressAuditRecord(
+            id=new_egress_audit_record_id(),
+            workspace_id=wid_retried,
+            policy_posture="restricted",
+            decision=EgressDecision.deferred.value,
+            destination_category="internal_only",
+            reason_code="LOCAL_EGRESS_RESTRICTED_LOCAL_ONLY",
+            details={},
+            enforced_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        session.add(r_new)
+
+        wid_single = await _workspace(
+            session_factory, network_posture="open"
+        )
+        r_single = EgressAuditRecord(
+            id=new_egress_audit_record_id(),
+            workspace_id=wid_single,
+            policy_posture="open",
+            decision=EgressDecision.allow.value,
+            destination_category="public_internet",
+            reason_code="LOCAL_EGRESS_OPEN_UNRESTRICTED",
+            details={},
+        )
+        session.add(r_single)
+        await session.flush()
+
+        repo = EgressAuditRepository(session)
+        counts = await repo.summary_counts_by_posture()
+
+        assert counts.get("restricted", 0) == 1
+        assert counts.get("open", 0) == 1
+
+
+@pytest.mark.unit
 async def test_workspace_response_includes_egress_audit(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
