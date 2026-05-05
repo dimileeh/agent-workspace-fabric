@@ -1,0 +1,324 @@
+from __future__ import annotations
+
+import ast
+import json
+import re
+import shlex
+import subprocess
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+import pytest
+import yaml
+
+from awf.cli.main import app
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+README_PATH = REPO_ROOT / "README.md"
+DOCS_INDEX_CANDIDATES = (README_PATH, REPO_ROOT / "docs" / "README.md")
+
+INTERNAL_DOC_PREFIXES = ("docs/awf-plans/",)
+PLANNING_DOC_NAMES = {
+    "docs/awf_prd_v2.2.md",
+    "docs/PLAN_MVP.md",
+    "docs/PLAN_PR_MONITOR.md",
+    "docs/PLAN_RELEASE_PR_SYNC.md",
+}
+OPTIONAL_PUBLIC_GUIDES = {
+    "docs/TROUBLESHOOTING.md",
+}
+COPY_PASTE_DOC_HINTS = {
+    "docs/PROJECT_ONBOARDING.md",
+}
+
+LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\((?P<target>[^)]+)\)")
+FENCE_RE = re.compile(
+    r"^```(?P<language>[A-Za-z0-9_+.-]*)[^\n]*\n(?P<body>.*?)(?=^```)",
+    re.MULTILINE | re.DOTALL,
+)
+AWF_COMMAND_RE = re.compile(r"(?<![\w./-])awf(?P<tail>\s+[^`\n|;)]*)")
+
+
+@dataclass(frozen=True)
+class MarkdownFence:
+    path: str
+    line: int
+    language: str
+    body: str
+
+
+@dataclass(frozen=True)
+class AwfCommandMention:
+    path: str
+    command: str
+    command_path: tuple[str, ...]
+
+
+def test_every_public_guide_is_linked_from_docs_index_or_readme() -> None:
+    public_docs = _public_docs()
+    index_links = _docs_index_links()
+
+    missing = sorted(public_docs - index_links)
+
+    assert not missing, (
+        "Public docs must be discoverable from README.md or docs/README.md. "
+        f"Missing index links: {missing}"
+    )
+
+
+def test_awf_commands_mentioned_in_public_docs_exist_in_cli_help_tree() -> None:
+    command_tree = _typer_command_tree(app)
+    mentions = _awf_command_mentions([Path("README.md"), *map(Path, sorted(_public_docs()))])
+    missing = [
+        mention
+        for mention in mentions
+        if mention.command_path not in command_tree
+    ]
+
+    assert not missing, (
+        "Public docs mention AWF commands that are not present in the Typer command tree: "
+        + ", ".join(
+            f"{mention.path}: `{mention.command}` -> {' '.join(mention.command_path)}"
+            for mention in missing
+        )
+    )
+
+
+def test_copy_paste_marked_snippets_are_syntactically_valid() -> None:
+    checked: list[str] = []
+    for rel_path in sorted(_copy_paste_docs()):
+        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        assert _fence_delimiter_count_is_even(text), f"{rel_path} has an unclosed code fence"
+        for fence in _markdown_fences(rel_path, text):
+            _assert_snippet_syntax(fence)
+            checked.append(f"{fence.path}:{fence.line}")
+
+    assert checked, "Expected at least one copy-paste-marked snippet to validate."
+
+
+def _public_docs() -> set[str]:
+    seeds = _readme_public_doc_links()
+    seeds.update(_present_docs(OPTIONAL_PUBLIC_GUIDES))
+
+    public_docs = set(seeds)
+    for rel_path in sorted(seeds):
+        public_docs.update(
+            link
+            for link in _markdown_doc_links(REPO_ROOT / rel_path)
+            if _is_public_doc_path(link)
+        )
+    return {doc for doc in public_docs if _is_public_doc_path(doc)}
+
+
+def _docs_index_links() -> set[str]:
+    links: set[str] = set()
+    for index_path in DOCS_INDEX_CANDIDATES:
+        if index_path.exists():
+            links.update(_markdown_doc_links(index_path))
+    return {link for link in links if _is_public_doc_path(link)}
+
+
+def _readme_public_doc_links() -> set[str]:
+    return {
+        link
+        for link in _markdown_doc_links(README_PATH)
+        if _is_public_doc_path(link)
+    }
+
+
+def _markdown_doc_links(path: Path) -> set[str]:
+    text = path.read_text(encoding="utf-8")
+    return {
+        resolved
+        for target in LINK_RE.findall(text)
+        if (resolved := _resolve_markdown_link(path, target)) is not None
+    }
+
+
+def _resolve_markdown_link(source_path: Path, target: str) -> str | None:
+    target = target.strip()
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc:
+        return None
+    raw_path = unquote(parsed.path)
+    if not raw_path or raw_path.startswith("#") or not raw_path.endswith(".md"):
+        return None
+
+    base_dir = source_path.parent
+    resolved = (base_dir / raw_path).resolve()
+    try:
+        rel_path = resolved.relative_to(REPO_ROOT)
+    except ValueError:
+        return None
+    return rel_path.as_posix()
+
+
+def _is_public_doc_path(rel_path: str) -> bool:
+    if not rel_path.startswith("docs/"):
+        return False
+    if any(rel_path.startswith(prefix) for prefix in INTERNAL_DOC_PREFIXES):
+        return False
+    return rel_path not in PLANNING_DOC_NAMES
+
+
+def _present_docs(candidates: Iterable[str]) -> set[str]:
+    return {rel_path for rel_path in candidates if (REPO_ROOT / rel_path).exists()}
+
+
+def _typer_command_tree(typer_app: object) -> set[tuple[str, ...]]:
+    command_paths: set[tuple[str, ...]] = set()
+    for command in typer_app.registered_commands:
+        command_paths.add((_command_name(command),))
+    for group in typer_app.registered_groups:
+        group_name = group.name
+        for command in group.typer_instance.registered_commands:
+            command_paths.add((group_name, _command_name(command)))
+    return command_paths
+
+
+def _command_name(command: object) -> str:
+    explicit_name = command.name
+    if explicit_name:
+        return explicit_name
+    return command.callback.__name__.replace("_", "-")
+
+
+def _awf_command_mentions(paths: Iterable[Path]) -> list[AwfCommandMention]:
+    root_groups = {path[0] for path in _typer_command_tree(app) if len(path) == 2}
+    mentions: list[AwfCommandMention] = []
+    for rel_path in paths:
+        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        collapsed = re.sub(r"\\\n\s*", " ", text)
+        for line in collapsed.splitlines():
+            if _ignore_awf_command_line(line):
+                continue
+            for match in AWF_COMMAND_RE.finditer(line):
+                raw_command = f"awf{match.group('tail')}".strip()
+                command_path = _awf_command_path(raw_command, root_groups)
+                if command_path is None:
+                    continue
+                mentions.append(
+                    AwfCommandMention(
+                        path=rel_path.as_posix(),
+                        command=raw_command,
+                        command_path=command_path,
+                    )
+                )
+    return mentions
+
+
+def _ignore_awf_command_line(line: str) -> bool:
+    lowered = line.lower()
+    return "currently not implemented" in lowered or "future" in lowered
+
+
+def _awf_command_path(
+    raw_command: str,
+    root_groups: set[str],
+) -> tuple[str, ...] | None:
+    try:
+        tokens = shlex.split(raw_command, comments=True)
+    except ValueError:
+        tokens = raw_command.split()
+    tokens = [_clean_token(token) for token in tokens]
+    if not tokens or tokens[0] != "awf":
+        return None
+    if len(tokens) == 1:
+        return None
+
+    first = tokens[1]
+    if not _looks_like_command_token(first):
+        return None
+    if first not in root_groups:
+        return (first,)
+    if len(tokens) < 3:
+        return None
+
+    second = tokens[2]
+    if not _looks_like_command_token(second):
+        return None
+    return (first, second)
+
+
+def _clean_token(token: str) -> str:
+    return token.strip("`'\".,: ")
+
+
+def _looks_like_command_token(token: str) -> bool:
+    if not token or token.startswith("-"):
+        return False
+    if token.startswith(("<", "{", "$")):
+        return False
+    if token in {".", "...", "&&", "||", "|", ";"}:
+        return False
+    return not ("/" in token or "=" in token)
+
+
+def _copy_paste_docs() -> set[str]:
+    docs = _present_docs(COPY_PASTE_DOC_HINTS)
+    docs.update(
+        rel_path
+        for rel_path in _public_docs()
+        if "copy-paste" in (REPO_ROOT / rel_path).read_text(encoding="utf-8").lower()
+        and rel_path.endswith(".md")
+    )
+    return docs
+
+
+def _fence_delimiter_count_is_even(text: str) -> bool:
+    return len(re.findall(r"^```", text, flags=re.MULTILINE)) % 2 == 0
+
+
+def _markdown_fences(rel_path: str, text: str) -> list[MarkdownFence]:
+    fences: list[MarkdownFence] = []
+    for match in FENCE_RE.finditer(text):
+        line = text.count("\n", 0, match.start()) + 1
+        fences.append(
+            MarkdownFence(
+                path=rel_path,
+                line=line,
+                language=match.group("language").lower(),
+                body=match.group("body").strip("\n"),
+            )
+        )
+    return fences
+
+
+def _assert_snippet_syntax(fence: MarkdownFence) -> None:
+    if not fence.body.strip():
+        pytest.fail(f"{fence.path}:{fence.line} has an empty copy-paste snippet")
+
+    language = fence.language
+    if language == "json":
+        json.loads(fence.body)
+    elif language in {"yaml", "yml"}:
+        yaml.safe_load(fence.body)
+    elif language == "python":
+        ast.parse(fence.body)
+    elif language in {"bash", "sh", "shell"}:
+        script = _strip_shell_prompts(fence.body)
+        result = subprocess.run(
+            ["bash", "-n"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+        assert result.returncode == 0, (
+            f"{fence.path}:{fence.line} has invalid shell syntax: {result.stderr.strip()}"
+        )
+    else:
+        assert fence.body.strip(), f"{fence.path}:{fence.line} has empty text snippet"
+
+
+def _strip_shell_prompts(script: str) -> str:
+    stripped_lines: list[str] = []
+    for line in script.splitlines():
+        if line.startswith(("$ ", "> ")):
+            stripped_lines.append(line[2:])
+        else:
+            stripped_lines.append(line)
+    return "\n".join(stripped_lines)

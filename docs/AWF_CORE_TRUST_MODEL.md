@@ -30,8 +30,7 @@ container by design so it can use the host Docker socket, the Docker Desktop
 SSH-agent forwarder, and chown per-workspace state to the unprivileged `agent`
 user (UID/GID `1000`) that the agent runtime container runs as. Workspace
 state under `AWF_HOST_WORK_DIR` is therefore root-owned on the host on Linux
-and is normally cleaned up through `awf service gc` / `awf service teardown`
-rather than host `rm`. See
+and is normally cleaned up through `awf service gc` rather than host `rm`. See
 [docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md](AWF_LOCAL_CONTAINER_UID_STRATEGY.md)
 for the per-pillar analysis (Docker socket, SSH/auth mounts, bind-mounted AWF
 state, linked worktree metadata, Linux/macOS behavior, cleanup permissions,

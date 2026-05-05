@@ -737,7 +737,7 @@ without reading the whole repo.
   missing, package install failure, disk pressure, port conflict, provider
   outage, stale PR monitor, and cleanup/orphan warning. Acceptance: every item
   includes the exact command to diagnose and the safest recovery command.
-- [ ] Add docs search/readability checks for public docs. Acceptance: CI or a
+- [x] Add docs search/readability checks for public docs. Acceptance: CI or a
   docs-status test confirms every public guide is linked from the docs index,
   key commands still exist in CLI help, and snippets marked copy-paste are
   syntactically valid.
