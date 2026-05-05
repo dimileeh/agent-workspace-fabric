@@ -235,9 +235,11 @@ def test_parity_matrix_matches_real_surfaces() -> None:
 
     real_cli_commands = set(get_cli_commands(cli_app))
 
+    import asyncio
+
     # 3. Load real MCP tools
     mcp = build_mcp_server(service=MagicMock(), settings=MagicMock())
-    real_mcp_tools = {t.name for t in mcp._tool_manager.list_tools()}
+    real_mcp_tools = {t.name for t in asyncio.run(mcp.list_tools())}
 
     # 4. Iterate over rows
     rows = _parity_rows()
