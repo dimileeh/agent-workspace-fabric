@@ -443,8 +443,17 @@ class WorkspaceService:
                 validation_runs,
                 candidate=latest_merge_candidate(ws),
             )
-            audit_record = await EgressAuditRepository(s).get_latest_for_workspace(workspace_id)
-            egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
+            try:
+                audit_record = await EgressAuditRepository(s).get_latest_for_workspace(workspace_id)
+            except Exception:
+                _log.warning(
+                    "Failed to fetch egress audit for workspace %s",
+                    workspace_id,
+                    exc_info=True,
+                )
+                egress_audit = None
+            else:
+                egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
             return workspace_response(
                 ws,
                 validation_provenance=validation_provenance,
