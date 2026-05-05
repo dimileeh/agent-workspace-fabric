@@ -20,7 +20,9 @@ from awf.common.config import (
 )
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
+_PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
 LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
 
 
@@ -82,6 +84,8 @@ def resolve_service_settings(
     if not database_url_explicit:
         database_url = DEFAULT_LOCAL_SERVICE_DATABASE_URL
 
+    work_dir = _resolve_service_work_dir(settings, env)
+
     return ServiceSettings(
         service_name=settings.service_name,
         env=settings.env,
@@ -90,7 +94,7 @@ def resolve_service_settings(
         database_url=database_url,
         docker_host=settings.docker_host,
         agent_runtime_image=settings.agent_runtime_image,
-        work_dir=settings.work_dir,
+        work_dir=work_dir,
         min_free_disk_bytes=settings.min_free_disk_bytes,
         host_home=settings.host_home or "~",
         api_token=_empty_to_none(settings.api_token),
@@ -154,6 +158,41 @@ def local_service_environ(
 def _has_env_key(environ: Mapping[str, str], key: str) -> bool:
     wanted = key.upper()
     return any(existing.upper() == wanted for existing in environ)
+
+
+def _env_value(environ: Mapping[str, str], key: str) -> str | None:
+    wanted = key.upper()
+    for existing, value in environ.items():
+        if existing.upper() == wanted:
+            return value
+    return None
+
+
+def _resolve_service_work_dir(settings: Settings, environ: Mapping[str, str]) -> str:
+    """Resolve the host state root used by local service Compose.
+
+    Docker Compose maps ``AWF_HOST_WORK_DIR`` into the service container as
+    ``AWF_WORK_DIR``. Local service CLI commands need to honor the same host
+    root so dry-run and cleanup actions inspect the resources that readiness
+    reports from the running service.
+    """
+
+    awf_work_dir = _env_value(environ, "AWF_WORK_DIR")
+    if awf_work_dir and not _is_project_default_work_dir(awf_work_dir):
+        return awf_work_dir
+    host_work_dir = _env_value(environ, "AWF_HOST_WORK_DIR")
+    if host_work_dir:
+        return host_work_dir
+    if "work_dir" in settings.model_fields_set and not _is_project_default_work_dir(
+        settings.work_dir
+    ):
+        return settings.work_dir
+    home = _env_value(environ, "HOME") or settings.host_home or "~"
+    return str(Path(home).expanduser() / ".awf" / "service")
+
+
+def _is_project_default_work_dir(value: str) -> bool:
+    return value.strip() == _PROJECT_DEFAULT_WORK_DIR
 
 
 def _empty_to_none(value: str | None) -> str | None:

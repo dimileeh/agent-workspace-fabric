@@ -8,6 +8,7 @@ import os
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.session import make_engine
+from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 
 CHECK_TIMEOUT_SECONDS = 5.0
 ORPHAN_EXAMPLE_LIMIT = 5
@@ -92,6 +94,7 @@ class WorkspaceIdView:
     active_ids: frozenset[str]
     terminal_ids: frozenset[str]
     available: bool
+    retained_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -706,6 +709,7 @@ def unavailable_workspace_view() -> WorkspaceIdView:
         active_ids=frozenset(),
         terminal_ids=frozenset(),
         available=False,
+        retained_ids=frozenset(),
     )
 
 
@@ -718,18 +722,28 @@ def workspace_id_from_project(project: str) -> str | None:
     return None
 
 
-async def workspace_id_view_from_session(session: AsyncSession) -> WorkspaceIdView:
-    stmt = select(Workspace.id, Workspace.status).where(
+async def workspace_id_view_from_session(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
+) -> WorkspaceIdView:
+    stmt = select(Workspace.id, Workspace.status, Workspace.updated_at).where(
         Workspace.status.in_(KNOWN_WORKSPACE_STATUSES)
     )
     rows = (await session.execute(stmt)).all()
-    return _workspace_view_from_rows(rows)
+    return _workspace_view_from_rows(rows, now=now, min_retention_hours=min_retention_hours)
 
 
-async def default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
-    stmt = text("SELECT id, status FROM workspaces WHERE status IN :statuses").bindparams(
-        bindparam("statuses", expanding=True)
-    )
+async def default_workspace_id_lookup(
+    database_url: str,
+    *,
+    now: datetime | None = None,
+    min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
+) -> WorkspaceIdView:
+    stmt = text(
+        "SELECT id, status, updated_at FROM workspaces WHERE status IN :statuses"
+    ).bindparams(bindparam("statuses", expanding=True))
     engine = None
     try:
         engine = make_engine(database_url)
@@ -740,7 +754,7 @@ async def default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
     finally:
         if engine is not None:
             await engine.dispose()
-    return _workspace_view_from_rows(rows)
+    return _workspace_view_from_rows(rows, now=now, min_retention_hours=min_retention_hours)
 
 
 def summary_not_collected() -> OrphanResourceSummary:
@@ -780,20 +794,36 @@ def summary_not_collected() -> OrphanResourceSummary:
     )
 
 
-def _workspace_view_from_rows(rows: Any) -> WorkspaceIdView:
+def _workspace_view_from_rows(
+    rows: Any,
+    *,
+    now: datetime | None = None,
+    min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
+) -> WorkspaceIdView:
     active: set[str] = set()
     terminal: set[str] = set()
-    for workspace_id, status in rows:
+    retained: set[str] = set()
+    current_time = _to_utc(now or datetime.now(UTC))
+    for row in rows:
+        workspace_id, status = row[0], row[1]
+        updated_at = row[2] if len(row) > 2 else None
         workspace_id_str = str(workspace_id)
         status_str = str(status)
         if status_str in ACTIVE_WORKSPACE_STATUSES:
             active.add(workspace_id_str)
         elif status_str in TERMINAL_WORKSPACE_STATUSES:
             terminal.add(workspace_id_str)
+            if _within_retention(
+                updated_at,
+                now=current_time,
+                min_retention_hours=min_retention_hours,
+            ):
+                retained.add(workspace_id_str)
     return WorkspaceIdView(
         active_ids=frozenset(active),
         terminal_ids=frozenset(terminal),
         available=True,
+        retained_ids=frozenset(retained),
     )
 
 
@@ -809,6 +839,12 @@ def _classify(resource: DetectedResource, *, workspace_view: WorkspaceIdView) ->
             resource=resource,
             classification="expected",
             reason="WORKSPACE_ACTIVE",
+        )
+    if resource.workspace_id in workspace_view.retained_ids:
+        return ClassifiedResource(
+            resource=resource,
+            classification="expected",
+            reason="WORKSPACE_TERMINAL_WITHIN_RETENTION",
         )
     if resource.workspace_id in workspace_view.terminal_ids:
         return ClassifiedResource(
@@ -860,6 +896,23 @@ def _kind_counts(records: tuple[ClassifiedResource, ...]) -> dict[str, int]:
 
 def _zero_kind_counts() -> dict[str, int]:
     return dict.fromkeys(RESOURCE_KINDS, 0)
+
+
+def _within_retention(
+    updated_at: object,
+    *,
+    now: datetime,
+    min_retention_hours: float,
+) -> bool:
+    if not isinstance(updated_at, datetime):
+        return False
+    return _to_utc(updated_at) > now - timedelta(hours=min_retention_hours)
+
+
+def _to_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _optional_str(value: object) -> str | None:

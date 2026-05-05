@@ -312,7 +312,11 @@ async def _check_agent_runtime_image(runner: AsyncCommandRunner, image: str) -> 
     )
 
 
-async def _workspace_view_for_readyz(factory: Any) -> WorkspaceIdView:
+async def _workspace_view_for_readyz(
+    factory: Any,
+    *,
+    min_retention_hours: float = 168,
+) -> WorkspaceIdView:
     if factory is None:
         return unavailable_workspace_view()
     try:
@@ -320,7 +324,10 @@ async def _workspace_view_for_readyz(factory: Any) -> WorkspaceIdView:
     except Exception:
         return unavailable_workspace_view()
     try:
-        return await workspace_id_view_from_session(session)
+        return await workspace_id_view_from_session(
+            session,
+            min_retention_hours=min_retention_hours,
+        )
     except Exception:
         return unavailable_workspace_view()
     finally:
@@ -337,11 +344,15 @@ async def _check_orphan_resources(
     work_dir: str,
     db_check: CheckResult,
     docker_check: CheckResult,
+    min_retention_hours: float = 168,
 ) -> CheckResult:
     if not db_check.ok:
         workspace_view = unavailable_workspace_view()
     else:
-        workspace_view = await _workspace_view_for_readyz(factory)
+        workspace_view = await _workspace_view_for_readyz(
+            factory,
+            min_retention_hours=min_retention_hours,
+        )
 
     if not docker_check.ok:
         docker_scan = _docker_resource_scan_unavailable(docker_check)
@@ -458,7 +469,10 @@ async def readyz(
     cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
     daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_daemon(runner))
     workspace_view_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
-        _workspace_view_for_readyz(factory)
+        _workspace_view_for_readyz(
+            factory,
+            min_retention_hours=settings.completed_workspace_retention_hours,
+        )
     )
     docker_scan_task: asyncio.Task[ResourceScan] = asyncio.create_task(
         scan_docker_resources_async(

@@ -44,11 +44,15 @@ def _jsonl(*rows: dict[str, str]) -> str:
 
 
 def _ok_view(
-    *, active: set[str] | None = None, terminal: set[str] | None = None
+    *,
+    active: set[str] | None = None,
+    terminal: set[str] | None = None,
+    retained: set[str] | None = None,
 ) -> WorkspaceIdView:
     return WorkspaceIdView(
         active_ids=frozenset(active or set()),
         terminal_ids=frozenset(terminal or set()),
+        retained_ids=frozenset(retained or set()),
         available=True,
     )
 
@@ -173,6 +177,26 @@ def test_active_workspace_resources_are_expected(tmp_path: Path) -> None:
     assert "active_count" not in summary
     assert summary["orphan_count"] == 0
     assert summary["cleanup_readiness"]["ready"] is True
+
+
+@pytest.mark.unit
+def test_retained_terminal_workspace_resources_are_not_orphans(tmp_path: Path) -> None:
+    (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
+
+    summary = build_orphan_resource_summary(
+        docker_scan=empty_docker_scan(),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_done"}, retained={"ws_done"}),
+    )
+    payload = summary.to_dict()
+
+    assert payload["ok"] is True
+    assert payload["reason"] == "NO_ORPHANS"
+    assert payload["resource_count"] == 1
+    assert payload["expected_count"] == 1
+    assert payload["orphan_count"] == 0
+    assert summary.records[0].classification == "expected"
+    assert summary.records[0].reason == "WORKSPACE_TERMINAL_WITHIN_RETENTION"
 
 
 @pytest.mark.unit

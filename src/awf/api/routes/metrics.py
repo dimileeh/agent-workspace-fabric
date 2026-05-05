@@ -633,7 +633,10 @@ async def _default_orphan_resource_summary(
     session: AsyncSession,
 ) -> OrphanResourceSummary:
     try:
-        workspace_view = await workspace_id_view_from_session(session)
+        workspace_view = await workspace_id_view_from_session(
+            session,
+            min_retention_hours=settings.completed_workspace_retention_hours,
+        )
     except Exception:
         workspace_view = unavailable_workspace_view()
     docker_scan, worktree_scan = await asyncio.gather(
