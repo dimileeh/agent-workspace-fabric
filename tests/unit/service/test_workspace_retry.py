@@ -15,11 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateV2Request
 from awf.common.config import Settings
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -34,19 +33,15 @@ from awf.service.workspaces import (
     create_workspace_v2_row,
     retry_workspace_row,
 )
+from tests.postgres import create_postgres_test_engine, postgres_test_engine
 
 pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _request(
@@ -116,12 +111,9 @@ def _ollama_provider_environ() -> dict[str, str]:
 def _docker_ok(args: list[str], **kwargs: object) -> SimpleNamespace:
     return SimpleNamespace(returncode=0, stdout="/usr/bin/cli\n", stderr="")
 
+
 def _ollama_ok(url: str, *, timeout: float) -> SimpleNamespace:
-    text = (
-        '{"models":[{"name":"kimi-k2.6:cloud"}]}'
-        if url.endswith("/api/tags")
-        else "{}"
-    )
+    text = '{"models":[{"name":"kimi-k2.6:cloud"}]}' if url.endswith("/api/tags") else "{}"
     return SimpleNamespace(status_code=200, text=text)
 
 
@@ -184,9 +176,7 @@ def _create_conformance_source_worktree(
     if implementation_diff:
         (worktree / "src/awf/retry.py").write_text("def retry():\n    return 'new'\n")
         (worktree / "tests/unit").mkdir(parents=True)
-        (worktree / "tests/unit/test_retry.py").write_text(
-            "def test_retry():\n    assert True\n"
-        )
+        (worktree / "tests/unit/test_retry.py").write_text("def test_retry():\n    assert True\n")
     return base_commit
 
 
@@ -594,6 +584,7 @@ async def _mark_planning_scope_failed(
         )
         await session.commit()
 
+
 async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -616,9 +607,7 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
         )
         operations = list(
             (
-                await session.execute(
-                    select(Operation).where(Operation.workspace_id == retried.id)
-                )
+                await session.execute(select(Operation).where(Operation.workspace_id == retried.id))
             ).scalars()
         )
         retry_events = list(
@@ -684,6 +673,7 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
         (retried.id, "workspace.retry_created", first.id),
     }
 
+
 async def test_retry_recomputes_resource_reservation_from_current_defaults(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -715,9 +705,7 @@ async def test_retry_recomputes_resource_reservation_from_current_defaults(
 
     async with factory() as session:
         retried_reservation = (
-            await ResourceReservationRepository(session).list_for_workspace(
-                retry.new_workspace_id
-            )
+            await ResourceReservationRepository(session).list_for_workspace(retry.new_workspace_id)
         )[0]
 
     assert retried_reservation.steady_cpu == 3.0
@@ -752,9 +740,7 @@ async def test_retry_conformance_unsatisfied_auto_salvages_implementation_diff(
         assert retried is not None
         operations = list(
             (
-                await session.execute(
-                    select(Operation).where(Operation.workspace_id == retried.id)
-                )
+                await session.execute(select(Operation).where(Operation.workspace_id == retried.id))
             ).scalars()
         )
         retry_created = list(
@@ -914,9 +900,7 @@ async def test_retry_planning_scope_violation_discards_premature_work_and_replan
     assert "Prior source required plan paths from the failed planning attempt" in (
         retried.task_prompt
     )
-    assert "Create or update only `docs/awf-plans/ws_scope_old.md`" not in (
-        retried.task_prompt
-    )
+    assert "Create or update only `docs/awf-plans/ws_scope_old.md`" not in (retried.task_prompt)
     assert "src/awf/runtime/planning.py" in retried.task_prompt
     assert retried.task_policy.get("agent_model") is None
     assert isinstance(retried.resolved_profile, dict)
@@ -1127,9 +1111,7 @@ async def test_retry_preserves_remote_push_branch_for_sync_workspace(
 
 @pytest.mark.unit
 async def test_retry_persists_task_kind_without_post_insert_update() -> None:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine = await create_postgres_test_engine()
 
     factory = make_session_factory(engine)
     service = WorkspaceService(factory)

@@ -251,10 +251,7 @@ def _bootstrap_stages(
 def _compose_profile_enabled(environ: Mapping[str, str], profile: str) -> bool:
     raw = environ.get("COMPOSE_PROFILES", "")
     return profile in {
-        item.strip()
-        for chunk in raw.split(",")
-        for item in chunk.split()
-        if item.strip()
+        item.strip() for chunk in raw.split(",") for item in chunk.split() if item.strip()
     }
 
 

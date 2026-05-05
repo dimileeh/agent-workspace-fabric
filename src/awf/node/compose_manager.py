@@ -430,7 +430,11 @@ class ComposeManager:
         if proc.returncode != 0:
             reason_code = "COMPOSE_COMMAND_FAILED"
             err_lower = stderr.lower()
-            if "daemon" in err_lower or "error during connect" in err_lower or "docker endpoint" in err_lower:
+            if (
+                "daemon" in err_lower
+                or "error during connect" in err_lower
+                or "docker endpoint" in err_lower
+            ):
                 reason_code = "DOCKER_UNAVAILABLE"
 
             raise ComposeOperationError(
@@ -481,10 +485,7 @@ class ComposeManager:
                 operation=operation,
                 returncode=124,
                 stdout="",
-                stderr=(
-                    f"docker {operation} exceeded "
-                    f"{DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
-                ),
+                stderr=(f"docker {operation} exceeded {DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"),
                 reason_code="DOCKER_COMMAND_TIMEOUT",
             ) from e
 
@@ -494,7 +495,11 @@ class ComposeManager:
         if proc.returncode != 0:
             reason_code = "COMPOSE_COMMAND_FAILED"
             err_lower = stderr.lower()
-            if "daemon" in err_lower or "error during connect" in err_lower or "docker endpoint" in err_lower:
+            if (
+                "daemon" in err_lower
+                or "error during connect" in err_lower
+                or "docker endpoint" in err_lower
+            ):
                 reason_code = "DOCKER_UNAVAILABLE"
             raise ComposeOperationError(
                 operation=operation,

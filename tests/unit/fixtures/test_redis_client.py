@@ -10,10 +10,7 @@ from types import ModuleType, TracebackType
 import pytest
 
 _FIXTURE_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "fixtures"
-    / "workspace_services"
-    / "redis_worker_app"
+    Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "redis_worker_app"
 )
 
 pytestmark = pytest.mark.unit

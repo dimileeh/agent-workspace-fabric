@@ -25,7 +25,6 @@ ALLOWLIST = {
     "NO_ORPHANS": "Success states do not need failure documentation.",
     "NETWORK_POSTURE_NO_ACTIVE_OPEN": "Success states do not need failure documentation.",
     "LOCAL_CONFIG_OK": "Success states do not need failure documentation.",
-
     # Grandfathered missing error codes to allow the expanded coverage gate to pass.
     # These should ideally be documented in the future.
     "API_TOKEN_NOT_CONFIGURED": "Grandfathered",
@@ -93,7 +92,9 @@ def test_catalog_coverage() -> None:
     catalog_content = CATALOG_PATH.read_text()
 
     # Find all headings like `### DOCKER_CLI_NOT_FOUND`
-    documented_codes: set[str] = set(re.findall(r"^###\s+([A-Z0-9_]+)", catalog_content, re.MULTILINE))
+    documented_codes: set[str] = set(
+        re.findall(r"^###\s+([A-Z0-9_]+)", catalog_content, re.MULTILINE)
+    )
 
     all_reason_codes = set(_REASON_TEXT.keys())
 
@@ -124,12 +125,8 @@ def test_catalog_coverage() -> None:
                 # assignment: error_code = "XYZ" or self.error_code = "XYZ"
                 elif isinstance(node, ast.Assign):
                     for target in node.targets:
-                        if (
-                            isinstance(target, ast.Name)
-                            and target.id == "error_code"
-                        ) or (
-                            isinstance(target, ast.Attribute)
-                            and target.attr == "error_code"
+                        if (isinstance(target, ast.Name) and target.id == "error_code") or (
+                            isinstance(target, ast.Attribute) and target.attr == "error_code"
                         ):
                             extracted = _extract_reason_code_value(
                                 node.value,
@@ -155,10 +152,15 @@ def test_catalog_coverage() -> None:
         if code not in documented_codes:
             missing_docs.append(code)
 
-    assert not missing_docs, f"The following reason codes are missing from {CATALOG_PATH}: {', '.join(missing_docs)}"
+    assert not missing_docs, (
+        f"The following reason codes are missing from {CATALOG_PATH}: {', '.join(missing_docs)}"
+    )
 
     documented_but_allowlisted = [
-        code for code in ALLOWLIST
+        code
+        for code in ALLOWLIST
         if code in documented_codes and ALLOWLIST[code] == "Grandfathered"
     ]
-    assert not documented_but_allowlisted, f"The following reason codes are fully documented but still in ALLOWLIST (Grandfathered): {', '.join(documented_but_allowlisted)}"
+    assert not documented_but_allowlisted, (
+        f"The following reason codes are fully documented but still in ALLOWLIST (Grandfathered): {', '.join(documented_but_allowlisted)}"
+    )

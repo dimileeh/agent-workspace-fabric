@@ -456,9 +456,7 @@ async def readyz(
     # wave, then gates classification on DB and daemon readiness results.
     db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(factory))
     cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
-    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
-        _check_docker_daemon(runner)
-    )
+    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_daemon(runner))
     workspace_view_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
         _workspace_view_for_readyz(factory)
     )

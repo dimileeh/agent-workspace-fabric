@@ -26,8 +26,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.db.base import Base
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -39,14 +39,9 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture

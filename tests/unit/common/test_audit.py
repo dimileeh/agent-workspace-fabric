@@ -52,9 +52,7 @@ def test_build_audit_payload_keeps_common_keys_and_safe_evidence_refs() -> None:
 @pytest.mark.unit
 def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usage() -> None:
     github_app_jwt = (
-        "eyJhbGciOiJSUzI1NiJ9."
-        "eyJpc3MiOiJnaXRodWItYXBwIn0."
-        "c2lnbmF0dXJlX3Nob3VsZF9ub3RfcGVyc2lzdA"
+        "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJnaXRodWItYXBwIn0.c2lnbmF0dXJlX3Nob3VsZF9ub3RfcGVyc2lzdA"
     )
     value = {
         "github_token": "ghp_should_not_persist",

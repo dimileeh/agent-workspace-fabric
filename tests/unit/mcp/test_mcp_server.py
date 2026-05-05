@@ -1,7 +1,7 @@
 """MCP server + tool behaviour tests.
 
 We exercise the tools via ``mcp.call_tool(name, args)`` (FastMCP's in-process
-harness) against a throwaway in-memory SQLite. This validates:
+harness) against a throwaway PostgreSQL. This validates:
 - All five tools are registered under the expected names.
 - Each tool's happy path returns the same payload shape as the REST API.
 - wait_for_workspace exits on terminal state without hanging.
@@ -19,15 +19,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import OperationResponse, WorkspaceControlResponse
 from awf.common.config import Settings
-from awf.db.base import Base
+from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.mcp import server as mcp_server
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
 from awf.service.controls import WorkspaceControlError
+from awf.service.workspaces import WorkspaceRetryError
+from tests.postgres import postgres_test_engine
 
 _PROVIDER_AUTH_ENV_KEYS = (
     "OPENAI_API_KEY",
@@ -41,13 +43,8 @@ _PROVIDER_AUTH_ENV_KEYS = (
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -86,6 +83,33 @@ async def test_build_mcp_server_captures_default_settings_once(
         assert result.structuredContent is None
 
     assert calls == 1
+
+
+@pytest.mark.unit
+def test_workspace_retry_error_result_uses_structured_error_payload() -> None:
+    result = mcp_server._workspace_retry_error_result(
+        WorkspaceRetryError("retry refused", detail={"workspace_id": "ws_x"})
+    )
+
+    assert result.isError is True
+    assert result.structuredContent == {
+        "error_code": "WORKSPACE_RETRY_ERROR",
+        "message": "retry refused",
+        "detail": {"workspace_id": "ws_x"},
+    }
+
+
+@pytest.mark.unit
+async def test_core_release_readiness_rejects_invalid_provider_names(mcp) -> None:  # type: ignore[no-untyped-def]
+    result = await mcp.call_tool(
+        "awf_get_core_release_readiness",
+        {"providers": ["bogus-provider"]},
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error_code"] == "INVALID_PROVIDERS"
 
 
 _CREATE_ARGS: dict[str, object] = {
@@ -135,7 +159,9 @@ async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
 def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
     any_of = schema.get("anyOf")
     assert isinstance(any_of, list)
-    string_schema = next(item for item in any_of if isinstance(item, dict) and item.get("type") == "string")
+    string_schema = next(
+        item for item in any_of if isinstance(item, dict) and item.get("type") == "string"
+    )
     assert isinstance(string_schema, dict)
     return string_schema
 
@@ -150,6 +176,7 @@ class TestToolRegistration:
             "awf_get_workspace",
             "awf_list_workspaces",
             "awf_wait_for_workspace",
+            "awf_adopt_pull_request_monitor",
         } <= names
         assert {
             "awf_create_workspace_v2",
@@ -232,15 +259,105 @@ class TestToolRegistration:
             "minLength": 1,
             "type": "string",
         }
-        assert create_v2.inputSchema["properties"]["provider_readiness_override"][
-            "default"
-        ] is False
         assert (
-            create_v2.inputSchema["properties"]["provider_readiness_override_reason"][
-                "default"
-            ]
+            create_v2.inputSchema["properties"]["provider_readiness_override"]["default"] is False
+        )
+        assert (
+            create_v2.inputSchema["properties"]["provider_readiness_override_reason"]["default"]
             is None
         )
+
+    @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_creates_adoption(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            assert repo.slug() == "dimileeh/aira-web"
+            assert pr_number == 277
+            return PullRequestAdoptionMetadata(
+                number=277,
+                head_ref="feature/ready",
+                head_repo_slug="dimileeh/aira-web",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="OPEN",
+                is_draft=False,
+                closed=False,
+                merged=False,
+                author="octocat",
+                url="https://github.com/dimileeh/aira-web/pull/277",
+                title="feature: ready",
+            )
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, pr_adoption_metadata_fetcher=_fetcher)
+        )
+
+        payload = await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": False,
+            },
+        )
+
+        assert isinstance(payload, dict)
+        assert payload["workspace_id"].startswith("ws_")
+        assert payload["repo_slug"] == "dimileeh/aira-web"
+        assert payload["pr_number"] == 277
+        assert payload["head_ref"] == "feature/ready"
+        assert payload["auto_merge"] is False
+
+    @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_returns_terminal_pr_error_result(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            assert repo.slug() == "dimileeh/aira-web"
+            assert pr_number == 277
+            return PullRequestAdoptionMetadata(
+                number=277,
+                head_ref="feature/ready",
+                head_repo_slug="dimileeh/aira-web",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="MERGED",
+                is_draft=False,
+                closed=True,
+                merged=True,
+                author="octocat",
+                url="https://github.com/dimileeh/aira-web/pull/277",
+                title="feature: ready",
+            )
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, pr_adoption_metadata_fetcher=_fetcher)
+        )
+
+        result = await mcp.call_tool(
+            "awf_adopt_pull_request_monitor",
+            {"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "PR_ALREADY_MERGED"
+        assert "already merged" in result.structuredContent["message"]
 
     @pytest.mark.unit
     async def test_operator_parity_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]
@@ -321,7 +438,9 @@ class TestToolRegistration:
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
         assert "workspace_id" in validate_props
-        validate_required = tools["awf_request_workspace_validation"].inputSchema.get("required", [])
+        validate_required = tools["awf_request_workspace_validation"].inputSchema.get(
+            "required", []
+        )
         assert "workspace_id" in validate_required
         assert validate_props["reason"]["default"] is None
         assert validate_props["requested_tier"]["default"] is None
@@ -460,7 +579,16 @@ class _RecordingControlService:
         reason: str | None,
         idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
-        self.calls.append(("stop", {"workspace_id": workspace_id, "reason": reason, "idempotency_key": idempotency_key}))
+        self.calls.append(
+            (
+                "stop",
+                {
+                    "workspace_id": workspace_id,
+                    "reason": reason,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
         return WorkspaceControlResponse(
             workspace_id=workspace_id,
             operation_id="op_stop",
@@ -576,7 +704,14 @@ class TestWorkspaceControls:
         )
 
         assert service.calls == [
-            ("stop", {"workspace_id": "ws_control", "reason": "free local resources", "idempotency_key": None})
+            (
+                "stop",
+                {
+                    "workspace_id": "ws_control",
+                    "reason": "free local resources",
+                    "idempotency_key": None,
+                },
+            )
         ]
         assert payload == {
             "workspace_id": "ws_control",
@@ -843,10 +978,7 @@ class TestCreateWorkspaceV2:
         assert isinstance(result, CallToolResult)
         assert result.isError is True
         assert result.structuredContent is not None
-        assert (
-            result.structuredContent["error_code"]
-            == "PROVIDER_READINESS_PRECHECK_FAILED"
-        )
+        assert result.structuredContent["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
         preflight = result.structuredContent["detail"]["provider_readiness_preflight"]
         assert preflight["provider"] == "codex"
         assert preflight["model"] == "gpt-5.5"
@@ -931,10 +1063,7 @@ class TestCreateWorkspaceV2:
         assert isinstance(blocked, CallToolResult)
         assert blocked.isError is True
         assert blocked.structuredContent is not None
-        assert (
-            blocked.structuredContent["error_code"]
-            == "PROVIDER_READINESS_PRECHECK_FAILED"
-        )
+        assert blocked.structuredContent["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
         blocked_preflight = blocked.structuredContent["detail"]["provider_readiness_preflight"]
         assert blocked_preflight["provider"] == "codex"
         assert blocked_preflight["source_workspace_id"] == workspace_id

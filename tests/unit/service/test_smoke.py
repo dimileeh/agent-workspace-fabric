@@ -50,8 +50,26 @@ def _ok_auth_collector():
             "status": "ok",
             "strict_providers": [],
             "providers": {
-                "github": {"ok": True, "status": "ok", "reason": "GITHUB_AUTH_OK", "message": "GitHub is ready.", "credential_sources": ["env:GH_TOKEN"], "credential_scope": "read+write+pr", "isolation": "process", "warnings": []},
-                "codex": {"ok": True, "status": "ok", "reason": "CODEX_AUTH_OK", "message": "Codex is ready.", "credential_sources": ["env:OPENAI_API_KEY"], "credential_scope": "read+write", "isolation": "process", "warnings": []},
+                "github": {
+                    "ok": True,
+                    "status": "ok",
+                    "reason": "GITHUB_AUTH_OK",
+                    "message": "GitHub is ready.",
+                    "credential_sources": ["env:GH_TOKEN"],
+                    "credential_scope": "read+write+pr",
+                    "isolation": "process",
+                    "warnings": [],
+                },
+                "codex": {
+                    "ok": True,
+                    "status": "ok",
+                    "reason": "CODEX_AUTH_OK",
+                    "message": "Codex is ready.",
+                    "credential_sources": ["env:OPENAI_API_KEY"],
+                    "credential_scope": "read+write",
+                    "isolation": "process",
+                    "warnings": [],
+                },
             },
             "security": {},
         }
@@ -96,7 +114,13 @@ def _ok_profile_preview_ok():
         )
         smoke_request = {}
         if include_smoke_request:
-            smoke_request = {"repo": {"url": path.as_uri()}, "task": {}, "workspace": {}, "validation": {}, "resources": {}}
+            smoke_request = {
+                "repo": {"url": path.as_uri()},
+                "task": {},
+                "workspace": {},
+                "validation": {},
+                "resources": {},
+            }
         return ProjectOnboardingPreview(
             path=path,
             inspection=inspection,
@@ -176,7 +200,9 @@ class TestCollectSmokeReportLiveMode:
         assert pr_phase["reason_code"] == "SMOKE_PR_READY"
         assert report["status"] == "ok"
 
-    async def test_service_unreachable_produces_fail_phase_with_action(self, tmp_path: Path) -> None:
+    async def test_service_unreachable_produces_fail_phase_with_action(
+        self, tmp_path: Path
+    ) -> None:
         async def _unreachable_service(settings, *, http_client=None):
             return {"status": "unreachable"}
 
@@ -202,8 +228,26 @@ class TestCollectSmokeReportLiveMode:
                 "status": "fail",
                 "strict_providers": [],
                 "providers": {
-                    "github": {"ok": False, "status": "fail", "reason": "GITHUB_TOKEN_ENV_MISSING", "message": "No token.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": ["missing token"]},
-                    "codex": {"ok": True, "status": "ok", "reason": "CODEX_AUTH_OK", "message": "Codex ready.", "credential_sources": ["env:OPENAI_API_KEY"], "credential_scope": "read+write", "isolation": "process", "warnings": []},
+                    "github": {
+                        "ok": False,
+                        "status": "fail",
+                        "reason": "GITHUB_TOKEN_ENV_MISSING",
+                        "message": "No token.",
+                        "credential_sources": [],
+                        "credential_scope": "none",
+                        "isolation": "process",
+                        "warnings": ["missing token"],
+                    },
+                    "codex": {
+                        "ok": True,
+                        "status": "ok",
+                        "reason": "CODEX_AUTH_OK",
+                        "message": "Codex ready.",
+                        "credential_sources": ["env:OPENAI_API_KEY"],
+                        "credential_scope": "read+write",
+                        "isolation": "process",
+                        "warnings": [],
+                    },
                 },
                 "security": {},
             }
@@ -222,14 +266,36 @@ class TestCollectSmokeReportLiveMode:
         assert auth_phase["reason_code"] == "SMOKE_AUTH_PARTIAL"
         assert auth_phase["status"] == "warn"
 
-    async def test_auth_status_ok_but_partial_providers_downgrades_to_warn(self, tmp_path: Path) -> None:
-        def _ok_status_partial_providers(settings, *, environ=None, strict_providers=None, **kwargs):
+    async def test_auth_status_ok_but_partial_providers_downgrades_to_warn(
+        self, tmp_path: Path
+    ) -> None:
+        def _ok_status_partial_providers(
+            settings, *, environ=None, strict_providers=None, **kwargs
+        ):
             return {
                 "status": "ok",
                 "strict_providers": [],
                 "providers": {
-                    "github": {"ok": True, "status": "ok", "reason": "GITHUB_AUTH_OK", "message": "GitHub ready.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": []},
-                    "codex": {"ok": False, "status": "warn", "reason": "CODEX_AUTH_MISSING", "message": "Codex missing.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": []},
+                    "github": {
+                        "ok": True,
+                        "status": "ok",
+                        "reason": "GITHUB_AUTH_OK",
+                        "message": "GitHub ready.",
+                        "credential_sources": [],
+                        "credential_scope": "none",
+                        "isolation": "process",
+                        "warnings": [],
+                    },
+                    "codex": {
+                        "ok": False,
+                        "status": "warn",
+                        "reason": "CODEX_AUTH_MISSING",
+                        "message": "Codex missing.",
+                        "credential_sources": [],
+                        "credential_scope": "none",
+                        "isolation": "process",
+                        "warnings": [],
+                    },
                 },
                 "security": {},
             }
@@ -268,7 +334,9 @@ class TestCollectSmokeReportLiveMode:
             )
             draft = DraftProfile(
                 template="node-nextjs",
-                profile=WorkspaceProfile(name="node-nextjs", source="onboarding:node-nextjs", confidence="high"),
+                profile=WorkspaceProfile(
+                    name="node-nextjs", source="onboarding:node-nextjs", confidence="high"
+                ),
                 yaml="test: yaml",
                 diagnostics=PreviewDiagnostics((), (), (), (), ()),
             )
@@ -383,7 +451,9 @@ class TestCollectSmokeReportMockedMode:
         assert demo_missing_phase["status"] == "fail"
         assert str(missing_project) in demo_missing_phase["message"]
 
-    async def test_demo_path_fallback_used_when_project_does_not_resolve(self, tmp_path: Path) -> None:
+    async def test_demo_path_fallback_used_when_project_does_not_resolve(
+        self, tmp_path: Path
+    ) -> None:
         missing_project = tmp_path / "nonexistent"
         (tmp_path / "demo_project").mkdir()
         (tmp_path / "demo_project" / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
@@ -448,7 +518,9 @@ class TestCollectSmokeReportMockedMode:
             )
             draft = DraftProfile(
                 template="generic",
-                profile=WorkspaceProfile(name="generic", source="onboarding:generic", confidence="low"),
+                profile=WorkspaceProfile(
+                    name="generic", source="onboarding:generic", confidence="low"
+                ),
                 yaml="test: yaml",
                 diagnostics=PreviewDiagnostics((), (), (), (), ()),
             )
@@ -492,13 +564,19 @@ class TestCollectSmokeReportMockedMode:
             )
             draft = DraftProfile(
                 template="python",
-                profile=WorkspaceProfile(name="python", source="onboarding:python", confidence="medium"),
+                profile=WorkspaceProfile(
+                    name="python", source="onboarding:python", confidence="medium"
+                ),
                 yaml="test: yaml",
                 diagnostics=PreviewDiagnostics((), (), (), (), ()),
             )
             sr = {} if include_smoke_request else None
             return ProjectOnboardingPreview(
-                path=path, inspection=inspection, draft=draft, diagnostics=draft.diagnostics, smoke_request=sr
+                path=path,
+                inspection=inspection,
+                draft=draft,
+                diagnostics=draft.diagnostics,
+                smoke_request=sr,
             )
 
         report = await collect_smoke_report(
@@ -598,7 +676,16 @@ class TestCollectSmokeReportExceptionPaths:
                 "status": "fail",
                 "strict_providers": [],
                 "providers": {
-                    "github": {"ok": False, "status": "fail", "reason": "GITHUB_TOKEN_ENV_MISSING", "message": "No token.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": []},
+                    "github": {
+                        "ok": False,
+                        "status": "fail",
+                        "reason": "GITHUB_TOKEN_ENV_MISSING",
+                        "message": "No token.",
+                        "credential_sources": [],
+                        "credential_scope": "none",
+                        "isolation": "process",
+                        "warnings": [],
+                    },
                 },
                 "security": {},
             }
@@ -617,14 +704,34 @@ class TestCollectSmokeReportExceptionPaths:
         assert auth_phase["reason_code"] == "SMOKE_AUTH_UNAVAILABLE"
         assert auth_phase["status"] == "fail"
 
-    async def test_auth_status_ok_but_zero_usable_providers_is_not_ready(self, tmp_path: Path) -> None:
+    async def test_auth_status_ok_but_zero_usable_providers_is_not_ready(
+        self, tmp_path: Path
+    ) -> None:
         def _ok_status_no_usable(settings, *, environ=None, **kwargs):
             return {
                 "status": "ok",
                 "strict_providers": [],
                 "providers": {
-                    "github": {"ok": False, "status": "warn", "reason": "GITHUB_TOKEN_ENV_MISSING", "message": "No token.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": []},
-                    "codex": {"ok": False, "status": "warn", "reason": "CODEX_KEY_MISSING", "message": "No key.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": []},
+                    "github": {
+                        "ok": False,
+                        "status": "warn",
+                        "reason": "GITHUB_TOKEN_ENV_MISSING",
+                        "message": "No token.",
+                        "credential_sources": [],
+                        "credential_scope": "none",
+                        "isolation": "process",
+                        "warnings": [],
+                    },
+                    "codex": {
+                        "ok": False,
+                        "status": "warn",
+                        "reason": "CODEX_KEY_MISSING",
+                        "message": "No key.",
+                        "credential_sources": [],
+                        "credential_scope": "none",
+                        "isolation": "process",
+                        "warnings": [],
+                    },
                 },
                 "security": {},
             }
@@ -733,7 +840,10 @@ class TestCollectSmokeReportExceptionPaths:
             )
 
             inspection = ProjectInspection(
-                path=path, detected_template="python", confidence="medium", signals=("pyproject.toml",)
+                path=path,
+                detected_template="python",
+                confidence="medium",
+                signals=("pyproject.toml",),
             )
             draft = DraftProfile(
                 template="python",
@@ -813,10 +923,15 @@ class TestCollectSmokeReportExceptionPaths:
             )
 
             inspection = ProjectInspection(
-                path=path, detected_template="python", confidence="medium", signals=("pyproject.toml",)
+                path=path,
+                detected_template="python",
+                confidence="medium",
+                signals=("pyproject.toml",),
             )
             draft = DraftProfile(
-                template="python", profile=NullProfile(), yaml="",
+                template="python",
+                profile=NullProfile(),
+                yaml="",
                 diagnostics=PreviewDiagnostics((), (), (), (), ()),
             )
             return ProjectOnboardingPreview(
@@ -921,6 +1036,7 @@ class TestCollectSmokeReportExceptionPaths:
     async def test_extract_validation_commands_direct_call_no_phases(self) -> None:
         class NoDraftPreview:
             draft = None
+
         result = _extract_validation_commands(NoDraftPreview())
         assert result == []
 
@@ -935,6 +1051,7 @@ class TestCollectSmokeReportExceptionPaths:
             return_value={"status": "ok", "providers": {}, "security": {}},
         ):
             from awf.service.smoke import _default_auth_collector
+
             result = _default_auth_collector(_settings())
         assert result["status"] == "ok"
 
@@ -945,6 +1062,7 @@ class TestCollectSmokeReportExceptionPaths:
             return_value=SimpleNamespace(template="python"),
         ):
             from awf.service.smoke import _default_profile_preview
+
             result = _default_profile_preview(Path("/tmp"))
         assert result is not None
 
@@ -986,10 +1104,15 @@ class TestCollectSmokeReportExceptionPaths:
             )
 
             inspection = ProjectInspection(
-                path=path, detected_template="python", confidence="medium", signals=("pyproject.toml",)
+                path=path,
+                detected_template="python",
+                confidence="medium",
+                signals=("pyproject.toml",),
             )
             draft = DraftProfile(
-                template="python", profile=BrokenPhases(), yaml="",
+                template="python",
+                profile=BrokenPhases(),
+                yaml="",
                 diagnostics=PreviewDiagnostics((), (), (), (), ()),
             )
             return ProjectOnboardingPreview(

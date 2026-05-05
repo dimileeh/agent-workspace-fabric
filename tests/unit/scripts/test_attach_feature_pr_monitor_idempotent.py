@@ -87,9 +87,7 @@ finally:
     fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
     fd.close()
 """
-    proc = subprocess.Popen(
-        [sys.executable, "-c", script, str(lock_path), str(ready_path)]
-    )
+    proc = subprocess.Popen([sys.executable, "-c", script, str(lock_path), str(ready_path)])
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if ready_path.exists():

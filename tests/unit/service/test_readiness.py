@@ -58,9 +58,7 @@ async def _classified_failure_collector(*, since_hours: int) -> dict[str, object
 @pytest.mark.unit
 def test_ready_for_gke_criteria_reference_executable_release_gate() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    todo = (repo_root / "TODO" / "pre-gke-industrial-readiness.md").read_text(
-        encoding="utf-8"
-    )
+    todo = (repo_root / "TODO" / "pre-gke-industrial-readiness.md").read_text(encoding="utf-8")
     readme = (repo_root / "docs/CONCEPTS.md").read_text(encoding="utf-8")
 
     assert "awf service readiness --format json" in todo
@@ -83,7 +81,9 @@ async def test_core_readiness_reports_collector_failures_and_missing_demo(
         raise RuntimeError(f"slo unavailable for {since_hours}h")
 
     report = await collect_core_readiness_report(
-        settings=SimpleNamespace(database_url="sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
         demo_path=tmp_path / "missing-demo",
         status_collector=_status_collector,
         doctor_collector=_doctor_collector,  # type: ignore[arg-type]
@@ -98,7 +98,9 @@ async def test_core_readiness_reports_collector_failures_and_missing_demo(
     assert reasons["demo_project"] == "DEMO_PROJECT_MISSING"
     assert reasons["prd_slo_thresholds"] == "PRD_SLO_METRICS_UNAVAILABLE"
     assert "Add the in-repo AWF Core demo project under examples/." in report.next_actions
-    assert "Restore PRD SLO evidence or record an explicit release allowlist." in report.next_actions
+    assert (
+        "Restore PRD SLO evidence or record an explicit release allowlist." in report.next_actions
+    )
     assert "Resolve release gate check: service_status." in report.next_actions
 
 
@@ -160,7 +162,9 @@ async def test_core_readiness_fails_on_generic_recent_failure_reason(tmp_path: P
         }
 
     report = await collect_core_readiness_report(
-        settings=SimpleNamespace(database_url="sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
         demo_path=demo_path,
         status_collector=_status_collector,
         doctor_collector=_doctor_collector,
@@ -169,7 +173,9 @@ async def test_core_readiness_fails_on_generic_recent_failure_reason(tmp_path: P
     )
 
     assert report.status == "fail"
-    taxonomy_check = next(check for check in report.checks if check.name == "recent_failure_taxonomy")
+    taxonomy_check = next(
+        check for check in report.checks if check.name == "recent_failure_taxonomy"
+    )
     assert taxonomy_check.reason_code == "GENERIC_FAILURE_REASON_BLOCKS_RELEASE"
     assert "Classify or reconcile" in report.next_actions[0]
 
@@ -205,7 +211,9 @@ async def test_core_readiness_allowlist_can_downgrade_generic_failure_gate(
         }
 
     report = await collect_core_readiness_report(
-        settings=SimpleNamespace(database_url="sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
         demo_path=demo_path,
         status_collector=_status_collector,
         doctor_collector=_doctor_collector,
@@ -215,7 +223,9 @@ async def test_core_readiness_allowlist_can_downgrade_generic_failure_gate(
     )
 
     assert report.status == "ok"
-    taxonomy_check = next(check for check in report.checks if check.name == "recent_failure_taxonomy")
+    taxonomy_check = next(
+        check for check in report.checks if check.name == "recent_failure_taxonomy"
+    )
     assert taxonomy_check.reason_code == "FAILURE_TAXONOMY_CLASSIFIED"
 
 
@@ -266,7 +276,9 @@ async def test_core_readiness_fails_when_prd_slo_thresholds_are_breached(
         }
 
     report = await collect_core_readiness_report(
-        settings=SimpleNamespace(database_url="sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
         demo_path=demo_path,
         status_collector=_status_collector,
         doctor_collector=_doctor_collector,
@@ -354,7 +366,9 @@ async def test_core_readiness_allowlist_downgrades_prd_slo_breach(
         }
 
     report = await collect_core_readiness_report(
-        settings=SimpleNamespace(database_url="sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
         demo_path=demo_path,
         status_collector=_status_collector,
         doctor_collector=_doctor_collector,
@@ -418,7 +432,9 @@ async def test_core_readiness_reuses_collected_service_status_for_doctor(
         }
 
     report = await collect_core_readiness_report(
-        settings=SimpleNamespace(database_url="sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
         demo_path=demo_path,
         status_collector=_status_collector,
         doctor_collector=_doctor_collector,  # type: ignore[arg-type]
@@ -441,7 +457,7 @@ async def test_readiness_collectors_use_database_fallbacks_when_not_injected(
             disposed.append(True)
 
     def _make_engine(database_url: str) -> _Engine:
-        assert database_url == "sqlite+aiosqlite:///:memory:"
+        assert database_url == "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
         return _Engine()
 
     def _make_session_factory(engine: _Engine) -> str:
@@ -466,7 +482,7 @@ async def test_readiness_collectors_use_database_fallbacks_when_not_injected(
         since_hours: int,
     ) -> dict[str, object]:
         assert session_factory == "session-factory"
-        assert settings.database_url == "sqlite+aiosqlite:///:memory:"
+        assert settings.database_url == "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
         assert since_hours == 168
         return {"kind": "slo"}
 
@@ -475,7 +491,7 @@ async def test_readiness_collectors_use_database_fallbacks_when_not_injected(
     monkeypatch.setattr(readiness, "summarize_failure_analysis", _summarize_failure_analysis)
     monkeypatch.setattr(readiness, "summarize_slo_metrics", _summarize_slo_metrics)
 
-    settings = SimpleNamespace(database_url="sqlite+aiosqlite:///:memory:")
+    settings = SimpleNamespace(database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf")
     failure_summary = await readiness._collect_failure_summary(
         settings,  # type: ignore[arg-type]
         failure_window_hours=24,
@@ -509,7 +525,7 @@ def test_generic_failure_findings_accept_mapping_and_object_shapes() -> None:
                 workspace_id="ws_latest",
                 failure_reason="specific",
                 reason_code="AGENT_FAILURE",
-            )
+            ),
         ],
         root_cause_clusters=(
             SimpleNamespace(
@@ -637,7 +653,9 @@ async def test_core_readiness_reports_collector_failures_as_release_gates(
         }
 
     report = await collect_core_readiness_report(
-        settings=SimpleNamespace(database_url="sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
         demo_path=demo_path,
         status_collector=_status_collector,
         doctor_collector=_doctor_collector,  # type: ignore[arg-type]
@@ -689,7 +707,9 @@ async def test_core_readiness_allowlists_unavailable_slo_metrics(
         }
 
     report = await collect_core_readiness_report(
-        settings=SimpleNamespace(database_url="sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        settings=SimpleNamespace(
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+        ),  # type: ignore[arg-type]
         demo_path=demo_path,
         status_collector=_status_collector,
         doctor_collector=_doctor_collector,
@@ -720,7 +740,7 @@ async def test_readiness_default_collectors_dispose_engines(
     session_factory = object()
 
     def _make_engine(database_url: str) -> _FakeEngine:
-        assert database_url == "sqlite+aiosqlite:///awf.db"
+        assert database_url == "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
         return engine
 
     def _make_session_factory(received_engine: _FakeEngine) -> object:
@@ -746,7 +766,9 @@ async def test_readiness_default_collectors_dispose_engines(
         assert settings is service_settings
         return {"since_hours": since_hours, "creation_total": 0}
 
-    service_settings = SimpleNamespace(database_url="sqlite+aiosqlite:///awf.db")
+    service_settings = SimpleNamespace(
+        database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    )
     monkeypatch.setattr(readiness, "make_engine", _make_engine)
     monkeypatch.setattr(readiness, "make_session_factory", _make_session_factory)
     monkeypatch.setattr(readiness, "summarize_failure_analysis", _summarize_failure_analysis)
@@ -871,26 +893,29 @@ def test_readiness_failure_taxonomy_includes_generic_root_cause_clusters() -> No
 
 @pytest.mark.unit
 def test_readiness_failure_taxonomy_ignores_classified_failures_and_reports_demo_action() -> None:
-    assert readiness._generic_failure_findings(  # noqa: SLF001
-        {
-            "failure_groups": [{"failure_reason": "validation_failure", "count": 1}],
-            "latest_examples": [
-                {
-                    "workspace_id": "ws_validation",
-                    "failure_reason": "validation_failure",
-                    "reason_code": "PYTEST_TEST_FAILURE",
-                }
-            ],
-            "root_cause_clusters": [
-                {
-                    "failure_reason": "infrastructure_failure",
-                    "reason_code": "GIT_PUSH_FAILED",
-                    "sample_workspace_ids": ("ws_git",),
-                    "count": 1,
-                }
-            ],
-        }
-    ) == []
+    assert (
+        readiness._generic_failure_findings(  # noqa: SLF001
+            {
+                "failure_groups": [{"failure_reason": "validation_failure", "count": 1}],
+                "latest_examples": [
+                    {
+                        "workspace_id": "ws_validation",
+                        "failure_reason": "validation_failure",
+                        "reason_code": "PYTEST_TEST_FAILURE",
+                    }
+                ],
+                "root_cause_clusters": [
+                    {
+                        "failure_reason": "infrastructure_failure",
+                        "reason_code": "GIT_PUSH_FAILED",
+                        "sample_workspace_ids": ("ws_git",),
+                        "count": 1,
+                    }
+                ],
+            }
+        )
+        == []
+    )
 
     assert readiness._next_actions(  # noqa: SLF001
         [

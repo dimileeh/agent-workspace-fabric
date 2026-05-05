@@ -71,9 +71,7 @@ def bounded_list_limit(limit: int, max_limit: int) -> int:
 
 def encode_bounded_list_cursor(offset: int) -> str:
     payload = {"o": offset}
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    )
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     return encoded.decode("ascii").rstrip("=")
 
 

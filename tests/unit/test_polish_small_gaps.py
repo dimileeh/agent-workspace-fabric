@@ -29,10 +29,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.validation_fix_cycle import read_output_tail
-from awf.db.base import Base
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -45,6 +44,7 @@ from awf.runtime.validation import (
     ValidationResult,
     ValidationRunner,
 )
+from tests.postgres import postgres_test_engine
 
 # ── feature_pr_sync ────────────────────────────────────────────────────────
 
@@ -195,14 +195,9 @@ class TestReleasePrBodyJsonParseFallback:
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'p.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 class TestProvisionerSkipUnknown:

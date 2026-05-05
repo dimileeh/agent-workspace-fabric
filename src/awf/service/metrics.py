@@ -39,20 +39,16 @@ from awf.service.workspaces import workspace_failure_details_payload
 
 
 class _IsoToTimestamp(expression.FunctionElement[Any]):  # noqa: N801
-    """Dialect-portable ISO-8601 string → timestamp cast.
-
-    PostgreSQL: CAST(… AS TIMESTAMP WITH TIME ZONE) – full tz-aware comparison.
-    SQLite:     datetime(…) – normalises any offset to UTC before comparing.
-    """
+    """PostgreSQL ISO-8601 string to timestamp cast."""
 
     inherit_cache = True
 
 
 _ISO8601_TS_PG = (
-    r'^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])'
-    r'T([01]\d|2[0-3]):[0-5]\d:[0-5]\d'
-    r'(\.\d+)?'
-    r'([+-]([01]\d|2[0-3]):?[0-5]\d|Z)?$'
+    r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])"
+    r"T([01]\d|2[0-3]):[0-5]\d:[0-5]\d"
+    r"(\.\d+)?"
+    r"([+-]([01]\d|2[0-3]):?[0-5]\d|Z)?$"
 )
 
 
@@ -62,15 +58,6 @@ def _pg_iso_to_timestamp(element: expression.FunctionElement[Any], compiler: Any
     return (
         f"CASE WHEN {arg} ~ '{_ISO8601_TS_PG}'"
         f" THEN CAST({arg} AS TIMESTAMP WITH TIME ZONE) ELSE NULL END"
-    )
-
-
-@compiles(_IsoToTimestamp, "sqlite")
-def _sqlite_iso_to_timestamp(element: expression.FunctionElement[Any], compiler: Any, **kw: Any) -> str:
-    arg = compiler.process(list(element.clauses)[0], **kw)
-    return (
-        f"CASE WHEN {arg} LIKE '____-__-__T__:__:__%'"
-        f" THEN datetime({arg}) ELSE NULL END"
     )
 
 
@@ -498,27 +485,28 @@ async def _cluster_root_causes(
     *,
     failure_details_cache: dict[str, dict[str, Any]] | None = None,
 ) -> list[RootCauseCluster]:
-    stmt = select(
-        Workspace.id,
-        Workspace.agent,
-        Workspace.task_policy,
-        Workspace.failure_reason,
-        Workspace.failure_message,
-    ).where(
-        Workspace.status == WorkspaceStatus.failed.value,
-        Workspace.updated_at >= window_start,
-    ).order_by(
-        Workspace.updated_at.desc(),
-        Workspace.id,
+    stmt = (
+        select(
+            Workspace.id,
+            Workspace.agent,
+            Workspace.task_policy,
+            Workspace.failure_reason,
+            Workspace.failure_message,
+        )
+        .where(
+            Workspace.status == WorkspaceStatus.failed.value,
+            Workspace.updated_at >= window_start,
+        )
+        .order_by(
+            Workspace.updated_at.desc(),
+            Workspace.id,
+        )
     )
     result = await session.execute(stmt)
     rows = result.all()
     details_by_id = await _cached_failure_details_by_workspace_id(
         session,
-        {
-            row.id: row.failure_message
-            for row in rows
-        },
+        {row.id: row.failure_message for row in rows},
         failure_details_cache=failure_details_cache,
     )
 
@@ -534,9 +522,7 @@ async def _cluster_root_causes(
 
     for row in rows:
         agent = row.agent or "unknown"
-        agent_model = (
-            row.task_policy.get("agent_model") if row.task_policy else None
-        )
+        agent_model = row.task_policy.get("agent_model") if row.task_policy else None
         reason = row.failure_reason or UNKNOWN_FAILURE_REASON
         msg = row.failure_message or ""
         details_payload = details_by_id.get(row.id, {})
@@ -579,9 +565,7 @@ async def _cluster_root_causes(
             )
         elif specific_reason_code == PLAN_CONFORMANCE_UNSATISFIED:
             likely_cause = "Plan Conformance Unsatisfied"
-            action = (
-                "Retry with the final conformance gaps and finish the remaining planned work."
-            )
+            action = "Retry with the final conformance gaps and finish the remaining planned work."
         elif AGENT_AUTH_FAILED in msg:
             likely_cause = "Agent Auth Failed"
             action = "Check agent credentials"
@@ -837,10 +821,7 @@ async def _latest_failed_workspace_examples(
     rows = result.all()
     details_by_id = await _cached_failure_details_by_workspace_id(
         session,
-        {
-            row.id: row.failure_message
-            for row in rows
-        },
+        {row.id: row.failure_message for row in rows},
         failure_details_cache=failure_details_cache,
     )
     examples: list[FailedWorkspaceExample] = []
@@ -927,10 +908,7 @@ async def _cached_failure_details_by_workspace_id(
     )
     for workspace_id in missing_failure_messages:
         failure_details_cache[workspace_id] = fetched_details.get(workspace_id, {})
-    return {
-        workspace_id: failure_details_cache[workspace_id]
-        for workspace_id in failure_messages
-    }
+    return {workspace_id: failure_details_cache[workspace_id] for workspace_id in failure_messages}
 
 
 def _workspace_event_view(
@@ -1075,17 +1053,13 @@ async def _provider_recovery_state_summary(
         Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["decision_reason_code"].as_string(),
         Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["source_reason_code"].as_string(),
     )
-    not_before = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY][
-        "not_before"
-    ].as_string()
+    not_before = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["not_before"].as_string()
     not_before_ts = _IsoToTimestamp(not_before)
     now_ts = _IsoToTimestamp(now.astimezone(UTC).isoformat())
 
     stmt = select(
         func.coalesce(
-            func.sum(
-                case((and_(action == "retry", not_before.is_(None)), 1), else_=0)
-            ),
+            func.sum(case((and_(action == "retry", not_before.is_(None)), 1), else_=0)),
             0,
         ).label("pending_retry_no_not_before"),
         func.coalesce(
@@ -1097,9 +1071,9 @@ async def _provider_recovery_state_summary(
             ),
             0,
         ).label("pending_retry_with_not_before"),
-        func.coalesce(
-            func.sum(case((action == "fallback", 1), else_=0)), 0
-        ).label("pending_fallback"),
+        func.coalesce(func.sum(case((action == "fallback", 1), else_=0)), 0).label(
+            "pending_fallback"
+        ),
         func.coalesce(
             func.sum(
                 case(
@@ -1130,7 +1104,8 @@ async def _provider_recovery_state_summary(
                     (
                         and_(
                             action == "terminal",
-                            decision_reason.is_(None) | (decision_reason != PROVIDER_RECOVERY_NO_LOOP_REASON),
+                            decision_reason.is_(None)
+                            | (decision_reason != PROVIDER_RECOVERY_NO_LOOP_REASON),
                         ),
                         1,
                     ),
@@ -1139,10 +1114,7 @@ async def _provider_recovery_state_summary(
             ),
             0,
         ).label("terminal_exhausted"),
-    ).where(
-        ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES)
-        | (action == "terminal")
-    )
+    ).where(~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES) | (action == "terminal"))
     row = (await session.execute(stmt)).one()
     return ProviderRecoveryStateSummary(
         pending_retry=int(row.pending_retry_no_not_before + row.pending_retry_with_not_before),
@@ -1200,8 +1172,7 @@ async def _reserved_resources_for_session(
         active_workspace_count=active_workspace_count,
         steady_cpu=persisted["steady_cpu"] + fallback_count * resource_defaults.steady_cpu,
         steady_memory_gb=(
-            persisted["steady_memory_gb"]
-            + fallback_count * resource_defaults.steady_memory_gb
+            persisted["steady_memory_gb"] + fallback_count * resource_defaults.steady_memory_gb
         ),
         peak_cpu=persisted["peak_cpu"] + fallback_count * resource_defaults.peak_cpu,
         peak_memory_gb=(
@@ -1373,15 +1344,18 @@ async def _count_creation_metrics(
     *,
     window_start: datetime,
 ) -> dict[str, int]:
-    stmt = (
-        select(
-            func.count().label("total"),
-            func.sum(case((Workspace.status == WorkspaceStatus.completed.value, 1), else_=0)).label("succeeded"),
-            func.sum(case((Workspace.status == WorkspaceStatus.failed.value, 1), else_=0)).label("failed"),
-            func.sum(case((Workspace.status == WorkspaceStatus.cancelled.value, 1), else_=0)).label("cancelled"),
-        )
-        .where(Workspace.created_at >= window_start)
-    )
+    stmt = select(
+        func.count().label("total"),
+        func.sum(case((Workspace.status == WorkspaceStatus.completed.value, 1), else_=0)).label(
+            "succeeded"
+        ),
+        func.sum(case((Workspace.status == WorkspaceStatus.failed.value, 1), else_=0)).label(
+            "failed"
+        ),
+        func.sum(case((Workspace.status == WorkspaceStatus.cancelled.value, 1), else_=0)).label(
+            "cancelled"
+        ),
+    ).where(Workspace.created_at >= window_start)
     row = (await session.execute(stmt)).one()
     return {
         "total": int(row.total or 0),
@@ -1396,16 +1370,17 @@ async def _count_cleanup_metrics(
     *,
     window_start: datetime,
 ) -> dict[str, int]:
-    stmt = (
-        select(
-            func.count().label("total"),
-            func.sum(case((Operation.status == OperationStatus.succeeded.value, 1), else_=0)).label("succeeded"),
-            func.sum(case((Operation.status == OperationStatus.failed.value, 1), else_=0)).label("failed"),
-        )
-        .where(
-            Operation.type == OperationType.destroy.value,
-            Operation.finished_at >= window_start,
-        )
+    stmt = select(
+        func.count().label("total"),
+        func.sum(case((Operation.status == OperationStatus.succeeded.value, 1), else_=0)).label(
+            "succeeded"
+        ),
+        func.sum(case((Operation.status == OperationStatus.failed.value, 1), else_=0)).label(
+            "failed"
+        ),
+    ).where(
+        Operation.type == OperationType.destroy.value,
+        Operation.finished_at >= window_start,
     )
     row = (await session.execute(stmt)).one()
     return {
@@ -1425,7 +1400,9 @@ async def _count_stuck_detailed(
     stmt = (
         select(
             func.sum(case((Workspace.failure_reason.is_(None), 1), else_=0)).label("stuck_running"),
-            func.sum(case((Workspace.failure_reason.is_not(None), 1), else_=0)).label("stuck_with_reason"),
+            func.sum(case((Workspace.failure_reason.is_not(None), 1), else_=0)).label(
+                "stuck_with_reason"
+            ),
         )
         .select_from(Workspace)
         .where(
@@ -1446,16 +1423,17 @@ async def _count_recovery_operations(
     *,
     window_start: datetime,
 ) -> dict[str, int]:
-    stmt = (
-        select(
-            func.count().label("total"),
-            func.sum(case((Operation.status == OperationStatus.succeeded.value, 1), else_=0)).label("succeeded"),
-            func.sum(case((Operation.status == OperationStatus.failed.value, 1), else_=0)).label("failed"),
-        )
-        .where(
-            Operation.type.in_(_RECOVERY_OPERATION_TYPES),
-            Operation.created_at >= window_start,
-        )
+    stmt = select(
+        func.count().label("total"),
+        func.sum(case((Operation.status == OperationStatus.succeeded.value, 1), else_=0)).label(
+            "succeeded"
+        ),
+        func.sum(case((Operation.status == OperationStatus.failed.value, 1), else_=0)).label(
+            "failed"
+        ),
+    ).where(
+        Operation.type.in_(_RECOVERY_OPERATION_TYPES),
+        Operation.created_at >= window_start,
     )
     row = (await session.execute(stmt)).one()
     return {
@@ -1476,10 +1454,10 @@ async def _count_monitor_completions(
 
     recent_pr_workspace = (Workspace.updated_at >= window_start) & Workspace.pr_url.is_not(None)
     completed_recent_pr_workspace = (
-        (Workspace.status == WorkspaceStatus.completed.value) & recent_pr_workspace
-    )
-    stuck_monitor_workspace = (
-        (Workspace.status == WorkspaceStatus.monitoring_pr.value) & (Workspace.created_at < cutoff)
+        Workspace.status == WorkspaceStatus.completed.value
+    ) & recent_pr_workspace
+    stuck_monitor_workspace = (Workspace.status == WorkspaceStatus.monitoring_pr.value) & (
+        Workspace.created_at < cutoff
     )
 
     stmt = (

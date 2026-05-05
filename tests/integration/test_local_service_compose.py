@@ -36,7 +36,10 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     assert "gh" in dockerfile
     assert "COPY src ./src" in dockerfile
     assert "COPY migrations ./migrations" in dockerfile
-    assert "COPY docker/compose/workspace.base.yml.j2 ./docker/compose/workspace.base.yml.j2" in dockerfile
+    assert (
+        "COPY docker/compose/workspace.base.yml.j2 ./docker/compose/workspace.base.yml.j2"
+        in dockerfile
+    )
     assert "uv sync --frozen --extra dev" in dockerfile
 
     expected_work_dir = "${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}"
@@ -57,9 +60,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         volumes = services[service_name]["volumes"]
         assert "../..:/app" not in volumes
         assert f"{expected_host_home}:{expected_host_home}:ro" not in volumes
-        assert services[service_name]["extra_hosts"] == [
-            "host.docker.internal:host-gateway"
-        ]
+        assert services[service_name]["extra_hosts"] == ["host.docker.internal:host-gateway"]
         assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
         assert "/run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock" in volumes
         assert f"{expected_work_dir}:{expected_work_dir}" in volumes
@@ -88,12 +89,8 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["AWF_WORKSPACE_PEAK_MEMORY_GB"] == (
             "${AWF_WORKSPACE_PEAK_MEMORY_GB:-16}"
         )
-        assert environment["AWF_LOCAL_CAPACITY_CPU_CORES"] == (
-            "${AWF_LOCAL_CAPACITY_CPU_CORES:-}"
-        )
-        assert environment["AWF_LOCAL_CAPACITY_MEMORY_GB"] == (
-            "${AWF_LOCAL_CAPACITY_MEMORY_GB:-}"
-        )
+        assert environment["AWF_LOCAL_CAPACITY_CPU_CORES"] == ("${AWF_LOCAL_CAPACITY_CPU_CORES:-}")
+        assert environment["AWF_LOCAL_CAPACITY_MEMORY_GB"] == ("${AWF_LOCAL_CAPACITY_MEMORY_GB:-}")
         assert environment["AWF_LOCAL_CAPACITY_DIND_SLOTS"] == (
             "${AWF_LOCAL_CAPACITY_DIND_SLOTS:-}"
         )

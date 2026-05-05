@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,7 +21,6 @@ from awf.control.worker import (
     _monitor_claim_is_stale,
     _stale_active_execution_failure_message,
 )
-from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
@@ -30,8 +28,9 @@ from awf.db.repositories import (
     SecretLeaseRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeSnapshot
+from tests.postgres import postgres_test_engine
 
 
 class _NoopProvisioner:
@@ -67,14 +66,9 @@ class _RecordingExecutor:
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'worker.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _worker(

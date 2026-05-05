@@ -7,29 +7,22 @@ exception, always close. We verify all three paths.
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.base import Base
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory, session_scope
+from tests.postgres import postgres_test_engine, postgres_test_url
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 class TestSessionScope:
@@ -81,15 +74,20 @@ class TestSessionScope:
 
 
 @pytest.mark.unit
-async def test_sqlite_raw_datetime_binds_do_not_use_deprecated_default_adapter() -> None:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", DeprecationWarning)
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text("SELECT :created_at"),
-                    {"created_at": datetime(2026, 4, 26, 12, 0, tzinfo=UTC)},
-                )
-    finally:
-        await engine.dispose()
+def test_make_engine_rejects_non_postgres_urls() -> None:
+    with pytest.raises(ValueError, match="postgresql\\+asyncpg"):
+        make_engine("mysql+asyncmy://u:p@example/awf")
+
+
+@pytest.mark.unit
+async def test_make_engine_applies_url_search_path() -> None:
+    async with postgres_test_url() as database_url:
+        engine = make_engine(database_url)
+        try:
+            async with engine.connect() as conn:
+                current_schema = await conn.scalar(text("select current_schema()"))
+        finally:
+            await engine.dispose()
+
+    assert isinstance(current_schema, str)
+    assert current_schema.startswith("awf_test_")

@@ -33,7 +33,7 @@ def _settings(
         service_name="awf",
         env="local",
         api_base_url="http://localhost:8000",
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
         docker_host=f"unix://{tmp_path / 'docker.sock'}" if docker_host is None else docker_host,
         agent_runtime_image="awf-agent-runtime:latest",
         work_dir=str(tmp_path / "work"),
@@ -807,23 +807,32 @@ def test_preflight_reason_and_message_report_missing_model() -> None:
         )
         == "MODEL_NOT_SELECTED"
     )
-    assert provider_readiness._preflight_message(
-        provider_result=provider_result,
-        probe=probe,
-        model=None,
-    ) == "No effective model was selected for the workspace agent."
+    assert (
+        provider_readiness._preflight_message(
+            provider_result=provider_result,
+            probe=probe,
+            model=None,
+        )
+        == "No effective model was selected for the workspace agent."
+    )
 
 
 @pytest.mark.unit
 def test_provider_readiness_preflight_snapshot_and_text_redaction(tmp_path: Path) -> None:
     snapshot = {"provider": "codex", "reason_code": "PROVIDER_READY"}
 
-    assert provider_readiness.provider_readiness_preflight_from_task_policy(
-        {"provider_readiness_preflight": snapshot}
-    ) == snapshot
-    assert provider_readiness.provider_readiness_preflight_from_task_policy(
-        {"provider_readiness_preflight": "bad-shape"}
-    ) is None
+    assert (
+        provider_readiness.provider_readiness_preflight_from_task_policy(
+            {"provider_readiness_preflight": snapshot}
+        )
+        == snapshot
+    )
+    assert (
+        provider_readiness.provider_readiness_preflight_from_task_policy(
+            {"provider_readiness_preflight": "bad-shape"}
+        )
+        is None
+    )
     redacted = provider_readiness.redact_launch_preflight_text(
         _settings(tmp_path),
         "token sk-proj-redact-text-secret",
@@ -926,7 +935,7 @@ def test_provider_readiness_codex_isolated_file_auth_reports_least_privilege(
     (codex_home / "installation_id").write_text("installation-secret\n")
     (codex_home / "sessions").mkdir()
     (codex_home / "sessions" / "session.jsonl").write_text("session-secret\n")
-    (codex_home / "logs_2.sqlite").write_text("log-secret\n")
+    (codex_home / "logs_2.db").write_text("log-secret\n")
 
     payload = collect_agent_readiness(
         _settings(tmp_path),
@@ -941,10 +950,11 @@ def test_provider_readiness_codex_isolated_file_auth_reports_least_privilege(
     assert codex["credential_scope"] == "isolated_workspace"
     assert codex["isolation"] == "per_workspace_copy"
     assert codex["warnings"] == []
-    assert {
-        source["signal"]
-        for source in codex["credential_sources"]
-    } >= {"~/.codex/auth.json", "~/.codex/config.toml", "~/.codex/installation_id"}
+    assert {source["signal"] for source in codex["credential_sources"]} >= {
+        "~/.codex/auth.json",
+        "~/.codex/config.toml",
+        "~/.codex/installation_id",
+    }
     serialized = json.dumps(payload, sort_keys=True)
     for secret in (
         "codex_file_secret",
@@ -968,9 +978,7 @@ def test_provider_readiness_codex_rules_directory_is_reported(tmp_path: Path) ->
 
     codex = payload["providers"]["codex"]
     assert codex["reason"] == "CODEX_FILE_AUTH_PRESENT"
-    assert "~/.codex/rules" in {
-        source["signal"] for source in codex["credential_sources"]
-    }
+    assert "~/.codex/rules" in {source["signal"] for source in codex["credential_sources"]}
 
 
 @pytest.mark.unit
@@ -1021,9 +1029,7 @@ def test_provider_readiness_codex_static_env_auth_warns_without_leaking_value(
             "isolation": "service_env",
         }
     ]
-    assert {warning["reason"] for warning in codex["warnings"]} == {
-        "STATIC_TOKEN_FALLBACK"
-    }
+    assert {warning["reason"] for warning in codex["warnings"]} == {"STATIC_TOKEN_FALLBACK"}
     serialized = json.dumps(payload, sort_keys=True)
     assert token not in serialized
     assert "OPENAI_API_KEY" in serialized
@@ -1125,10 +1131,7 @@ def test_provider_readiness_env_fallbacks_report_security_warnings(
         assert provider["ok"] is True
         assert provider["credential_scope"] == "static_env_token"
         assert provider["isolation"] == "service_env"
-        assert any(
-            warning["reason"] == "STATIC_TOKEN_FALLBACK"
-            for warning in provider["warnings"]
-        )
+        assert any(warning["reason"] == "STATIC_TOKEN_FALLBACK" for warning in provider["warnings"])
     serialized = json.dumps(payload, sort_keys=True)
     for secret in env.values():
         assert secret not in serialized
@@ -1150,10 +1153,7 @@ def test_provider_readiness_docker_reports_host_daemon_broad_control_warning(
     assert docker["reason"] == "DOCKER_HOST_CONFIGURED"
     assert docker["credential_scope"] == "docker_host_control"
     assert docker["isolation"] == "host_daemon"
-    assert any(
-        warning["reason"] == "DOCKER_HOST_BROAD_CONTROL"
-        for warning in docker["warnings"]
-    )
+    assert any(warning["reason"] == "DOCKER_HOST_BROAD_CONTROL" for warning in docker["warnings"])
 
 
 @pytest.mark.unit
@@ -1163,9 +1163,7 @@ def test_provider_readiness_docker_registry_auth_is_observed_not_read(
     home = tmp_path / "home"
     docker_home = home / ".docker"
     docker_home.mkdir(parents=True)
-    (docker_home / "config.json").write_text(
-        '{"auths":{"ghcr.io":{"auth":"docker_file_secret"}}}'
-    )
+    (docker_home / "config.json").write_text('{"auths":{"ghcr.io":{"auth":"docker_file_secret"}}}')
     env_auth = '{"auths":{"registry.example":{"auth":"docker_env_secret"}}}'
 
     payload = collect_agent_readiness(
@@ -1342,12 +1340,10 @@ def test_provider_readiness_codex_directory_fallback_and_rules_are_sources(
     )
 
     assert {
-        source["signal"]
-        for source in rules_payload["providers"]["codex"]["credential_sources"]
+        source["signal"] for source in rules_payload["providers"]["codex"]["credential_sources"]
     } == {"~/.codex/rules"}
     assert {
-        source["signal"]
-        for source in empty_payload["providers"]["codex"]["credential_sources"]
+        source["signal"] for source in empty_payload["providers"]["codex"]["credential_sources"]
     } == {"~/.codex"}
 
 
@@ -1463,9 +1459,10 @@ def test_provider_readiness_security_summary_handles_malformed_warning_payloads(
 
 @pytest.mark.unit
 def test_provider_readiness_primary_scope_and_isolation_fallbacks() -> None:
-    assert provider_readiness._primary_credential_scope(
-        [{"credential_scope": "unknown"}]
-    ) == "not_observed"
+    assert (
+        provider_readiness._primary_credential_scope([{"credential_scope": "unknown"}])
+        == "not_observed"
+    )
     assert provider_readiness._primary_isolation([{"isolation": "unknown"}]) == "none"
 
 
@@ -1924,7 +1921,9 @@ def test_ollama_model_probe_reports_missing_model_and_transport_failures() -> No
     assert provider_readiness._probe_ollama_model(
         ("http://ollama.local:11434/api/tags",),
         model=None,
-        http_get=lambda _url, *, timeout: _ollama_ok("http://ollama.local:11434/api/tags", timeout=timeout),
+        http_get=lambda _url, *, timeout: _ollama_ok(
+            "http://ollama.local:11434/api/tags", timeout=timeout
+        ),
         secrets=frozenset(),
     ) == {
         "status": "fail",
@@ -2097,14 +2096,17 @@ def test_provider_readiness_default_subprocess_and_http_wrappers(
     monkeypatch.setattr(provider_readiness.subprocess, "run", _subprocess_run)
     monkeypatch.setattr(provider_readiness.httpx, "get", _httpx_get)
 
-    assert provider_readiness._run_subprocess(
-        ["gh", "auth", "status"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=1.5,
-        env={},
-    ) is completed
+    assert (
+        provider_readiness._run_subprocess(
+            ["gh", "auth", "status"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            env={},
+        )
+        is completed
+    )
     assert calls == [(["gh", "auth", "status"], 1.5)]
     assert provider_readiness._http_get("http://example.test/api/version", timeout=1.5).text == "ok"
 
@@ -2216,8 +2218,7 @@ def test_provider_readiness_redaction_parts_preserve_literal_context() -> None:
     )
 
     assert rendered == (
-        "prefix <redacted> https://<redacted>@github.com/org/repo "
-        "and token <redacted> suffix"
+        "prefix <redacted> https://<redacted>@github.com/org/repo and token <redacted> suffix"
     )
     assert parts == [
         "prefix ",
@@ -2266,9 +2267,10 @@ def test_provider_readiness_redaction_segment_helpers_cover_overlap_edges() -> N
 
 @pytest.mark.unit
 def test_provider_readiness_helper_fallbacks_handle_unknown_shapes() -> None:
-    assert provider_readiness._primary_credential_scope(
-        [{"credential_scope": "custom_scope"}]
-    ) == "not_observed"
+    assert (
+        provider_readiness._primary_credential_scope([{"credential_scope": "custom_scope"}])
+        == "not_observed"
+    )
     assert provider_readiness._primary_isolation([{"isolation": "custom_isolation"}]) == "none"
     assert provider_readiness._provider_warning_values({"warnings": "not-a-list"}) == []
 
@@ -2278,9 +2280,7 @@ def test_provider_readiness_helper_fallbacks_handle_unknown_shapes() -> None:
             "codex": {"status": "ok", "warnings": ["ignored"]},
             "docker": {
                 "status": "ok",
-                "warnings": [
-                    {"reason": "DOCKER_HOST_BROAD_CONTROL", "severity": "warning"}
-                ],
+                "warnings": [{"reason": "DOCKER_HOST_BROAD_CONTROL", "severity": "warning"}],
             },
         }
     )

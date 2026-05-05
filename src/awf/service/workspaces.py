@@ -21,6 +21,8 @@ from awf.api.schemas import (
     OperationResponse,
     OwnedPathOverlapResponse,
     ProviderRecoveryStateResponse,
+    PullRequestMonitorAdoptionRequest,
+    PullRequestMonitorAdoptionResponse,
     RuntimeServiceResponse,
     ValidationFreshnessSummaryResponse,
     WorkspaceAppEndpointResponse,
@@ -82,6 +84,7 @@ from awf.service.coordination import (
     task_policy_with_coordination_warnings,
 )
 from awf.service.disk import DiskCheck
+from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
 from awf.service.profile_metadata import network_posture_from_profile_snapshot
 from awf.service.provider_readiness import (
     HttpGet,
@@ -132,8 +135,7 @@ class RuntimeInspection(Protocol):
 OWNED_PATH_OVERLAP_RISK_CODE = "OWNED_PATH_OVERLAP_RISK"
 OWNED_PATH_OVERLAP_RISK_EVENT_TYPE = "workspace.owned_path_overlap_risk"
 OWNED_PATH_OVERLAP_RISK_MESSAGE = (
-    "Owned paths overlap active workspaces; this may require rebase "
-    "or conflict resolution."
+    "Owned paths overlap active workspaces; this may require rebase or conflict resolution."
 )
 OWNED_PATH_OVERLAP_PAYLOAD_FIELDS = (
     "workspace_id",
@@ -204,9 +206,7 @@ class WorkspaceRetryNotAllowedError(WorkspaceRetryError):
             "Only failed or cancelled workspaces can be retried.",
             detail={
                 "status": workspace.status,
-                "retryable_statuses": [
-                    status.value for status in RETRYABLE_WORKSPACE_STATUSES
-                ],
+                "retryable_statuses": [status.value for status in RETRYABLE_WORKSPACE_STATUSES],
             },
         )
 
@@ -360,6 +360,7 @@ class WorkspaceService:
         runtime_inspector: RuntimeInspection | None = None,
         project_stopper: ProjectStopper | None = None,
         cleaner_factory: CleanerFactory | None = None,
+        pr_adoption_metadata_fetcher: Any | None = None,
     ) -> None:
         self._factory = session_factory
         self._settings = settings
@@ -367,6 +368,7 @@ class WorkspaceService:
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._project_stopper = project_stopper or stop_project_containers
         self._cleaner_factory = cleaner_factory or default_cleaner
+        self._pr_adoption_metadata_fetcher = pr_adoption_metadata_fetcher
 
     @property
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
@@ -414,6 +416,19 @@ class WorkspaceService:
             )
             await s.commit()
             return workspace_retry_response(result)
+
+    async def adopt_pull_request_monitor(
+        self,
+        req: PullRequestMonitorAdoptionRequest,
+    ) -> PullRequestMonitorAdoptionResponse:
+        async with self._factory() as s:
+            result = await PullRequestMonitorAdoptionService(
+                s,
+                metadata_fetcher=self._pr_adoption_metadata_fetcher,
+                settings=self._settings,
+            ).adopt(req)
+            await s.commit()
+            return result
 
     async def get(self, workspace_id: str) -> WorkspaceResponse | None:
         async with self._factory() as s:
@@ -600,11 +615,7 @@ class WorkspaceService:
     async def get_operation(self, operation_id: str) -> OperationResponse | None:
         async with self._factory() as s:
             operation = await OperationRepository(s).get(operation_id)
-            return (
-                OperationResponse.model_validate(operation)
-                if operation is not None
-                else None
-            )
+            return OperationResponse.model_validate(operation) if operation is not None else None
 
     async def list_events(
         self,
@@ -654,10 +665,7 @@ class WorkspaceService:
                 return None
             path = Path(stream.path)
 
-        if (
-            self._log_root is not None
-            and not path.resolve().is_relative_to(self._log_root)
-        ):
+        if self._log_root is not None and not path.resolve().is_relative_to(self._log_root):
             return None
         if not path.is_file():
             return None
@@ -728,15 +736,11 @@ async def create_workspace_v2_row(
         task_title=payload.task.title,
         task_prompt=payload.task.prompt,
         task_external_id=payload.task.external_id,
-        task_class=(
-            payload.task.task_class.value if payload.task.task_class is not None else None
-        ),
+        task_class=(payload.task.task_class.value if payload.task.task_class is not None else None),
         owned_paths=payload.task.owned_paths,
         task_policy=task_policy,
         auto_merge=payload.task.auto_merge,
-        initial_review_grace_period_seconds=(
-            payload.task.initial_review_grace_period_seconds
-        ),
+        initial_review_grace_period_seconds=(payload.task.initial_review_grace_period_seconds),
         agent=payload.task.agent.value,
         env_profile=None,
         profile_ref=payload.workspace.profile_ref,
@@ -754,9 +758,7 @@ async def create_workspace_v2_row(
         prompt=payload.task.prompt,
         external_id=payload.task.external_id,
         idempotency_key=idempotency_key,
-        task_class=(
-            payload.task.task_class.value if payload.task.task_class is not None else None
-        ),
+        task_class=(payload.task.task_class.value if payload.task.task_class is not None else None),
         owned_paths=payload.task.owned_paths,
     )
     attempt = await TaskAttemptRepository(session).create_for_workspace(task=task, workspace=ws)
@@ -872,9 +874,7 @@ async def retry_workspace_row(
                 source_base_commit=source.base_commit,
                 conformance_evidence=conformance_evidence,
                 conformance_evidence_ref=(
-                    conformance_context.evidence_ref
-                    if conformance_context is not None
-                    else None
+                    conformance_context.evidence_ref if conformance_context is not None else None
                 ),
                 source_branch_name=source.branch_name,
                 source_remote_push_branch=source.remote_push_branch,
@@ -910,9 +910,7 @@ async def retry_workspace_row(
         owned_paths=list(source.owned_paths),
         task_policy=retried_task_policy,
         auto_merge=source.auto_merge,
-        initial_review_grace_period_seconds=(
-            source.initial_review_grace_period_seconds
-        ),
+        initial_review_grace_period_seconds=(source.initial_review_grace_period_seconds),
         agent=source.agent,
         env_profile=source.env_profile,
         profile_ref=source.profile_ref,
@@ -947,8 +945,8 @@ async def retry_workspace_row(
     retry_scheduler_policy["retry_attempt_number"] = max(0, attempt.attempt_number - 1)
     retry_policy[SCHEDULER_POLICY_KEY] = retry_scheduler_policy
     retried.task_policy = retry_policy
-    latest_source_reservation = (
-        await ResourceReservationRepository(session).list_for_workspace(source.id, limit=1)
+    latest_source_reservation = await ResourceReservationRepository(session).list_for_workspace(
+        source.id, limit=1
     )
     retry_resource_summary: dict[str, Any] = {}
     if latest_source_reservation:
@@ -1084,10 +1082,7 @@ def _retry_task_policy(
         ),
         coordination_warnings,
     )
-    if (
-        planning_scope_context is not None
-        and planning_scope_context.fallback_model is not None
-    ):
+    if planning_scope_context is not None and planning_scope_context.fallback_model is not None:
         policy["agent_model"] = planning_scope_context.fallback_model["model"]
     return policy
 
@@ -1238,9 +1233,7 @@ def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResp
         attempt_number=result.attempt_number,
         status_url=f"/v1/workspaces/{new_workspace_id}",
         events_url=f"/v1/workspaces/{new_workspace_id}/events",
-        provider_readiness_preflight=workspace_provider_readiness_preflight(
-            result.new_workspace
-        ),
+        provider_readiness_preflight=workspace_provider_readiness_preflight(result.new_workspace),
     )
 
 
@@ -1304,13 +1297,11 @@ def workspace_response(
         getattr(workspace, "resolved_profile", None)
     )
     computed_fields["provider_recovery_state"] = _provider_recovery_state_response(workspace)
-    computed_fields["provider_readiness_preflight"] = (
-        workspace_provider_readiness_preflight(workspace)
+    computed_fields["provider_readiness_preflight"] = workspace_provider_readiness_preflight(
+        workspace
     )
     computed_fields["pricing"] = _pricing_metadata_response(workspace)
-    return WorkspaceResponse.model_validate(
-        _WorkspaceResponseSource(workspace, computed_fields)
-    )
+    return WorkspaceResponse.model_validate(_WorkspaceResponseSource(workspace, computed_fields))
 
 
 def _workspace_app_endpoint_responses(
@@ -1740,9 +1731,7 @@ def _workspace_runtime_health_from_events(
         if not isinstance(message, str):
             message = reason_code
         return WorkspaceRuntimeHealthResponse(
-            status="unavailable"
-            if reason_code == "RUNTIME_INSPECTION_UNAVAILABLE"
-            else "stranded",
+            status="unavailable" if reason_code == "RUNTIME_INSPECTION_UNAVAILABLE" else "stranded",
             reason_code=reason_code,
             decision=cast(Any, decision),
             message=message,
@@ -1892,9 +1881,7 @@ async def _resource_reservation_summary(
             float(active_totals["steady_memory_gb"]) + reservation_plan.steady_memory_gb
         ),
         peak_cpu=float(active_totals["peak_cpu"]) + reservation_plan.peak_cpu,
-        peak_memory_gb=(
-            float(active_totals["peak_memory_gb"]) + reservation_plan.peak_memory_gb
-        ),
+        peak_memory_gb=(float(active_totals["peak_memory_gb"]) + reservation_plan.peak_memory_gb),
         disk_mb=int(active_totals["disk_mb"]) + (reservation_plan.disk_mb or 0),
         dind_slots=int(active_totals["dind_slots"]) + reservation_plan.dind_slots,
     )
@@ -2047,9 +2034,7 @@ def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]
     if payload.task.model is not None:
         policy["agent_model"] = payload.task.model
     if payload.task.out_of_scope_changes is not None:
-        policy["out_of_scope_changes"] = payload.task.out_of_scope_changes.model_dump(
-            mode="json"
-        )
+        policy["out_of_scope_changes"] = payload.task.out_of_scope_changes.model_dump(mode="json")
     if payload.task.provider_recovery is not None:
         policy["provider_recovery"] = payload.task.provider_recovery.model_dump(
             mode="json",
@@ -2067,8 +2052,6 @@ def profile_with_requested_tier(
         return profile
     return profile.model_copy(
         update={
-            "validation": profile.validation.model_copy(
-                update={"requested_tier": requested_tier}
-            )
+            "validation": profile.validation.model_copy(update={"requested_tier": requested_tier})
         }
     )

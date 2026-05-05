@@ -564,9 +564,7 @@ def test_resolved_profile_digest_is_canonical_and_covers_full_profile() -> None:
 @pytest.mark.unit
 def test_environment_identity_inputs_sanitize_environment_and_secret_values() -> None:
     inputs = environment_identity_inputs(
-        _identity_profile(
-            ports={"database": "postgres://user:password@127.0.0.1:5432/app"}
-        )
+        _identity_profile(ports={"database": "postgres://user:password@127.0.0.1:5432/app"})
     )
     rendered = str(inputs)
 
@@ -579,8 +577,7 @@ def test_environment_identity_inputs_sanitize_environment_and_secret_values() ->
         {
             "name": "database",
             "value_sha256": (
-                "sha256:"
-                "30e7d9f55ac1fd625ddc82a1f36e9e1e827f18f3f90a4f32630ca8b4f1a7bc6e"
+                "sha256:30e7d9f55ac1fd625ddc82a1f36e9e1e827f18f3f90a4f32630ca8b4f1a7bc6e"
             ),
         }
     ]
@@ -591,15 +588,13 @@ def test_environment_identity_inputs_sanitize_environment_and_secret_values() ->
         {
             "name": "API_TOKEN",
             "value_sha256": (
-                "sha256:"
-                "6a34e9cf66e854e6e1b79ceebaac12897fd6845a57d2cf367ca33a74fdbc1afb"
+                "sha256:6a34e9cf66e854e6e1b79ceebaac12897fd6845a57d2cf367ca33a74fdbc1afb"
             ),
         },
         {
             "name": "PYTHON_VERSION",
             "value_sha256": (
-                "sha256:"
-                "33307da56af13f791584518fef2e49641180bfbf2ef7b2d256c9ab6fad564f80"
+                "sha256:33307da56af13f791584518fef2e49641180bfbf2ef7b2d256c9ab6fad564f80"
             ),
         },
     ]
@@ -860,7 +855,12 @@ class TestHappyPath:
             "hook_kind": "generated_setup",
             "timeout_seconds": 120,
         }
-        assert [call.args[-1].removeprefix("[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; ") for call in fake.calls] == [
+        assert [
+            call.args[-1].removeprefix(
+                "[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; "
+            )
+            for call in fake.calls
+        ] == [
             "python scripts/setup.py",
             "python scripts/db_generated_setup.py",
             "python scripts/pre_agent.py",
@@ -1053,10 +1053,7 @@ class TestHappyPath:
             "command timed out after 1s"
         )
         assert (
-            tmp_path
-            / "logs"
-            / "ws_db_refresh_timeout"
-            / "validation.01_db_refresh.stderr.log"
+            tmp_path / "logs" / "ws_db_refresh_timeout" / "validation.01_db_refresh.stderr.log"
         ).read_text(encoding="utf-8") == "command timed out after 1s"
         assert result.first_failure.metadata == {
             "database_hook": True,
@@ -1067,9 +1064,7 @@ class TestHappyPath:
         assert all("pytest -q" not in call[-1] for call in timeout_runner.calls)
 
     @pytest.mark.unit
-    async def test_generated_setup_timeout_uses_hook_specific_reason(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_generated_setup_timeout_uses_hook_specific_reason(self, tmp_path: Path) -> None:
         timeout_runner = _ImmediateTimeoutStreamingRunner()
         val = ValidationRunner(
             runner=timeout_runner,
@@ -1391,9 +1386,7 @@ class TestProfileHealthChecks:
         assert result.first_failure is not None
         assert result.first_failure.reason_code == "HEALTHCHECK_COMMAND_FAILED"
         assert result.first_failure.metadata["target"] == "curl -fsS http://api:8000/healthz"
-        assert "connection refused" in result.first_failure.stderr_path.read_text(
-            encoding="utf-8"
-        )
+        assert "connection refused" in result.first_failure.stderr_path.read_text(encoding="utf-8")
         assert "pytest -q" not in fake.calls[0].args[-1]
 
     @pytest.mark.unit
@@ -1549,9 +1542,7 @@ class TestProfileHealthChecks:
         assert not (tmp_path / "logs" / "ws_bad_stream_id").exists()
 
     @pytest.mark.unit
-    def test_invalid_healthcheck_configuration_helpers_fail_closed(
-        self, tmp_path: Path
-    ) -> None:
+    def test_invalid_healthcheck_configuration_helpers_fail_closed(self, tmp_path: Path) -> None:
         invalid = ProfileHealthCheck.model_construct(
             name="invalid",
             kind=None,
@@ -1584,9 +1575,7 @@ class TestProfileHealthChecks:
             "import sys; print('invalid healthcheck configuration', file=sys.stderr); sys.exit(2)",
         ]
         assert _healthcheck_failure_reason(http, latest) == "HEALTHCHECK_HTTP_STATUS_MISMATCH"
-        assert _healthcheck_failure_reason(invalid, latest) == (
-            "HEALTHCHECK_INVALID_CONFIGURATION"
-        )
+        assert _healthcheck_failure_reason(invalid, latest) == ("HEALTHCHECK_INVALID_CONFIGURATION")
 
 
 class TestFailureStopsEarly:
@@ -1788,9 +1777,10 @@ class TestCoverageEnforcement:
 
         assert validation_module.coverage_command_plan(no_command).command == ""
         assert validation_module.coverage_command_plan(non_pytest).command == "coverage report"
-        assert "pytest -n 5 --dist=loadscope" in validation_module.coverage_command_plan(
-            max_only
-        ).command
+        assert (
+            "pytest -n 5 --dist=loadscope"
+            in validation_module.coverage_command_plan(max_only).command
+        )
         assert validation_module._pytest_token_index(["python", "-m", "unittest"]) is None
         assert validation_module._is_pytest_coverage_command("coverage run -m pytest")
 
@@ -1989,10 +1979,7 @@ class TestCoverageEnforcement:
         fake, val = runner
         fake.queue_result(
             returncode=1,
-            stdout=(
-                "ERROR unable to write coverage XML report\n"
-                "Total coverage: 95%\n"
-            ),
+            stdout=("ERROR unable to write coverage XML report\nTotal coverage: 95%\n"),
         )
         profile = WorkspaceProfile.model_validate(
             {
@@ -2226,9 +2213,7 @@ class TestCoverageEnforcement:
         assert result.command_result.stdout_path.name == "01_baseline_coverage.stdout"
 
     @pytest.mark.unit
-    def test_python_coverage_parser_prefers_total_line_over_summary(
-        self, tmp_path: Path
-    ) -> None:
+    def test_python_coverage_parser_prefers_total_line_over_summary(self, tmp_path: Path) -> None:
         coverage_output = tmp_path / "coverage.txt"
         coverage_output.write_text(
             "coverage summary: 91%\n"
@@ -2260,9 +2245,7 @@ class TestCoverageEnforcement:
             ("pytest --cov='unterminated", False),
         ],
     )
-    def test_pytest_coverage_command_detection(
-        self, command: str, expected: bool
-    ) -> None:
+    def test_pytest_coverage_command_detection(self, command: str, expected: bool) -> None:
         assert validation_module._is_pytest_coverage_command(command) is expected
 
     @pytest.mark.unit
@@ -2294,9 +2277,7 @@ class TestCoverageEnforcement:
             encoding="utf-8",
         )
 
-        evidence = validation_module._parse_pytest_failure_evidence_from_files(
-            [missing, output]
-        )
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([missing, output])
 
         assert evidence.node_ids == ["tests/unit/test_widget.py::test_handles_edges"]
         assert evidence.evidence == [
@@ -2304,9 +2285,7 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
-    def test_pytest_failure_parser_accepts_indented_summary_lines(
-        self, tmp_path: Path
-    ) -> None:
+    def test_pytest_failure_parser_accepts_indented_summary_lines(self, tmp_path: Path) -> None:
         output = tmp_path / "pytest.txt"
         output.write_text(
             "  FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError\n"
@@ -2322,9 +2301,7 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
-    def test_pytest_failure_parser_ignores_indented_fallback_evidence(
-        self, tmp_path: Path
-    ) -> None:
+    def test_pytest_failure_parser_ignores_indented_fallback_evidence(self, tmp_path: Path) -> None:
         output = tmp_path / "pytest.txt"
         output.write_text(
             "ERROR collecting tests/unit/test_imports.py\n"
@@ -2443,10 +2420,7 @@ class TestCoverageEnforcement:
         assert _healthcheck_cli_args(invalid)[0:2] == ["python", "-c"]
         assert _healthcheck_attempt_timeout(invalid, remaining_seconds=0) == 0.001
         assert _healthcheck_failure_reason(http, failed) == "HEALTHCHECK_HTTP_STATUS_MISMATCH"
-        assert (
-            _healthcheck_failure_reason(invalid, failed)
-            == "HEALTHCHECK_INVALID_CONFIGURATION"
-        )
+        assert _healthcheck_failure_reason(invalid, failed) == "HEALTHCHECK_INVALID_CONFIGURATION"
 
 
 class TestMigration:
@@ -2806,7 +2780,10 @@ class TestValidationResultHelpers:
             ValidationResult(commands=[command_failure], coverage=coverage_failure).first_failure
             is command_failure
         )
-        assert ValidationResult(commands=[], coverage=coverage_failure).first_failure is coverage_command
+        assert (
+            ValidationResult(commands=[], coverage=coverage_failure).first_failure
+            is coverage_command
+        )
 
     @pytest.mark.unit
     def test_coverage_metadata_and_result_helpers_handle_absent_percent_and_command(
@@ -2906,9 +2883,9 @@ class TestValidationResultHelpers:
         assert result.returncode == 124
         assert result.reason_code == "PHASE_TIMEOUT"
         assert result.stderr_path.read_text(encoding="utf-8") == "command timed out after 0.01s"
-        assert (
-            tmp_path / "logs" / "ws_timeout" / "validation.01_timeout.stderr.log"
-        ).read_text(encoding="utf-8") == "command timed out after 0.01s"
+        assert (tmp_path / "logs" / "ws_timeout" / "validation.01_timeout.stderr.log").read_text(
+            encoding="utf-8"
+        ) == "command timed out after 0.01s"
 
     @pytest.mark.unit
     async def test_exec_timeout_invokes_targeted_cleanup_before_phase_timeout(
@@ -3066,10 +3043,7 @@ class TestValidationResultHelpers:
         assert args[args.index("awf-exec") + 2 :] == ["pytest", "-q"]
         assert result.stdout_path.read_text(encoding="utf-8") == "out\n"
         assert (
-            tmp_path
-            / "logs"
-            / "ws_streaming_timeout"
-            / "validation.01_validate.stdout.log"
+            tmp_path / "logs" / "ws_streaming_timeout" / "validation.01_validate.stdout.log"
         ).read_text(encoding="utf-8") == "out\n"
 
     @pytest.mark.unit
@@ -3157,16 +3131,10 @@ class TestValidationResultHelpers:
         assert result.stdout_path.read_text(encoding="utf-8") == "late out\n"
         assert result.stderr_path.read_text(encoding="utf-8") == "late err\n"
         assert (
-            tmp_path
-            / "logs"
-            / "ws_non_streaming_timeout"
-            / "validation.01_validate.stdout.log"
+            tmp_path / "logs" / "ws_non_streaming_timeout" / "validation.01_validate.stdout.log"
         ).read_text(encoding="utf-8") == "late out\n"
         assert (
-            tmp_path
-            / "logs"
-            / "ws_non_streaming_timeout"
-            / "validation.01_validate.stderr.log"
+            tmp_path / "logs" / "ws_non_streaming_timeout" / "validation.01_validate.stderr.log"
         ).read_text(encoding="utf-8") == "late err\n"
 
     @pytest.mark.unit

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import awf.service.gc as gc
@@ -45,10 +45,6 @@ from awf.service.gc import (
 )
 
 """Terminal workspace filesystem GC tests."""
-
-
-
-
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +96,21 @@ async def _workspace(
             workspace.pr_merge_sha = pr_merge_sha
         await session.commit()
         return workspace.id
+
+
+async def _set_workspace_gc_state(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    **values: object,
+) -> None:
+    async with session_factory() as session:
+        await session.execute(
+            update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
 
 
 async def _issue_gc_secret_lease(
@@ -718,13 +729,13 @@ async def test_default_plan_includes_superseded_no_work_candidate(
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=200),
     )
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        assert workspace is not None
-        workspace.status = "superseded"
-        workspace.compose_project_name = "awf_superseded_gc"
-        workspace.updated_at = now - timedelta(hours=200)
-        await session.commit()
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        status="superseded",
+        compose_project_name="awf_superseded_gc",
+        updated_at=now - timedelta(hours=200),
+    )
 
     monkeypatch.setattr(
         gc,
@@ -769,12 +780,13 @@ async def test_default_plan_preserves_recent_superseded_no_work_within_retention
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
     )
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        assert workspace is not None
-        workspace.status = "superseded"
-        workspace.compose_project_name = "awf_recent_superseded_gc"
-        await session.commit()
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        status="superseded",
+        compose_project_name="awf_recent_superseded_gc",
+        updated_at=now - timedelta(hours=1),
+    )
 
     monkeypatch.setattr(
         gc,
@@ -820,13 +832,13 @@ async def test_single_workspace_filesystem_gc_keeps_superseded_no_work_on_dry_ru
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=200),
     )
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        assert workspace is not None
-        workspace.status = "superseded"
-        workspace.compose_project_name = "awf_single_superseded_gc"
-        workspace.updated_at = now - timedelta(hours=200)
-        await session.commit()
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        status="superseded",
+        compose_project_name="awf_single_superseded_gc",
+        updated_at=now - timedelta(hours=200),
+    )
     _write(tmp_path / "service" / "git" / "worktrees" / workspace_id / "repo.txt", "repo")
 
     monkeypatch.setattr(
@@ -873,12 +885,13 @@ async def test_default_plan_preserves_superseded_when_agent_container_not_runnin
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=200),
     )
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        assert workspace is not None
-        workspace.status = "superseded"
-        workspace.compose_project_name = "awf_superseded_gc_not_running"
-        await session.commit()
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        status="superseded",
+        compose_project_name="awf_superseded_gc_not_running",
+        updated_at=now - timedelta(hours=200),
+    )
 
     monkeypatch.setattr(
         gc,
@@ -924,12 +937,13 @@ async def test_default_plan_preserves_superseded_when_agent_service_missing(
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=200),
     )
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        assert workspace is not None
-        workspace.status = "superseded"
-        workspace.compose_project_name = "awf_superseded_missing_agent_service"
-        await session.commit()
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        status="superseded",
+        compose_project_name="awf_superseded_missing_agent_service",
+        updated_at=now - timedelta(hours=200),
+    )
 
     monkeypatch.setattr(
         gc,
@@ -1351,12 +1365,12 @@ async def test_cleanup_is_idempotent_after_partial_compose_failure(
     assert first_payload["candidates"][0]["compose_teardown"]["reason_code"] == (
         "DOCKER_COMPOSE_DOWN_FAILED"
     )
-    assert {
-        data["status"] for data in first_payload["candidates"][0]["paths"].values()
-    } == {"skipped"}
-    assert {
-        data["reason_code"] for data in first_payload["candidates"][0]["paths"].values()
-    } == {"DOCKER_COMPOSE_DOWN_FAILED"}
+    assert {data["status"] for data in first_payload["candidates"][0]["paths"].values()} == {
+        "skipped"
+    }
+    assert {data["reason_code"] for data in first_payload["candidates"][0]["paths"].values()} == {
+        "DOCKER_COMPOSE_DOWN_FAILED"
+    }
     assert worktree.exists()
     assert compose.exists()
     assert auth.exists()
@@ -1389,9 +1403,9 @@ async def test_cleanup_is_idempotent_after_partial_compose_failure(
     assert third.status == "succeeded"
     assert third.deleted_paths == []
     assert third.delete_errors == []
-    assert {
-        data["status"] for data in third_payload["candidates"][0]["paths"].values()
-    } == {"already_removed"}
+    assert {data["status"] for data in third_payload["candidates"][0]["paths"].values()} == {
+        "already_removed"
+    }
     assert third.path_outcomes[0].to_dict()["reason_code"] == "PATH_ALREADY_REMOVED"
 
 
@@ -1452,15 +1466,11 @@ async def test_single_workspace_cleanup_is_idempotent_after_partial_compose_fail
         "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
         "error": "network still in use",
     }
-    assert {
-        data["status"] for data in first_candidate["paths"].values()
-    } == {"skipped"}
-    assert {
-        data["reason_code"] for data in first_candidate["paths"].values()
-    } == {"DOCKER_COMPOSE_DOWN_FAILED"}
-    assert {
-        data["error"] for data in first_candidate["paths"].values()
-    } == {"network still in use"}
+    assert {data["status"] for data in first_candidate["paths"].values()} == {"skipped"}
+    assert {data["reason_code"] for data in first_candidate["paths"].values()} == {
+        "DOCKER_COMPOSE_DOWN_FAILED"
+    }
+    assert {data["error"] for data in first_candidate["paths"].values()} == {"network still in use"}
     assert worktree.exists()
     assert compose.exists()
     assert auth.exists()
@@ -1496,12 +1506,10 @@ async def test_single_workspace_cleanup_is_idempotent_after_partial_compose_fail
     assert third.status == "succeeded"
     assert third.deleted_paths == []
     assert third.delete_errors == []
-    assert {
-        data["status"] for data in third_candidate["paths"].values()
-    } == {"already_removed"}
-    assert {
-        data["reason_code"] for data in third_candidate["paths"].values()
-    } == {"PATH_ALREADY_REMOVED"}
+    assert {data["status"] for data in third_candidate["paths"].values()} == {"already_removed"}
+    assert {data["reason_code"] for data in third_candidate["paths"].values()} == {
+        "PATH_ALREADY_REMOVED"
+    }
     assert all("error" not in data for data in third_candidate["paths"].values())
 
 
@@ -1764,7 +1772,9 @@ def test_delete_gc_path_treats_missing_path_as_already_removed(tmp_path: Path) -
 
 
 @pytest.mark.unit
-def test_delete_gc_path_handles_rmtree_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_delete_gc_path_handles_rmtree_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = tmp_path / "service" / "git" / "worktrees" / "ws_error"
     target.mkdir(parents=True)
     gc_path = WorkspaceGCPath(
@@ -1774,7 +1784,9 @@ def test_delete_gc_path_handles_rmtree_oserror(tmp_path: Path, monkeypatch: pyte
         estimated_bytes=0,
     )
 
-    monkeypatch.setattr("shutil.rmtree", lambda _p: (_ for _ in ()).throw(OSError("permission denied")))
+    monkeypatch.setattr(
+        "shutil.rmtree", lambda _p: (_ for _ in ()).throw(OSError("permission denied"))
+    )
 
     deleted, error = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
 
@@ -1822,18 +1834,27 @@ def test_estimate_bytes_treats_stat_races_as_zero_or_skipped() -> None:
     assert _estimate_bytes(_RacyDirectory()) == 7  # type: ignore[arg-type]
 
 
-
 def test_snapshot_has_no_work_unavailable():
     snap = RuntimeSnapshot(stack_state="unavailable", services=[])
     assert _snapshot_has_no_work(snap) is False
 
+
 def test_snapshot_has_no_work_no_agent():
-    snap = RuntimeSnapshot(stack_state="running", services=[RuntimeService(name="other", state="running", command="sleep", container_id="id", image="img")])
+    snap = RuntimeSnapshot(
+        stack_state="running",
+        services=[
+            RuntimeService(
+                name="other", state="running", command="sleep", container_id="id", image="img"
+            )
+        ],
+    )
     assert _snapshot_has_no_work(snap) is False
+
 
 def test_container_command_is_idle_no_command():
     assert _container_command_is_idle(None) is False
     assert _container_command_is_idle("") is False
+
 
 def test_classify_workspace_completed_retention_expired():
     ws = Workspace(
@@ -1841,9 +1862,16 @@ def test_classify_workspace_completed_retention_expired():
         status=WorkspaceStatus.completed.value,
         updated_at=datetime.now(UTC) - timedelta(hours=25),
         compose_project_name="proj",
-        pr_url="http://github.com/pr/1"
+        pr_url="http://github.com/pr/1",
     )
-    res = _classify_workspace_for_gc(ws, work_dir=Path("/tmp"), now=datetime.now(UTC), cutoff_at=datetime.now(UTC) - timedelta(hours=24), default_policy=False, cleanup_enabled=True)
+    res = _classify_workspace_for_gc(
+        ws,
+        work_dir=Path("/tmp"),
+        now=datetime.now(UTC),
+        cutoff_at=datetime.now(UTC) - timedelta(hours=24),
+        default_policy=False,
+        cleanup_enabled=True,
+    )
     assert isinstance(res, WorkspaceGCCandidate)
     assert res.reason_code == COMPLETED_PR_RETENTION_EXPIRED
 
@@ -1852,11 +1880,19 @@ def test_classify_workspace_completed_retention_expired():
         status=WorkspaceStatus.completed.value,
         updated_at=datetime.now(UTC) - timedelta(hours=25),
         compose_project_name="proj",
-        pr_url=None
+        pr_url=None,
     )
-    res2 = _classify_workspace_for_gc(ws2, work_dir=Path("/tmp"), now=datetime.now(UTC), cutoff_at=datetime.now(UTC) - timedelta(hours=24), default_policy=False, cleanup_enabled=True)
+    res2 = _classify_workspace_for_gc(
+        ws2,
+        work_dir=Path("/tmp"),
+        now=datetime.now(UTC),
+        cutoff_at=datetime.now(UTC) - timedelta(hours=24),
+        default_policy=False,
+        cleanup_enabled=True,
+    )
     assert isinstance(res2, WorkspaceGCCandidate)
     assert res2.reason_code == TERMINAL_WORKSPACE_RETENTION_EXPIRED
+
 
 def test_failed_terminal_workspace_has_no_work_exception(monkeypatch: pytest.MonkeyPatch):
     class _RaisingRuntimeInspector:
@@ -1869,40 +1905,65 @@ def test_failed_terminal_workspace_has_no_work_exception(monkeypatch: pytest.Mon
 
     assert _failed_terminal_workspace_has_no_work(ws) is False
 
+
 def test_classify_workspace_failed_no_work_but_within_retention():
     ws = Workspace(
         id="ws_1",
         status=WorkspaceStatus.failed.value,
         updated_at=datetime.now(UTC) - timedelta(hours=1),
-        compose_project_name="proj"
+        compose_project_name="proj",
     )
     with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=True):
-        res = _classify_workspace_for_gc(ws, work_dir=Path("/tmp"), now=datetime.now(UTC), cutoff_at=datetime.now(UTC) - timedelta(hours=24), default_policy=True, cleanup_enabled=True)
+        res = _classify_workspace_for_gc(
+            ws,
+            work_dir=Path("/tmp"),
+            now=datetime.now(UTC),
+            cutoff_at=datetime.now(UTC) - timedelta(hours=24),
+            default_policy=True,
+            cleanup_enabled=True,
+        )
         assert isinstance(res, WorkspaceGCPreserved)
         assert res.reason_code == WORKSPACE_WITHIN_RETENTION
+
 
 def test_classify_workspace_failed_no_work_expired():
     ws = Workspace(
         id="ws_1",
         status=WorkspaceStatus.failed.value,
         updated_at=datetime.now(UTC) - timedelta(hours=25),
-        compose_project_name="proj"
+        compose_project_name="proj",
     )
     with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=True):
-        res = _classify_workspace_for_gc(ws, work_dir=Path("/tmp"), now=datetime.now(UTC), cutoff_at=datetime.now(UTC) - timedelta(hours=24), default_policy=True, cleanup_enabled=True)
+        res = _classify_workspace_for_gc(
+            ws,
+            work_dir=Path("/tmp"),
+            now=datetime.now(UTC),
+            cutoff_at=datetime.now(UTC) - timedelta(hours=24),
+            default_policy=True,
+            cleanup_enabled=True,
+        )
         assert isinstance(res, WorkspaceGCCandidate)
         assert res.reason_code == FAILED_WORKSPACE_NO_WORK
+
 
 def test_classify_workspace_failed_has_work_but_expired_no_default_policy():
     ws = Workspace(
         id="ws_1",
         status=WorkspaceStatus.failed.value,
         updated_at=datetime.now(UTC) - timedelta(hours=25),
-        compose_project_name="proj"
+        compose_project_name="proj",
     )
     with patch("awf.service.gc._failed_terminal_workspace_has_no_work", return_value=False):
-        res = _classify_workspace_for_gc(ws, work_dir=Path("/tmp"), now=datetime.now(UTC), cutoff_at=datetime.now(UTC) - timedelta(hours=24), default_policy=False, cleanup_enabled=True)
+        res = _classify_workspace_for_gc(
+            ws,
+            work_dir=Path("/tmp"),
+            now=datetime.now(UTC),
+            cutoff_at=datetime.now(UTC) - timedelta(hours=24),
+            default_policy=False,
+            cleanup_enabled=True,
+        )
         assert isinstance(res, WorkspaceGCPreserved)
+
 
 @pytest.mark.unit
 async def test_no_work_superseded_workspace_is_gc_candidate_without_recovery_metadata(
@@ -1919,13 +1980,13 @@ async def test_no_work_superseded_workspace_is_gc_candidate_without_recovery_met
         updated_at=now - timedelta(hours=200),
     )
 
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        assert workspace is not None
-        workspace.status = "superseded"
-        workspace.compose_project_name = "awf_superseded_meta_test"
-        workspace.updated_at = now - timedelta(hours=200)
-        await session.commit()
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        status="superseded",
+        compose_project_name="awf_superseded_meta_test",
+        updated_at=now - timedelta(hours=200),
+    )
 
     monkeypatch.setattr(
         gc,
@@ -1979,22 +2040,17 @@ async def test_no_work_superseded_gc_candidate_includes_recovery_metadata_refere
         updated_at=now - timedelta(hours=200),
     )
 
-    async with session_factory() as session:
-        workspace = await session.get(Workspace, workspace_id)
-        assert workspace is not None
-        workspace.status = "superseded"
-        workspace.compose_project_name = "awf_superseded_recovery_meta"
-        workspace.updated_at = now - timedelta(hours=200)
-        workspace.failure_reason = FailureReason.agent_failure.value
-        workspace.failure_message = "RESOURCE_EXHAUSTED RetryableQuotaError"
-        workspace.failure_details = {
-            "provider": "google",
-            "model": "gemini-2.5-pro",
-            "retryable": True,
-            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
-        }
-        await session.commit()
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        status="superseded",
+        compose_project_name="awf_superseded_recovery_meta",
+        updated_at=now - timedelta(hours=200),
+        failure_reason=FailureReason.agent_failure.value,
+        failure_message="RESOURCE_EXHAUSTED RetryableQuotaError",
+    )
 
+    async with session_factory() as session:
         from awf.common.ids import new_event_id
 
         session.add(
@@ -2003,8 +2059,8 @@ async def test_no_work_superseded_gc_candidate_includes_recovery_metadata_refere
                 workspace_id=workspace_id,
                 event_type="workspace.provider_recovery_requested",
                 reason_code="PROVIDER_FAILURE_DETECTED",
-                old_state=workspace.status,
-                new_state=workspace.status,
+                old_state="superseded",
+                new_state="superseded",
                 payload={"reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED"},
             )
         )

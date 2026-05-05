@@ -362,6 +362,88 @@ class TestWorkspaceRemonitor:
         mock.assert_not_called()
 
 
+class TestWorkspaceAdoptPr:
+    @pytest.mark.unit
+    def test_posts_adoption_request_with_api_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=202,
+            payload={
+                "workspace_id": "ws_adopt",
+                "status": "requested",
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                    "--agent",
+                    "codex",
+                    "--no-auto-merge",
+                    "--initial-review-grace-period-seconds",
+                    "0",
+                    "--reason",
+                    "recover existing PR",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "ws_adopt" in result.stdout
+        assert "env-secret" not in result.stdout
+        assert "env-secret" not in result.stderr
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/adopt-pr",
+        )
+        assert mock.call_args.kwargs["json"] == {
+            "repo_url": None,
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "pr_url": None,
+            "agent": "codex",
+            "profile_ref": "auto",
+            "profile": None,
+            "auto_merge": False,
+            "initial_review_grace_period_seconds": 0,
+            "task_title": None,
+            "task_prompt": None,
+            "reason": "recover existing PR",
+        }
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
+
+    @pytest.mark.unit
+    def test_posts_pr_url_without_repo_fields(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--pr-url",
+                    "https://github.com/dimileeh/aira-web/pull/277",
+                    "--api-token",
+                    "cli-secret",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args.kwargs["json"]["pr_url"] == (
+            "https://github.com/dimileeh/aira-web/pull/277"
+        )
+        assert mock.call_args.kwargs["json"]["repo_slug"] is None
+        assert mock.call_args.kwargs["json"]["pr_number"] is None
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer cli-secret"}
+
+
 class TestWorkspaceList:
     @pytest.mark.unit
     def test_passes_limit_as_query_param(self) -> None:

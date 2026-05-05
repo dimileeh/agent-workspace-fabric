@@ -8,23 +8,15 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.audit import AUDIT_SCHEMA
-from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceEventRepository, WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from tests.postgres import postgres_test_session
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = make_session_factory(engine)
-    async with factory() as s:
+    async with postgres_test_session() as s:
         yield s
-
-    await engine.dispose()
 
 
 @pytest.mark.unit

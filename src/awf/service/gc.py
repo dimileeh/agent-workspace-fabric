@@ -62,9 +62,7 @@ TERMINAL_WORKSPACE_GC_STATUSES = frozenset(
     }
 )
 
-_FAILED_NO_WORK_TERMINAL_STATUSES = frozenset(
-    {WorkspaceStatus.failed.value, "superseded"}
-)
+_FAILED_NO_WORK_TERMINAL_STATUSES = frozenset({WorkspaceStatus.failed.value, "superseded"})
 _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS = ("sleep infinity", "tail -f /dev/null")
 
 _RUNTIME_INSPECTOR = RuntimeInspector()
@@ -101,7 +99,9 @@ class WorkspaceGCPath:
         reason_code: str | None = None,
     ) -> dict[str, object]:
         resolved_status = status or ("already_removed" if not self.exists else "planned")
-        resolved_reason = reason_code or (PATH_ALREADY_REMOVED if not self.exists else "PATH_PLANNED")
+        resolved_reason = reason_code or (
+            PATH_ALREADY_REMOVED if not self.exists else "PATH_PLANNED"
+        )
         payload: dict[str, object] = {
             "path": str(self.path),
             "exists": self.exists,
@@ -394,9 +394,7 @@ class WorkspaceGCResult:
     def to_dict(self) -> dict[str, object]:
         deleted_paths = set(self.deleted_paths)
         delete_errors = {(error.kind, error.path): error.error for error in self.delete_errors}
-        path_outcomes = {
-            (outcome.kind, outcome.path): outcome for outcome in self.path_outcomes
-        }
+        path_outcomes = {(outcome.kind, outcome.path): outcome for outcome in self.path_outcomes}
         payload = self.plan.to_dict()
         payload.update(
             {
@@ -686,13 +684,21 @@ async def run_terminal_workspace_gc(
             reservation_releases={},
         )
 
-    resolved_worktree_remover = _resolve_worktree_remover(worktree_remover, session_factory, work_dir)
+    resolved_worktree_remover = _resolve_worktree_remover(
+        worktree_remover, session_factory, work_dir
+    )
     secret_lease_revocations = await _revoke_gc_secret_leases(
         session_factory,
         workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
         now=current_time,
     )
-    deleted_paths, delete_errors, path_outcomes, compose_teardowns, worktree_removes = await _delete_gc_plan_paths(
+    (
+        deleted_paths,
+        delete_errors,
+        path_outcomes,
+        compose_teardowns,
+        worktree_removes,
+    ) = await _delete_gc_plan_paths(
         plan,
         compose_teardown=compose_teardown,
         worktree_remover=resolved_worktree_remover,
@@ -754,7 +760,9 @@ async def run_workspace_filesystem_gc(
     current_time = _to_utc(now or datetime.now(UTC))
     normalized_work_dir = Path(work_dir).expanduser()
     cutoff_at = current_time - timedelta(hours=min_age_hours)
-    resolved_worktree_remover = _resolve_worktree_remover(worktree_remover, session_factory, work_dir)
+    resolved_worktree_remover = _resolve_worktree_remover(
+        worktree_remover, session_factory, work_dir
+    )
     async with session_factory() as session:
         workspace = await session.get(Workspace, workspace_id)
 
@@ -805,7 +813,13 @@ async def run_workspace_filesystem_gc(
         workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
         now=current_time,
     )
-    deleted_paths, delete_errors, path_outcomes, compose_teardowns, worktree_removes = await _delete_gc_plan_paths(
+    (
+        deleted_paths,
+        delete_errors,
+        path_outcomes,
+        compose_teardowns,
+        worktree_removes,
+    ) = await _delete_gc_plan_paths(
         plan,
         compose_teardown=compose_teardown,
         worktree_remover=resolved_worktree_remover,
@@ -1129,9 +1143,7 @@ def _gc_result(
     has_errors = bool(delete_errors) or any(
         v.get("error") is not None for v in res_releases.values()
     )
-    status: WorkspaceCleanupExecutionStatus = (
-        "partial" if has_errors else "succeeded"
-    )
+    status: WorkspaceCleanupExecutionStatus = "partial" if has_errors else "succeeded"
     return WorkspaceGCResult(
         plan=plan,
         dry_run=False,
@@ -1143,9 +1155,7 @@ def _gc_result(
         worktree_removes=wt_removes,
         reservation_releases=res_releases,
         status=status,
-        reason_code=(
-            CLEANUP_EXECUTION_PARTIAL if has_errors else CLEANUP_EXECUTION_SUCCEEDED
-        ),
+        reason_code=(CLEANUP_EXECUTION_PARTIAL if has_errors else CLEANUP_EXECUTION_SUCCEEDED),
     )
 
 
@@ -1350,9 +1360,7 @@ def _snapshot_has_no_work(snapshot: RuntimeSnapshot) -> bool:
         return False
 
     agent_services = [
-        service
-        for service in snapshot.services
-        if (service.name or "").lower() == "agent"
+        service for service in snapshot.services if (service.name or "").lower() == "agent"
     ]
     if not agent_services:
         return False
@@ -1369,9 +1377,7 @@ def _container_command_is_idle(command: str | None) -> bool:
     if not command:
         return False
     command_text = command.lower()
-    return any(
-        pattern in command_text for pattern in _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS
-    )
+    return any(pattern in command_text for pattern in _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS)
 
 
 def _has_pr_metadata(workspace: Workspace) -> bool:

@@ -17,10 +17,7 @@ def test_classifies_gemini_auth_failure_and_redacts_secret_fingerprint() -> None
     classification = classify_provider_failure(
         reason_code=None,
         stdout="",
-        stderr=(
-            "GEMINI_API_KEY=AIzaSyProviderSecret was rejected: "
-            "401 unauthorized"
-        ),
+        stderr=("GEMINI_API_KEY=AIzaSyProviderSecret was rejected: 401 unauthorized"),
         provider=None,
         model="gemini-1.5-pro",
     )

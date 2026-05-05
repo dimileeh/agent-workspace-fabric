@@ -8,7 +8,7 @@ Database wiring:
     - ``configure_database(app, factory)`` attaches a session factory to ``app.state``
       so dependencies in ``awf.api.deps`` can yield sessions per request.
     - For production, ``lifespan`` (wired below) creates the engine + factory from
-      settings. For tests, the ``client`` fixture creates an in-memory SQLite engine.
+      settings. Tests inject a PostgreSQL-backed factory.
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ from awf.api.routes import (
     ws,
 )
 from awf.common.config import Settings, get_settings
-from awf.db.base import Base
 from awf.db.session import make_engine, make_session_factory
 
 
@@ -55,10 +54,6 @@ def configure_database(
         app.state.db_engine = engine
     if database_url is not None:
         app.state.database_url = database_url
-        from awf.api.deps import _sqlite_file_path, _sqlite_identity
-
-        db_path = _sqlite_file_path(database_url)
-        app.state.db_sqlite_identity = _sqlite_identity(db_path) if db_path is not None else None
 
 
 @asynccontextmanager
@@ -70,12 +65,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     settings: Settings = get_settings()
     engine = make_engine(settings.database_url)
-
-    # For local SQLite we create tables at startup so the first run works out of the box.
-    # For Postgres in prod we rely on Alembic migrations (applied separately by `alembic upgrade`).
-    if settings.database_url.startswith("sqlite"):
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
 
     factory = make_session_factory(engine)
     configure_database(app, factory, engine=engine, database_url=settings.database_url)

@@ -619,9 +619,7 @@ class TestMergeStateStatus:
         action = decide(
             status,
             MonitorState(
-                sync_base_no_progress_signature=(
-                    "abc1234567890def|MERGEABLE|BEHIND|base_behind=1"
-                ),
+                sync_base_no_progress_signature=("abc1234567890def|MERGEABLE|BEHIND|base_behind=1"),
                 sync_base_no_progress_count=3,
             ),
             MonitorConfig(max_no_progress_sync_base_attempts=3),

@@ -130,8 +130,7 @@ def _is_sensitive_key(key: str) -> bool:
     if _SENSITIVE_NON_TOKEN_KEY_RE.search(key):
         return True
     return bool(
-        _SENSITIVE_TOKEN_KEY_RE.search(key)
-        and not _TOKEN_USAGE_METADATA_KEY_RE.search(key)
+        _SENSITIVE_TOKEN_KEY_RE.search(key) and not _TOKEN_USAGE_METADATA_KEY_RE.search(key)
     )
 
 

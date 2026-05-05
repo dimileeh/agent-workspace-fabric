@@ -8,22 +8,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.base import Base
 from awf.db.repositories import ProviderModelCircuitBreakerRepository
-from awf.db.session import make_engine, make_session_factory
+from tests.postgres import postgres_test_session
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = make_session_factory(engine)
-    async with factory() as s:
+    async with postgres_test_session() as s:
         yield s
-
-    await engine.dispose()
 
 
 @pytest.mark.unit
@@ -208,21 +200,30 @@ async def test_provider_model_circuit_open_queries_close_expired_rows(
         failure_threshold=1,
         cooldown_seconds=10,
     )
-    assert await repo.open_breaker(
-        provider="anthropic",
-        model="missing",
-        now=now,
-    ) is None
-    assert await repo.open_breaker(
-        provider="anthropic",
-        model="claude-sonnet",
-        now=now + timedelta(seconds=5),
-    ) == open_breaker
-    assert await repo.open_breaker(
-        provider="anthropic",
-        model="claude-sonnet",
-        now=now + timedelta(seconds=10),
-    ) is None
+    assert (
+        await repo.open_breaker(
+            provider="anthropic",
+            model="missing",
+            now=now,
+        )
+        is None
+    )
+    assert (
+        await repo.open_breaker(
+            provider="anthropic",
+            model="claude-sonnet",
+            now=now + timedelta(seconds=5),
+        )
+        == open_breaker
+    )
+    assert (
+        await repo.open_breaker(
+            provider="anthropic",
+            model="claude-sonnet",
+            now=now + timedelta(seconds=10),
+        )
+        is None
+    )
 
     await repo.record_failure(
         provider="openai",
@@ -236,10 +237,13 @@ async def test_provider_model_circuit_open_queries_close_expired_rows(
         cooldown_seconds=10,
     )
     assert await repo.open_breakers_for_pairs(pairs=[("", "gpt-5.5")], now=now) == {}
-    assert await repo.open_breakers_for_pairs(
-        pairs=[("openai", "gpt-5.5")],
-        now=now + timedelta(seconds=10),
-    ) == {}
+    assert (
+        await repo.open_breakers_for_pairs(
+            pairs=[("openai", "gpt-5.5")],
+            now=now + timedelta(seconds=10),
+        )
+        == {}
+    )
 
     await repo.record_failure(
         provider="ollama",

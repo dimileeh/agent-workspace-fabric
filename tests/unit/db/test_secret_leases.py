@@ -8,10 +8,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import event, select
-from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent, WorkspaceSecretLease
 from awf.db.repositories import (
@@ -20,20 +19,13 @@ from awf.db.repositories import (
     WorkspaceRepository,
     _secret_lease_insert_if_absent_stmt,
 )
-from awf.db.session import make_engine, make_session_factory
+from tests.postgres import postgres_test_session
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = make_session_factory(engine)
-    async with factory() as s:
+    async with postgres_test_session() as s:
         yield s
-
-    await engine.dispose()
 
 
 async def _workspace(session: AsyncSession) -> Workspace:
@@ -79,21 +71,11 @@ def _lease_issues(now: datetime) -> list[SecretLeaseIssue]:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    ("dialect_name", "dialect"),
-    [
-        ("postgresql", postgresql.dialect()),
-        ("sqlite", sqlite.dialect()),
-    ],
-)
-def test_secret_lease_issue_insert_has_conflict_guard(
-    dialect_name: str,
-    dialect: object,
-) -> None:
-    stmt = _secret_lease_insert_if_absent_stmt(dialect_name)
+def test_secret_lease_issue_insert_has_conflict_guard() -> None:
+    stmt = _secret_lease_insert_if_absent_stmt("postgresql")
 
     assert stmt is not None
-    sql = str(stmt.compile(dialect=dialect))
+    sql = str(stmt.compile(dialect=postgresql.dialect()))
     assert "ON CONFLICT (workspace_id, secret_name, kind, target) DO NOTHING" in sql
     assert "RETURNING" in sql
 
@@ -279,11 +261,10 @@ async def test_issue_declared_leases_fetches_existing_workspace_rows_once(
     lease_selects = [
         statement
         for statement in statements
-        if statement.startswith("select")
-        and "from workspace_secret_leases" in statement
+        if statement.startswith("select") and "from workspace_secret_leases" in statement
     ]
     assert len(lease_selects) == 1
-    assert "where workspace_secret_leases.workspace_id = ?" in lease_selects[0]
+    assert "where workspace_secret_leases.workspace_id =" in lease_selects[0]
 
 
 @pytest.mark.unit
@@ -542,16 +523,17 @@ async def test_issue_event_omits_empty_issue_metadata(session: AsyncSession) -> 
 
 
 @pytest.mark.unit
-async def test_expire_due_leases_tolerates_orphaned_local_rows(
+async def test_expire_due_leases_records_workspace_event_for_valid_rows(
     session: AsyncSession,
 ) -> None:
     now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
-    orphan = WorkspaceSecretLease(
-        id="sl_orphaned_test_lease",
-        workspace_id="ws_missing",
-        secret_name="orphan-token",
+    workspace = await _workspace(session)
+    lease = WorkspaceSecretLease(
+        id="sl_expiring_test_lease",
+        workspace_id=workspace.id,
+        secret_name="expiring-token",
         kind="env",
-        target="ORPHAN_TOKEN",
+        target="EXPIRING_TOKEN",
         mode="ro",
         required=True,
         provider=None,
@@ -562,12 +544,13 @@ async def test_expire_due_leases_tolerates_orphaned_local_rows(
         issue_metadata={},
         mount_metadata={},
     )
-    session.add(orphan)
+    session.add(lease)
     await session.flush()
 
     expired = await SecretLeaseRepository(session).expire_due_leases(now=now)
 
-    assert expired == [orphan]
-    assert orphan.status == "expired"
+    assert expired == [lease]
+    assert lease.status == "expired"
     events = (await session.execute(select(WorkspaceEvent))).scalars().all()
-    assert events == []
+    assert events[-1].event_type == "workspace.secret_lease"
+    assert events[-1].reason_code == "SECRET_LEASE_EXPIRED"

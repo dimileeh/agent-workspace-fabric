@@ -34,19 +34,25 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+from sqlalchemy import text
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 
 from awf.common.commands import AsyncioSubprocessRunner  # noqa: E402
 from awf.common.github_client import RepoRef  # noqa: E402
+from awf.db.session import make_engine  # noqa: E402
 from awf.runtime.release_pr_sync import (  # noqa: E402
     ReleasePrSyncError,
     ensure_release_pr_open,
 )
+
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 
 
 async def _main(
@@ -86,7 +92,7 @@ async def _main(
     # Idempotency guard: only launch if no sync_release_pr workspace is
     # already active for this PR.
     if attach_monitor and result.pr_number is not None:
-        if _monitor_already_running(
+        if await _monitor_already_running(
             work_dir=work_dir, repo_slug=repo.slug(), pr_number=result.pr_number
         ):
             print(f"  monitor already active for {repo.slug()}#{result.pr_number}; skipping launch")
@@ -166,7 +172,7 @@ async def _main(
 _MONITOR_COOLDOWN_SECONDS = 300
 
 
-def _monitor_already_running(*, work_dir: Path, repo_slug: str, pr_number: int) -> bool:
+async def _monitor_already_running(*, work_dir: Path, repo_slug: str, pr_number: int) -> bool:
     """True iff we should skip spawning a new monitor for this PR.
 
     Skips when EITHER:
@@ -185,57 +191,54 @@ def _monitor_already_running(*, work_dir: Path, repo_slug: str, pr_number: int) 
     fragile: a run_awf.py that crashes fast leaves a ``provisioning``
     row but NO process. DB-based check catches both cases.
     """
-    # SQLite DB lives at ``<work_dir>/awf.db``. The scheduler may run
-    # before any workspace has been provisioned (no DB yet) — treat
-    # that as "no monitor running" and let the launch proceed.
-    db_path = work_dir / "awf.db"
-    if not db_path.exists():
-        return False
-    # Use a plain sync sqlite3 connection — the scheduler isn't inside
-    # the async driver's event loop and doesn't need to pull in the
-    # whole SQLAlchemy stack for a single SELECT.
-    import sqlite3
-
+    del work_dir
     repo_url_variants = _repo_url_variants(repo_slug)
-    placeholders = ",".join("?" for _ in repo_url_variants)
+    database_url = os.environ.get("AWF_DATABASE_URL", _DEFAULT_DATABASE_URL)
+    engine = make_engine(database_url)
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as conn:
+        async with engine.connect() as conn:
             # (a) Non-terminal row → classic "already running".
-            cur = conn.execute(
-                f"""SELECT 1 FROM workspaces
+            active = await conn.execute(
+                text(
+                    """SELECT 1 FROM workspaces
                     WHERE task_kind = 'sync_release_pr'
-                      AND pr_number = ?
-                      AND repo_url IN ({placeholders})
-                      AND status NOT IN ('completed', 'failed')
-                    LIMIT 1""",
-                (pr_number, *repo_url_variants),
+                      AND pr_number = :pr_number
+                      AND repo_url = ANY(:repo_url_variants)
+                      AND status NOT IN ('completed', 'failed', 'cancelled', 'destroyed')
+                    LIMIT 1"""
+                ),
+                {
+                    "pr_number": pr_number,
+                    "repo_url_variants": list(repo_url_variants),
+                },
             )
-            if cur.fetchone() is not None:
+            if active.fetchone() is not None:
                 return True
             # (b) Terminal row within cooldown window → skip.
-            # Compare ``updated_at`` against ``now() - cooldown`` using
-            # SQLite's own time math so we don't depend on the
-            # timezone the row was written in.
-            cur = conn.execute(
-                f"""SELECT 1 FROM workspaces
+            terminal = await conn.execute(
+                text(
+                    """SELECT 1 FROM workspaces
                     WHERE task_kind = 'sync_release_pr'
-                      AND pr_number = ?
-                      AND repo_url IN ({placeholders})
+                      AND pr_number = :pr_number
+                      AND repo_url = ANY(:repo_url_variants)
                       AND status IN ('completed', 'failed')
-                      AND datetime(updated_at) >= datetime('now', ?)
+                      AND updated_at >= now() - (:cooldown_seconds * interval '1 second')
                     ORDER BY updated_at DESC
-                    LIMIT 1""",
-                (
-                    pr_number,
-                    *repo_url_variants,
-                    f"-{_MONITOR_COOLDOWN_SECONDS} seconds",
+                    LIMIT 1"""
                 ),
+                {
+                    "pr_number": pr_number,
+                    "repo_url_variants": list(repo_url_variants),
+                    "cooldown_seconds": _MONITOR_COOLDOWN_SECONDS,
+                },
             )
-            row = cur.fetchone()
-    except sqlite3.DatabaseError:
-        # Malformed / locked DB → don't let that stop the scheduler.
+            row = terminal.fetchone()
+    except Exception:
+        # DB unavailable → don't let that stop the scheduler.
         # Worst case we spawn a duplicate, which is what we had before.
         return False
+    finally:
+        await engine.dispose()
     return row is not None
 
 

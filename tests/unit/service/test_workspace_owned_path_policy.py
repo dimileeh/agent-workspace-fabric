@@ -8,22 +8,17 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateV2Request
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import QueueDecisionRepository, WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.service.workspaces import WorkspaceService
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _request(
@@ -151,8 +146,7 @@ async def test_create_v2_allows_overlap_and_records_risk_event(
     assert events[0].payload == {
         "warning_code": "OWNED_PATH_OVERLAP_RISK",
         "message": (
-            "Owned paths overlap active workspaces; this may require rebase "
-            "or conflict resolution."
+            "Owned paths overlap active workspaces; this may require rebase or conflict resolution."
         ),
         "workspace_ids": [existing.id],
         "overlaps": [

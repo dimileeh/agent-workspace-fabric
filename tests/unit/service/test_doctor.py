@@ -222,9 +222,7 @@ def test_doctor_warns_when_active_open_network_posture_is_visible(
             "open": 1,
             "unknown": 0,
         },
-        "open_examples": [
-            {"workspace_id": "ws_open", "status": "running", "pr_url": None}
-        ],
+        "open_examples": [{"workspace_id": "ws_open", "status": "running", "pr_url": None}],
     }
 
     async def _collector(_settings: ServiceSettings, **_kwargs: object) -> dict[str, object]:
@@ -431,7 +429,9 @@ def test_doctor_maps_plain_language_failures(tmp_path: Path) -> None:
     diagnostics = _diagnostics_by_id(report)
 
     assert report.to_dict()["status"] == "fail"
-    assert diagnostics["docker"]["message"] == "Docker is installed but the daemon is not reachable."
+    assert (
+        diagnostics["docker"]["message"] == "Docker is installed but the daemon is not reachable."
+    )
     assert diagnostics["docker"]["action"] == "Start Docker Desktop or verify AWF_DOCKER_HOST."
     assert diagnostics["api"]["message"].startswith("AWF API is not reachable")
     assert diagnostics["worker"]["reason"] == "WORKER_CONTAINER_EXITED"
@@ -621,7 +621,9 @@ def test_doctor_reports_local_config_issues(tmp_path: Path) -> None:
 
     assert config["status"] == "fail"
     assert config["reason"] == "LOCAL_CONFIG_INVALID"
-    assert config["message"] == "Local AWF configuration has issues that block reliable service use."
+    assert (
+        config["message"] == "Local AWF configuration has issues that block reliable service use."
+    )
     assert config["metadata"]["issue_count"] == 4
     serialized = json.dumps(report.to_dict(), sort_keys=True)
     assert "db-secret" not in serialized
@@ -820,20 +822,26 @@ def test_doctor_helper_fallbacks_and_endpoint_parsing(
     assert doctor_mod._reason_text("FUTURE_OK", label="Future", status="ok").message == (
         "Future check passed."
     )
-    assert doctor_mod._reason_text(
-        "FUTURE_SKIP",
-        label="Future",
-        status="skipped",
-    ).action == "Fix prerequisite checks first."
+    assert (
+        doctor_mod._reason_text(
+            "FUTURE_SKIP",
+            label="Future",
+            status="skipped",
+        ).action
+        == "Fix prerequisite checks first."
+    )
     assert doctor_mod._reason_text("FUTURE_FAIL", label="Future", status="fail").message == (
         "Future check reported fail."
     )
-    assert doctor_mod._reason_text(
-        "PORT_OPEN",
-        label="Port",
-        status="ok",
-        context={"endpoint": "localhost:8000"},
-    ).message == "localhost:8000 is accepting connections."
+    assert (
+        doctor_mod._reason_text(
+            "PORT_OPEN",
+            label="Port",
+            status="ok",
+            context={"endpoint": "localhost:8000"},
+        ).message
+        == "localhost:8000 is accepting connections."
+    )
 
     assert doctor_mod._status_from_check({"status": "fail"}) == "fail"
     assert doctor_mod._status_from_check({"status": "unknown"}) == "warn"
@@ -848,7 +856,7 @@ def test_doctor_helper_fallbacks_and_endpoint_parsing(
     assert doctor_mod._parse_compose_ps('{"Service":"worker"}') == [{"Service": "worker"}]
     assert doctor_mod._parse_compose_ps('"not-an-object"') is None
     assert doctor_mod._parse_compose_ps('["not-an-object"]') is None
-    assert doctor_mod._parse_compose_ps('1\n2') is None
+    assert doctor_mod._parse_compose_ps("1\n2") is None
     assert doctor_mod._parse_compose_ps('{"Service":"api"}\nnot-json') is None
 
     fallback = {"Service": "api", "Name": "awf-api"}
@@ -859,7 +867,10 @@ def test_doctor_helper_fallbacks_and_endpoint_parsing(
     assert doctor_mod._api_endpoint("https://example.test") == ("example.test", 443)
     assert "Invalid IPv6 URL" in doctor_mod._api_endpoint("http://[::1")
     assert "Port could not be cast" in doctor_mod._api_endpoint("http://localhost:bad")
-    assert "host" in doctor_mod._database_endpoint("sqlite+aiosqlite:///tmp.db")
+    assert doctor_mod._database_endpoint("postgresql+asyncpg://awf:awf_dev@localhost:5433/awf") == (
+        "localhost",
+        5433,
+    )
     bad_db = doctor_mod._database_endpoint("postgresql://user:secret-db@host:bad/db")
     assert "secret-db" not in bad_db
 
@@ -883,9 +894,7 @@ def test_doctor_helper_fallbacks_and_endpoint_parsing(
         def __str__(self) -> str:
             return "opaque-secret"
 
-    assert doctor_mod._redact_value(_SecretObject(), frozenset({"opaque-secret"})) == (
-        "<redacted>"
-    )
+    assert doctor_mod._redact_value(_SecretObject(), frozenset({"opaque-secret"})) == ("<redacted>")
 
 
 @pytest.mark.unit

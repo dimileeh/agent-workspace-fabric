@@ -433,9 +433,7 @@ def test_docker_timeout_and_generic_errors_are_actionable_warnings(tmp_path: Pat
         work_dir=tmp_path,
         docker_host="unix:///var/run/docker.sock",
         workspace_view=_view(),
-        run_subprocess=_run_with(
-            containers=subprocess.TimeoutExpired(["docker", "ps"], timeout=5)
-        ),
+        run_subprocess=_run_with(containers=subprocess.TimeoutExpired(["docker", "ps"], timeout=5)),
     ).to_check_payload()
     generic = detect_orphan_resources(
         work_dir=tmp_path,

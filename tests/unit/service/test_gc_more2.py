@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import awf.service.gc as gc
@@ -14,6 +14,8 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import ResourceReservation, Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
@@ -98,6 +100,29 @@ async def _workspace(
             workspace.pr_merge_sha = pr_merge_sha
         await session.commit()
         return workspace.id
+
+
+async def _task_attempt_for_workspace(
+    session: AsyncSession,
+    workspace_id: str,
+) -> str:
+    workspace = await session.get(Workspace, workspace_id)
+    assert workspace is not None
+    task = await TaskRepository(session).create_or_get(
+        repo_url=workspace.repo_url,
+        base_branch=workspace.branch_base,
+        title=workspace.task_title,
+        prompt=workspace.task_prompt,
+        external_id=f"gc-{workspace_id}",
+        idempotency_key=None,
+        task_class=workspace.task_class,
+        owned_paths=list(workspace.owned_paths),
+    )
+    attempt = await TaskAttemptRepository(session).create_for_workspace(
+        task=task,
+        workspace=workspace,
+    )
+    return attempt.id
 
 
 def test_classify_workspace_failed_has_work_but_expired_no_default_policy():
@@ -212,9 +237,10 @@ async def test_gc_execute_releases_resource_reservations(
 
     async with session_factory() as session:
         repo = ResourceReservationRepository(session)
+        attempt_id = await _task_attempt_for_workspace(session, workspace_id)
         await repo.create(
             workspace_id=workspace_id,
-            attempt_id="attempt_1",
+            attempt_id=attempt_id,
             node_id="node_1",
             steady_cpu=1.0,
             steady_memory_gb=2.0,
@@ -239,9 +265,7 @@ async def test_gc_execute_releases_resource_reservations(
     assert result.reservation_releases[workspace_id]["released_count"] >= 1
 
     async with session_factory() as session:
-        stmt = select(ResourceReservation).where(
-            ResourceReservation.workspace_id == workspace_id
-        )
+        stmt = select(ResourceReservation).where(ResourceReservation.workspace_id == workspace_id)
         rows = list((await session.execute(stmt)).scalars())
         assert all(r.released_at is not None for r in rows)
 
@@ -275,9 +299,10 @@ async def test_gc_dry_run_does_not_remove_worktree_or_release_reservations(
 
     async with session_factory() as session:
         repo = ResourceReservationRepository(session)
+        attempt_id = await _task_attempt_for_workspace(session, workspace_id)
         await repo.create(
             workspace_id=workspace_id,
-            attempt_id="attempt_2",
+            attempt_id=attempt_id,
             node_id="node_1",
             steady_cpu=1.0,
             steady_memory_gb=2.0,
@@ -381,10 +406,14 @@ async def test_gc_reservation_release_failure_does_not_block_other_cleanup(
     _write(compose / "compose.yml", "compose")
     _write(auth / "codex" / "auth.json", "auth")
 
-    async def _failing_release(self: object, workspace_id: str, **kwargs: object) -> list[ResourceReservation]:
+    async def _failing_release(
+        self: object, workspace_id: str, **kwargs: object
+    ) -> list[ResourceReservation]:
         raise RuntimeError("db connection lost")
 
-    with patch.object(ResourceReservationRepository, "release_active_for_workspace", _failing_release):
+    with patch.object(
+        ResourceReservationRepository, "release_active_for_workspace", _failing_release
+    ):
         result = await run_terminal_workspace_gc(
             session_factory,
             work_dir=work_dir,
@@ -443,9 +472,10 @@ async def test_gc_idempotent_after_partial_failure(
 
     async with session_factory() as session:
         repo = ResourceReservationRepository(session)
+        attempt_id = await _task_attempt_for_workspace(session, workspace_id)
         await repo.create(
             workspace_id=workspace_id,
-            attempt_id="attempt_idempotent",
+            attempt_id=attempt_id,
             node_id="node_1",
             steady_cpu=1.0,
             steady_memory_gb=2.0,
@@ -937,10 +967,15 @@ async def test_plan_reclassifies_old_failed_active_workspace_from_candidate_to_p
         updated_at=now - timedelta(hours=200),
     )
     async with session_factory() as session:
-        ws = await session.get(Workspace, failed_id)
-        assert ws is not None
-        ws.compose_project_name = "awf_reclassify_gc"
-        ws.updated_at = now - timedelta(hours=200)
+        await session.execute(
+            update(Workspace)
+            .where(Workspace.id == failed_id)
+            .values(
+                compose_project_name="awf_reclassify_gc",
+                updated_at=now - timedelta(hours=200),
+            )
+            .execution_options(synchronize_session=False)
+        )
         await session.commit()
 
     monkeypatch.setattr(
@@ -997,9 +1032,21 @@ async def test_default_worktree_remover_succeeds(
         updated_at=now,
         age_hours=200,
         reason_code="COMPLETED_PR_RETENTION_EXPIRED",
-        worktree=WorkspaceGCPath(kind="worktree", path=work_dir / "git" / "worktrees" / workspace_id, exists=True, estimated_bytes=0),
-        compose=WorkspaceGCPath(kind="compose", path=work_dir / "compose" / workspace_id, exists=False, estimated_bytes=0),
-        auth=WorkspaceGCPath(kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0),
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=work_dir / "git" / "worktrees" / workspace_id,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
     )
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
@@ -1042,9 +1089,21 @@ async def test_default_worktree_remover_skips_when_no_repo_url(
         updated_at=now,
         age_hours=200,
         reason_code="FAILED_WORKSPACE_NO_WORK",
-        worktree=WorkspaceGCPath(kind="worktree", path=work_dir / "git" / "worktrees" / workspace_id, exists=True, estimated_bytes=0),
-        compose=WorkspaceGCPath(kind="compose", path=work_dir / "compose" / workspace_id, exists=False, estimated_bytes=0),
-        auth=WorkspaceGCPath(kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0),
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=work_dir / "git" / "worktrees" / workspace_id,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
     )
 
     result = await _default_worktree_remover(
@@ -1084,8 +1143,15 @@ async def test_default_worktree_remover_skips_existing_plain_directory(
             exists=True,
             estimated_bytes=0,
         ),
-        compose=WorkspaceGCPath(kind="compose", path=work_dir / "compose" / workspace_id, exists=False, estimated_bytes=0),
-        auth=WorkspaceGCPath(kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
     )
 
     result = await _default_worktree_remover(
@@ -1118,9 +1184,21 @@ async def test_default_worktree_remover_handles_git_error(
         updated_at=now,
         age_hours=200,
         reason_code="COMPLETED_PR_RETENTION_EXPIRED",
-        worktree=WorkspaceGCPath(kind="worktree", path=work_dir / "git" / "worktrees" / workspace_id, exists=True, estimated_bytes=0),
-        compose=WorkspaceGCPath(kind="compose", path=work_dir / "compose" / workspace_id, exists=False, estimated_bytes=0),
-        auth=WorkspaceGCPath(kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0),
+        worktree=WorkspaceGCPath(
+            kind="worktree",
+            path=work_dir / "git" / "worktrees" / workspace_id,
+            exists=True,
+            estimated_bytes=0,
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose",
+            path=work_dir / "compose" / workspace_id,
+            exists=False,
+            estimated_bytes=0,
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / workspace_id, exists=False, estimated_bytes=0
+        ),
     )
 
     with patch("awf.node.git_manager.GitManager") as mock_gm_cls:
@@ -1162,9 +1240,10 @@ async def test_release_gc_reservations_rollback_on_db_exception(
 
     async with session_factory() as session:
         repo = ResourceReservationRepository(session)
+        attempt_id = await _task_attempt_for_workspace(session, ws_b)
         await repo.create(
             workspace_id=ws_b,
-            attempt_id="attempt_b1",
+            attempt_id=attempt_id,
             node_id="node_b1",
             steady_cpu=1.0,
             steady_memory_gb=2.0,
@@ -1179,14 +1258,18 @@ async def test_release_gc_reservations_rollback_on_db_exception(
     call_count = 0
     original_release = ResourceReservationRepository.release_active_for_workspace
 
-    async def _flaky_release(self: ResourceReservationRepository, workspace_id: str, **kwargs: object) -> list[ResourceReservation]:
+    async def _flaky_release(
+        self: ResourceReservationRepository, workspace_id: str, **kwargs: object
+    ) -> list[ResourceReservation]:
         nonlocal call_count
         call_count += 1
         if workspace_id == ws_a:
             raise RuntimeError("simulated db error")
         return await original_release(self, workspace_id, **kwargs)
 
-    with patch.object(ResourceReservationRepository, "release_active_for_workspace", _flaky_release):
+    with patch.object(
+        ResourceReservationRepository, "release_active_for_workspace", _flaky_release
+    ):
         result = await run_terminal_workspace_gc(
             session_factory,
             work_dir=work_dir,

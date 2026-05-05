@@ -49,7 +49,6 @@ from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
@@ -277,9 +276,9 @@ def _build_auth_mounts(
 
     Mount mode notes:
     - Codex is intentionally absent here. A live host ``~/.codex`` contains
-      logs, SQLite state, session files, and locks that collide with Codex
-      Desktop. Each workspace gets an isolated Codex home via
-      ``_workspace_auth_mounts`` instead.
+      logs, session files, and locks that collide with Codex Desktop. Each
+      workspace gets an isolated Codex home via ``_workspace_auth_mounts``
+      instead.
     - OpenCode and Ollama are also intentionally absent here. Their writable
       config/auth state is seeded per workspace so agent runs cannot mutate
       the operator's live home directory.
@@ -1436,35 +1435,6 @@ def print_defer_summary(*, artifacts_root: Path, out: IO[str]) -> None:
         out.write(f"  {ws_id}: {count} {noun} — {author} on {locator}\n")
 
 
-_ADDITIVE_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
-    # (table, column, SQL fragment). Additive only — safe to apply in
-    # any order because ``ALTER TABLE ADD COLUMN`` is idempotent when
-    # gated on the PRAGMA check below.
-    ("workspaces", "remote_push_branch", "VARCHAR(256)"),
-    ("workspaces", "profile_ref", "VARCHAR(128)"),
-    ("workspaces", "requested_profile", "JSON"),
-    ("workspaces", "resolved_profile", "JSON"),
-)
-
-
-def _add_missing_columns(connection: Any) -> None:
-    """Idempotently add columns that later migrations introduced to an
-    existing SQLite DB.
-
-    Driven from ``_ADDITIVE_MIGRATIONS`` rather than Alembic because
-    local ``run_awf.py`` workspaces are a dev convenience that predates
-    the alembic setup for the runtime DB. Production DBs get proper
-    migrations; this path keeps long-lived local run directories
-    resumable without dropping state."""
-    import sqlalchemy as _sa
-
-    inspector = _sa.inspect(connection)
-    for table, column, sql_type in _ADDITIVE_MIGRATIONS:
-        existing = {c["name"] for c in inspector.get_columns(table)}
-        if column not in existing:
-            connection.execute(_sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
-
-
 async def _main(
     config_path: Path,
     work_dir: Path,
@@ -1492,20 +1462,13 @@ async def _main(
     ).stdout.strip()
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    db_path = work_dir / "awf.db"
-    if db_path.exists() and reset_state:
-        print(f"Resetting AWF run database at {db_path}", flush=True)
-        db_path.unlink()
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # ``create_all`` creates tables but never alters existing ones.
-        # When a persisted local SQLite DB predates newer code, columns
-        # added by later migrations (e.g. ``remote_push_branch`` in
-        # b2c3d4e5f6a1) are missing and the first write fails. Apply
-        # additive column migrations manually here so operators can
-        # resume an old run_awf workspace without dropping state.
-        await conn.run_sync(_add_missing_columns)
+    if reset_state:
+        print("--reset-state is ignored for PostgreSQL-backed run state", flush=True)
+    database_url = os.environ.get(
+        "AWF_DATABASE_URL",
+        "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
+    )
+    engine = make_engine(database_url)
     factory = make_session_factory(engine)
 
     try:
@@ -1568,7 +1531,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--reset-state",
         action="store_true",
-        help="Delete and recreate awf.db before launching tasks in this work dir.",
+        help="Deprecated no-op; PostgreSQL state is managed by migrations and retention cleanup.",
     )
     args = parser.parse_args()
     if args.keep_state and args.reset_state:

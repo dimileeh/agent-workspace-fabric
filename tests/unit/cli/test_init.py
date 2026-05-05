@@ -41,11 +41,7 @@ def _docker_diagnostic(status: str = "ok") -> Any:
 def _doctor_report(*diagnostics: Any) -> Any:
     from awf.service.doctor.models import DoctorReport
 
-    overall = (
-        "ok"
-        if all(getattr(d, "status", "ok") == "ok" for d in diagnostics)
-        else "fail"
-    )
+    overall = "ok" if all(getattr(d, "status", "ok") == "ok" for d in diagnostics) else "fail"
     return DoctorReport(
         service="awf",
         status=overall,
@@ -107,9 +103,7 @@ def _stub_local_prerequisites(
     doctor_status: str = "ok",
     preview_smoke_payload: bool = False,
 ) -> None:
-    async def _collect_service_status(
-        _settings: object, **kwargs: object
-    ) -> dict[str, object]:
+    async def _collect_service_status(_settings: object, **kwargs: object) -> dict[str, object]:
         return {
             "service": "awf",
             "status": service_status,
@@ -128,9 +122,8 @@ def _stub_local_prerequisites(
         lambda report: f"AWF doctor: {getattr(report, 'status', 'unknown')}\n",
     )
     if preview_smoke_payload:
-        def _preview_project_onboarding(
-            _path: Path, **_kwargs: object
-        ) -> object:
+
+        def _preview_project_onboarding(_path: Path, **_kwargs: object) -> object:
             return SimpleNamespace(
                 draft=SimpleNamespace(template="generic"),
                 smoke_request={"dummy": "payload"},
@@ -181,7 +174,8 @@ def test_init_invalid_project_path_is_reported_without_service_checks(
         raise AssertionError("should not collect service status")
 
     def _fail_to_collect_doctor_report(
-        *_args: object, **_kwargs: object,
+        *_args: object,
+        **_kwargs: object,
     ) -> object:
         raise AssertionError("should not collect doctor report")
 
@@ -223,9 +217,7 @@ def test_init_runs_status_and_doctor_checks(
 ) -> None:
     calls = {"status": 0, "doctor": 0}
 
-    async def _collect_service_status(
-        _settings: object, **_kwargs: object
-    ) -> dict[str, object]:
+    async def _collect_service_status(_settings: object, **_kwargs: object) -> dict[str, object]:
         calls["status"] += 1
         return {
             "service": "awf",
@@ -260,9 +252,7 @@ def test_init_continues_when_service_status_probe_raises(
 ) -> None:
     calls = {"status": 0, "doctor": 0}
 
-    async def _collect_service_status(
-        _settings: object, **_kwargs: object
-    ) -> dict[str, object]:
+    async def _collect_service_status(_settings: object, **_kwargs: object) -> dict[str, object]:
         calls["status"] += 1
         raise RuntimeError("service probe is unavailable")
 
@@ -272,7 +262,9 @@ def test_init_continues_when_service_status_probe_raises(
     ) -> object:
         calls["doctor"] += 1
         status_collector = kwargs["status_collector"]
-        status = await status_collector(_settings, strict_providers=frozenset(), provider_environ={})
+        status = await status_collector(
+            _settings, strict_providers=frozenset(), provider_environ={}
+        )
         return SimpleNamespace(status=status.get("status", "fail"), diagnostics=())
 
     monkeypatch.setattr("awf.service.config.resolve_service_settings", lambda: object())
@@ -307,9 +299,7 @@ def test_init_uses_cached_service_status_for_doctor_report(
         "agent_readiness": {"status": "ok"},
     }
 
-    async def _collect_service_status(
-        _settings: object, **_kwargs: object
-    ) -> dict[str, object]:
+    async def _collect_service_status(_settings: object, **_kwargs: object) -> dict[str, object]:
         calls["status"] += 1
         return status_payload
 
@@ -319,7 +309,9 @@ def test_init_uses_cached_service_status_for_doctor_report(
     ) -> object:
         calls["doctor"] += 1
         status_collector = kwargs["status_collector"]
-        collected_status = await status_collector(_settings, strict_providers=frozenset(), provider_environ={})
+        collected_status = await status_collector(
+            _settings, strict_providers=frozenset(), provider_environ={}
+        )
         calls["doctor_status"] += 1
         assert collected_status is status_payload
         return SimpleNamespace(status="ok", diagnostics=())
@@ -375,7 +367,9 @@ def test_init_does_not_submit_workspace_request(
 
 
 @pytest.mark.unit
-def test_init_includes_smoke_workspace_hints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_init_includes_smoke_workspace_hints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _stub_local_prerequisites(monkeypatch, preview_smoke_payload=True)
 
     result = _runner.invoke(

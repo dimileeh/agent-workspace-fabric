@@ -20,7 +20,6 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -28,18 +27,14 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _seed_open_candidate(
@@ -391,10 +386,7 @@ class TestEvaluateStaleness:
             policy=DEFAULT_STALE_POLICY,
         )
 
-        assert {
-            (f.reason_code, f.trigger_ref, f.blocks_merge, f.severity)
-            for f in findings
-        } == {
+        assert {(f.reason_code, f.trigger_ref, f.blocks_merge, f.severity) for f in findings} == {
             (
                 "ADVISORY_PLAN_ARTIFACT_OVERLAP",
                 "docs/awf-plans/ws_other.md",

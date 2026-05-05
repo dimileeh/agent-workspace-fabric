@@ -72,10 +72,9 @@ class Settings(BaseSettings):
 
     # Database (control-plane)
     database_url: str = Field(
-        default="sqlite+aiosqlite:///./awf.db",
+        default="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
         description=(
-            "Control-plane database URL. SQLite default is for local dev only; "
-            "production must set postgresql+asyncpg://..."
+            "Control-plane PostgreSQL database URL. AWF requires postgresql+asyncpg://..."
         ),
     )
 

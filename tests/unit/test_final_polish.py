@@ -13,11 +13,11 @@ import structlog
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError
-from awf.db.base import Base
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from scripts import run_awf
+from tests.postgres import create_postgres_test_engine
 
 # ── github_client error paths ──────────────────────────────────────────────
 
@@ -93,9 +93,7 @@ class TestExecutorFixPassWarnings:
         template = (
             Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
         )
-        engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'fp.db'}")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
         factory = make_session_factory(engine)
         async with factory() as s:
             repo = WorkspaceRepository(s)
@@ -136,6 +134,7 @@ class TestExecutorFixPassWarnings:
         fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (hack: still has change)
         fake.queue_result(returncode=1, stderr="commit would be empty")  # fix_commit FAILS
         fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
+
         class _FixPassValidation:
             def __init__(self, artifacts_dir: Path) -> None:
                 self.artifacts_dir = artifacts_dir
@@ -270,9 +269,7 @@ class TestExecutorMarkFailedStatusDiverged:
         template = (
             Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
         )
-        engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'mf.db'}")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
         factory = make_session_factory(engine)
         async with factory() as s:
             repo = WorkspaceRepository(s)
@@ -419,23 +416,21 @@ class TestRunAwfIncompleteNoFailureReason:
 
 class TestAttachFeaturePrMain:
     @pytest.mark.unit
-    async def test_main_invokes_orchestrate_attach(
+    async def test_main_invokes_supported_adoption_flow_by_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Lines 218-219: ``_main`` is the argparse-bound entry. It
-        constructs a runner and delegates to orchestrate_attach. We
-        monkeypatch the delegatee and verify the delegation happens."""
+        """The legacy helper now delegates to the supported API adoption flow."""
         import argparse
 
         from scripts import attach_feature_pr_monitor as mod
 
         captured: dict[str, Any] = {}
 
-        async def _fake_orchestrate(**kwargs: Any) -> int:
+        async def _fake_adopt(**kwargs: Any) -> int:
             captured.update(kwargs)
             return 0
 
-        monkeypatch.setattr(mod, "orchestrate_attach", _fake_orchestrate)
+        monkeypatch.setattr(mod, "orchestrate_service_adoption", _fake_adopt)
 
         ns = argparse.Namespace(
             repo="git@github.com:dimileeh/aira-web.git",
@@ -444,9 +439,15 @@ class TestAttachFeaturePrMain:
             auto_merge=False,
             companions=None,
             work_dir=tmp_path,
+            base_url="http://awf.local",
+            api_token="secret",
+            legacy_detached=False,
+            pr_url=None,
         )
         rc = await mod._main(ns)
         assert rc == 0
         assert captured["repo_url"] == "git@github.com:dimileeh/aira-web.git"
         assert captured["pr_number"] == 277
         assert captured["agent"] == "codex"
+        assert captured["base_url"] == "http://awf.local"
+        assert captured["api_token"] == "secret"

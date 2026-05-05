@@ -21,7 +21,6 @@ from typing import Any, Final
 from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -92,9 +91,7 @@ ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
 )
-ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
-    ACTIVE_OWNED_PATH_OVERLAP_STATUSES
-)
+ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = ACTIVE_OWNED_PATH_OVERLAP_STATUSES
 ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.completed.value,
     WorkspaceStatus.failed.value,
@@ -110,9 +107,7 @@ _SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "kind",
     "target",
 )
-_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
-    "idempotency_key",
-)
+_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS: Final[tuple[str, ...]] = ("idempotency_key",)
 _CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "subscription_id",
     "dedupe_key",
@@ -223,12 +218,6 @@ def _secret_lease_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
             .on_conflict_do_nothing(index_elements=_SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS)
             .returning(WorkspaceSecretLease.id)
         )
-    if dialect_name == "sqlite":
-        return (
-            sqlite_insert(WorkspaceSecretLease)
-            .on_conflict_do_nothing(index_elements=_SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS)
-            .returning(WorkspaceSecretLease.id)
-        )
     return None
 
 
@@ -236,14 +225,6 @@ def _callback_subscription_insert_if_absent_stmt(dialect_name: str | None) -> An
     if dialect_name == "postgresql":
         return (
             postgresql_insert(CallbackSubscription)
-            .on_conflict_do_nothing(
-                index_elements=_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS
-            )
-            .returning(CallbackSubscription.id)
-        )
-    if dialect_name == "sqlite":
-        return (
-            sqlite_insert(CallbackSubscription)
             .on_conflict_do_nothing(
                 index_elements=_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS
             )
@@ -259,12 +240,6 @@ def _callback_delivery_insert_if_absent_stmt(dialect_name: str | None) -> Any | 
             .on_conflict_do_nothing(index_elements=_CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS)
             .returning(CallbackDelivery.id)
         )
-    if dialect_name == "sqlite":
-        return (
-            sqlite_insert(CallbackDelivery)
-            .on_conflict_do_nothing(index_elements=_CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS)
-            .returning(CallbackDelivery.id)
-        )
     return None
 
 
@@ -274,17 +249,7 @@ def _provider_model_circuit_breaker_insert_if_absent_stmt(
     if dialect_name == "postgresql":
         return (
             postgresql_insert(ProviderModelCircuitBreaker)
-            .on_conflict_do_nothing(
-                index_elements=_PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS
-            )
-            .returning(ProviderModelCircuitBreaker.id)
-        )
-    if dialect_name == "sqlite":
-        return (
-            sqlite_insert(ProviderModelCircuitBreaker)
-            .on_conflict_do_nothing(
-                index_elements=_PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS
-            )
+            .on_conflict_do_nothing(index_elements=_PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS)
             .returning(ProviderModelCircuitBreaker.id)
         )
     return None
@@ -306,19 +271,12 @@ def _callback_subscription_event_type_filter(
     event_type_candidates: tuple[str, ...],
     dialect_name: str | None,
 ) -> ColumnElement[bool]:
-    event_type_values: Any
-    if dialect_name == "postgresql":
-        event_type_values = (
-            func.jsonb_array_elements_text(CallbackSubscription.event_types.cast(JSONB))
-            .table_valued("value")
-            .render_derived(name="callback_event_type")
-        )
-    else:
-        event_type_values = (
-            func.json_each(CallbackSubscription.event_types)
-            .table_valued("value")
-            .alias("callback_event_type")
-        )
+    del dialect_name
+    event_type_values = (
+        func.jsonb_array_elements_text(CallbackSubscription.event_types.cast(JSONB))
+        .table_valued("value")
+        .render_derived(name="callback_event_type")
+    )
 
     return (
         select(1)
@@ -1099,12 +1057,8 @@ class MergeCandidateRepository:
                 selectinload(MergeCandidate.task),
                 selectinload(MergeCandidate.policy_findings),
                 selectinload(MergeCandidate.workspace).selectinload(Workspace.operations),
-                selectinload(MergeCandidate.workspace).selectinload(
-                    Workspace.validation_runs
-                ),
-                selectinload(MergeCandidate.workspace).selectinload(
-                    Workspace.policy_findings
-                ),
+                selectinload(MergeCandidate.workspace).selectinload(Workspace.validation_runs),
+                selectinload(MergeCandidate.workspace).selectinload(Workspace.policy_findings),
             )
             .order_by(MergeCandidate.created_at.desc(), MergeCandidate.id.desc())
             .limit(1)
@@ -1518,9 +1472,7 @@ class ValidationRunRepository:
         if not unique_workspace_ids:
             return {}
 
-        stmt = select(ValidationRun).where(
-            ValidationRun.workspace_id.in_(unique_workspace_ids)
-        )
+        stmt = select(ValidationRun).where(ValidationRun.workspace_id.in_(unique_workspace_ids))
         if status is not None:
             stmt = stmt.where(ValidationRun.status == status)
         stmt = stmt.order_by(
@@ -2478,6 +2430,14 @@ class WorkspaceRepository:
         stmt = select(Workspace).where(Workspace.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def acquire_idempotency_key_lock(self, key: str) -> None:
+        """Serialize workspace idempotency decisions with a PostgreSQL advisory lock."""
+        lock_key = _workspace_idempotency_advisory_lock_key(key)
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+
     async def acquire_owned_path_conflict_lock(
         self,
         *,
@@ -2529,9 +2489,7 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
     ) -> list[OwnedPathOverlap]:
-        requested_paths = [
-            path for path in owned_paths if _normalize_owned_path(path) != ""
-        ]
+        requested_paths = [path for path in owned_paths if _normalize_owned_path(path) != ""]
         if not requested_paths:
             return []
 
@@ -2734,10 +2692,7 @@ class WorkspaceRepository:
             exclude_ids=exclude_ids,
             after=after,
         )
-        return [
-            workspace.id
-            for workspace in self._sort_schedulable_workspaces(candidates, limit)
-        ]
+        return [workspace.id for workspace in self._sort_schedulable_workspaces(candidates, limit)]
 
     async def list_schedulable_workspaces(
         self,
@@ -3471,6 +3426,14 @@ def _operation_idempotency_advisory_lock_key(key: str) -> int:
     return unsigned
 
 
+def _workspace_idempotency_advisory_lock_key(key: str) -> int:
+    digest = hashlib.sha256(f"awf:workspace-idempotency\x00{key}".encode()).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 1 << 63:
+        return unsigned - (1 << 64)
+    return unsigned
+
+
 def owned_paths_overlap(left: str, right: str) -> bool:
     return _owned_paths_overlap(left, right)
 
@@ -3706,7 +3669,9 @@ class CallbackDeliveryRepository:
 
         created_at = now or datetime.now(UTC)
         delivery_id = new_callback_delivery_id()
-        event_kind_value = event_kind.value if isinstance(event_kind, CallbackEventKind) else event_kind
+        event_kind_value = (
+            event_kind.value if isinstance(event_kind, CallbackEventKind) else event_kind
+        )
         idempotency_key = f"callback-delivery:{subscription.id}:{dedupe_key}"
         delivery_envelope = dict(envelope)
         delivery_envelope["delivery"] = {
@@ -3896,10 +3861,7 @@ class OperationRepository:
         self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:
-        """Serialize operation idempotency decisions for one key on Postgres."""
-        if self._dialect_name != "postgresql":
-            return
-
+        """Serialize operation idempotency decisions with a PostgreSQL advisory lock."""
         lock_key = _operation_idempotency_advisory_lock_key(key)
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
@@ -4005,8 +3967,7 @@ class OperationRepository:
             if not isinstance(payload, dict):
                 continue
             if all(
-                key in payload and payload[key] == value
-                for key, value in payload_identity.items()
+                key in payload and payload[key] == value for key, value in payload_identity.items()
             ):
                 return operation
         return None

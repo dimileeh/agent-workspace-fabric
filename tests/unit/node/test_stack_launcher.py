@@ -102,7 +102,10 @@ class _SuppressibleAuthMountResolver:
     ) -> tuple[AuthMount, ...]:
         self.calls.append((workspace_id, suppressed_targets, suppressed_providers))
         mounts = []
-        if "/home/agent/.config/gh" not in suppressed_targets and "github" not in suppressed_providers:
+        if (
+            "/home/agent/.config/gh" not in suppressed_targets
+            and "github" not in suppressed_providers
+        ):
             mounts.append(
                 AuthMount(
                     source="/host/home/.config/gh",
@@ -239,7 +242,9 @@ def _layout() -> WorktreeLayout:
 
 
 @pytest.mark.unit
-async def test_compose_stack_launcher_returns_none_when_docker_missing_without_required_services() -> None:
+async def test_compose_stack_launcher_returns_none_when_docker_missing_without_required_services() -> (
+    None
+):
     compose = _DockerUnavailableCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -737,7 +742,9 @@ async def test_compose_stack_launcher_uses_declared_leases_before_legacy_auth_mo
 
 
 @pytest.mark.unit
-async def test_compose_stack_launcher_suppresses_satisfied_legacy_targets_before_resolution() -> None:
+async def test_compose_stack_launcher_suppresses_satisfied_legacy_targets_before_resolution() -> (
+    None
+):
     compose = _RecordingCompose()
     declared_resolver = _DeclaredLeaseResolver()
     auth_mount_resolver = _SuppressibleAuthMountResolver()
@@ -779,7 +786,9 @@ async def test_compose_stack_launcher_suppresses_satisfied_legacy_targets_before
 
 
 @pytest.mark.unit
-async def test_compose_stack_launcher_suppresses_satisfied_legacy_providers_before_resolution() -> None:
+async def test_compose_stack_launcher_suppresses_satisfied_legacy_providers_before_resolution() -> (
+    None
+):
     compose = _RecordingCompose()
     auth_mount_resolver = _SuppressibleAuthMountResolver()
     launcher = ComposeStackLauncher(
@@ -797,9 +806,7 @@ async def test_compose_stack_launcher_suppresses_satisfied_legacy_providers_befo
         )
     )
 
-    assert auth_mount_resolver.calls == [
-        ("ws_launcher", frozenset(), frozenset({"github"}))
-    ]
+    assert auth_mount_resolver.calls == [("ws_launcher", frozenset(), frozenset({"github"}))]
     assert compose.specs[0].auth_mounts == (
         AuthMount(
             source="/host/awf/git/mirrors/repo.git",

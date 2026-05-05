@@ -83,9 +83,7 @@ _STALE_ACTIVE_EXECUTION_EVENT_TYPE = "workspace.stale_active_execution_detected"
 _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE = (
     "workspace.stale_active_execution_cleanup_failed"
 )
-_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE = (
-    "STALE_ACTIVE_EXECUTION_CLEANUP_FAILED"
-)
+_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE = "STALE_ACTIVE_EXECUTION_CLEANUP_FAILED"
 _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
@@ -96,9 +94,7 @@ _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE = (
 _MONITOR_RECOVERY_EXECUTION_CLAIM_PRESERVED_REASON_CODE = (
     "UNEXPIRED_EXECUTION_CLAIM_PRESERVED_DURING_MONITOR_RECOVERY"
 )
-_MONITOR_RECOVERY_NO_EXECUTION_CLAIM_REASON_CODE = (
-    "NO_EXECUTION_CLAIM_DURING_MONITOR_RECOVERY"
-)
+_MONITOR_RECOVERY_NO_EXECUTION_CLAIM_REASON_CODE = "NO_EXECUTION_CLAIM_DURING_MONITOR_RECOVERY"
 _MONITOR_RECOVERY_MONITOR_CLAIM_ACQUIRED_REASON_CODE = (
     "MONITOR_CLAIM_ACQUIRED_DURING_MONITOR_RECOVERY"
 )
@@ -441,7 +437,9 @@ class ControlWorker:
         if isinstance(workspaces[0], str):
             workspace_ids = cast("list[str]", workspaces)
             stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
-            rows = {workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()}
+            rows = {
+                workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()
+            }
         else:
             workspace_rows = cast("list[Workspace]", workspaces)
             workspace_ids = [workspace.id for workspace in workspace_rows]
@@ -841,9 +839,7 @@ class ControlWorker:
             repo_url=candidate.repo_url,
             compose_project_name=candidate.compose_project_name,
             compose_file_path=(
-                Path(candidate.compose_file_path)
-                if candidate.compose_file_path
-                else None
+                Path(candidate.compose_file_path) if candidate.compose_file_path else None
             ),
             remove_volumes=True,
             remove_worktree=False,
@@ -1506,7 +1502,7 @@ async def _record_scheduler_queue_decision(
         return
 
     queue_repo = QueueDecisionRepository(session)
-    latest = (await queue_repo.list_for_workspace(workspace.id, limit=1))
+    latest = await queue_repo.list_for_workspace(workspace.id, limit=1)
     score = scheduler_score_from_workspace(workspace, now=decided_at)
     score_summary = (
         score_summary_with_suppression(
@@ -1621,9 +1617,7 @@ def _runtime_workspace(candidate: _ActiveExecutionCandidate) -> RuntimeWorkspace
         compose_project_name=candidate.compose_project_name,
         compose_file_path=candidate.compose_file_path,
         pr_url=candidate.pr_url,
-        retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(
-            candidate.task_policy
-        ),
+        retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(candidate.task_policy),
     )
 
 

@@ -12,11 +12,11 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import SecretLeaseIssue, SecretLeaseRepository, WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.service.gc import WorkspaceGCWorktreeRemoveResult
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -27,14 +27,9 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -213,8 +208,7 @@ async def test_completed_monitor_filesystem_gc_logs_success_for_retained_old_wor
     assert not compose_dir.exists()
     assert not auth.exists()
     assert any(
-        record.get("event") == "monitor.filesystem_gc_ok"
-        and record.get("deleted_path_count") == 3
+        record.get("event") == "monitor.filesystem_gc_ok" and record.get("deleted_path_count") == 3
         for record in captured
     )
 
@@ -411,9 +405,15 @@ async def test_completed_monitor_filesystem_gc_logs_failure_on_reservation_relea
         updated_at=now,
         age_hours=720,
         reason_code="AGE",
-        worktree=WorkspaceGCPath(kind="worktree", path=worktrees_root / ws_id, exists=True, estimated_bytes=0),
-        compose=WorkspaceGCPath(kind="compose", path=work_dir / "compose" / ws_id, exists=True, estimated_bytes=0),
-        auth=WorkspaceGCPath(kind="auth", path=work_dir / "auth" / ws_id, exists=True, estimated_bytes=0),
+        worktree=WorkspaceGCPath(
+            kind="worktree", path=worktrees_root / ws_id, exists=True, estimated_bytes=0
+        ),
+        compose=WorkspaceGCPath(
+            kind="compose", path=work_dir / "compose" / ws_id, exists=True, estimated_bytes=0
+        ),
+        auth=WorkspaceGCPath(
+            kind="auth", path=work_dir / "auth" / ws_id, exists=True, estimated_bytes=0
+        ),
     )
     plan = WorkspaceGCPlan(
         work_dir=work_dir,
@@ -433,13 +433,24 @@ async def test_completed_monitor_filesystem_gc_logs_failure_on_reservation_relea
         compose_teardowns={},
         secret_lease_revocations={},
         worktree_removes={},
-        reservation_releases={ws_id: {"released_count": 0, "reason_code": "TERMINAL_GC", "error": "db connection failed"}},
+        reservation_releases={
+            ws_id: {
+                "released_count": 0,
+                "reason_code": "TERMINAL_GC",
+                "error": "db connection failed",
+            }
+        },
         status="partial",
         reason_code="CLEANUP_EXECUTION_PARTIAL",
     )
 
-    with patch("awf.runtime.pr_monitor_runner.run_workspace_filesystem_gc", new=AsyncMock(return_value=fake_result)), \
-         structlog.testing.capture_logs() as captured:
+    with (
+        patch(
+            "awf.runtime.pr_monitor_runner.run_workspace_filesystem_gc",
+            new=AsyncMock(return_value=fake_result),
+        ),
+        structlog.testing.capture_logs() as captured,
+    ):
         await runner._gc_completed_workspace_filesystem(ws_id)
 
     assert any(
@@ -447,8 +458,9 @@ async def test_completed_monitor_filesystem_gc_logs_failure_on_reservation_relea
         and record.get("workspace_id") == ws_id
         and record.get("reservation_releases", {}).get(ws_id, {}).get("error") is not None
         for record in captured
-    ), f"Expected filesystem_gc_failed with reservation release error; got events: {[r.get('event') for r in captured]}"
-    assert not any(
-        record.get("event") == "monitor.filesystem_gc_ok"
-        for record in captured
-    ), "filesystem_gc_ok should not be emitted when reservation release fails"
+    ), (
+        f"Expected filesystem_gc_failed with reservation release error; got events: {[r.get('event') for r in captured]}"
+    )
+    assert not any(record.get("event") == "monitor.filesystem_gc_ok" for record in captured), (
+        "filesystem_gc_ok should not be emitted when reservation release fails"
+    )

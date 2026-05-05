@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.service.workspace_observability as workspace_observability_module
 from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
@@ -25,7 +24,7 @@ from awf.db.repositories import (
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.pricing import PricingMetadata
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
@@ -56,17 +55,13 @@ from awf.service.workspaces import (
     retry_workspace_row,
     v2_task_policy_snapshot,
 )
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.mark.unit
@@ -100,15 +95,23 @@ def test_workspace_observability_private_fallbacks_cover_absent_policy_metadata(
     workspace = SimpleNamespace(resolved_profile=None)
 
     assert workspace_observability_module._overview_pricing_metadata(workspace) is None
-    assert workspace_observability_module._provider_readiness_preflight_from_task_policy(None) is None
+    assert (
+        workspace_observability_module._provider_readiness_preflight_from_task_policy(None) is None
+    )
 
 
 @pytest.mark.unit
 def test_workspace_usage_summary_handles_mixed_currencies_and_result_fallback() -> None:
     workspace = SimpleNamespace(
         operations=[
-            SimpleNamespace(result={"usage": {"input_tokens": 1, "cost_estimate": 0.25, "currency": "USD"}}, payload={}),
-            SimpleNamespace(result={}, payload={"usage": {"output_tokens": 2, "cost_estimate": 0.50, "currency": "EUR"}}),
+            SimpleNamespace(
+                result={"usage": {"input_tokens": 1, "cost_estimate": 0.25, "currency": "USD"}},
+                payload={},
+            ),
+            SimpleNamespace(
+                result={},
+                payload={"usage": {"output_tokens": 2, "cost_estimate": 0.50, "currency": "EUR"}},
+            ),
         ]
     )
 
@@ -477,7 +480,7 @@ async def test_workspace_service_control_wrappers_commit_results(
 
 
 @pytest.mark.unit
-async def test_retry_workspace_errors_and_missing_source_task_fallback(
+async def test_retry_workspace_errors_and_missing_source_attempt_fallback(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with factory() as session:
@@ -502,21 +505,6 @@ async def test_retry_workspace_errors_and_missing_source_task_fallback(
             test_commands=["pytest -q"],
         )
         failed.status = WorkspaceStatus.failed.value
-        task = await TaskRepository(session).create_or_get(
-            repo_url=failed.repo_url,
-            base_branch=failed.branch_base,
-            title=failed.task_title,
-            prompt=failed.task_prompt,
-            external_id=failed.task_external_id,
-            idempotency_key=None,
-            task_class=failed.task_class,
-            owned_paths=list(failed.owned_paths),
-        )
-        source_attempt = await TaskAttemptRepository(session).create_for_workspace(
-            task=task,
-            workspace=failed,
-        )
-        source_attempt.task_id = "task_missing_from_retry_source"
         await session.commit()
         active_id = active.id
         failed_id = failed.id
@@ -2472,21 +2460,35 @@ class TestComputeCostEstimatePerUnit:
         assert cost is None
         assert reason == "unsupported_pricing_unit"
 
+
 @pytest.mark.unit
 def test_workspace_usage_summary_aggregates_from_operations() -> None:
     workspace = SimpleNamespace(
         id="ws_usage",
         operations=[
             SimpleNamespace(
-                result={"usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30, "cost_estimate": 0.05, "currency": "USD"}}
+                result={
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "total_tokens": 30,
+                        "cost_estimate": 0.05,
+                        "currency": "USD",
+                    }
+                }
             ),
             SimpleNamespace(
-                payload={"usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10, "cost_estimate": 0.01}}
+                payload={
+                    "usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 5,
+                        "total_tokens": 10,
+                        "cost_estimate": 0.01,
+                    }
+                }
             ),
-            SimpleNamespace(
-                result={"usage": {"input_tokens": 15}}
-            ),
-        ]
+            SimpleNamespace(result={"usage": {"input_tokens": 15}}),
+        ],
     )
     usage = workspace_usage_summary(workspace)
 
@@ -2632,13 +2634,11 @@ def test_workspace_usage_summary_safely_ignores_malformed_usage() -> None:
     workspace = SimpleNamespace(
         id="ws_usage",
         operations=[
-            SimpleNamespace(
-                result={"usage": "not a dict"}
-            ),
+            SimpleNamespace(result={"usage": "not a dict"}),
             SimpleNamespace(
                 payload={"usage": {"input_tokens": "10", "output_tokens": None, "total_tokens": 10}}
-            )
-        ]
+            ),
+        ],
     )
     usage = workspace_usage_summary(workspace)
 

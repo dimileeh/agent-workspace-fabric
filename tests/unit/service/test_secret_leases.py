@@ -10,26 +10,18 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent, WorkspaceSecretLease
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
 from awf.profiles.models import ProfileSecret, WorkspaceProfile
 from awf.service.secret_leases import SecretLeaseService
+from tests.postgres import postgres_test_session
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = make_session_factory(engine)
-    async with factory() as s:
+    async with postgres_test_session() as s:
         yield s
-
-    await engine.dispose()
 
 
 async def _workspace(session: AsyncSession) -> Workspace:

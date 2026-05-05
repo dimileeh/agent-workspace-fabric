@@ -109,11 +109,11 @@ async def test_node_next_browser_profile_runs_setup_health_validate_and_cleans_u
             "healthcheck",
             "validate",
         ]
-        assert validation_result.commands[0].stdout_path.read_text(encoding="utf-8").endswith(
-            "ok\n"
+        assert (
+            validation_result.commands[0].stdout_path.read_text(encoding="utf-8").endswith("ok\n")
         )
-        assert validation_result.commands[1].stdout_path.read_text(encoding="utf-8").endswith(
-            "ok\n"
+        assert (
+            validation_result.commands[1].stdout_path.read_text(encoding="utf-8").endswith("ok\n")
         )
         assert (
             validation_result.commands[2].stdout_path.read_text(encoding="utf-8")

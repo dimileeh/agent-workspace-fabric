@@ -161,10 +161,7 @@ def test_cleanup_failure_message_falls_back_to_result_reason_code() -> None:
         reason_code="CLEANUP_FAILED_WITHOUT_STEP_DETAIL",
     )
 
-    assert (
-        controls._cleanup_failure_message(cleanup)
-        == "CLEANUP_FAILED_WITHOUT_STEP_DETAIL"
-    )
+    assert controls._cleanup_failure_message(cleanup) == "CLEANUP_FAILED_WITHOUT_STEP_DETAIL"
 
 
 @pytest.mark.unit
@@ -695,8 +692,7 @@ async def test_destroy_workspace_records_structured_partial_cleanup_and_retry(
     cleanup_event = next(
         event
         for event in failed_events
-        if event.event_type == "workspace.state_changed"
-        and event.reason_code == "CLEANUP_FAILED"
+        if event.event_type == "workspace.state_changed" and event.reason_code == "CLEANUP_FAILED"
     )
     assert cleanup_event.payload is not None
     assert cleanup_event.payload["cleanup"] == partial_cleanup
@@ -793,7 +789,8 @@ async def test_validate_exact_idempotency_replay_survives_terminal_workspace_mov
             )
         ]
         before_event_ids = [
-            row.id for row in await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+            row.id
+            for row in await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
         ]
 
         replay = await service.request_validate_workspace(
@@ -818,7 +815,8 @@ async def test_validate_exact_idempotency_replay_survives_terminal_workspace_mov
             )
         ]
         after_event_ids = [
-            row.id for row in await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+            row.id
+            for row in await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
         ]
 
     assert replay.id == operation.id

@@ -89,10 +89,7 @@ def _opencode_config_for_effort(*, effort: str | None) -> dict[str, object]:
         # support it.
         model_config["options"] = {"think": True}
 
-    models = {
-        model: {**model_config, "name": model}
-        for model in OPENCODE_OLLAMA_CLOUD_MODELS
-    }
+    models = {model: {**model_config, "name": model} for model in OPENCODE_OLLAMA_CLOUD_MODELS}
     return {
         "$schema": "https://opencode.ai/config.json",
         "permission": "allow",

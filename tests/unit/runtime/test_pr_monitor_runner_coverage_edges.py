@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
-from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace
 from awf.db.repositories import (
@@ -24,7 +23,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     AddressComments,
     CheckFailure,
@@ -69,6 +68,7 @@ from awf.runtime.pr_monitor_runner import (
     _NonCheckReviewerSettleDecision,
     _notify_human_reason,
     _redact_and_truncate_github_error,
+    _remote_push_url_for_workspace,
     _stale_pending_check_warnings,
     _target_reconcile_failure_payload,
     _target_reconcile_payload,
@@ -81,6 +81,7 @@ from awf.service.target_branch_monitor import (
     TargetBranchMonitorResult,
     TargetBranchMonitorStatus,
 )
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -92,14 +93,9 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'monitor.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _status_for_helpers(
@@ -236,9 +232,7 @@ async def _force_workspace_status(
 ) -> None:
     async with factory() as s:
         await s.execute(
-            sa_update(Workspace)
-            .where(Workspace.id == workspace_id)
-            .values(status=status.value)
+            sa_update(Workspace).where(Workspace.id == workspace_id).values(status=status.value)
         )
         await s.commit()
 
@@ -501,10 +495,7 @@ def test_github_error_redaction_covers_app_jwt_and_bearer_tokens() -> None:
     jwt_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
     bearer_token = "opaqueBearerToken123"
     redacted = _redact_and_truncate_github_error(
-        "HTTP 503 "
-        f"{app_token} "
-        f"jwt={jwt_token} "
-        f"Authorization: Bearer {bearer_token}"
+        f"HTTP 503 {app_token} jwt={jwt_token} Authorization: Bearer {bearer_token}"
     )
 
     assert app_token not in redacted
@@ -709,9 +700,7 @@ async def test_stale_recovery_dispatch_ignores_terminal_workspace_race(
         assert ws is not None
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
         ignored_events = [
-            event
-            for event in ws.events
-            if event.event_type == "workspace.stale_callback_ignored"
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
         ]
 
     assert ws.status == final_status.value
@@ -776,9 +765,7 @@ async def test_stale_recovery_dispatch_ignores_legacy_invalid_workspace_status(
         assert ws is not None
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
         ignored_events = [
-            event
-            for event in ws.events
-            if event.event_type == "workspace.stale_callback_ignored"
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
         ]
 
     assert ws.status == "legacy-invalid-status"
@@ -1139,8 +1126,7 @@ async def test_merge_rejection_posts_human_notification_and_keeps_monitoring(
     assert terminal is False
     assert sleep_fn.calls == [60]
     assert any(
-        key.startswith("__awf_notify__:abc1234567890def:")
-        for key in state.threads_addressed_ids
+        key.startswith("__awf_notify__:abc1234567890def:") for key in state.threads_addressed_ids
     )
     assert cmd.calls[0].args[:4] == ["gh", "pr", "merge", "42"]
     assert cmd.calls[1].args[:4] == ["gh", "pr", "comment", "42"]
@@ -1479,15 +1465,11 @@ async def test_non_transient_github_merge_error_records_failed_audit_and_redacts
     assert result_events[0].payload["outcome"] == "failed"
     assert result_events[0].payload["operation_id"] == merge_operation.id
     assert result_events[0].payload["pr_number"] == 42
-    assert result_events[0].payload["pr_url"] == (
-        "https://github.com/dimileeh/aira-web/pull/42"
-    )
+    assert result_events[0].payload["pr_url"] == ("https://github.com/dimileeh/aira-web/pull/42")
     assert result_events[0].payload["source_head_sha"] == "abc1234567890def"
     assert result_events[0].payload["target_branch"] == "development"
     assert result_events[0].payload["evidence"]["operation"] == "merge_pr"
-    assert result_events[0].payload["evidence"]["log_stream_refs"] == {
-        "monitor": "monitor.log"
-    }
+    assert result_events[0].payload["evidence"]["log_stream_refs"] == {"monitor": "monitor.log"}
     assert "raw_secret_value" not in repr(result_events[0].payload)
     assert "opaqueBearerToken123" not in repr(result_events[0].payload)
     assert "https://[redacted]@github.com/org/repo" in repr(result_events[0].payload)
@@ -2100,9 +2082,7 @@ async def test_target_branch_reconcile_event_preserves_resolver_operator_details
         )
 
     reconciled_log = next(
-        event
-        for event in captured
-        if event.get("event") == "monitor.target_branch_reconciled"
+        event for event in captured if event.get("event") == "monitor.target_branch_reconciled"
     )
     assert reconciled_log["status"] == "committed"
     assert reconciled_log["commit_sha"] == "abc123"
@@ -2129,9 +2109,7 @@ async def test_target_branch_reconcile_event_preserves_resolver_operator_details
         assert payload["commit_sha"] == "abc123"
         assert payload["pushed"] is True
         assert payload["branch"] == "development"
-        assert payload["changed_paths"] == [
-            "migrations/versions/merge001_merge_alembic_heads.py"
-        ]
+        assert payload["changed_paths"] == ["migrations/versions/merge001_merge_alembic_heads.py"]
         resolver = payload["resolver_results"][0]
         assert resolver["reason_code"] == "ALEMBIC_HEADS_MERGED"
         assert resolver["heads"] == ["left001", "right001"]
@@ -2311,10 +2289,7 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(
         returncode=128,
-        stderr=(
-            "fatal: unable to access "
-            "https://user:ghp_should_not_persist@github.com/org/repo"
-        ),
+        stderr=("fatal: unable to access https://user:ghp_should_not_persist@github.com/org/repo"),
     )
     runner = make_runner(
         factory=factory,
@@ -2474,10 +2449,7 @@ async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requ
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
         returncode=128,
-        stderr=(
-            "fatal: unable to access "
-            "https://user:ghp_should_not_persist@github.com/org/repo"
-        ),
+        stderr=("fatal: unable to access https://user:ghp_should_not_persist@github.com/org/repo"),
     )
     runner = make_runner(
         factory=factory,
@@ -2902,6 +2874,43 @@ async def test_git_helpers_handle_bad_base_count_and_push_rejection_recovery(
 
     assert cmd.calls[-2].args[-2:] == ["origin", "awf/ws_git"]
     assert cmd.calls[-1].args[-2:] == ["--hard", "origin/awf/ws_git"]
+
+
+@pytest.mark.unit
+async def test_fork_push_rejection_does_not_reset_when_fetch_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="[rejected] non-fast-forward")
+    cmd.queue_result(returncode=128, stderr="fatal: could not read Username")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / "ws_fork"
+
+    result = await runner._git_push_result(
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        remote_url="https://github.com/contributor/aira-web.git",
+    )
+
+    assert result.failed is True
+    assert result.recovered_by_resync is False
+    assert "resync fetch failed" in result.stderr
+    assert cmd.calls[0].args[-2:] == [
+        "https://github.com/contributor/aira-web.git",
+        "HEAD:refs/heads/fix/review",
+    ]
+    assert cmd.calls[1].args[-2:] == [
+        "https://github.com/contributor/aira-web.git",
+        "refs/heads/fix/review",
+    ]
+    assert not any("reset" in call.args for call in cmd.calls)
 
 
 @pytest.mark.unit
@@ -3601,6 +3610,33 @@ def test_candidate_stale_required_action_maps_validation_reason() -> None:
     assert _candidate_stale_required_action(None) is None
     assert _candidate_stale_required_action("validation_insufficient_tier") == "validate"
     assert _candidate_stale_required_action("STALE_TARGET_ADVANCED") == "rebase"
+
+
+@pytest.mark.unit
+def test_remote_push_url_for_adopted_fork_preserves_https_credentials() -> None:
+    workspace = Workspace(
+        id="ws_https_fork_credentials",
+        status=WorkspaceStatus.monitoring_pr.value,
+        repo_url=("https://x-access-token:credential-value@github.com/base/aira-web.git"),
+        branch_base="development",
+        branch_name="feature-sync/ws_https_fork_credentials",
+        remote_push_branch="fix/review",
+        task_title="fork credentials",
+        task_prompt="x",
+        task_kind="sync_feature_pr",
+        task_policy={
+            "pr_adoption": {
+                "head_repo_slug": "contributor/aira-web",
+            }
+        },
+        agent="claude_code",
+        test_commands=[],
+    )
+
+    assert _remote_push_url_for_workspace(
+        workspace,
+        base_repo=RepoRef(owner="base", name="aira-web"),
+    ) == ("https://x-access-token:credential-value@github.com/contributor/aira-web.git")
 
 
 @pytest.mark.unit

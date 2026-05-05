@@ -29,7 +29,9 @@ def test_nearest_existing_path_walks_up_to_existing_parent(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
-def test_nearest_existing_path_returns_root_when_nothing_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nearest_existing_path_returns_root_when_nothing_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(Path, "exists", lambda _self: False)
     result = _nearest_existing_path(Path("/nowhere/fake"))
     assert result == Path("/")

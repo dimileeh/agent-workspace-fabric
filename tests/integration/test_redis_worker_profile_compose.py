@@ -17,10 +17,7 @@ from awf.profiles.resolver import ProfileResolver
 from awf.runtime.validation import ValidationRunner
 
 _FIXTURE = (
-    Path(__file__).resolve().parents[1]
-    / "fixtures"
-    / "workspace_services"
-    / "redis_worker_app"
+    Path(__file__).resolve().parents[1] / "fixtures" / "workspace_services" / "redis_worker_app"
 )
 _TEMPLATE = Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -115,14 +112,18 @@ async def test_redis_worker_profile_runs_setup_health_validate_and_cleans_up(
             "healthcheck",
             "validate",
         ]
-        assert validation_result.commands[0].stdout_path.read_text(encoding="utf-8").endswith(
-            "+PONG\n"
+        assert (
+            validation_result.commands[0]
+            .stdout_path.read_text(encoding="utf-8")
+            .endswith("+PONG\n")
         )
-        assert validation_result.commands[1].stdout_path.read_text(encoding="utf-8").endswith(
-            "ok\n"
+        assert (
+            validation_result.commands[1].stdout_path.read_text(encoding="utf-8").endswith("ok\n")
         )
-        assert validation_result.commands[2].stdout_path.read_text(encoding="utf-8").endswith(
-            "worker processed awf-redis-worker-fixture\n"
+        assert (
+            validation_result.commands[2]
+            .stdout_path.read_text(encoding="utf-8")
+            .endswith("worker processed awf-redis-worker-fixture\n")
         )
         assert (
             validation_result.commands[3].stdout_path.read_text(encoding="utf-8")

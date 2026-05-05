@@ -43,7 +43,9 @@ def _jsonl(*rows: dict[str, str]) -> str:
     return "".join(json.dumps(row) + "\n" for row in rows)
 
 
-def _ok_view(*, active: set[str] | None = None, terminal: set[str] | None = None) -> WorkspaceIdView:
+def _ok_view(
+    *, active: set[str] | None = None, terminal: set[str] | None = None
+) -> WorkspaceIdView:
     return WorkspaceIdView(
         active_ids=frozenset(active or set()),
         terminal_ids=frozenset(terminal or set()),
@@ -307,7 +309,9 @@ def test_workspace_lookup_disposes_engine_after_success(
     engine = _Engine()
     monkeypatch.setattr(orphan_resources, "make_engine", lambda _url: engine)
 
-    view = asyncio.run(default_workspace_id_lookup("sqlite+aiosqlite:///awf.db"))
+    view = asyncio.run(
+        default_workspace_id_lookup("postgresql+asyncpg://awf:awf_dev@localhost:5433/awf")
+    )
 
     assert view == WorkspaceIdView(
         active_ids=frozenset({"ws_active"}),

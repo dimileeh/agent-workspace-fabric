@@ -244,9 +244,63 @@ class WorkspaceCreateV2Request(BaseModel):
     resources: WorkspaceV2Resources = Field(
         default_factory=lambda: WorkspaceV2Resources(cpu=None, memory=None)
     )
-    preflight: WorkspaceLaunchPreflight = Field(
-        default_factory=lambda: WorkspaceLaunchPreflight()
+    preflight: WorkspaceLaunchPreflight = Field(default_factory=lambda: WorkspaceLaunchPreflight())
+
+
+class PullRequestMonitorAdoptionRequest(BaseModel):
+    """Input for adopting an already-open GitHub PR into AWF monitoring."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    repo_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+    repo_slug: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
+    pr_number: int | None = Field(default=None, ge=1)
+    pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+
+    agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
+    profile: WorkspaceProfile | None = None
+    auto_merge: bool = True
+    initial_review_grace_period_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=86400,
     )
+    task_title: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+    task_prompt: Annotated[
+        str | None,
+        Field(default=None, min_length=1, max_length=16384),
+    ] = None
+    reason: Annotated[str | None, Field(default=None, max_length=512)] = None
+
+
+class PullRequestMonitorAdoptionResponse(BaseModel):
+    """Response for the supported existing-PR adoption flow."""
+
+    workspace_id: str
+    status: WorkspaceStatus
+    version: int
+    task_id: str | None = None
+    attempt_id: str | None = None
+    candidate_id: str | None = None
+
+    repo_slug: str
+    repo_url: str
+    pr_number: int
+    pr_url: str
+    head_ref: str
+    base_ref: str
+    head_sha: str | None = None
+    base_sha: str | None = None
+    auto_merge: bool
+    monitor_policy: dict[str, Any] = Field(default_factory=dict)
+    attached_existing: bool
+    validation_provenance: ValidationFreshnessSummaryResponse = Field(
+        default_factory=lambda: ValidationFreshnessSummaryResponse()
+    )
+    status_url: str
+    events_url: str
+    logs_url: str
 
 
 class QueueDecisionSummaryResponse(BaseModel):
@@ -632,9 +686,7 @@ class WorkspaceResponse(BaseModel):
 
     latest_queue_decision: QueueDecisionSummaryResponse | None = None
     active_resource_reservation: ResourceReservationSummaryResponse | None = None
-    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(
-        default_factory=list
-    )
+    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(default_factory=list)
     policy_findings: list[PolicyFindingResponse] = Field(
         default_factory=list,
         validation_alias="active_policy_findings",
@@ -830,9 +882,7 @@ class WorkspaceOverviewResponse(BaseModel):
     )
     pricing: WorkspacePricingMetadataResponse | None = None
     recovery: WorkspaceRecoverySummaryResponse | None = None
-    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(
-        default_factory=list
-    )
+    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(default_factory=list)
     provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
     status: WorkspaceStatus
     current_phase: str

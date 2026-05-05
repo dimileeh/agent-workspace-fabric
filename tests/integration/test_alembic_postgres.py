@@ -6,8 +6,7 @@ the migration round-trip never downgrades the operator's real AWF database.
 
 What this covers:
 - asyncpg driver + ``async_engine_from_config`` path in migrations/env.py
-- The autogen migration's Postgres dialect output (which differs subtly from
-  SQLite; e.g., index creation for JSON columns)
+- The autogen migration's Postgres dialect output for JSON and index DDL
 - Round-trip upgrade → downgrade → upgrade on the real DB
 """
 
@@ -36,7 +35,8 @@ def _raw_postgres_database_url() -> str | None:
     # Load only this test URL from the repo-local dotenv file. Pulling the whole
     # file into os.environ would leak host provider/auth settings into hermetic
     # readiness tests.
-    dotenv_url = dotenv_values(_REPO_ROOT / ".env").get("AWF_TEST_DATABASE_URL")
+    dotenv_config = dotenv_values(_REPO_ROOT / ".env")
+    dotenv_url = dotenv_config.get("AWF_TEST_DATABASE_URL") or dotenv_config.get("AWF_DATABASE_URL")
     if isinstance(dotenv_url, str) and dotenv_url.strip():
         return dotenv_url
     return None
@@ -66,6 +66,22 @@ def test_postgres_database_url_reads_repo_dotenv_when_environment_is_unset(
     monkeypatch.setattr(sys.modules[__name__], "_REPO_ROOT", tmp_path)
     (tmp_path / ".env").write_text(
         "AWF_TEST_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf\n",
+        encoding="utf-8",
+    )
+
+    assert _postgres_database_url().render_as_string(hide_password=False) == (
+        "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    )
+
+
+def test_postgres_database_url_reads_repo_dotenv_database_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AWF_TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "_REPO_ROOT", tmp_path)
+    (tmp_path / ".env").write_text(
+        "AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf\n",
         encoding="utf-8",
     )
 
@@ -107,6 +123,7 @@ async def _drop_database(maintenance_url: URL, database_name: str) -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.timeout(120)
 def test_alembic_upgrade_downgrade_upgrade_on_postgres() -> None:
     """Apply → revert → re-apply the full migration chain against live Postgres."""
     configured_url = _postgres_database_url()

@@ -153,6 +153,54 @@ class TestAddWorktree:
         assert branch == "awf/ws_abc123"
 
     @pytest.mark.unit
+    async def test_creates_worktree_from_github_pull_head_ref(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        _git(["switch", "-q", "-c", "fork-pr-head"], origin_repo)
+        (origin_repo / "FORK.md").write_text("from pull head\n")
+        _git(["add", "FORK.md"], origin_repo)
+        _git(["commit", "-q", "-m", "fork pr head"], origin_repo)
+        pr_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=origin_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        _git(["update-ref", "refs/pull/42/head", pr_head], origin_repo)
+        _git(["switch", "-q", "development"], origin_repo)
+        _git(["branch", "-D", "fork-pr-head"], origin_repo)
+
+        layout = await manager.add_worktree(
+            workspace_id="ws_pr_head",
+            repo_url=str(origin_repo),
+            base_branch="refs/pull/42/head",
+            new_branch="feature-sync/ws_pr_head",
+        )
+
+        assert (layout.worktree_path / "FORK.md").read_text() == "from pull head\n"
+        head = subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        tracking = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(layout.mirror_path),
+                "rev-parse",
+                "refs/remotes/origin/pull/42/head",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert head == pr_head
+        assert tracking == pr_head
+
+    @pytest.mark.unit
     async def test_rejects_duplicate_worktree_path(
         self, manager: GitManager, origin_repo: Path
     ) -> None:
@@ -220,9 +268,7 @@ class TestAddWorktree:
         ) in chowned
         assert (layout.worktree_path / "README.md", 1000, 1000) in chowned
         object_files = [
-            path
-            for path in (layout.mirror_path / "objects").glob("*/*")
-            if path.is_file()
+            path for path in (layout.mirror_path / "objects").glob("*/*") if path.is_file()
         ]
         assert object_files
         assert all((path, 1000, 1000) not in chowned for path in object_files)
@@ -233,13 +279,13 @@ class TestAddWorktree:
     ) -> None:
         manager_without_owner = GitManager(tmp_path / "awf-work")
         mirror = await manager_without_owner.ensure_mirror(str(origin_repo))
-        protected_object = next(
-            path for path in (mirror / "objects").glob("*/*") if path.is_file()
-        )
+        protected_object = next(path for path in (mirror / "objects").glob("*/*") if path.is_file())
 
         chowned: list[Path] = []
 
-        def fake_chown(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], uid: int, gid: int) -> None:
+        def fake_chown(
+            path: str | bytes | os.PathLike[str] | os.PathLike[bytes], uid: int, gid: int
+        ) -> None:
             target = Path(path)
             if target == protected_object:
                 raise PermissionError(target)
@@ -323,9 +369,12 @@ def test_linked_worktree_git_dir_handles_invalid_relative_and_unreadable_gitfile
     assert git_manager._linked_worktree_git_dir(worktree) is None  # noqa: SLF001
 
     git_file.write_text("gitdir: ../mirror.git/worktrees/ws")
-    assert git_manager._linked_worktree_git_dir(worktree) == (  # noqa: SLF001
-        worktree / "../mirror.git/worktrees/ws"
-    ).resolve()
+    assert (
+        git_manager._linked_worktree_git_dir(worktree)
+        == (  # noqa: SLF001
+            worktree / "../mirror.git/worktrees/ws"
+        ).resolve()
+    )
 
     original_read_text = Path.read_text
 
@@ -555,9 +604,7 @@ class TestAgentWorktreeWritable:
         # Loose object files must not be chowned recursively. Docker Desktop
         # on macOS rejects the chown when host metadata is missing, which
         # caused the regression fixed in commit aa866959.
-        objects_target = next(
-            t for t in targets if t.path == layout.mirror_path / "objects"
-        )
+        objects_target = next(t for t in targets if t.path == layout.mirror_path / "objects")
         assert objects_target.recursive
         assert objects_target.directories_only
         assert layout.mirror_path / "objects" in directories_only_paths
@@ -569,9 +616,7 @@ class TestAgentWorktreeWritable:
         assert layout.mirror_path / "worktrees" not in recursive_paths
 
     @pytest.mark.unit
-    def test_agent_writable_targets_omits_logs_when_mirror_lacks_it(
-        self, tmp_path: Path
-    ) -> None:
+    def test_agent_writable_targets_omits_logs_when_mirror_lacks_it(self, tmp_path: Path) -> None:
         """Bare mirrors default to no top-level logs/ — the helper must not
         synthesize a target for a non-existent path or the chown step would
         attempt to chown a missing entry on macOS Docker Desktop."""
@@ -583,9 +628,7 @@ class TestAgentWorktreeWritable:
         (mirror / "refs").mkdir()
         (mirror / "worktrees").mkdir()
 
-        targets = _agent_writable_git_targets(
-            layout_mirror=mirror, worktree_path=worktree
-        )
+        targets = _agent_writable_git_targets(layout_mirror=mirror, worktree_path=worktree)
         target_paths = {t.path for t in targets}
 
         assert mirror / "logs" not in target_paths
@@ -729,7 +772,7 @@ class TestGitEnvironment:
         manager = GitManager(tmp_path / "work", env={"HOME": str(home), "AWF_TEST_ENV": "ok"})
 
         result = await manager._run(  # noqa: SLF001 - narrow regression for subprocess env.
-            ["sh", "-c", "printf '%s:%s' \"$HOME\" \"$AWF_TEST_ENV\""],
+            ["sh", "-c", 'printf \'%s:%s\' "$HOME" "$AWF_TEST_ENV"'],
             operation="env",
         )
 
@@ -796,9 +839,12 @@ class TestAgentWritableWorktreeHelpers:
             encoding="utf-8",
         )
 
-        assert git_module._linked_worktree_git_dir(relative) == (  # noqa: SLF001
-            relative / "../mirror.git/worktrees/ws_relative"
-        ).resolve()
+        assert (
+            git_module._linked_worktree_git_dir(relative)
+            == (  # noqa: SLF001
+                relative / "../mirror.git/worktrees/ws_relative"
+            ).resolve()
+        )
 
     @pytest.mark.unit
     def test_chown_targets_skip_missing_and_duplicate_paths(

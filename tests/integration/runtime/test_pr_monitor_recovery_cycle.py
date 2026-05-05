@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient
-from awf.db.base import Base
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -34,13 +33,14 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
     _initial_review_grace_started_key,
 )
+from tests.postgres import postgres_test_engine
 
 
 @dataclass
@@ -136,14 +136,9 @@ def _pr_payload(*, head_sha: str = "abc1234567890def") -> str:
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _seed_monitoring_workspace(

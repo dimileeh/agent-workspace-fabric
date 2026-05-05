@@ -19,14 +19,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
 # Make ``src/`` importable.
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
-
-from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
 # Import the concrete adapters so the registry is populated even though we
 # then override entries for no-op salvage.
@@ -40,12 +39,13 @@ from awf.common.commands import AsyncioSubprocessRunner  # noqa: E402
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor  # noqa: E402
 from awf.db.enums import AgentRuntime, WorkspaceStatus  # noqa: E402
 from awf.db.repositories import WorkspaceRepository  # noqa: E402
-from awf.db.session import make_session_factory  # noqa: E402
+from awf.db.session import make_engine, make_session_factory  # noqa: E402
 from awf.node.compose_manager import ComposeManager  # noqa: E402
 from awf.runtime.pr_creator import PullRequestCreator  # noqa: E402
 from awf.runtime.validation import ValidationRunner  # noqa: E402
 
 _TEMPLATE = _ROOT / "docker" / "compose" / "workspace.base.yml.j2"
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 
 
 class _NoOpAdapter(AgentAdapter):
@@ -146,12 +146,8 @@ def _install_noop_adapter_factory() -> None:
 
 
 async def _main(work_dir: Path, workspace_id: str) -> int:
-    db_path = work_dir / "awf.db"
-    if not db_path.exists():
-        print(f"No AWF DB at {db_path}", file=sys.stderr)
-        return 2
-
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    database_url = os.environ.get("AWF_DATABASE_URL", _DEFAULT_DATABASE_URL)
+    engine = make_engine(database_url)
     factory = make_session_factory(engine)
 
     try:

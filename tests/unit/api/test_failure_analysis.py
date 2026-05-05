@@ -141,7 +141,9 @@ async def _planning_scope_failed_workspace(engine: AsyncEngine, *, updated_at: d
         return workspace.id
 
 
-async def _provider_capacity_exhausted_workspace(engine: AsyncEngine, *, updated_at: datetime) -> str:
+async def _provider_capacity_exhausted_workspace(
+    engine: AsyncEngine, *, updated_at: datetime
+) -> str:
     factory = make_session_factory(engine)
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -165,7 +167,7 @@ async def _provider_capacity_exhausted_workspace(engine: AsyncEngine, *, updated
                     "provider": "google",
                     "model": "gemini-1.5-pro",
                     "retryable": True,
-                    "recommended_action": "Retry the workspace later or fallback to a different provider."
+                    "recommended_action": "Retry the workspace later or fallback to a different provider.",
                 }
             },
         )
@@ -397,7 +399,8 @@ async def test_failure_summary_endpoint_exposes_planning_scope_violation(
     assert example["details"]["salvage_policy"] == "explicit_salvage_required"
     assert example["salvage"] == {"branch_name": "awf/ws_scope"}
     cluster = next(
-        item for item in body["root_cause_clusters"]
+        item
+        for item in body["root_cause_clusters"]
         if item["reason_code"] == AGENT_PLAN_PHASE_SCOPE_VIOLATION
     )
     assert cluster["likely_cause"] == "Planning Scope Violation"
@@ -425,19 +428,23 @@ async def test_failure_summary_endpoint_exposes_provider_capacity_exhausted(
 
     # Find our cluster
     cluster = next(
-        c for c in body["root_cause_clusters"]
+        c
+        for c in body["root_cause_clusters"]
         if c["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
     )
     assert cluster["likely_cause"] == "Provider Quota Exhausted"
-    assert cluster["actionable_next_action"] == "Retry the workspace later or fallback to a different provider."
+    assert (
+        cluster["actionable_next_action"]
+        == "Retry the workspace later or fallback to a different provider."
+    )
 
     # Find our example in latest_examples
-    example = next(
-        e for e in body["latest_examples"]
-        if e["workspace_id"] == workspace_id
-    )
+    example = next(e for e in body["latest_examples"] if e["workspace_id"] == workspace_id)
     assert example["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
     assert example["details"]["provider"] == "google"
     assert example["details"]["model"] == "gemini-1.5-pro"
     assert example["details"]["retryable"] is True
-    assert example["details"]["recommended_action"] == "Retry the workspace later or fallback to a different provider."
+    assert (
+        example["details"]["recommended_action"]
+        == "Retry the workspace later or fallback to a different provider."
+    )

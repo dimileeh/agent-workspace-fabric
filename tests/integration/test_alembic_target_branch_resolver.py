@@ -160,7 +160,9 @@ async def test_target_branch_reconcile_single_alembic_head_is_noop(tmp_path: Pat
     assert resolver_result.heads == ("head001",)
     assert resolver_result.generated_path is None
     assert _heads(result.checkout_path) == ["head001"]
-    assert not list((result.checkout_path / "migrations" / "versions").glob("*merge_alembic_heads.py"))
+    assert not list(
+        (result.checkout_path / "migrations" / "versions").glob("*merge_alembic_heads.py")
+    )
 
 
 @pytest.mark.integration

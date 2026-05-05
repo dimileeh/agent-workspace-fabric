@@ -323,9 +323,7 @@ def _unsafe_loaded_revision_graph(
     )
     branch_label_owners = _branch_label_owners(revisions)
     duplicate_branch_labels = {
-        label: owners
-        for label, owners in sorted(branch_label_owners.items())
-        if len(owners) > 1
+        label: owners for label, owners in sorted(branch_label_owners.items()) if len(owners) > 1
     }
     missing_down_revisions, ambiguous_down_revisions = _revision_reference_anomalies(
         revisions=revisions,
@@ -466,11 +464,7 @@ def _loaded_revision_heads(revisions: Sequence[Script]) -> tuple[str, ...]:
         for reference in _revision_references(revision, reference_type="down_revision")
     }
     return tuple(
-        sorted(
-            revision.revision
-            for revision in revisions
-            if revision.revision not in referenced
-        )
+        sorted(revision.revision for revision in revisions if revision.revision not in referenced)
     )
 
 

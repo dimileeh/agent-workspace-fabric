@@ -17,10 +17,7 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures" / "test_quality_guardrails"
 
 
 def _scan_fixture(name: str) -> list[tuple[str, int]]:
-    return [
-        (violation.code, violation.line)
-        for violation in scan_test_quality([FIXTURES / name])
-    ]
+    return [(violation.code, violation.line) for violation in scan_test_quality([FIXTURES / name])]
 
 
 @pytest.mark.unit

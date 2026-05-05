@@ -156,7 +156,10 @@ def test_validation_coverage_fields_handles_malformed_failing_test_evidence() ->
         log_stream_refs={
             "coverage": {
                 "failing_test_node_ids": "tests/unit/test_widget.py::test_handles_edges",
-                "failing_test_evidence": [123, "FAILED tests/unit/test_widget.py::test_handles_edges"],
+                "failing_test_evidence": [
+                    123,
+                    "FAILED tests/unit/test_widget.py::test_handles_edges",
+                ],
             }
         }
     )
@@ -164,7 +167,9 @@ def test_validation_coverage_fields_handles_malformed_failing_test_evidence() ->
     fields = validation_coverage_fields(run)
 
     assert fields["failing_test_node_ids"] == []
-    assert fields["failing_test_evidence"] == ["FAILED tests/unit/test_widget.py::test_handles_edges"]
+    assert fields["failing_test_evidence"] == [
+        "FAILED tests/unit/test_widget.py::test_handles_edges"
+    ]
 
 
 @pytest.mark.unit
@@ -230,7 +235,9 @@ def test_validation_run_summary_response_has_coverage_gaps_field() -> None:
 
     assert response.coverage_gaps == [{"file": "a.py", "missing_lines": ["1"]}]
     assert response.failing_test_node_ids == ["tests/unit/test_widget.py::test_handles_edges"]
-    assert response.failing_test_evidence == ["FAILED tests/unit/test_widget.py::test_handles_edges"]
+    assert response.failing_test_evidence == [
+        "FAILED tests/unit/test_widget.py::test_handles_edges"
+    ]
 
 
 @pytest.mark.unit
@@ -258,4 +265,6 @@ def test_validation_provenance_item_response_has_coverage_gaps_field() -> None:
 
     assert response.coverage_gaps == [{"file": "b.py", "missing_lines": ["5"]}]
     assert response.failing_test_node_ids == ["tests/unit/test_widget.py::test_handles_edges"]
-    assert response.failing_test_evidence == ["FAILED tests/unit/test_widget.py::test_handles_edges"]
+    assert response.failing_test_evidence == [
+        "FAILED tests/unit/test_widget.py::test_handles_edges"
+    ]

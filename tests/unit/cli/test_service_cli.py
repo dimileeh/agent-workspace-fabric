@@ -26,8 +26,10 @@ from awf.service.target_branch_monitor import (
     TargetBranchMonitorResult,
     TargetBranchMonitorStatus,
 )
+from tests.postgres import postgres_test_url_sync
 
 _runner = CliRunner()
+_POSTGRES_TEST_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 
 
 def _combined_output(result: Any) -> str:
@@ -58,34 +60,32 @@ def _create_gc_cli_workspace(
     compose_file_path: str | None = None,
 ) -> str:
     async def _setup() -> str:
-        from awf.db.base import Base
         from awf.db.repositories import WorkspaceRepository
         from awf.db.session import make_engine, make_session_factory
 
         engine = make_engine(db_url)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        factory = make_session_factory(engine)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).create(
-                repo_url="git@github.com:example/repo.git",
-                branch_base="development",
-                task_title="gc cli",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-            )
-            workspace.status = status
-            workspace.updated_at = updated_at
-            workspace.compose_file_path = compose_file_path
-            if pr:
-                workspace.pr_url = "https://github.com/example/repo/pull/321"
-                workspace.pr_number = 321
-                workspace.pr_merge_sha = "d" * 40
-            await session.commit()
-            workspace_id = workspace.id
-        await engine.dispose()
-        return workspace_id
+        try:
+            factory = make_session_factory(engine)
+            async with factory() as session:
+                workspace = await WorkspaceRepository(session).create(
+                    repo_url="git@github.com:example/repo.git",
+                    branch_base="development",
+                    task_title="gc cli",
+                    task_prompt="p",
+                    agent="codex",
+                    test_commands=[],
+                )
+                workspace.status = status
+                workspace.updated_at = updated_at
+                workspace.compose_file_path = compose_file_path
+                if pr:
+                    workspace.pr_url = "https://github.com/example/repo/pull/321"
+                    workspace.pr_number = 321
+                    workspace.pr_merge_sha = "d" * 40
+                await session.commit()
+                return workspace.id
+        finally:
+            await engine.dispose()
 
     return asyncio.run(_setup())
 
@@ -662,9 +662,8 @@ def test_readme_documents_run_awf_compatibility_status() -> None:
     normalized_readme = " ".join(readme.split())
 
     assert "`scripts/run_awf.py` is the compatibility dogfood runner" in normalized_readme
-    assert "SQLite DB under `--work-dir`" in normalized_readme
-    assert "does not require the local Postgres control-plane database" in readme
-    assert "service worker is the normal always-on executor" in readme
+    assert "PostgreSQL control-plane DB" in normalized_readme
+    assert "service worker is the normal always-on executor" in normalized_readme.lower()
 
 
 @pytest.mark.unit
@@ -684,35 +683,35 @@ def test_service_gc_cli_defaults_to_json_dry_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
-    work_dir = tmp_path / "service"
-    workspace_id = _create_gc_cli_workspace(
-        db_url=db_url,
-        status="completed",
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
-        pr=True,
-    )
-    worktree = work_dir / "git" / "worktrees" / workspace_id
-    _write_gc_file(worktree / "repo.txt", "repo")
-    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
-    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+    with postgres_test_url_sync() as db_url:
+        work_dir = tmp_path / "service"
+        workspace_id = _create_gc_cli_workspace(
+            db_url=db_url,
+            status="completed",
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            pr=True,
+        )
+        worktree = work_dir / "git" / "worktrees" / workspace_id
+        _write_gc_file(worktree / "repo.txt", "repo")
+        monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+        monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
 
-    result = _runner.invoke(app, ["service", "gc", "--min-age-hours", "1"])
+        result = _runner.invoke(app, ["service", "gc", "--min-age-hours", "1"])
 
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["dry_run"] is True
-    assert payload["status"] == "dry_run"
-    assert payload["policy"]["retention_hours"] == 1
-    assert payload["candidate_count"] == 1
-    assert payload["preserved_count"] == 0
-    assert payload["reason_code"] == "CLEANUP_DRY_RUN"
-    assert payload["deleted_paths"] == []
-    assert payload["candidates"][0]["workspace_id"] == workspace_id
-    assert payload["candidates"][0]["status"] == "completed"
-    assert payload["candidates"][0]["reason_code"] == "COMPLETED_PR_RETENTION_EXPIRED"
-    assert payload["candidates"][0]["paths"]["worktree"]["path"] == str(worktree)
-    assert worktree.exists()
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["dry_run"] is True
+        assert payload["status"] == "dry_run"
+        assert payload["policy"]["retention_hours"] == 1
+        assert payload["candidate_count"] == 1
+        assert payload["preserved_count"] == 0
+        assert payload["reason_code"] == "CLEANUP_DRY_RUN"
+        assert payload["deleted_paths"] == []
+        assert payload["candidates"][0]["workspace_id"] == workspace_id
+        assert payload["candidates"][0]["status"] == "completed"
+        assert payload["candidates"][0]["reason_code"] == "COMPLETED_PR_RETENTION_EXPIRED"
+        assert payload["candidates"][0]["paths"]["worktree"]["path"] == str(worktree)
+        assert worktree.exists()
 
 
 @pytest.mark.unit
@@ -720,57 +719,57 @@ def test_service_gc_cli_execute_deletes_and_supports_pretty_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
-    work_dir = tmp_path / "service"
-    workspace_id = _create_gc_cli_workspace(
-        db_url=db_url,
-        status="completed",
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
-        pr=True,
-    )
-    worktree = work_dir / "git" / "worktrees" / workspace_id
-    compose = work_dir / "compose" / workspace_id
-    auth = work_dir / "auth" / workspace_id
-    _write_gc_file(worktree / "repo.txt", "repo")
-    _write_gc_file(compose / "compose.yml", "compose")
-    _write_gc_file(auth / "codex" / "auth.json", "auth")
-    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
-    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
-    import awf.cli.main as cli_main
+    with postgres_test_url_sync() as db_url:
+        work_dir = tmp_path / "service"
+        workspace_id = _create_gc_cli_workspace(
+            db_url=db_url,
+            status="completed",
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            pr=True,
+        )
+        worktree = work_dir / "git" / "worktrees" / workspace_id
+        compose = work_dir / "compose" / workspace_id
+        auth = work_dir / "auth" / workspace_id
+        _write_gc_file(worktree / "repo.txt", "repo")
+        _write_gc_file(compose / "compose.yml", "compose")
+        _write_gc_file(auth / "codex" / "auth.json", "auth")
+        monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+        monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+        import awf.cli.main as cli_main
 
-    monkeypatch.setattr(
-        cli_main,
-        "_run_terminal_workspace_compose_teardown",
-        _mock_compose_teardown_succeeded,
-    )
-    monkeypatch.setattr(
-        cli_main,
-        "_run_terminal_workspace_worktree_remove",
-        _mock_worktree_remover_succeeded,
-    )
+        monkeypatch.setattr(
+            cli_main,
+            "_run_terminal_workspace_compose_teardown",
+            _mock_compose_teardown_succeeded,
+        )
+        monkeypatch.setattr(
+            cli_main,
+            "_run_terminal_workspace_worktree_remove",
+            _mock_worktree_remover_succeeded,
+        )
 
-    result = _runner.invoke(
-        app,
-        [
-            "service",
-            "gc",
-            "--execute",
-            "--min-age-hours",
-            "1",
-            "--format",
-            "pretty",
-        ],
-    )
+        result = _runner.invoke(
+            app,
+            [
+                "service",
+                "gc",
+                "--execute",
+                "--min-age-hours",
+                "1",
+                "--format",
+                "pretty",
+            ],
+        )
 
-    assert result.exit_code == 0, result.output
-    assert "dry_run: False" in result.stdout
-    assert "reason_code: CLEANUP_EXECUTION_SUCCEEDED" in result.stdout
-    assert "candidate_count: 1" in result.stdout
-    assert workspace_id in result.stdout
-    assert "deleted_paths" in result.stdout
-    assert not worktree.exists()
-    assert not compose.exists()
-    assert not auth.exists()
+        assert result.exit_code == 0, result.output
+        assert "dry_run: False" in result.stdout
+        assert "reason_code: CLEANUP_EXECUTION_SUCCEEDED" in result.stdout
+        assert "candidate_count: 1" in result.stdout
+        assert workspace_id in result.stdout
+        assert "deleted_paths" in result.stdout
+        assert not worktree.exists()
+        assert not compose.exists()
+        assert not auth.exists()
 
 
 @pytest.mark.unit
@@ -778,30 +777,30 @@ def test_service_gc_cli_uses_configured_retention_when_omitted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
-    work_dir = tmp_path / "service"
-    workspace_id = _create_gc_cli_workspace(
-        db_url=db_url,
-        status="completed",
-        updated_at=datetime.now(UTC) - timedelta(hours=2),
-        pr=True,
-    )
-    worktree = work_dir / "git" / "worktrees" / workspace_id
-    _write_gc_file(worktree / "repo.txt", "repo")
-    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
-    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
-    monkeypatch.setenv("AWF_COMPLETED_WORKSPACE_RETENTION_HOURS", "24")
+    with postgres_test_url_sync() as db_url:
+        work_dir = tmp_path / "service"
+        workspace_id = _create_gc_cli_workspace(
+            db_url=db_url,
+            status="completed",
+            updated_at=datetime.now(UTC) - timedelta(hours=2),
+            pr=True,
+        )
+        worktree = work_dir / "git" / "worktrees" / workspace_id
+        _write_gc_file(worktree / "repo.txt", "repo")
+        monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+        monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+        monkeypatch.setenv("AWF_COMPLETED_WORKSPACE_RETENTION_HOURS", "24")
 
-    result = _runner.invoke(app, ["service", "gc"])
+        result = _runner.invoke(app, ["service", "gc"])
 
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["policy"]["retention_hours"] == 24
-    assert payload["candidate_count"] == 0
-    assert payload["preserved_count"] == 1
-    assert payload["preserved"][0]["workspace_id"] == workspace_id
-    assert payload["preserved"][0]["reason_code"] == "WORKSPACE_WITHIN_RETENTION"
-    assert worktree.exists()
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["policy"]["retention_hours"] == 24
+        assert payload["candidate_count"] == 0
+        assert payload["preserved_count"] == 1
+        assert payload["preserved"][0]["workspace_id"] == workspace_id
+        assert payload["preserved"][0]["reason_code"] == "WORKSPACE_WITHIN_RETENTION"
+        assert worktree.exists()
 
 
 @pytest.mark.unit
@@ -809,43 +808,43 @@ def test_service_gc_cli_execute_failures_exit_nonzero_with_reason_payload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
-    work_dir = tmp_path / "service"
-    workspace_id = _create_gc_cli_workspace(
-        db_url=db_url,
-        status="completed",
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
-        pr=True,
-    )
-    worktree = work_dir / "git" / "worktrees" / workspace_id
-    worktree.parent.mkdir(parents=True, exist_ok=True)
-    worktree.write_text("not a directory", encoding="utf-8")
-    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
-    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
-    import awf.cli.main as cli_main
+    with postgres_test_url_sync() as db_url:
+        work_dir = tmp_path / "service"
+        workspace_id = _create_gc_cli_workspace(
+            db_url=db_url,
+            status="completed",
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            pr=True,
+        )
+        worktree = work_dir / "git" / "worktrees" / workspace_id
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        worktree.write_text("not a directory", encoding="utf-8")
+        monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+        monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+        import awf.cli.main as cli_main
 
-    monkeypatch.setattr(
-        cli_main,
-        "_run_terminal_workspace_compose_teardown",
-        _mock_compose_teardown_succeeded,
-    )
-    monkeypatch.setattr(
-        cli_main,
-        "_run_terminal_workspace_worktree_remove",
-        _mock_worktree_remover_succeeded,
-    )
+        monkeypatch.setattr(
+            cli_main,
+            "_run_terminal_workspace_compose_teardown",
+            _mock_compose_teardown_succeeded,
+        )
+        monkeypatch.setattr(
+            cli_main,
+            "_run_terminal_workspace_worktree_remove",
+            _mock_worktree_remover_succeeded,
+        )
 
-    result = _runner.invoke(
-        app,
-        ["service", "gc", "--execute", "--min-age-hours", "1"],
-    )
+        result = _runner.invoke(
+            app,
+            ["service", "gc", "--execute", "--min-age-hours", "1"],
+        )
 
-    assert result.exit_code == 1
-    payload = json.loads(result.stdout)
-    assert payload["status"] == "partial"
-    assert payload["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
-    assert payload["delete_errors"][0]["reason_code"] == "PATH_DELETE_FAILED"
-    assert payload["candidates"][0]["paths"]["worktree"]["status"] == "failed"
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "partial"
+        assert payload["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+        assert payload["delete_errors"][0]["reason_code"] == "PATH_DELETE_FAILED"
+        assert payload["candidates"][0]["paths"]["worktree"]["status"] == "failed"
 
 
 @pytest.mark.unit
@@ -853,192 +852,189 @@ def test_service_gc_cli_execute_records_compose_teardown_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
-    work_dir = tmp_path / "service"
-    workspace_id = _create_gc_cli_workspace(
-        db_url=db_url,
-        status="completed",
-        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
-        pr=True,
-    )
-    worktree = work_dir / "git" / "worktrees" / workspace_id
-    compose = work_dir / "compose" / workspace_id
-    auth = work_dir / "auth" / workspace_id
-    _write_gc_file(worktree / "repo.txt", "repo")
-    _write_gc_file(compose / "compose.yml", "compose")
-    _write_gc_file(auth / "codex" / "auth.json", "auth")
-    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
-    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
-    import awf.cli.main as cli_main
-
-    monkeypatch.setattr(
-        cli_main,
-        "_run_terminal_workspace_compose_teardown",
-        _mock_compose_teardown_failed,
-    )
-    monkeypatch.setattr(
-        cli_main,
-        "_run_terminal_workspace_worktree_remove",
-        _mock_worktree_remover_succeeded,
-    )
-
-    result = _runner.invoke(
-        app,
-        [
-            "service",
-            "gc",
-            "--execute",
-            "--min-age-hours",
-            "1",
-            "--format",
-            "json",
-        ],
-    )
-
-    assert result.exit_code == 1, result.output
-    payload = json.loads(result.stdout)
-    assert payload["status"] == "partial"
-    assert payload["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
-    assert payload["delete_errors"][0]["kind"] == "compose_teardown"
-    assert payload["delete_errors"][0]["reason_code"] == "DOCKER_COMPOSE_DOWN_FAILED"
-    assert payload["candidates"][0]["compose_teardown"] == {
-        "status": "failed",
-        "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
-        "error": "compose teardown failed",
-    }
-    assert payload["candidates"][0]["paths"]["worktree"]["status"] == "skipped"
-    assert worktree.exists()
-    assert compose.exists()
-    assert auth.exists()
-
-
-def test_service_gc_cli_execute_compose_teardown_uses_compose_file(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    compose = tmp_path / "compose" / "workspace-1"
-    compose_file = compose / "compose.yml"
-    compose.mkdir(parents=True, exist_ok=True)
-    compose_file.write_text("compose: {}\n", encoding="utf-8")
-    candidate = SimpleNamespace(
-        workspace_id="workspace-1",
-        compose=SimpleNamespace(path=compose),
-    )
-    calls: list[tuple[list[str], dict[str, object]]] = []
-    import awf.cli.main as cli_main
-
-    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(cli_main.subprocess, "run", _run)
-
-    result = cli_main._run_terminal_workspace_compose_teardown(candidate)
-
-    assert result.status == "succeeded"
-    assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
-    assert calls == [
-        (
-            [
-                "docker",
-                "compose",
-                "-p",
-                "awf_workspace-1",
-                "-f",
-                str(compose_file),
-                "down",
-                "--remove-orphans",
-            ],
-            {"check": False, "capture_output": True, "text": True},
+    with postgres_test_url_sync() as db_url:
+        work_dir = tmp_path / "service"
+        workspace_id = _create_gc_cli_workspace(
+            db_url=db_url,
+            status="completed",
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            pr=True,
         )
-    ]
+        worktree = work_dir / "git" / "worktrees" / workspace_id
+        compose = work_dir / "compose" / workspace_id
+        auth = work_dir / "auth" / workspace_id
+        _write_gc_file(worktree / "repo.txt", "repo")
+        _write_gc_file(compose / "compose.yml", "compose")
+        _write_gc_file(auth / "codex" / "auth.json", "auth")
+        monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+        monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+        import awf.cli.main as cli_main
 
-
-def test_service_gc_cli_execute_compose_teardown_prefers_persisted_project_name(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    compose = tmp_path / "compose" / "workspace-1"
-    compose_file = compose / "compose.yml"
-    compose.mkdir(parents=True, exist_ok=True)
-    compose_file.write_text("compose: {}\n", encoding="utf-8")
-    candidate = SimpleNamespace(
-        workspace_id="workspace-1",
-        compose=SimpleNamespace(path=compose),
-        compose_project_name="custom_workspace_project",
-    )
-    calls: list[tuple[list[str], dict[str, object]]] = []
-    import awf.cli.main as cli_main
-
-    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(cli_main.subprocess, "run", _run)
-
-    result = cli_main._run_terminal_workspace_compose_teardown(candidate)
-
-    assert result.status == "succeeded"
-    assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
-    assert calls == [
-        (
-            [
-                "docker",
-                "compose",
-                "-p",
-                "custom_workspace_project",
-                "-f",
-                str(compose_file),
-                "down",
-                "--remove-orphans",
-            ],
-            {"check": False, "capture_output": True, "text": True},
+        monkeypatch.setattr(
+            cli_main,
+            "_run_terminal_workspace_compose_teardown",
+            _mock_compose_teardown_failed,
         )
-    ]
-
-
-def test_service_gc_cli_execute_compose_teardown_prefers_persisted_compose_file_path(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    compose = tmp_path / "compose" / "workspace-1"
-    compose_file = compose / "compose.prod.yml"
-    compose.mkdir(parents=True, exist_ok=True)
-    compose_file.write_text("compose: {}\n", encoding="utf-8")
-    candidate = SimpleNamespace(
-        workspace_id="workspace-1",
-        compose=SimpleNamespace(path=compose),
-        compose_file_path=str(compose_file),
-        compose_project_name="custom_workspace_project",
-    )
-    calls: list[tuple[list[str], dict[str, object]]] = []
-    import awf.cli.main as cli_main
-
-    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(cli_main.subprocess, "run", _run)
-
-    result = cli_main._run_terminal_workspace_compose_teardown(candidate)
-
-    assert result.status == "succeeded"
-    assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
-    assert calls == [
-        (
-            [
-                "docker",
-                "compose",
-                "-p",
-                "custom_workspace_project",
-                "-f",
-                str(compose_file),
-                "down",
-                "--remove-orphans",
-            ],
-            {"check": False, "capture_output": True, "text": True},
+        monkeypatch.setattr(
+            cli_main,
+            "_run_terminal_workspace_worktree_remove",
+            _mock_worktree_remover_succeeded,
         )
-    ]
+
+        result = _runner.invoke(
+            app,
+            [
+                "service",
+                "gc",
+                "--execute",
+                "--min-age-hours",
+                "1",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "partial"
+        assert payload["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+        assert payload["delete_errors"][0]["kind"] == "compose_teardown"
+        assert payload["delete_errors"][0]["reason_code"] == "DOCKER_COMPOSE_DOWN_FAILED"
+        assert payload["candidates"][0]["compose_teardown"] == {
+            "status": "failed",
+            "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
+            "error": "compose teardown failed",
+        }
+        assert payload["candidates"][0]["paths"]["worktree"]["status"] == "skipped"
+        assert worktree.exists()
+        assert compose.exists()
+        assert auth.exists()
+
+    def test_service_gc_cli_execute_compose_teardown_uses_compose_file(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        compose = tmp_path / "compose" / "workspace-1"
+        compose_file = compose / "compose.yml"
+        compose.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("compose: {}\n", encoding="utf-8")
+        candidate = SimpleNamespace(
+            workspace_id="workspace-1",
+            compose=SimpleNamespace(path=compose),
+        )
+        calls: list[tuple[list[str], dict[str, object]]] = []
+        import awf.cli.main as cli_main
+
+        def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(cli_main.subprocess, "run", _run)
+
+        result = cli_main._run_terminal_workspace_compose_teardown(candidate)
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+        assert calls == [
+            (
+                [
+                    "docker",
+                    "compose",
+                    "-p",
+                    "awf_workspace-1",
+                    "-f",
+                    str(compose_file),
+                    "down",
+                    "--remove-orphans",
+                ],
+                {"check": False, "capture_output": True, "text": True},
+            )
+        ]
+
+    def test_service_gc_cli_execute_compose_teardown_prefers_persisted_project_name(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        compose = tmp_path / "compose" / "workspace-1"
+        compose_file = compose / "compose.yml"
+        compose.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("compose: {}\n", encoding="utf-8")
+        candidate = SimpleNamespace(
+            workspace_id="workspace-1",
+            compose=SimpleNamespace(path=compose),
+            compose_project_name="custom_workspace_project",
+        )
+        calls: list[tuple[list[str], dict[str, object]]] = []
+        import awf.cli.main as cli_main
+
+        def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(cli_main.subprocess, "run", _run)
+
+        result = cli_main._run_terminal_workspace_compose_teardown(candidate)
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+        assert calls == [
+            (
+                [
+                    "docker",
+                    "compose",
+                    "-p",
+                    "custom_workspace_project",
+                    "-f",
+                    str(compose_file),
+                    "down",
+                    "--remove-orphans",
+                ],
+                {"check": False, "capture_output": True, "text": True},
+            )
+        ]
+
+    def test_service_gc_cli_execute_compose_teardown_prefers_persisted_compose_file_path(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        compose = tmp_path / "compose" / "workspace-1"
+        compose_file = compose / "compose.prod.yml"
+        compose.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text("compose: {}\n", encoding="utf-8")
+        candidate = SimpleNamespace(
+            workspace_id="workspace-1",
+            compose=SimpleNamespace(path=compose),
+            compose_file_path=str(compose_file),
+            compose_project_name="custom_workspace_project",
+        )
+        calls: list[tuple[list[str], dict[str, object]]] = []
+        import awf.cli.main as cli_main
+
+        def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(cli_main.subprocess, "run", _run)
+
+        result = cli_main._run_terminal_workspace_compose_teardown(candidate)
+
+        assert result.status == "succeeded"
+        assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+        assert calls == [
+            (
+                [
+                    "docker",
+                    "compose",
+                    "-p",
+                    "custom_workspace_project",
+                    "-f",
+                    str(compose_file),
+                    "down",
+                    "--remove-orphans",
+                ],
+                {"check": False, "capture_output": True, "text": True},
+            )
+        ]
 
 
 @pytest.mark.unit
@@ -1053,7 +1049,7 @@ def test_service_config_uses_postgres_default_and_redacts_secrets() -> None:
         _env_file=None,
         api_token="api-secret",
         github_token="ghp_secret",
-        database_url="sqlite+aiosqlite:///./awf.db",
+        database_url=_POSTGRES_TEST_URL,
         worker_max_concurrent_executions=5,
     )
 
@@ -1094,21 +1090,21 @@ def test_service_mode_uses_postgres_when_database_env_unset(
 
     service_settings = resolve_service_settings(base, environ={})
 
-    assert base.database_url.startswith("sqlite+aiosqlite")
+    assert base.database_url.startswith("postgresql+asyncpg://")
     assert service_settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
     assert service_settings.database_url.startswith("postgresql+asyncpg://")
 
 
 @pytest.mark.unit
-def test_service_mode_preserves_explicit_sqlite_for_throwaway_runs(tmp_path: Path) -> None:
+def test_service_mode_preserves_explicit_postgres_url() -> None:
     from awf.service.config import resolve_service_settings
 
-    sqlite_url = f"sqlite+aiosqlite:///{tmp_path / 'throwaway.db'}"
-    base = Settings(_env_file=None, database_url=sqlite_url)
+    explicit_url = "postgresql+asyncpg://awf:awf_dev@db.internal:5432/awf"
+    base = Settings(_env_file=None, database_url=explicit_url)
 
-    service_settings = resolve_service_settings(base, environ={"AWF_DATABASE_URL": sqlite_url})
+    service_settings = resolve_service_settings(base, environ={"AWF_DATABASE_URL": explicit_url})
 
-    assert service_settings.database_url == sqlite_url
+    assert service_settings.database_url == explicit_url
 
 
 @pytest.mark.unit
@@ -1603,7 +1599,7 @@ def test_service_doctor_defaults_to_pretty_output_and_zero_exit(
                     "metadata": {},
                 }
             ],
-        }
+        },
     )
 
     async def _collect(received: object, **kwargs: object) -> object:
@@ -1637,7 +1633,7 @@ def test_service_doctor_json_output_is_structured(
             "status": "ok",
             "summary": {"ok": 1, "warn": 0, "fail": 0},
             "diagnostics": [],
-        }
+        },
     )
 
     async def _collect(_settings: object, **_kwargs: object) -> object:
@@ -1677,7 +1673,7 @@ def test_service_doctor_failing_diagnostics_exit_one(
                     "metadata": {},
                 }
             ],
-        }
+        },
     )
 
     async def _collect(_settings: object, **_kwargs: object) -> object:
@@ -1759,7 +1755,7 @@ def test_service_doctor_provider_options_are_validated_and_passed_through(
             "status": "ok",
             "summary": {"ok": 1, "warn": 0, "fail": 0},
             "diagnostics": [],
-        }
+        },
     )
 
     async def _collect(_settings: object, **kwargs: object) -> object:
@@ -1837,7 +1833,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
 
     class _Engine:
         def __init__(self) -> None:
-            self.url = make_url("sqlite+aiosqlite:///:memory:")
+            self.url = make_url(_POSTGRES_TEST_URL)
 
         async def dispose(self) -> None:
             created["disposed"] = True
@@ -1893,17 +1889,17 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         def __init__(
             self,
             *,
-                session_factory: object,
-                provisioner: object,
-                executor: object,
-                runtime_cleaner: object,
-                config: object,
-            ) -> None:
-                created["worker_session_factory"] = session_factory
-                created["worker_provisioner"] = provisioner
-                created["worker_executor"] = executor
-                created["worker_runtime_cleaner"] = runtime_cleaner
-                created["worker_config"] = config
+            session_factory: object,
+            provisioner: object,
+            executor: object,
+            runtime_cleaner: object,
+            config: object,
+        ) -> None:
+            created["worker_session_factory"] = session_factory
+            created["worker_provisioner"] = provisioner
+            created["worker_executor"] = executor
+            created["worker_runtime_cleaner"] = runtime_cleaner
+            created["worker_config"] = config
 
         async def run_once(self) -> int:
             created["run_once"] = True
@@ -1941,7 +1937,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         service_name="awf",
         env="local",
         api_base_url="http://localhost:8000",
-        database_url=f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}",
+        database_url=_POSTGRES_TEST_URL,
         docker_host="unix:///var/run/docker.sock",
         agent_runtime_image="custom-agent-runtime:dev",
         work_dir=str(host_work_dir),
@@ -1970,9 +1966,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["stack_auth_mount_resolver"].host_home == (tmp_path / "host-home").resolve()
     assert created["stack_auth_mount_resolver"].work_dir == host_work_dir
     assert created["stack_secret_lease_resolver"] is not None
-    assert created["stack_secret_lease_resolver"].host_home == (
-        tmp_path / "host-home"
-    ).resolve()
+    assert created["stack_secret_lease_resolver"].host_home == (tmp_path / "host-home").resolve()
     assert created["stack_secret_lease_resolver"].work_dir == host_work_dir
     assert created["stack_secret_lease_resolver"].host_env is worker_mod.os.environ
     assert created["provisioner_session_factory"] is session_factory

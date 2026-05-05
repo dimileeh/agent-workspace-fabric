@@ -278,9 +278,7 @@ async def test_overlap_graph_queue_state_filter_limits_nodes_before_edges(
     assert {edge.affected_workspace_ids for edge in queued_graph.edges} == {
         tuple(sorted(queued_ids))
     }
-    assert {node.workspace_id for node in running_graph.nodes} == running_ids | {
-        mixed_running_id
-    }
+    assert {node.workspace_id for node in running_graph.nodes} == running_ids | {mixed_running_id}
     assert {edge.affected_workspace_ids for edge in running_graph.edges} == {
         tuple(sorted(running_ids))
     }
@@ -328,8 +326,7 @@ async def test_overlap_graph_deterministic_and_compact(
     edge = graph.edges[0]
     assert edge.affected_workspace_ids == tuple(sorted([older_id, newer_a_id]))
     assert {
-        frozenset([match.left_owned_path, match.right_owned_path])
-        for match in edge.path_matches
+        frozenset([match.left_owned_path, match.right_owned_path]) for match in edge.path_matches
     } == {
         frozenset(["src/**", "src/awf/service.py"]),
         frozenset(["src/awf/**", "src/awf/service.py"]),

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,7 +33,6 @@ sys.path.insert(0, str(_ROOT / "src"))
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 # Populate the adapter registry.
@@ -48,7 +48,7 @@ from awf.common.ids import new_event_id  # noqa: E402
 from awf.db.enums import AgentRuntime, WorkspaceStatus  # noqa: E402
 from awf.db.models import WorkspaceEvent  # noqa: E402
 from awf.db.repositories import WorkspaceRepository  # noqa: E402
-from awf.db.session import make_session_factory  # noqa: E402
+from awf.db.session import make_engine, make_session_factory  # noqa: E402
 from awf.runtime.logs import LogStore  # noqa: E402
 from awf.runtime.pr_monitor_runner import (  # noqa: E402
     _initial_review_grace_done_key,
@@ -61,6 +61,8 @@ from awf.runtime.release_pr_monitor import (  # noqa: E402
     build_release_pr_monitor,
 )
 
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+
 
 async def _main(
     work_dir: Path,
@@ -69,12 +71,8 @@ async def _main(
     auto_merge: bool = True,
     push_pending: bool = False,
 ) -> int:
-    db_path = work_dir / "awf.db"
-    if not db_path.exists():
-        print(f"No AWF DB at {db_path}", file=sys.stderr)
-        return 2
-
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    database_url = os.environ.get("AWF_DATABASE_URL", _DEFAULT_DATABASE_URL)
+    engine = make_engine(database_url)
     factory = make_session_factory(engine)
 
     try:

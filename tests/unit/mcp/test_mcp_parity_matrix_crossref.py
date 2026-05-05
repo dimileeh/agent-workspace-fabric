@@ -210,7 +210,9 @@ def test_parity_matrix_rest_endpoints_exist_in_api_routes() -> None:
         if not rest_cell:
             continue
         parsed = _parse_rest_endpoints_from_cell(rest_cell)
-        looks_like_endpoints = bool(re.search(r"(GET|POST|PUT|DELETE|PATCH|WS|WebSocket)\s+/", _strip_backticks(rest_cell)))
+        looks_like_endpoints = bool(
+            re.search(r"(GET|POST|PUT|DELETE|PATCH|WS|WebSocket)\s+/", _strip_backticks(rest_cell))
+        )
         assert not looks_like_endpoints or parsed, (
             f"{row.get('Capability', '?')}: non-empty REST cell looks like it should list endpoints but none could be parsed: {rest_cell!r}"
         )
@@ -218,9 +220,8 @@ def test_parity_matrix_rest_endpoints_exist_in_api_routes() -> None:
             normalized = f"{method} {_normalize_path(path)}"
             if normalized not in known_normalized:
                 missing.append(f"{row.get('Capability', '?')}: {method} {path}")
-    assert not missing, (
-        "REST endpoints in parity matrix not found in API routes:\n"
-        + "\n".join(missing)
+    assert not missing, "REST endpoints in parity matrix not found in API routes:\n" + "\n".join(
+        missing
     )
 
 
@@ -239,8 +240,7 @@ def test_parity_matrix_mcp_tools_exist_in_server() -> None:
             if part.startswith("awf_") and part not in mcp_tools:
                 missing.append(f"{row.get('Capability', '?')}: {part}")
     assert not missing, (
-        "MCP tool names in parity matrix not found in server registration:\n"
-        + "\n".join(missing)
+        "MCP tool names in parity matrix not found in server registration:\n" + "\n".join(missing)
     )
 
 
@@ -281,9 +281,8 @@ def test_parity_matrix_cli_commands_or_absent() -> None:
                     missing.append(
                         f"{row.get('Capability', '?')}: {part} (unsupported flag {flag_name})"
                     )
-    assert not missing, (
-        "CLI commands/flags in parity matrix not found in CLI app:\n"
-        + "\n".join(missing)
+    assert not missing, "CLI commands/flags in parity matrix not found in CLI app:\n" + "\n".join(
+        missing
     )
 
 
@@ -325,7 +324,6 @@ def test_parity_matrix_schema_names_exist_in_schemas_module() -> None:
                 if word in FRAMEWORK_RESPONSE_TYPES:
                     continue
                 missing.append(f"{row.get('Capability', '?')}: {word}")
-    assert not missing, (
-        "Schema names in parity matrix not found in schemas.py:\n"
-        + "\n".join(missing)
+    assert not missing, "Schema names in parity matrix not found in schemas.py:\n" + "\n".join(
+        missing
     )

@@ -11,7 +11,6 @@ import pytest
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import (
@@ -24,7 +23,6 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
 from awf.service.controls import (
     _OPERATION_ERROR_MESSAGE_MAX_LENGTH,
     ActiveWorkspaceDestroyError,
@@ -46,19 +44,13 @@ from awf.service.controls import (
     default_cleaner,
     stop_project_containers,
 )
+from tests.postgres import postgres_test_session
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = make_session_factory(engine)
-    async with factory() as s:
+    async with postgres_test_session() as s:
         yield s
-
-    await engine.dispose()
 
 
 @dataclass
@@ -156,9 +148,7 @@ class StaleCallbackCleaner(RecordingCleaner):
             .values(
                 status=self.final_status.value,
                 failure_reason=(
-                    "operator_failure"
-                    if self.final_status == WorkspaceStatus.failed
-                    else None
+                    "operator_failure" if self.final_status == WorkspaceStatus.failed else None
                 ),
                 failure_message=(
                     "operator moved workspace"
@@ -513,13 +503,17 @@ async def test_idempotent_replay_returns_original_operation_audit_unchanged(
 
     assert replay.operation_id == first.operation_id
     assert replayed.id == operation.id
-    assert replayed.payload == original_payload == {
-        "owner": "operator_api",
-        "source": "operator_api",
-        "reason": "preserve audit",
-        "reason_code": "OPERATOR_STOP",
-        "requested_action": "stop",
-    }
+    assert (
+        replayed.payload
+        == original_payload
+        == {
+            "owner": "operator_api",
+            "source": "operator_api",
+            "reason": "preserve audit",
+            "reason_code": "OPERATOR_STOP",
+            "requested_action": "stop",
+        }
+    )
     assert replayed.result == original_result
     assert replayed.started_at == original_started_at
     assert replayed.finished_at == original_finished_at
@@ -792,7 +786,9 @@ async def test_cancel_stop_destroy_remonitor_payloads_include_operator_audit(
     cancel = await _workspace(session, status=WorkspaceStatus.completed, title="cancel audit")
     stop = await _workspace(session, status=WorkspaceStatus.completed, title="stop audit")
     destroy = await _workspace(session, status=WorkspaceStatus.destroyed, title="destroy audit")
-    remonitor = await _workspace(session, status=WorkspaceStatus.monitoring_pr, title="remonitor audit")
+    remonitor = await _workspace(
+        session, status=WorkspaceStatus.monitoring_pr, title="remonitor audit"
+    )
     remonitor.pr_url = "https://github.com/example/control-lifecycle/pull/45"
     remonitor.pr_number = 45
     remonitor.base_commit = "b" * 40
@@ -811,7 +807,8 @@ async def test_cancel_stop_destroy_remonitor_payloads_include_operator_audit(
     await service.remonitor_workspace(remonitor.id, reason="rerun monitor")
 
     operations_by_type = {
-        operation.type: operation for operation in await OperationRepository(session).list_all(limit=20)
+        operation.type: operation
+        for operation in await OperationRepository(session).list_all(limit=20)
     }
 
     assert operations_by_type[OperationType.cancel.value].payload == {
@@ -1285,8 +1282,7 @@ async def test_rebase_monitoring_pr_creates_rebase_operation_and_replays_exact_k
     state_event = next(
         event
         for event in events
-        if event.event_type == "workspace.state_changed"
-        and event.reason_code == "OPERATOR_REBASE"
+        if event.event_type == "workspace.state_changed" and event.reason_code == "OPERATOR_REBASE"
     )
 
     assert replay.id == operation.id
@@ -1412,9 +1408,7 @@ async def test_rebase_same_key_with_different_expected_version_conflicts_without
         )
 
     assert before_operation_ids == [operation.id]
-    assert [
-        row.id for row in await _operations(session, workspace.id)
-    ] == before_operation_ids
+    assert [row.id for row in await _operations(session, workspace.id)] == before_operation_ids
     assert [row.id for row in await _events(session, workspace.id)] == before_event_ids
 
 
@@ -1663,9 +1657,7 @@ async def test_destroy_already_cancelled_workspace_runs_cleanup_and_records_dest
     )
     operations = await _operations(session, workspace.id)
     events = await _events(session, workspace.id)
-    state_events = [
-        event for event in events if event.event_type == "workspace.state_changed"
-    ]
+    state_events = [event for event in events if event.event_type == "workspace.state_changed"]
 
     assert response.operation_id == operations[0].id
     assert response.status == WorkspaceStatus.destroyed
@@ -1716,9 +1708,7 @@ async def test_destroy_already_cancelled_workspace_runs_cleanup_and_records_dest
     assert state_events[0].old_state == WorkspaceStatus.destroying.value
     assert state_events[0].payload is not None
     assert state_events[0].payload["cleanup"] == operations[0].result["cleanup"]
-    assert not any(
-        event.event_type == "workspace.stale_callback_ignored" for event in events
-    )
+    assert not any(event.event_type == "workspace.stale_callback_ignored" for event in events)
 
 
 @pytest.mark.unit
@@ -1768,9 +1758,7 @@ async def test_force_destroy_active_workspace_runs_cleanup_and_marks_destroyed(
             "completed_steps": [],
         },
     }
-    state_events = [
-        event for event in events if event.event_type == "workspace.state_changed"
-    ]
+    state_events = [event for event in events if event.event_type == "workspace.state_changed"]
     assert [event.new_state for event in state_events[:3]] == [
         WorkspaceStatus.destroyed.value,
         WorkspaceStatus.destroying.value,
@@ -2165,9 +2153,7 @@ async def test_destroy_destroying_workspace_runs_cleanup_without_retransition(
     state_change_events = [
         event for event in events if event.event_type == "workspace.state_changed"
     ]
-    assert [event.new_state for event in state_change_events] == [
-        WorkspaceStatus.destroyed.value
-    ]
+    assert [event.new_state for event in state_change_events] == [WorkspaceStatus.destroyed.value]
 
 
 @pytest.mark.unit

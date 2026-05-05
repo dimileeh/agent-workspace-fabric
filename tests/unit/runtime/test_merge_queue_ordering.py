@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -22,8 +21,9 @@ from awf.db.repositories import (
     WorkspaceRepository,
     sync_candidate_readiness,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import Merge, MonitorState
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import FakeAdapter, RecordedSleep, make_runner
 from tests.unit.runtime.test_pr_monitor import _status
 
@@ -31,14 +31,9 @@ REPO_URL = "git@github.com:dimileeh/aira-web.git"
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -224,9 +219,7 @@ async def test_monitor_waits_for_older_candidate_without_notify_human(
         "blocker_pr_number": 101,
         "blocker_title": "Older candidate",
         "blocker_status": older_status.value,
-        "blocker_state": "monitor_owned_recovery"
-        if recovery_operation
-        else "merge_eligible",
+        "blocker_state": "monitor_owned_recovery" if recovery_operation else "merge_eligible",
     }
 
 

@@ -28,7 +28,7 @@ def _settings(
         service_name="awf",
         env="local",
         api_base_url="http://localhost:8000",
-        database_url=database_url or f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}",
+        database_url=database_url or "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
         docker_host="unix:///var/run/docker.sock",
         agent_runtime_image="custom-agent-runtime:dev",
         work_dir=str((tmp_path / "awf-work").resolve()),
@@ -43,6 +43,13 @@ def _settings(
         planning_max_iterations_default=planning_max_iterations_default,
         node_id="node-1",
     )
+
+
+def _in_process_merge_coordinator(
+    _database_url: str, *, engine: object
+) -> InProcessMergeCoordinator:
+    del engine
+    return InProcessMergeCoordinator()
 
 
 @pytest.mark.unit
@@ -198,6 +205,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         "_apply_service_git_environment",
         lambda env: created.setdefault("applied_git_env", env),
     )
+    monkeypatch.setattr(
+        worker_mod,
+        "_merge_coordinator_for_database_url",
+        _in_process_merge_coordinator,
+    )
 
     def _build_feature_monitor(**kwargs: object) -> object:
         created["feature_monitor_kwargs"] = kwargs
@@ -278,9 +290,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert monitor is not None
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 321
     assert created["feature_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 45
-    assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == [
-        "custom-reviewer"
-    ]
+    assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "post_merge_target_reconciler" in created["feature_monitor_kwargs"]
@@ -306,9 +316,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert manual_monitor is not None
     assert created["release_monitor_kwargs"]["initial_review_grace_period_seconds"] == 12.5
     assert created["release_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 45
-    assert created["release_monitor_kwargs"]["non_check_reviewer_logins"] == [
-        "custom-reviewer"
-    ]
+    assert created["release_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "post_merge_target_reconciler" in created["release_monitor_kwargs"]
@@ -377,18 +385,53 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
     # silence other heavy constructors
     monkeypatch.setattr(worker_mod, "make_engine", lambda _url: object())
     monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: object())
-    monkeypatch.setattr(worker_mod, "AsyncioSubprocessRunner", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "LogStore", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "ValidationRunner", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "PullRequestCreator", type("_AnyInit", (), {"__init__": lambda _s, _r: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "GitHubClient", type("_AnyInit", (), {"__init__": lambda _s, _r: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "GitManager", type("_AnyInit", (), {"__init__": lambda _s, _p, **_kw: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "ComposeManager", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "ComposeStackLauncher", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "Provisioner", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "ControlWorker", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
-    monkeypatch.setattr(worker_mod, "InProcessMergeCoordinator", type("_AnyInit", (), {"__init__": lambda _s: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod,
+        "AsyncioSubprocessRunner",
+        type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}),
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod, "LogStore", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None})
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod, "ValidationRunner", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None})
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod, "PullRequestCreator", type("_AnyInit", (), {"__init__": lambda _s, _r: None})
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod, "GitHubClient", type("_AnyInit", (), {"__init__": lambda _s, _r: None})
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod, "GitManager", type("_AnyInit", (), {"__init__": lambda _s, _p, **_kw: None})
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod, "ComposeManager", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None})
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod,
+        "ComposeStackLauncher",
+        type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}),
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod,
+        "ServiceAuthMountResolver",
+        type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}),
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod, "Provisioner", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None})
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod, "ControlWorker", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None})
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod, "InProcessMergeCoordinator", type("_AnyInit", (), {"__init__": lambda _s: None})
+    )  # type: ignore[type-var]
+    monkeypatch.setattr(
+        worker_mod,
+        "_merge_coordinator_for_database_url",
+        _in_process_merge_coordinator,
+    )
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
     monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
 
@@ -550,15 +593,20 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
     monkeypatch.setattr(worker_mod.socket, "gethostname", lambda: "container-7dbf")
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
     monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
+    monkeypatch.setattr(
+        worker_mod,
+        "_merge_coordinator_for_database_url",
+        _in_process_merge_coordinator,
+    )
 
     settings = resolve_service_settings(
         Settings(
             _env_file=None,
             work_dir=str(tmp_path / "awf-work"),
             host_home=str(tmp_path / "host-home"),
-            database_url=f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}",
+            database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
         ),
-        environ={"AWF_DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"},
+        environ={"AWF_DATABASE_URL": "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"},
     )
 
     worker_mod.build_worker_runtime(settings)
@@ -678,8 +726,7 @@ def test_service_git_environment_configures_gh_credential_helper_for_git(
 
     count = int(env["GIT_CONFIG_COUNT"])
     entries = {
-        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"]
-        for index in range(count)
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
     }
 
     assert entries["safe.directory"] == "*"

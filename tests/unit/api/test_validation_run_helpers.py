@@ -146,18 +146,11 @@ def test_validation_coverage_fields_ignore_non_contract_value_types() -> None:
 
 @pytest.mark.unit
 def test_fresh_for_target_handles_true_false_and_unknown_cases() -> None:
+    assert fresh_for_target(validation_target_head_sha="abc", current_target_head_sha="abc") is True
     assert (
-        fresh_for_target(validation_target_head_sha="abc", current_target_head_sha="abc")
-        is True
+        fresh_for_target(validation_target_head_sha="abc", current_target_head_sha="def") is False
     )
-    assert (
-        fresh_for_target(validation_target_head_sha="abc", current_target_head_sha="def")
-        is False
-    )
-    assert (
-        fresh_for_target(validation_target_head_sha="", current_target_head_sha="def")
-        is None
-    )
+    assert fresh_for_target(validation_target_head_sha="", current_target_head_sha="def") is None
 
 
 @pytest.mark.unit

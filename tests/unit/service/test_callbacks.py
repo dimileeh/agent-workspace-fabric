@@ -345,14 +345,20 @@ async def test_enqueue_missing_callback_sources_is_a_safe_noop(
     service = CallbackDeliveryService(factory)
 
     assert await service.enqueue_workspace_event("evt_missing") == []
-    assert await service.enqueue_operation_event(
-        "op_missing",
-        event_type="operation.state_changed",
-    ) == []
-    assert await service.enqueue_merge_event(
-        "mc_missing",
-        event_type="merge.candidate_updated",
-    ) == []
+    assert (
+        await service.enqueue_operation_event(
+            "op_missing",
+            event_type="operation.state_changed",
+        )
+        == []
+    )
+    assert (
+        await service.enqueue_merge_event(
+            "mc_missing",
+            event_type="merge.candidate_updated",
+        )
+        == []
+    )
 
 
 @pytest.mark.unit

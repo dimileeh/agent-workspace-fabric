@@ -51,7 +51,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run(cmd: list[str], *, timeout: int = 60, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str], *, timeout: int = 60, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
         check=check,
@@ -115,7 +117,7 @@ def _build_agent_image(tmp_path: Path, workspace_id: str, seed_compose_file: Pat
             f"FROM {_AGENT_IMAGE_BASE}\n"
             "COPY tiny-compose.yml /seed/compose.yml\n"
             "ENTRYPOINT []\n"
-            "CMD [\"sh\", \"-c\", \"sleep infinity\"]\n"
+            'CMD ["sh", "-c", "sleep infinity"]\n'
         ),
         encoding="utf-8",
     )
@@ -158,9 +160,7 @@ async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Pa
     worktree_host_path = tmp_path / "agent-worktree"
     worktree_host_path.mkdir()
     _write_tiny_project(local_project)
-    agent_image = _build_agent_image(
-        tmp_path, workspace_id, local_project / "tiny" / "compose.yml"
-    )
+    agent_image = _build_agent_image(tmp_path, workspace_id, local_project / "tiny" / "compose.yml")
 
     manager = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
     spec = WorkspaceComposeSpec(
@@ -201,10 +201,7 @@ async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Pa
         _exec_agent(
             project_name=project_name,
             compose_file=paths.compose_file,
-            command=(
-                f"docker compose -f {inner_compose} "
-                f"-p {inner_project} up -d --wait"
-            ),
+            command=(f"docker compose -f {inner_compose} -p {inner_project} up -d --wait"),
             timeout=180,
         )
         response = _exec_agent(
@@ -220,8 +217,7 @@ async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Pa
                 project_name=project_name,
                 compose_file=paths.compose_file,
                 command=(
-                    f"docker compose -f {inner_compose} "
-                    f"-p {inner_project} down -v --remove-orphans"
+                    f"docker compose -f {inner_compose} -p {inner_project} down -v --remove-orphans"
                 ),
             )
         if paths is not None:

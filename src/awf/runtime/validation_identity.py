@@ -68,8 +68,7 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
                 _command_identity(command) for command in profile.database.generated_setup
             ],
             "pre_validation_refresh": [
-                _command_identity(command)
-                for command in profile.database.pre_validation_refresh
+                _command_identity(command) for command in profile.database.pre_validation_refresh
             ],
         },
         "validation": {

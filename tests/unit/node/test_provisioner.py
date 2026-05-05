@@ -1,4 +1,4 @@
-"""Provisioner tests — real GitManager against a throwaway git repo + SQLite DB.
+"""Provisioner tests — real GitManager against a throwaway git repo + PostgreSQL DB.
 
 We exercise the full provisioner flow rather than mocking git, because the whole
 point is the integration between state transitions and filesystem operations.
@@ -15,8 +15,8 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
     SecretLeaseRepository,
@@ -24,13 +24,20 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
+from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
-from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.node.provisioner import (
+    Provisioner,
+    ProvisionerConfig,
+    _provision_checkout_base_branch,
+    _provision_remote_push_branch,
+)
 from awf.node.stack_launcher import ComposeStackLauncher
-from awf.profiles.models import ProfileSecret, WorkspaceProfile
+from awf.profiles.models import EgressMode, ProfileSecret, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError
+from tests.postgres import postgres_test_engine
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -51,17 +58,9 @@ def origin_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    # File-based SQLite so multiple sessions see the same state (the provisioner
-    # opens several short sessions across the flow).
-    db_path = tmp_path / "awf-test.db"
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -116,6 +115,37 @@ class TestSuccess:
         provisioner: Provisioner,
     ) -> None:
         await provisioner.provision_claimed("ws_missing")
+
+    @pytest.mark.unit
+    async def test_provision_claimed_ready_workspace_records_stale_skip(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="stale",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision_claimed(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.events[-1].event_type == "workspace.stale_action_skipped"
+            assert reloaded.events[-1].payload["action"] == "provision"
 
     @pytest.mark.unit
     async def test_transitions_to_ready_only_after_stack_launch_succeeds(
@@ -175,6 +205,142 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_checks_out_pull_head_ref_and_records_remote_push_branch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingGit:
+            work_dir = tmp_path / "awf-work"
+
+            def __init__(self) -> None:
+                self.add_worktree_calls: list[dict[str, object]] = []
+
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                self.add_worktree_calls.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "repo_url": repo_url,
+                        "base_branch": base_branch,
+                        "new_branch": new_branch,
+                    }
+                )
+                worktree = self.work_dir / "worktrees" / workspace_id
+                worktree.mkdir(parents=True, exist_ok=True)
+                return WorktreeLayout(
+                    mirror_path=self.work_dir / "mirrors" / "repo.git",
+                    worktree_path=worktree,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "h" * 40
+
+        git = _RecordingGit()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git,  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url="https://github.com/dimileeh/aira-web.git",
+                branch_base="development",
+                task_title="adopt",
+                task_prompt="monitor",
+                agent="codex",
+                test_commands=[],
+                task_kind="sync_feature_pr",
+                task_policy={
+                    "pr_adoption": {
+                        "pr_number": 277,
+                        "head_ref": "feature/ready",
+                        "base_ref": "development",
+                    }
+                },
+                resolved_profile={"name": "generic"},
+            )
+            ws.pr_number = 277
+            await s.commit()
+            workspace_id = ws.id
+
+        await provisioner.provision(workspace_id)
+
+        assert git.add_worktree_calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": "https://github.com/dimileeh/aira-web.git",
+                "base_branch": "refs/pull/277/head",
+                "new_branch": f"feature-sync/{workspace_id}",
+            }
+        ]
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(workspace_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.branch_base == "development"
+            assert reloaded.branch_name == f"feature-sync/{workspace_id}"
+            assert reloaded.remote_push_branch == "feature/ready"
+
+    @pytest.mark.unit
+    def test_sync_feature_pr_checkout_uses_pull_head_ref_when_pr_number_is_present(
+        self,
+    ) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="feature-sync/ws",
+            remote_push_branch="feature/fork-head",
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "pr_number": "278",
+                    "head_ref": "feature/fork-head",
+                    "base_ref": "development",
+                }
+            },
+        )
+
+        assert _provision_checkout_base_branch(ws) == "refs/pull/278/head"
+        assert _provision_remote_push_branch(ws) == "feature/fork-head"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "task_kind, task_policy",
+        [
+            ("feature_branch_pr", {"pr_adoption": {"head_ref": "feature/ignored"}}),
+            ("sync_feature_pr", {}),
+            ("sync_feature_pr", {"pr_adoption": "not-a-dict"}),
+            ("sync_feature_pr", {"pr_adoption": {"head_ref": 123}}),
+            ("sync_feature_pr", {"pr_adoption": {"head_ref": " "}}),
+        ],
+    )
+    def test_sync_feature_pr_head_ref_helpers_fall_back_when_metadata_is_absent(
+        self,
+        task_kind: str,
+        task_policy: dict[str, Any],
+    ) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            branch_name="awf/ws",
+            remote_push_branch="awf/ws",
+            task_kind=task_kind,
+            task_policy=task_policy,
+        )
+
+        assert _provision_checkout_base_branch(ws) == "development"
+        assert _provision_remote_push_branch(ws) == "awf/ws"
 
     @pytest.mark.unit
     async def test_profile_secret_leases_are_issued_before_launch_and_mounted_after_success(
@@ -748,6 +914,59 @@ class TestFailureHandling:
             assert failed_events[-1].reason_code == "PROFILE_RESOLUTION_FAILURE"
 
     @pytest.mark.unit
+    async def test_local_egress_policy_error_marks_workspace_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _EgressFailingLauncher:
+            async def launch(self, _request: Any) -> object:
+                raise LocalEgressPolicyError(
+                    reason_code="LOCAL_EGRESS_MODE_UNSUPPORTED",
+                    mode=EgressMode.restricted,
+                    message="local backend cannot enforce this mode",
+                    details={"network_posture": "restricted"},
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_EgressFailingLauncher(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={"name": "restricted-local"},
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(LocalEgressPolicyError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "policy_failure"
+            assert reloaded.failure_message is not None
+            assert "LOCAL_EGRESS_MODE_UNSUPPORTED" in reloaded.failure_message
+            failed_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            ]
+            assert failed_events[-1].reason_code == "LOCAL_EGRESS_MODE_UNSUPPORTED"
+
+    @pytest.mark.unit
     async def test_missing_base_branch_marks_workspace_failed(
         self,
         provisioner: Provisioner,
@@ -852,9 +1071,7 @@ class TestOperatorControlRaces:
                 return "c" * 40
 
         class _DestroyAfterClaimProvisioner(Provisioner):
-            async def _load_and_claim(
-                self, session: AsyncSession, workspace_id: str
-            ) -> Any:
+            async def _load_and_claim(self, session: AsyncSession, workspace_id: str) -> Any:
                 ws = await super()._load_and_claim(session, workspace_id)
                 assert ws is not None
                 await _force_destroy_provisioning_workspace(session_factory, workspace_id)
@@ -994,9 +1211,7 @@ class TestOperatorControlRaces:
     ) -> None:
         class _DestroyingFailingStackLauncher:
             async def launch(self, request: Any) -> object:
-                await _force_destroy_provisioning_workspace(
-                    session_factory, request.workspace_id
-                )
+                await _force_destroy_provisioning_workspace(session_factory, request.workspace_id)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -1140,9 +1355,7 @@ class TestOperatorControlRaces:
     ) -> None:
         class _DestroyingStackLauncher:
             async def launch(self, request: Any) -> object:
-                await _force_destroy_provisioning_workspace(
-                    session_factory, request.workspace_id
-                )
+                await _force_destroy_provisioning_workspace(session_factory, request.workspace_id)
                 return ComposeProjectPaths(
                     project_dir=Path("/tmp/awf-compose/ws_launcher"),
                     compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),

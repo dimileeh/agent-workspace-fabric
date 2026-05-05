@@ -686,9 +686,7 @@ class TestGeminiAdapter:
         override = no_model_settings["modelConfigs"]["overrides"][0]  # type: ignore[index]
         assert override["match"] == {}
         assert (
-            override["modelConfig"]["generateContentConfig"]["thinkingConfig"][
-                "thinkingLevel"
-            ]
+            override["modelConfig"]["generateContentConfig"]["thinkingConfig"]["thinkingLevel"]
             == "HIGH"
         )
 

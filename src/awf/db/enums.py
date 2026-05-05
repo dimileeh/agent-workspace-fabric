@@ -72,6 +72,7 @@ class OperationType(StrEnum):
     ci_repair = "ci_repair"
     human_wait = "human_wait"
     monitor_state = "monitor_state"
+    adopt_pr = "adopt_pr"
     destroy = "destroy"
 
 
@@ -135,6 +136,12 @@ class TaskKind(StrEnum):
     only posts "ready to merge" when all gates green. The existing open
     PR is kept current via the monitor's SyncBase cycle as more feature
     branches land on development."""
+
+    sync_feature_pr = "sync_feature_pr"
+    """Adopt an already-open feature PR into AWF's service monitor.
+    Provisioning checks out the PR head ref and the executor skips the
+    original coding-agent, validation, push, and PR-create path before
+    handing the workspace to the normal PR monitor."""
 
 
 class TaskClass(StrEnum):

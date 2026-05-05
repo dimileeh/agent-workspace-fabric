@@ -144,6 +144,13 @@ def test_network_posture_legacy_cutoff_is_unset_by_default_and_in_payload() -> N
 
 
 @pytest.mark.unit
+def test_network_posture_legacy_cutoff_treats_blank_string_as_unset() -> None:
+    settings = Settings(_env_file=None, network_posture_open_legacy_cutoff=" ")
+
+    assert settings.network_posture_open_legacy_cutoff is None
+
+
+@pytest.mark.unit
 def test_network_posture_legacy_cutoff_flows_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -152,9 +159,7 @@ def test_network_posture_legacy_cutoff_flows_from_environment(
     settings = resolve_service_settings(Settings(_env_file=None), environ=os.environ)
     payload = service_config_payload(settings)
 
-    assert settings.network_posture_open_legacy_cutoff == datetime(
-        2026, 5, 2, 13, 0, tzinfo=UTC
-    )
+    assert settings.network_posture_open_legacy_cutoff == datetime(2026, 5, 2, 13, 0, tzinfo=UTC)
     assert payload["network_posture_open_legacy_cutoff"] == "2026-05-02T13:00:00+00:00"
     json.dumps(payload)
 
@@ -217,9 +222,7 @@ def test_awf_github_token_resolves_from_explicit_service_environment() -> None:
 def test_local_service_environ_loads_compose_env_with_host_override(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "AWF_GITHUB_TOKEN=ghp_compose_token\n"
-        "GH_TOKEN=ghp_compose_gh_token\n"
-        "EMPTY_VALUE=\n",
+        "AWF_GITHUB_TOKEN=ghp_compose_token\nGH_TOKEN=ghp_compose_gh_token\nEMPTY_VALUE=\n",
         encoding="utf-8",
     )
 

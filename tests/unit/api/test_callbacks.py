@@ -35,13 +35,14 @@ async def _subscription_count(engine: AsyncEngine) -> int:
     factory = make_session_factory(engine)
     async with factory() as session:
         return int(
-            await session.scalar(select(func.count()).select_from(CallbackSubscription))
-            or 0
+            await session.scalar(select(func.count()).select_from(CallbackSubscription)) or 0
         )
 
 
 @pytest.fixture
-async def callback_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
+async def callback_app_and_client(
+    engine: AsyncEngine,
+) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
@@ -242,9 +243,12 @@ def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
 
 @pytest.mark.unit
 def test_legacy_ipv4_literal_detector_rejects_malformed_legacy_hosts() -> None:
-    assert api_schemas._looks_like_legacy_ipv4_literal(  # type: ignore[arg-type]
-        _NoLegacyIPv4Labels()
-    ) is False
+    assert (
+        api_schemas._looks_like_legacy_ipv4_literal(  # type: ignore[arg-type]
+            _NoLegacyIPv4Labels()
+        )
+        is False
+    )
     assert api_schemas._looks_like_legacy_ipv4_literal("192.168..1") is False
     assert api_schemas._looks_like_legacy_ipv4_literal("0xg.168.1.1") is False
     assert api_schemas._looks_like_legacy_ipv4_literal("0x7f.0.0.1") is True

@@ -12,7 +12,7 @@ The pure helpers (``build_fix_prompt``, ``read_output_tail``,
   - The re-invocation of the agent on a fix pass embeds the failure
     context (fix prompt actually flows to the adapter subprocess).
 
-The harness mirrors ``test_executor.py``: real in-memory SQLite,
+The harness mirrors ``test_executor.py``: real PostgreSQL,
 ``FakeCommandRunner`` queued with explicit per-subprocess results.
 Every docker compose exec / git / gh invocation consumes exactly one
 queued result, in order.
@@ -32,13 +32,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapters
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationCommandResult, ValidationResult, ValidationRunner
+from tests.postgres import postgres_test_engine
 
 from .executor_paths import _test_worktree_path, _test_worktrees_root
 
@@ -47,13 +47,10 @@ _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "worksp
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
-        yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
+        yield session_factory
 
 
 @pytest.fixture
@@ -118,6 +115,7 @@ async def _seed_ready_workspace(
         if create_worktree:
             (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
         return ws.id
+
 
 def _queue_initial_pass(fake: FakeCommandRunner) -> None:
     """Queue the subprocess results for the initial agent-run + commit
@@ -203,7 +201,9 @@ class _CancelBeforeFixValidation:
             ws = await repo.get(workspace_id)
             assert ws is not None
             if self._terminal_status == WorkspaceStatus.cancelled:
-                await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_CANCEL")
+                await repo.transition(
+                    ws, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_CANCEL"
+                )
             else:
                 # The destroy path can race in from the control plane while the executor is
                 # between awaits; set the observed status directly to model that stale read.
@@ -384,9 +384,7 @@ class TestFixCycleMissingWorktree:
         fake = _RemoveWorktreeOnCall(
             worktree_path,
             predicate=lambda args, result: (
-                bool(args)
-                and args[-1].endswith("pytest -q")
-                and result.returncode != 0
+                bool(args) and args[-1].endswith("pytest -q") and result.returncode != 0
             ),
         )
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
@@ -452,9 +450,7 @@ class TestFixCycleMissingWorktree:
         adapter_calls = [c for c in fake.calls if "exec" in c.args and "codex" in c.args]
         validation_calls = [c for c in fake.calls if c.args and c.args[-1].endswith("pytest -q")]
         git_add_calls = [
-            c
-            for c in fake.calls
-            if c.args[:1] == ["git"] and c.args[-2:] == ["add", "-A"]
+            c for c in fake.calls if c.args[:1] == ["git"] and c.args[-2:] == ["add", "-A"]
         ]
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(ws_id)
@@ -515,9 +511,7 @@ class TestFixCycleMissingWorktree:
         worktree_path = _test_worktree_path(factory, ws_id)
         fake = _RemoveWorktreeOnCall(
             worktree_path,
-            predicate=lambda args, _result: (
-                args[:1] == ["git"] and args[-2:] == ["add", "-A"]
-            ),
+            predicate=lambda args, _result: args[:1] == ["git"] and args[-2:] == ["add", "-A"],
             occurrence=2,
         )
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
@@ -554,8 +548,7 @@ class TestFixCycleMissingWorktree:
         fake = _RemoveWorktreeOnCall(
             worktree_path,
             predicate=lambda args, _result: (
-                args[:1] == ["git"]
-                and args[-3:] == ["diff", "--cached", "--name-only"]
+                args[:1] == ["git"] and args[-3:] == ["diff", "--cached", "--name-only"]
             ),
             occurrence=2,
         )
@@ -810,7 +803,9 @@ class TestExecProcessCleanupSafety:
 
         assert len(fake.calls) == 2
         assert not any(call.args and call.args[0] == "git" for call in fake.calls)
-        assert fake.calls[1].args[-1] == fake.calls[0].args[fake.calls[0].args.index("awf-exec") + 1]
+        assert (
+            fake.calls[1].args[-1] == fake.calls[0].args[fake.calls[0].args.index("awf-exec") + 1]
+        )
 
     @pytest.mark.unit
     async def test_validation_cleanup_failure_does_not_start_fix_pass(
@@ -843,9 +838,10 @@ class TestExecProcessCleanupSafety:
 
         adapter_calls = [call for call in fake.calls if "codex" in call.args]
         assert len(adapter_calls) == 1
-        assert fake.calls[-1].args[-1] == fake.calls[-2].args[
-            fake.calls[-2].args.index("awf-exec") + 1
-        ]
+        assert (
+            fake.calls[-1].args[-1]
+            == fake.calls[-2].args[fake.calls[-2].args.index("awf-exec") + 1]
+        )
 
     @pytest.mark.unit
     async def test_fix_pass_cleanup_failure_fails_infrastructure_before_commit(
@@ -879,12 +875,12 @@ class TestExecProcessCleanupSafety:
 
         adapter_calls = [call for call in fake.calls if "codex" in call.args]
         assert len(adapter_calls) == 2
-        assert fake.calls[-1].args[-1] == fake.calls[-2].args[
-            fake.calls[-2].args.index("awf-exec") + 1
-        ]
+        assert (
+            fake.calls[-1].args[-1]
+            == fake.calls[-2].args[fake.calls[-2].args.index("awf-exec") + 1]
+        )
         assert not any(
-            call.args[:2] == ["git", "-C"] and "commit" in call.args
-            for call in fake.calls[8:]
+            call.args[:2] == ["git", "-C"] and "commit" in call.args for call in fake.calls[8:]
         )
 
     @pytest.mark.unit

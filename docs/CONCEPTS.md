@@ -442,9 +442,8 @@ explicit mocked-local PR monitor and cleanup evidence so the Core demo remains
 deterministic without live GitHub or provider credentials.
 
 The service-mode default database URL is local Postgres
-(`postgresql+asyncpg://awf:...@localhost:5433/awf`). SQLite remains supported
-for tests and throwaway script runs, but the always-on service should run
-against Postgres.
+(`postgresql+asyncpg://awf:...@localhost:5433/awf`). Tests, throwaway script
+runs, and the always-on service all use PostgreSQL.
 
 The local Compose stack defaults `AWF_API_TOKEN` to `local-dev-token`. Use the
 same value in the console `.env.local` file, or override it consistently in the
@@ -917,4 +916,3 @@ Recent dogfood observability slices added:
 | `NotifyHuman` | PR monitor action for manual-merge mode or non-code policy blockers. |
 | Initial review grace | One-time wait after PR monitoring starts before auto-merge may happen. |
 | DinD | Docker-in-Docker sidecar used for Dockerized projects. |
-

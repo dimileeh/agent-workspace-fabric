@@ -548,16 +548,12 @@ def test_profile_schema_rejects_mismatched_healthcheck_kind() -> None:
         {
             "name": "bad-endpoint-scheme",
             "services": [{"name": "app", "image": "example/app:latest"}],
-            "app_endpoints": [
-                {"name": "app", "service": "app", "scheme": 123, "port": 3000}
-            ],
+            "app_endpoints": [{"name": "app", "service": "app", "scheme": 123, "port": 3000}],
         },
         {
             "name": "bad-endpoint-visibility",
             "services": [{"name": "app", "image": "example/app:latest"}],
-            "app_endpoints": [
-                {"name": "app", "service": "app", "port": 3000, "visibility": 123}
-            ],
+            "app_endpoints": [{"name": "app", "service": "app", "port": 3000, "visibility": 123}],
         },
     ],
 )
@@ -741,18 +737,14 @@ def test_profile_schema_accepts_planning_policy() -> None:
 
 @pytest.mark.unit
 def test_profile_planning_default_max_iterations_is_three() -> None:
-    profile = WorkspaceProfile.model_validate(
-        {"name": "awf-self", "planning": {"required": True}}
-    )
+    profile = WorkspaceProfile.model_validate({"name": "awf-self", "planning": {"required": True}})
 
     assert profile.planning.max_iterations == 3
 
 
 @pytest.mark.unit
 def test_planning_profile_round_trips_conformance_stall_policy_defaults() -> None:
-    profile = WorkspaceProfile.model_validate(
-        {"name": "awf-self", "planning": {"required": True}}
-    )
+    profile = WorkspaceProfile.model_validate({"name": "awf-self", "planning": {"required": True}})
 
     stall = profile.planning.conformance_stall
     assert stall.no_output_seconds == 600
@@ -1304,9 +1296,7 @@ def test_repo_profile_invalid_yaml_reports_resolution_error(tmp_path: Path) -> N
 def test_repo_profile_validation_error_reports_resolution_error(tmp_path: Path) -> None:
     (tmp_path / ".awf").mkdir()
     (tmp_path / ".awf" / "workspace.yml").write_text(
-        "name: bad\n"
-        "services:\n"
-        "  - name: db\n",
+        "name: bad\nservices:\n  - name: db\n",
         encoding="utf-8",
     )
 
@@ -1323,9 +1313,7 @@ def test_resolve_workspace_profile_wrapper_appends_request_validation_commands()
     )
 
     assert result.reason == "central registry profile generic; request validation commands appended"
-    assert [c.command for c in result.profile.phases.validate_commands] == [
-        "ruff check src/awf"
-    ]
+    assert [c.command for c in result.profile.phases.validate_commands] == ["ruff check src/awf"]
 
 
 @pytest.mark.unit

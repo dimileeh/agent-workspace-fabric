@@ -405,9 +405,7 @@ async def test_resource_saturation_orphan_provider_supports_async_and_db_failure
         return expected
 
     request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(orphan_resource_summary_provider=_async_provider)
-        )
+        app=SimpleNamespace(state=SimpleNamespace(orphan_resource_summary_provider=_async_provider))
     )
     provided = await metrics_route._resource_saturation_orphan_resources(
         request,
@@ -419,7 +417,9 @@ async def test_resource_saturation_orphan_provider_supports_async_and_db_failure
         async def execute(self, *_args: object, **_kwargs: object) -> None:
             raise RuntimeError("db down")
 
-    monkeypatch.setattr(metrics_route, "scan_docker_resources", lambda **_kwargs: empty_docker_scan())
+    monkeypatch.setattr(
+        metrics_route, "scan_docker_resources", lambda **_kwargs: empty_docker_scan()
+    )
     defaulted = await metrics_route._default_orphan_resource_summary(settings, _BadSession())
 
     assert provided is expected
@@ -547,9 +547,7 @@ async def test_resource_saturation_endpoint_serializes_capacity_and_pressure(
     assert body["reserved_resources"]["disk_mb"] == 4096
     assert body["reserved_resources"]["dind_slots"] == 1
     assert body["capacity"]["peak_cpu"]["reason_code"] == "PEAK_CPU_CAPACITY_SATURATED"
-    assert body["capacity"]["peak_memory_gb"]["reason_code"] == (
-        "PEAK_MEMORY_CAPACITY_SATURATED"
-    )
+    assert body["capacity"]["peak_memory_gb"]["reason_code"] == ("PEAK_MEMORY_CAPACITY_SATURATED")
     assert body["capacity"]["disk_mb"]["reason_code"] == "DISK_RESERVATION_PRESSURE"
     assert body["capacity"]["dind_slots"]["reason_code"] == "DIND_CAPACITY_SATURATED"
     assert body["capacity"]["pressure_reasons"] == [

@@ -8,10 +8,7 @@ from awf.common.workspace_policy import agent_model_from_task_policy
 
 
 def test_agent_model_from_task_policy_strips_nonblank_model() -> None:
-    assert (
-        agent_model_from_task_policy({"agent_model": "  gpt-5.3-codex  "})
-        == "gpt-5.3-codex"
-    )
+    assert agent_model_from_task_policy({"agent_model": "  gpt-5.3-codex  "}) == "gpt-5.3-codex"
 
 
 @pytest.mark.parametrize(

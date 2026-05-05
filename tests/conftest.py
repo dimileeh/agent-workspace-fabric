@@ -1,9 +1,8 @@
 """Shared pytest fixtures for AWF.
 
-The ``client`` fixture wires each test to its own in-memory SQLite database with
-a fresh app instance, so tests are isolated and can run in parallel. Tests that
-need to inspect the DB directly can use the ``session`` fixture (added in
-tests/unit/db/test_workspace_repository.py) which uses the same pattern.
+The ``client`` fixture wires each test to its own PostgreSQL schema with a fresh
+app instance, so tests are isolated and can run in parallel. Tests that need to
+inspect the DB directly can use the ``engine`` fixture with the same pattern.
 """
 
 from __future__ import annotations
@@ -23,9 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.app import configure_database, create_app
 from awf.common.config import Settings
-from awf.db.base import Base
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
+from tests.postgres import postgres_test_engine
 
 try:
     import fcntl
@@ -106,19 +105,14 @@ def _serialize_docker_daemon_tests(request: pytest.FixtureRequest) -> Iterator[N
 
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
-    """Per-test in-memory SQLite engine with schema created from ORM metadata."""
-    eng = make_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    """Per-test PostgreSQL engine with schema created from ORM metadata."""
+    async with postgres_test_engine() as eng:
         yield eng
-    finally:
-        await eng.dispose()
 
 
 @pytest.fixture
 async def client(engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
-    """AsyncClient bound to a fresh AWF app with an in-memory SQLite DB.
+    """AsyncClient bound to a fresh AWF app with an isolated PostgreSQL schema.
 
     Uses ``use_lifespan=False`` so the real lifespan (which reads env + builds a
     production engine) doesn't run; we attach our own session factory instead.
@@ -130,13 +124,15 @@ async def client(engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
 
+
 @pytest.fixture
 def mock_docker_cli_probe(monkeypatch):
     """Safely mock docker CLI probes."""
     original_run = subprocess.run
+
     def _mock_run(args, **kwargs):
         if len(args) > 0 and args[0] == "docker" and any("command -v" in str(a) for a in args):
-            CompletedProcess = namedtuple('CompletedProcess', ['returncode', 'stdout', 'stderr'])
+            CompletedProcess = namedtuple("CompletedProcess", ["returncode", "stdout", "stderr"])
             return CompletedProcess(returncode=0, stdout="/usr/bin/cli\n", stderr="")
         return original_run(args, **kwargs)
 

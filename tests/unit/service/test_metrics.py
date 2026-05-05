@@ -39,6 +39,7 @@ async def session_factory(
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     yield make_session_factory(engine)
 
+
 async def _reservation_for_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -87,7 +88,6 @@ async def _reservation_for_workspace(
         )
         reservation.released_at = released_at
         await session.commit()
-
 
 
 def _disk_check(
@@ -243,7 +243,9 @@ async def test_mixed_statuses_and_failure_reasons_roll_up_counts(
         WorkspaceStatus.cancelled,
         WorkspaceStatus.destroyed,
     ):
-        await create_workspace(session_factory, status=status, updated_at=now - timedelta(minutes=10))
+        await create_workspace(
+            session_factory, status=status, updated_at=now - timedelta(minutes=10)
+        )
     await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
@@ -305,7 +307,9 @@ async def test_since_hours_filters_by_workspace_updated_at(
         failure_reason=FailureReason.validation_failure,
     )
 
-    summary = await summarize_workspace_reliability(session_factory, settings=Settings(), since_hours=6, now=now)
+    summary = await summarize_workspace_reliability(
+        session_factory, settings=Settings(), since_hours=6, now=now
+    )
 
     expected_status_counts = zero_status_counts()
     expected_status_counts[WorkspaceStatus.failed.value] = 1
@@ -515,9 +519,7 @@ async def test_failure_analysis_latest_examples_do_not_load_workspace_relationsh
         if any(table in statement for table in relationship_tables)
     ]
     workspace_event_queries = [
-        statement
-        for statement in statements
-        if "from workspace_events" in statement
+        statement for statement in statements if "from workspace_events" in statement
     ]
     assert len(workspace_event_queries) == 1
     workspace_event_query = workspace_event_queries[0]
@@ -1758,7 +1760,9 @@ async def test_root_cause_clusters_mixed_rows(
     assert "Unknown Validation Failure" in cluster_reasons
 
     # Check grouping
-    syntax_cluster = next(c for c in summary.root_cause_clusters if c.likely_cause == "Syntax or Import Error")
+    syntax_cluster = next(
+        c for c in summary.root_cause_clusters if c.likely_cause == "Syntax or Import Error"
+    )
     assert syntax_cluster.count == 2
     assert syntax_cluster.agent == "opencode"
 
@@ -1794,7 +1798,9 @@ async def test_root_cause_clusters_agent_model_extraction(
     summary = await summarize_failure_analysis(session_factory, now=now)
 
     # Groups should be split by agent_model
-    syntax_clusters = [c for c in summary.root_cause_clusters if c.likely_cause == "Syntax or Import Error"]
+    syntax_clusters = [
+        c for c in summary.root_cause_clusters if c.likely_cause == "Syntax or Import Error"
+    ]
     assert len(syntax_clusters) == 2
 
     models = {c.agent_model for c in syntax_clusters}
@@ -1835,8 +1841,6 @@ async def test_existing_failure_groups_unaffected(
     assert len(summary.failure_groups) == 1
     assert summary.failure_groups[0].failure_reason == FailureReason.agent_failure.value
     assert len(summary.latest_examples) == 1
-
-
 
 
 @pytest.mark.unit
@@ -2440,7 +2444,9 @@ class TestIso8601PostgresGuardRegex:
     def test_invalid_timestamps_rejected(self, value: str) -> None:
         import re
 
-        assert not re.match(self._PATTERN, value), f"Expected invalid timestamp to be rejected: {value}"
+        assert not re.match(self._PATTERN, value), (
+            f"Expected invalid timestamp to be rejected: {value}"
+        )
 
     @pytest.mark.parametrize(
         "value",

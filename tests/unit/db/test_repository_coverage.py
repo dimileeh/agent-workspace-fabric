@@ -1,8 +1,8 @@
 """Coverage-focused repository behavior tests.
 
-These tests intentionally use the real ORM metadata against in-memory SQLite.
-They target repository branches that are hard to observe through higher-level
-service tests while still asserting durable behavior, not just execution.
+These tests intentionally use the real ORM metadata against PostgreSQL. They
+target repository branches that are hard to observe through higher-level service
+tests while still asserting durable behavior, not just execution.
 """
 
 from __future__ import annotations
@@ -11,10 +11,9 @@ from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import Task, TaskAttempt, Workspace
 from awf.db.repositories import (
@@ -42,28 +41,25 @@ from awf.db.repositories import (
     _resolve_session_dialect_name,
     _secret_lease_insert_if_absent_stmt,
     _wildcard_prefixes_overlap,
+    _workspace_idempotency_advisory_lock_key,
     owned_path_overlap_match,
     owned_paths_overlap,
     sync_candidate_readiness,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.merge_eligibility import (
     DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
     VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
 )
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = make_session_factory(engine)
-    async with factory() as s:
-        yield s
-
-    await engine.dispose()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        async with factory() as s:
+            yield s
 
 
 async def _workspace(
@@ -112,20 +108,16 @@ async def _workspace(
         ),
     ],
 )
-def test_idempotent_insert_helpers_support_postgres_sqlite_and_fallback(
+def test_idempotent_insert_helpers_support_postgres_and_fallback(
     helper: Callable[[str | None], object | None],
     conflict_columns: str,
 ) -> None:
-    for dialect_name, dialect in (
-        ("postgresql", postgresql.dialect()),
-        ("sqlite", sqlite.dialect()),
-    ):
-        stmt = helper(dialect_name)
+    stmt = helper("postgresql")
 
-        assert stmt is not None
-        sql = str(stmt.compile(dialect=dialect))
-        assert f"ON CONFLICT ({conflict_columns}) DO NOTHING" in sql
-        assert "RETURNING" in sql
+    assert stmt is not None
+    sql = str(stmt.compile(dialect=postgresql.dialect()))
+    assert f"ON CONFLICT ({conflict_columns}) DO NOTHING" in sql
+    assert "RETURNING" in sql
 
     assert helper(None) is None
 
@@ -313,7 +305,7 @@ async def test_task_attempt_latest_and_canonical_lookup_filters(
 
 
 @pytest.mark.unit
-async def test_postgres_only_repository_locks_are_skipped_or_executed_intentionally() -> None:
+async def test_postgres_only_repository_locks_execute_advisory_lock_helpers() -> None:
     class RecordingSession:
         info: dict[str, str] = {}
 
@@ -361,13 +353,11 @@ async def test_postgres_only_repository_locks_are_skipped_or_executed_intentiona
         branch_base="main",
         owned_paths=[".", ""],
     )
-    sqlite_session = RecordingSession()
-    await WorkspaceRepository(sqlite_session, dialect_name="sqlite").acquire_owned_path_conflict_lock(
-        repo_url="repo3",
-        branch_base="main",
-        owned_paths=["src/awf/**"],
-    )
-
+    workspace_idempotency_session = RecordingSession()
+    await WorkspaceRepository(
+        workspace_idempotency_session,
+        dialect_name="postgresql",
+    ).acquire_idempotency_key_lock("key0")
     operation_session = RecordingSession()
     await OperationRepository(
         operation_session,
@@ -376,12 +366,15 @@ async def test_postgres_only_repository_locks_are_skipped_or_executed_intentiona
 
     assert len(task_session.executed) == 1
     assert len(workspace_session.executed) == 1
-    assert sqlite_session.executed == []
     assert workspace_session.executed[0][1] == {
         "lock_key": _owned_path_conflict_advisory_lock_key(
             repo_url="repo3",
             branch_base="main",
         )
+    }
+    assert len(workspace_idempotency_session.executed) == 1
+    assert workspace_idempotency_session.executed[0][1] == {
+        "lock_key": _workspace_idempotency_advisory_lock_key("key0")
     }
     assert len(operation_session.executed) == 1
     assert operation_session.executed[0][1] == {
@@ -389,6 +382,8 @@ async def test_postgres_only_repository_locks_are_skipped_or_executed_intentiona
     }
     assert _owned_path_conflict_advisory_lock_key(repo_url="repo0", branch_base="main") > 0
     assert _owned_path_conflict_advisory_lock_key(repo_url="repo3", branch_base="main") < 0
+    assert _workspace_idempotency_advisory_lock_key("key0") > 0
+    assert _workspace_idempotency_advisory_lock_key("key1") < 0
     assert _operation_idempotency_advisory_lock_key("key2") > 0
     assert _operation_idempotency_advisory_lock_key("key0") < 0
 
@@ -920,9 +915,7 @@ async def test_policy_finding_replace_active_findings_handles_workspace_and_cand
     assert [row.id for row in new_candidate_added] == [new_candidate_added[0].id]
     assert [row.id for row in new_candidate_resolved] == [candidate_added[0].id]
     assert new_candidate_resolved[0].status == "resolved"
-    assert [row.id for row in active_by_candidate[candidate.id]] == [
-        new_candidate_added[0].id
-    ]
+    assert [row.id for row in active_by_candidate[candidate.id]] == [new_candidate_added[0].id]
     assert active_by_candidate["mc_missing"] == []
     assert await repo.list_active_for_candidates([]) == {}
     assert [row.id for row in active_for_candidate] == [new_candidate_added[0].id]
@@ -1228,7 +1221,7 @@ async def test_workspace_transition_if_current_releases_resources_and_claims_are
 
 
 @pytest.mark.unit
-async def test_claim_monitoring_pr_with_loaded_naive_expiry_uses_database_compare(
+async def test_claim_monitoring_pr_with_active_postgres_expiry_uses_database_compare(
     session: AsyncSession,
 ) -> None:
     workspace_repo = WorkspaceRepository(session)
@@ -1238,7 +1231,7 @@ async def test_claim_monitoring_pr_with_loaded_naive_expiry_uses_database_compar
         status=WorkspaceStatus.monitoring_pr,
     )
     claim_workspace.monitor_claimed_by = "owner-1"
-    claim_workspace.monitor_claim_expires_at = datetime(2026, 4, 27, 15, 5)
+    claim_workspace.monitor_claim_expires_at = datetime(2026, 4, 27, 15, 5, tzinfo=UTC)
     await session.flush()
 
     assert not await workspace_repo.claim_monitoring_pr(
@@ -1334,9 +1327,7 @@ async def test_workspace_queue_listing_and_owned_path_edges(
 
     assert [workspace.id for workspace in without_attempts] == [without_attempt.id]
     assert [workspace.id for workspace in merge_queue] == [with_attempt.id]
-    assert [workspace.id for workspace in merge_queue_without_candidates] == [
-        with_attempt.id
-    ]
+    assert [workspace.id for workspace in merge_queue_without_candidates] == [with_attempt.id]
     assert {workspace.id for workspace in unfiltered_without_attempts} >= {
         without_attempt.id,
         older_without_attempt.id,

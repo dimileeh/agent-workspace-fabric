@@ -18,7 +18,6 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
@@ -26,8 +25,9 @@ from awf.db.repositories import (
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.logs import LogStore
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -40,14 +40,9 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -240,7 +235,9 @@ class TestMonitorActionLogging:
 
         async with factory() as s:
             streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws_id)
-            recovery_stream = next((stream for stream in streams if stream.source == "recovery"), None)
+            recovery_stream = next(
+                (stream for stream in streams if stream.source == "recovery"), None
+            )
             operations = await OperationRepository(s).list_all(workspace_id=ws_id, limit=20)
             push_events = await WorkspaceEventRepository(s).list(
                 workspace_id=ws_id,
@@ -252,14 +249,15 @@ class TestMonitorActionLogging:
                 event_type="workspace.audit.comment_resolution",
                 limit=10,
             )
-        assert recovery_stream is not None, f"Expected a stream with source='recovery'. Streams: {[(s.stream_id, s.source) for s in streams]}. Calls: {[c.args for c in cmd.calls]}"
+        assert recovery_stream is not None, (
+            f"Expected a stream with source='recovery'. Streams: {[(s.stream_id, s.source) for s in streams]}. Calls: {[c.args for c in cmd.calls]}"
+        )
         assert recovery_stream.kind == "stdout"
         comment_operation = next(op for op in operations if op.type == "comment_repair")
         comment_push = next(
             event
             for event in push_events
-            if event.payload is not None
-            and event.payload["action"] == "comment_repair_push"
+            if event.payload is not None and event.payload["action"] == "comment_repair_push"
         )
         assert comment_push.payload == {
             "schema": "control_audit.v1",
@@ -906,7 +904,8 @@ class TestMonitorDirtyWorktreeSalvage:
         commit_calls = [
             call.args
             for call in cmd.calls
-            if len(call.args) >= 5 and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_dirty"]
+            if len(call.args) >= 5
+            and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_dirty"]
         ]
         assert commit_calls
         assert any(call.args[:3] == ["gh", "api", "graphql"] for call in cmd.calls)

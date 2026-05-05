@@ -30,7 +30,7 @@ from awf.service.controls import (
         ("7", 7),
         ('"8"', 8),
         ('W/"9"', 9),
-        (" W/  \"10\" ", 10),
+        (' W/  "10" ', 10),
     ],
 )
 def test_parse_if_match_accepts_bare_quoted_and_weak_versions(

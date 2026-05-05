@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
@@ -42,13 +41,16 @@ from awf.service.status import (
     collect_service_status,
     collect_workspace_cleanup_status,
 )
+from tests.postgres import postgres_test_url
+
+_POSTGRES_TEST_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 
 
 def _settings(
     tmp_path: Path,
     *,
     min_free_disk_bytes: int = 200,
-    database_url: str = "sqlite+aiosqlite:///:memory:",
+    database_url: str = _POSTGRES_TEST_URL,
     completed_workspace_retention_hours: float = 168,
 ) -> ServiceSettings:
     return ServiceSettings(
@@ -266,12 +268,8 @@ def test_service_status_includes_ok_disk_check_from_mocked_usage(tmp_path: Path)
 
 
 @pytest.mark.unit
-def test_service_status_exposes_workspace_cleanup_readiness(tmp_path: Path) -> None:
-    database_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
-    engine = make_engine(database_url)
-    async def _setup() -> tuple[str, str, str]:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+async def test_service_status_exposes_workspace_cleanup_readiness(tmp_path: Path) -> None:
+    async with postgres_test_url() as database_url:
         now = datetime.now(UTC)
         old_completed = await _seed_cleanup_status_workspace(
             database_url,
@@ -293,18 +291,13 @@ def test_service_status_exposes_workspace_cleanup_readiness(tmp_path: Path) -> N
             updated_at=now - timedelta(hours=200),
             title="failed",
         )
-        await engine.dispose()
-        return old_completed, recent_completed, failed
+        settings = _settings(
+            tmp_path,
+            database_url=database_url,
+            completed_workspace_retention_hours=24,
+        )
 
-    old_completed, recent_completed, failed = asyncio.run(_setup())
-    settings = _settings(
-        tmp_path,
-        database_url=database_url,
-        completed_workspace_retention_hours=24,
-    )
-
-    status = asyncio.run(
-        collect_service_status(
+        status = await collect_service_status(
             settings,
             api_get=_api_get,
             db_probe=_db_probe,
@@ -313,7 +306,6 @@ def test_service_status_exposes_workspace_cleanup_readiness(tmp_path: Path) -> N
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             provider_environ={},
         )
-    )
 
     assert status["status"] == "ok"
     cleanup = status["checks"]["workspace_cleanup"]
@@ -410,8 +402,8 @@ def test_status_db_helpers_handle_engine_construction_failures(
         lambda _url: (_ for _ in ()).throw(RuntimeError("bad database url")),
     )
 
-    db = asyncio.run(check_database("sqlite+aiosqlite:///bad.db"))
-    view = asyncio.run(_default_workspace_id_lookup("sqlite+aiosqlite:///bad.db"))
+    db = asyncio.run(check_database(_POSTGRES_TEST_URL))
+    view = asyncio.run(_default_workspace_id_lookup(_POSTGRES_TEST_URL))
 
     assert db["ok"] is False
     assert db["reason"] == "DB_CONNECTION_FAILED"
@@ -444,7 +436,7 @@ def test_check_database_disposes_engine_when_probe_fails(
 
     monkeypatch.setattr(status_mod, "make_engine", lambda _url: _Engine())
 
-    db = asyncio.run(check_database("sqlite+aiosqlite:///fake.db"))
+    db = asyncio.run(check_database(_POSTGRES_TEST_URL))
 
     assert db["ok"] is False
     assert db["reason"] == "DB_CONNECTION_FAILED"
@@ -466,37 +458,33 @@ def test_legacy_open_default_treats_non_datetime_rows_as_legacy() -> None:
 
 
 @pytest.mark.unit
-def test_default_workspace_lookup_extracts_network_posture_from_resolved_profile(
+async def test_default_workspace_lookup_extracts_network_posture_from_resolved_profile(
     tmp_path: Path,
 ) -> None:
-    database_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
-    engine = make_engine(database_url)
-
-    async def _setup() -> str:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+    async with postgres_test_url() as database_url:
+        engine = make_engine(database_url)
         factory = make_session_factory(engine)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).create(
-                repo_url="git@github.com:example/repo.git",
-                branch_base="development",
-                task_title="open profile",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-                resolved_profile={
-                    "name": "open-profile",
-                    "security": {"egress": {"mode": "open"}},
-                },
-            )
-            workspace.status = WorkspaceStatus.running.value
-            workspace.created_at = datetime(2026, 5, 2, 11, 20, 37, tzinfo=UTC)
-            await session.commit()
-            return workspace.id
-
-    workspace_id = asyncio.run(_setup())
-    view = asyncio.run(_default_workspace_id_lookup(database_url))
-    asyncio.run(engine.dispose())
+        try:
+            async with factory() as session:
+                workspace = await WorkspaceRepository(session).create(
+                    repo_url="git@github.com:example/repo.git",
+                    branch_base="development",
+                    task_title="open profile",
+                    task_prompt="p",
+                    agent="codex",
+                    test_commands=[],
+                    resolved_profile={
+                        "name": "open-profile",
+                        "security": {"egress": {"mode": "open"}},
+                    },
+                )
+                workspace.status = WorkspaceStatus.running.value
+                workspace.created_at = datetime(2026, 5, 2, 11, 20, 37, tzinfo=UTC)
+                await session.commit()
+                workspace_id = workspace.id
+            view = await _default_workspace_id_lookup(database_url)
+        finally:
+            await engine.dispose()
 
     assert view.available is True
     assert view.active_ids == frozenset({workspace_id})
@@ -504,37 +492,33 @@ def test_default_workspace_lookup_extracts_network_posture_from_resolved_profile
 
 
 @pytest.mark.unit
-def test_default_workspace_lookup_keeps_open_when_legacy_cutoff_unset(
+async def test_default_workspace_lookup_keeps_open_when_legacy_cutoff_unset(
     tmp_path: Path,
 ) -> None:
-    database_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
-    engine = make_engine(database_url)
-
-    async def _setup() -> str:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+    async with postgres_test_url() as database_url:
+        engine = make_engine(database_url)
         factory = make_session_factory(engine)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).create(
-                repo_url="git@github.com:example/repo.git",
-                branch_base="development",
-                task_title="explicit open profile",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-                resolved_profile={
-                    "name": "explicit-open-profile",
-                    "security": {"egress": {"mode": "open"}},
-                },
-            )
-            workspace.status = WorkspaceStatus.running.value
-            workspace.created_at = datetime(2026, 5, 2, 11, 20, 35, tzinfo=UTC)
-            await session.commit()
-            return workspace.id
-
-    workspace_id = asyncio.run(_setup())
-    view = asyncio.run(_default_workspace_id_lookup(database_url))
-    asyncio.run(engine.dispose())
+        try:
+            async with factory() as session:
+                workspace = await WorkspaceRepository(session).create(
+                    repo_url="git@github.com:example/repo.git",
+                    branch_base="development",
+                    task_title="explicit open profile",
+                    task_prompt="p",
+                    agent="codex",
+                    test_commands=[],
+                    resolved_profile={
+                        "name": "explicit-open-profile",
+                        "security": {"egress": {"mode": "open"}},
+                    },
+                )
+                workspace.status = WorkspaceStatus.running.value
+                workspace.created_at = datetime(2026, 5, 2, 11, 20, 35, tzinfo=UTC)
+                await session.commit()
+                workspace_id = workspace.id
+            view = await _default_workspace_id_lookup(database_url)
+        finally:
+            await engine.dispose()
 
     assert view.available is True
     assert view.active_ids == frozenset({workspace_id})
@@ -542,42 +526,36 @@ def test_default_workspace_lookup_keeps_open_when_legacy_cutoff_unset(
 
 
 @pytest.mark.unit
-def test_default_workspace_lookup_treats_legacy_open_default_as_unknown(
+async def test_default_workspace_lookup_treats_legacy_open_default_as_unknown(
     tmp_path: Path,
 ) -> None:
-    database_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
-    engine = make_engine(database_url)
-
-    async def _setup() -> str:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+    async with postgres_test_url() as database_url:
+        engine = make_engine(database_url)
         factory = make_session_factory(engine)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).create(
-                repo_url="git@github.com:example/repo.git",
-                branch_base="development",
-                task_title="legacy open default",
-                task_prompt="p",
-                agent="codex",
-                test_commands=[],
-                resolved_profile={
-                    "name": "legacy-open-default",
-                    "security": {"egress": {"mode": "open"}},
-                },
+        try:
+            async with factory() as session:
+                workspace = await WorkspaceRepository(session).create(
+                    repo_url="git@github.com:example/repo.git",
+                    branch_base="development",
+                    task_title="legacy open default",
+                    task_prompt="p",
+                    agent="codex",
+                    test_commands=[],
+                    resolved_profile={
+                        "name": "legacy-open-default",
+                        "security": {"egress": {"mode": "open"}},
+                    },
+                )
+                workspace.status = WorkspaceStatus.running.value
+                workspace.created_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+                await session.commit()
+                workspace_id = workspace.id
+            view = await _default_workspace_id_lookup(
+                database_url,
+                legacy_open_default_cutoff=datetime(2026, 5, 2, 13, 0, tzinfo=UTC),
             )
-            workspace.status = WorkspaceStatus.running.value
-            workspace.created_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
-            await session.commit()
-            return workspace.id
-
-    workspace_id = asyncio.run(_setup())
-    view = asyncio.run(
-        _default_workspace_id_lookup(
-            database_url,
-            legacy_open_default_cutoff=datetime(2026, 5, 2, 13, 0, tzinfo=UTC),
-        )
-    )
-    asyncio.run(engine.dispose())
+        finally:
+            await engine.dispose()
 
     assert view.available is True
     assert view.active_ids == frozenset({workspace_id})
@@ -1106,8 +1084,7 @@ def test_service_status_reports_stranded_active_workspaces(tmp_path: Path) -> No
         "ws_monitor",
     }
     assert any(
-        example["workspace_id"] == "ws_monitor"
-        and example["decision"] == "remonitor_workspace"
+        example["workspace_id"] == "ws_monitor" and example["decision"] == "remonitor_workspace"
         for example in examples
     )
 
@@ -1672,6 +1649,7 @@ def test_orphan_check_handles_missing_docker_binary(tmp_path: Path) -> None:
     assert orphans["status"] == "unavailable"
     assert orphans["reason"] == "DOCKER_CLI_NOT_FOUND"
 
+
 @pytest.mark.unit
 def test_default_workspace_id_lookup_returns_unavailable_for_malformed_url() -> None:
     view = asyncio.run(_default_workspace_id_lookup("not-a-real-database-url"))
@@ -1682,15 +1660,10 @@ def test_default_workspace_id_lookup_returns_unavailable_for_malformed_url() -> 
 
 
 @pytest.mark.unit
-async def test_database_probe_and_workspace_lookup_read_sqlite_rows(tmp_path: Path) -> None:
-    db_path = tmp_path / "awf-status.db"
-    database_url = f"sqlite+aiosqlite:///{db_path}"
-
-    async def seed() -> None:
+async def test_database_probe_and_workspace_lookup_read_postgres_rows(tmp_path: Path) -> None:
+    async with postgres_test_url() as database_url:
         engine = make_engine(database_url)
         try:
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
             factory = make_session_factory(engine)
             async with factory() as session:
                 repo = WorkspaceRepository(session)
@@ -1721,14 +1694,12 @@ async def test_database_probe_and_workspace_lookup_read_sqlite_rows(tmp_path: Pa
                 )
                 ignored.status = "unknown_future_status"
                 await session.commit()
+
+            db_check = await check_database(database_url)
+            view = await _default_workspace_id_lookup(database_url)
+            failed = await check_database("postgresql+asyncpg://awf:awf_dev@127.0.0.1:1/awf")
         finally:
             await engine.dispose()
-
-    await seed()
-
-    db_check = await check_database(database_url)
-    view = await _default_workspace_id_lookup(database_url)
-    failed = await check_database("sqlite+aiosqlite:////no/such/parent/awf.db")
 
     assert db_check == {"ok": True, "status": "ok"}
     assert view.available is True
@@ -1773,7 +1744,7 @@ def test_status_workspace_lookup_ignores_unknown_status_rows(
 
     monkeypatch.setattr(status_mod, "make_engine", lambda _url: _Engine())
 
-    view = asyncio.run(_default_workspace_id_lookup("sqlite+aiosqlite:///fake.db"))
+    view = asyncio.run(_default_workspace_id_lookup(_POSTGRES_TEST_URL))
 
     assert view.active_ids == frozenset({"ws_active"})
     assert view.terminal_ids == frozenset({"ws_done"})
@@ -1823,9 +1794,7 @@ def test_status_helpers_cover_docker_socket_and_result_failures(tmp_path: Path) 
     )
     assert missing_socket["reason"] == "DOCKER_SOCKET_UNREACHABLE"
 
-    non_unix_settings = ServiceSettings(
-        **{**settings.__dict__, "docker_host": "tcp://docker:2375"}
-    )
+    non_unix_settings = ServiceSettings(**{**settings.__dict__, "docker_host": "tcp://docker:2375"})
     docker_ok = _check_docker(
         non_unix_settings,
         run_subprocess=_make_run_subprocess(),

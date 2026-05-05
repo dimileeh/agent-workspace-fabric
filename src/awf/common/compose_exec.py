@@ -41,8 +41,7 @@ class ComposeExecCleanupError(RuntimeError):
         self.label = label
         self.cleanup_result = cleanup_result
         super().__init__(
-            f"{EXEC_PROCESS_CLEANUP_FAILED}: {source} {label} "
-            f"invocation {invocation_id}: {message}"
+            f"{EXEC_PROCESS_CLEANUP_FAILED}: {source} {label} invocation {invocation_id}: {message}"
         )
 
 

@@ -514,15 +514,10 @@ def build_conformance_stall_recovery_prompt(
 
     plan_path = _safe_conformance_text(stall_evidence.get("plan_path"))
     report_path = _safe_conformance_text(stall_evidence.get("report_path"))
-    plan_line = (
-        f"`{plan_path}`" if plan_path else "the existing plan artifact"
-    )
-    report_line = (
-        f"`{report_path}`" if report_path else "the existing conformance report path"
-    )
+    plan_line = f"`{plan_path}`" if plan_path else "the existing plan artifact"
+    report_line = f"`{report_path}`" if report_path else "the existing conformance report path"
     gap_lines = (
-        "\n".join(f"- {gap}" for gap in prior_gaps if gap)
-        or "- No prior gaps were captured."
+        "\n".join(f"- {gap}" for gap in prior_gaps if gap) or "- No prior gaps were captured."
     )
     return (
         "## Retry after conformance stall\n\n"
@@ -694,7 +689,9 @@ def _normalized_coordination_warning(
         "blocks_launch": _safe_warning_bool(warning.get("blocks_launch")),
         "workspace_ids": workspace_ids,
         "overlaps": overlaps,
-        "overlap_count": max(overlap_count if overlap_count is not None else len(overlaps), len(overlaps)),
+        "overlap_count": max(
+            overlap_count if overlap_count is not None else len(overlaps), len(overlaps)
+        ),
         "overlaps_truncated": _safe_warning_bool(warning.get("overlaps_truncated")),
         "stale_policy_context": context,
     }

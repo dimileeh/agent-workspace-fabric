@@ -50,7 +50,6 @@ from awf.control.executor import (
     _validation_run_reason_code,
     _validation_tier_for_workspace,
 )
-from awf.db.base import Base
 from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.repositories import (
     ResourceReservationRepository,
@@ -60,7 +59,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -75,6 +74,7 @@ from awf.runtime.validation_identity import (
     environment_identity_digest,
     resolved_profile_digest,
 )
+from tests.postgres import create_postgres_test_engine
 
 
 def _command_result(tmp_path: Path, *, returncode: int = 1) -> ValidationCommandResult:
@@ -185,7 +185,9 @@ class _CoverageValidation:
         self.calls: list[str] = []
         self.kwargs: list[dict[str, object]] = []
 
-    async def run_profile_coverage(self, *, phase: str, **_kwargs: object) -> ValidationCoverageResult | None:
+    async def run_profile_coverage(
+        self, *, phase: str, **_kwargs: object
+    ) -> ValidationCoverageResult | None:
         self.calls.append(phase)
         self.kwargs.append(dict(_kwargs))
         return self.coverage
@@ -240,7 +242,9 @@ def _executor_with_runner(
 @pytest.mark.unit
 def test_failure_reason_for_phase_maps_setup_timeout_and_healthcheck() -> None:
     assert (
-        _failure_reason_for_phase(SimpleNamespace(phase="healthcheck", reason_code="COMMAND_FAILED"))
+        _failure_reason_for_phase(
+            SimpleNamespace(phase="healthcheck", reason_code="COMMAND_FAILED")
+        )
         == FailureReason.health_check_failure
     )
     assert (
@@ -404,7 +408,9 @@ def test_validation_run_command_records_include_database_refresh_hooks() -> None
 
 
 @pytest.mark.unit
-def test_validation_run_command_records_run_pending_healthchecks_after_refresh_without_validate() -> None:
+def test_validation_run_command_records_run_pending_healthchecks_after_refresh_without_validate() -> (
+    None
+):
     profile = WorkspaceProfile.model_validate(
         {
             "name": "records-db-refresh-no-validate",
@@ -590,9 +596,7 @@ def test_validation_run_command_records_can_skip_healthchecks_and_coverage() -> 
 
 @pytest.mark.unit
 def test_validation_tier_for_workspace_uses_task_class_floor() -> None:
-    profile = WorkspaceProfile.model_validate(
-        {"name": "tier", "validation": {"requested_tier": 1}}
-    )
+    profile = WorkspaceProfile.model_validate({"name": "tier", "validation": {"requested_tier": 1}})
 
     assert (
         _validation_tier_for_workspace(
@@ -751,9 +755,7 @@ async def test_baseline_coverage_preflight_skips_when_strategy_disables_it(
 async def test_final_coverage_gate_reuses_exact_fresh_evidence(
     tmp_path: Path,
 ) -> None:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine = await create_postgres_test_engine()
     factory = make_session_factory(engine)
     profile = WorkspaceProfile.model_validate(
         {
@@ -842,9 +844,7 @@ async def test_final_coverage_gate_reuses_exact_fresh_evidence(
 async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
     tmp_path: Path,
 ) -> None:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine = await create_postgres_test_engine()
     factory = make_session_factory(engine)
     profile = WorkspaceProfile.model_validate(
         {
@@ -936,8 +936,12 @@ async def test_planning_required_prompts_include_coordination_warning(
     )  # dirty after planning
     runner.queue_result(returncode=0, stdout="")  # committed paths since baseline
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n")  # before compare
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n")  # after compare
+    runner.queue_result(
+        returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n"
+    )  # before compare
+    runner.queue_result(
+        returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n"
+    )  # after compare
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
@@ -1191,10 +1195,14 @@ async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Pa
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="")  # before_plan (1)
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD (2)
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")  # dirty after plan (3)
+    runner.queue_result(
+        returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n"
+    )  # dirty after plan (3)
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty) (4)
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop (5)
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")  # before_compare (6)
+    runner.queue_result(
+        returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n"
+    )  # before_compare (6)
     runner.queue_result(
         returncode=0,
         stdout=(
@@ -1368,7 +1376,9 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")  # before_compare
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")  # after_compare (first)
+    runner.queue_result(
+        returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n"
+    )  # after_compare (first)
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
     runner.queue_result(
         returncode=0,
@@ -1430,14 +1440,8 @@ def test_planning_iteration_settings_default_applies_only_when_profile_omits_val
         }
     )
 
-    assert (
-        _profile_with_planning_iteration_default(omitted, 4).planning.max_iterations
-        == 4
-    )
-    assert (
-        _profile_with_planning_iteration_default(explicit, 4).planning.max_iterations
-        == 1
-    )
+    assert _profile_with_planning_iteration_default(omitted, 4).planning.max_iterations == 4
+    assert _profile_with_planning_iteration_default(explicit, 4).planning.max_iterations == 1
 
 
 @pytest.mark.unit
@@ -1445,21 +1449,14 @@ def test_raw_profile_planning_detection_handles_missing_profile() -> None:
     assert _raw_profile_has_explicit_planning_max_iterations(None) is False
     assert _raw_profile_has_explicit_planning_max_iterations({"planning": {}}) is False
     assert (
-        _raw_profile_has_explicit_planning_max_iterations(
-            {"planning": {"required": True}}
-        )
-        is False
+        _raw_profile_has_explicit_planning_max_iterations({"planning": {"required": True}}) is False
     )
     assert (
-        _raw_profile_has_explicit_planning_max_iterations(
-            {"planning": {"max_iterations": 0}}
-        )
+        _raw_profile_has_explicit_planning_max_iterations({"planning": {"max_iterations": 0}})
         is True
     )
     assert (
-        _raw_profile_has_explicit_planning_max_iterations(
-            {"planning": {"max_iterations": 2}}
-        )
+        _raw_profile_has_explicit_planning_max_iterations({"planning": {"max_iterations": 2}})
         is True
     )
 
@@ -1511,9 +1508,9 @@ def test_agent_git_writability_preflight_script_exercises_object_and_ref_writes(
 
     assert "git status --porcelain" in script
     assert "git hash-object -w --stdin" in script
-    assert "git cat-file -e \"$blob^{blob}\"" in script
-    assert "git update-ref \"$ref\" HEAD" in script
-    assert "git update-ref -d \"$ref\"" in script
+    assert 'git cat-file -e "$blob^{blob}"' in script
+    assert 'git update-ref "$ref" HEAD' in script
+    assert 'git update-ref -d "$ref"' in script
 
 
 @pytest.mark.unit
@@ -1664,8 +1661,7 @@ def test_read_ref_sha_returns_none_for_missing_ref(tmp_path: Path) -> None:
 def test_read_ref_sha_reads_packed_ref_when_loose_ref_is_missing(tmp_path: Path) -> None:
     sha = "a" * 40
     (tmp_path / "packed-refs").write_text(
-        "# pack-refs with: peeled fully-peeled sorted\n"
-        f"{sha} refs/heads/awf/ws_packed\n",
+        f"# pack-refs with: peeled fully-peeled sorted\n{sha} refs/heads/awf/ws_packed\n",
         encoding="utf-8",
     )
 
@@ -1683,7 +1679,14 @@ def test_read_ref_sha_reads_packed_ref_when_loose_ref_is_missing(tmp_path: Path)
         ([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (0, "", "")], 5),
         ([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (2, "", "diff failed")], 5),
         (
-            [(0, "", ""), (0, "", ""), (0, "", ""), (0, "", ""), (1, "", ""), (1, "", "commit failed")],
+            [
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (1, "", ""),
+                (1, "", "commit failed"),
+            ],
             6,
         ),
         (
@@ -1897,9 +1900,7 @@ async def test_recover_missing_git_head_or_mark_failed_fails_when_filesystem_rec
 async def test_record_git_object_recovery_event_persists_workspace_event(
     tmp_path: Path,
 ) -> None:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine = await create_postgres_test_engine()
     factory = make_session_factory(engine)
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -2340,7 +2341,9 @@ def test_baseline_coverage_ratchet_rejects_missing_or_regressed_measurements(
     )
     assert not _coverage_preserves_below_threshold_baseline(
         coverage,
-        baseline_coverage=_coverage(tmp_path, percent=99, status="passed", reason_code="COVERAGE_OK"),
+        baseline_coverage=_coverage(
+            tmp_path, percent=99, status="passed", reason_code="COVERAGE_OK"
+        ),
     )
     assert not _coverage_preserves_below_threshold_baseline(coverage, baseline_coverage=baseline)
 
@@ -2438,9 +2441,7 @@ def test_coverage_wrapped_pytest_failure_message_handles_missing_coverage() -> N
         failing_test_node_ids=["tests/test_provider.py::test_failure"],
     )
 
-    assert "coverage output was not available" in _coverage_wrapped_pytest_failure_message(
-        coverage
-    )
+    assert "coverage output was not available" in _coverage_wrapped_pytest_failure_message(coverage)
 
 
 @pytest.mark.unit
@@ -2491,9 +2492,10 @@ def test_validation_failure_message_carries_coverage_context(tmp_path: Path) -> 
         )
         == "validation failed: coverage output was not found"
     )
-    assert _validation_failure_message(
-        ValidationResult(commands=[_command_result(tmp_path)])
-    ) == "validation failed: pytest --cov"
+    assert (
+        _validation_failure_message(ValidationResult(commands=[_command_result(tmp_path)]))
+        == "validation failed: pytest --cov"
+    )
     assert (
         _validation_failure_message(
             ValidationResult(
@@ -2842,10 +2844,7 @@ async def test_planning_required_rejects_committed_code_as_outside_plan(tmp_path
     runner.queue_result(returncode=0, stdout="")  # dirty after planning (clean)
     runner.queue_result(
         returncode=0,
-        stdout=(
-            "docs/awf-plans/ws_plan_code.md\n"
-            "src/awf/executor.py\n"
-        ),
+        stdout=("docs/awf-plans/ws_plan_code.md\nsrc/awf/executor.py\n"),
     )  # committed paths since baseline
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter("plan plus code")
@@ -2888,12 +2887,20 @@ async def test_planning_required_falls_back_to_porcelain_when_no_baseline_sha(
     # Fresh repo or detached state where rev-parse HEAD fails.
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="")  # before_plan
-    runner.queue_result(returncode=128, stderr="fatal: not a git repository")  # rev-parse HEAD fails
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_plan_fallback.md\n")  # dirty after planning
-    runner.queue_result(returncode=128, stderr="fatal: not a git repository")  # rev-parse HEAD pre-loop also fails
+    runner.queue_result(
+        returncode=128, stderr="fatal: not a git repository"
+    )  # rev-parse HEAD fails
+    runner.queue_result(
+        returncode=0, stdout="?? docs/awf-plans/ws_plan_fallback.md\n"
+    )  # dirty after planning
+    runner.queue_result(
+        returncode=128, stderr="fatal: not a git repository"
+    )  # rev-parse HEAD pre-loop also fails
     runner.queue_result(returncode=0, stdout="")  # before_compare
     runner.queue_result(returncode=0, stdout="")  # after_compare
-    runner.queue_result(returncode=128, stderr="fatal: not a git repository")  # rev-parse HEAD iter 0 post also fails
+    runner.queue_result(
+        returncode=128, stderr="fatal: not a git repository"
+    )  # rev-parse HEAD iter 0 post also fails
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan fallback",
@@ -2924,7 +2931,9 @@ async def test_planning_required_falls_back_to_porcelain_when_no_baseline_sha(
 
     assert message is None
     # No git diff --name-only call should have been issued because rev-parse failed.
-    diff_calls = [call for call in runner.calls if "diff" in call.args and "--name-only" in call.args]
+    diff_calls = [
+        call for call in runner.calls if "diff" in call.args and "--name-only" in call.args
+    ]
     assert not diff_calls
 
 
@@ -2933,7 +2942,9 @@ async def test_planning_required_dirty_plan_still_accepted(tmp_path: Path) -> No
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="")  # before_plan
     runner.queue_result(returncode=0, stdout="old_sha\n")  # rev-parse HEAD
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_plan_dirty.md\n")  # dirty after planning
+    runner.queue_result(
+        returncode=0, stdout="?? docs/awf-plans/ws_plan_dirty.md\n"
+    )  # dirty after planning
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
     runner.queue_result(returncode=0, stdout="old_sha\n")  # rev-parse HEAD pre-loop
     runner.queue_result(returncode=0, stdout="")  # before_compare
@@ -2969,7 +2980,9 @@ async def test_planning_required_dirty_plan_still_accepted(tmp_path: Path) -> No
 
     assert message is None
     # Because no new commits, the diff call should return empty; porcelain still carries the plan.
-    diff_calls = [call for call in runner.calls if "diff" in call.args and "--name-only" in call.args]
+    diff_calls = [
+        call for call in runner.calls if "diff" in call.args and "--name-only" in call.args
+    ]
     assert diff_calls
 
 
@@ -3485,7 +3498,9 @@ async def test_record_rebase_recovery_success_updates_candidate_and_operation(
         base_commit="old-base",
         monitor_last_commit_sha="old-head",
     )
-    candidate_workspace = SimpleNamespace(base_commit="old-base", monitor_last_commit_sha="old-head")
+    candidate_workspace = SimpleNamespace(
+        base_commit="old-base", monitor_last_commit_sha="old-head"
+    )
     candidate = SimpleNamespace(
         id="candidate",
         workspace_id=workspace.id,

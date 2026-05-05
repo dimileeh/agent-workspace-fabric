@@ -4,10 +4,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
 )
@@ -16,11 +15,13 @@ from awf.service.metrics import (
     _cluster_root_causes,
     _provider_likely_cause,
 )
+from tests.postgres import postgres_test_engine
 
 
 @pytest.mark.unit
 def test_provider_likely_cause_not_string():
     assert _provider_likely_cause(None) == "Provider Capacity Exhausted"
+
 
 @pytest.mark.unit
 async def test_cached_failure_details_by_workspace_id_none_cache(session_factory):
@@ -38,7 +39,7 @@ async def test_cluster_root_causes_causes(session_factory):
         for reason in [
             "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
             "AGENT_AUTH_FAILED",
-            AGENT_PLAN_PHASE_SCOPE_VIOLATION
+            AGENT_PLAN_PHASE_SCOPE_VIOLATION,
         ]:
             ws = await repo.create(
                 repo_url="git@github.com:example/repo.git",
@@ -48,10 +49,12 @@ async def test_cluster_root_causes_causes(session_factory):
                 agent="gemini",
                 task_policy={},
                 test_commands=[],
-                owned_paths=[]
+                owned_paths=[],
             )
             # Add state_changed event
-            await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=reason, payload={"details": {}})
+            await repo.transition(
+                ws, to=WorkspaceStatus.failed, reason_code=reason, payload={"details": {}}
+            )
 
         await session.commit()
 
@@ -63,10 +66,5 @@ async def test_cluster_root_causes_causes(session_factory):
 
 @pytest.fixture
 async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()

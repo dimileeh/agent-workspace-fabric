@@ -358,9 +358,7 @@ class ValidationRunner:
             if include_coverage and "validate" in requested_phases
             else None
         )
-        alembic_policy = (
-            profile.validation.alembic if "validate" in requested_phases else None
-        )
+        alembic_policy = profile.validation.alembic if "validate" in requested_phases else None
         healthcheck_before_phase = (
             "validate"
             if profile.database.pre_validation_refresh and "validate" in requested_phases
@@ -891,7 +889,9 @@ class ValidationRunner:
             )
 
         command_result: ValidationCommandResult | None = None
-        command_plan = CoverageCommandPlan(command=coverage.command.command) if coverage.command else None
+        command_plan = (
+            CoverageCommandPlan(command=coverage.command.command) if coverage.command else None
+        )
         if coverage.command is not None:
             command_plan = coverage_command_plan(
                 coverage,
@@ -929,9 +929,7 @@ class ValidationRunner:
         status = _coverage_status(reason_code=reason_code, enforce=coverage.enforce)
         policy_failed = status == "failed"
         if command_result is not None:
-            command_reason_code = (
-                PYTEST_TEST_FAILURE if pytest_evidence.present else reason_code
-            )
+            command_reason_code = PYTEST_TEST_FAILURE if pytest_evidence.present else reason_code
             command_metadata = dict(command_result.metadata)
             if pytest_evidence.node_ids:
                 command_metadata["failing_test_node_ids"] = pytest_evidence.node_ids
@@ -1529,11 +1527,7 @@ def _coverage_reason_code(
         return "COVERAGE_NOT_FOUND"
     if percent < minimum_percent:
         return "COVERAGE_BELOW_THRESHOLD"
-    if (
-        command_result is not None
-        and command_result.returncode != 0
-        and not has_pytest_failures
-    ):
+    if command_result is not None and command_result.returncode != 0 and not has_pytest_failures:
         return "COVERAGE_COMMAND_FAILED"
     return "COVERAGE_OK"
 

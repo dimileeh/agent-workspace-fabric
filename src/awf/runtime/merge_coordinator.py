@@ -1,9 +1,8 @@
 """Merge-attempt coordination for PR monitors.
 
-The in-process coordinator is kept for tests, SQLite, and compatibility
-paths. Service deployments backed by Postgres can use advisory locks so
-independently spawned monitor processes and multiple workers share the
-same coordination key.
+The in-process coordinator is kept for tests and compatibility paths. Service
+deployments backed by Postgres can use advisory locks so independently spawned
+monitor processes and multiple workers share the same coordination key.
 """
 
 from __future__ import annotations

@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.base import Base
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import Merge, MonitorState
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -63,14 +63,9 @@ class FailOnUseMergeCoordinator:
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -145,12 +140,8 @@ class TestMergeCoordinatorRunner:
             active for args, active in observed if args[:3] == ["gh", "api", "graphql"]
         ]
         assert graphql_active == [False, True]
-        assert [
-            active for args, active in observed if args[:3] == ["gh", "pr", "merge"]
-        ] == [True]
-        assert [
-            active for args, active in observed if args[:2] == ["docker", "compose"]
-        ] == [False]
+        assert [active for args, active in observed if args[:3] == ["gh", "pr", "merge"]] == [True]
+        assert [active for args, active in observed if args[:2] == ["docker", "compose"]] == [False]
 
         waiting = [
             r for r in captured if r.get("event") == "monitor.merge_critical_section_waiting"

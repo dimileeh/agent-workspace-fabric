@@ -76,13 +76,9 @@ _GITHUB_TOKEN_PATTERNS = (
     r"gh[pousr]_[A-Za-z0-9_]{8,}",
     r"github_pat_[A-Za-z0-9_]{8,}",
 )
-_OPENAI_TOKEN_PATTERNS = (
-    r"sk-proj-[A-Za-z0-9_-]{8,}",
-)
+_OPENAI_TOKEN_PATTERNS = (r"sk-proj-[A-Za-z0-9_-]{8,}",)
 _ANTHROPIC_TOKEN_PATTERNS = (r"sk-ant-[A-Za-z0-9_-]{8,}",)
-_LEGACY_OPENAI_TOKEN_PATTERNS = (
-    r"sk-[A-Za-z0-9]{20,}",
-)
+_LEGACY_OPENAI_TOKEN_PATTERNS = (r"sk-[A-Za-z0-9]{20,}",)
 _GOOGLE_TOKEN_PATTERNS = (r"AIza[A-Za-z0-9_-]{12,}",)
 _SLACK_TOKEN_PATTERNS = (r"xox[baprs]-[A-Za-z0-9-]{8,}",)
 # Keep provider-specific sk-* families before the legacy sk-* fallback.
@@ -94,11 +90,7 @@ _KNOWN_TOKEN_PATTERNS = (
     *_GOOGLE_TOKEN_PATTERNS,
     *_SLACK_TOKEN_PATTERNS,
 )
-_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9])("
-    + "|".join(_KNOWN_TOKEN_PATTERNS)
-    + r")(?![A-Za-z0-9])"
-)
+_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(_KNOWN_TOKEN_PATTERNS) + r")(?![A-Za-z0-9])")
 _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.codex: "codex",
     AgentRuntime.claude_code: "claude_code",
@@ -574,8 +566,7 @@ def _probe_cli_auth_status(
             "status": "fail",
             "reason_code": timeout_reason,
             "message": (
-                f"{provider_label} auth status probe exceeded "
-                f"{_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
+                f"{provider_label} auth status probe exceeded {_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
             ),
         }
     except Exception as exc:
@@ -635,14 +626,10 @@ def _preflight_message(
         return "No effective model was selected for the workspace agent."
     if provider_result.get("ok") is not True:
         return str(
-            provider_result.get("message")
-            or "Selected provider authentication is not ready."
+            provider_result.get("message") or "Selected provider authentication is not ready."
         )
     if probe.get("status") == "fail":
-        return str(
-            probe.get("message")
-            or "Selected provider auth probe did not report readiness."
-        )
+        return str(probe.get("message") or "Selected provider auth probe did not report readiness.")
     return "Selected provider authentication and model readiness are sufficient for launch."
 
 
@@ -712,9 +699,7 @@ def _launch_preflight_payload(
         payload["probe_detail"] = _redact(_truncate(probe_detail), secrets)
     warnings = provider_result.get("warnings") if provider_result is not None else None
     if isinstance(warnings, list):
-        payload["warnings"] = [
-            warning for warning in warnings if isinstance(warning, Mapping)
-        ]
+        payload["warnings"] = [warning for warning in warnings if isinstance(warning, Mapping)]
     return payload
 
 
@@ -783,7 +768,7 @@ def _check_github(
                     "Compose environment."
                 ),
                 action=(
-                    "Run `export AWF_GITHUB_TOKEN=\"$(gh auth token)\"` before "
+                    'Run `export AWF_GITHUB_TOKEN="$(gh auth token)"` before '
                     "starting Compose, or put AWF_GITHUB_TOKEN/GH_TOKEN in "
                     "docker/compose/.env."
                 ),
@@ -1157,9 +1142,7 @@ def _check_opencode(
 ) -> dict[str, Any]:
     opencode_config = (host_home / ".config" / "opencode").is_dir()
     ollama_files = [
-        filename
-        for filename in _OLLAMA_AUTH_FILES
-        if (host_home / ".ollama" / filename).is_file()
+        filename for filename in _OLLAMA_AUTH_FILES if (host_home / ".ollama" / filename).is_file()
     ]
     env_signal = _first_present_env(environ, _OPENCODE_ENV_KEYS)
     signals: list[str] = []
@@ -1230,7 +1213,9 @@ def _check_opencode(
             isolation=_primary_isolation(credential_sources),
             warnings=_static_env_warnings(
                 provider_label="OpenCode/Ollama",
-                signals=[env_signal] if env_signal is not None and not (opencode_config or ollama_files) else [],
+                signals=[env_signal]
+                if env_signal is not None and not (opencode_config or ollama_files)
+                else [],
             ),
         )
 
@@ -1252,7 +1237,9 @@ def _check_opencode(
         isolation=_primary_isolation(credential_sources),
         warnings=_static_env_warnings(
             provider_label="OpenCode/Ollama",
-            signals=[env_signal] if env_signal is not None and not (opencode_config or ollama_files) else [],
+            signals=[env_signal]
+            if env_signal is not None and not (opencode_config or ollama_files)
+            else [],
         ),
     )
 
@@ -1667,9 +1654,7 @@ def _replace_url_credential_redaction_spans(
     rendered = _render_redaction_segments(segments)
     replacements: list[tuple[int, int, list[_RedactionSegment]]] = []
     for match in _URL_CREDENTIAL_RE.finditer(rendered):
-        replacements.append(
-            (match.start(2), match.end(2), [("redaction", ""), ("literal", "@")])
-        )
+        replacements.append((match.start(2), match.end(2), [("redaction", ""), ("literal", "@")]))
     return _replace_rendered_redaction_spans(segments, replacements)
 
 
@@ -1719,11 +1704,7 @@ def _slice_redaction_segments(
         if overlap_start < overlap_end:
             inner_start = overlap_start - position
             inner_end = overlap_end - position
-            if (
-                kind == "redaction"
-                and inner_start == 0
-                and inner_end == len(_REDACTION)
-            ):
+            if kind == "redaction" and inner_start == 0 and inner_end == len(_REDACTION):
                 sliced.append(("redaction", ""))
             else:
                 sliced.append(("literal", rendered[inner_start:inner_end]))

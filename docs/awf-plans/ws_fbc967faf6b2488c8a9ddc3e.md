@@ -15,7 +15,7 @@ for parallel PR candidates:
 6. A companion lenient-policy assertion proves non-overlapping docs/test changes
    stay mergeable when the task-class policy allows it.
 
-Use in-memory SQLite, real AWF repositories/services, and fake target branch
+Use isolated PostgreSQL, real AWF repositories/services, and fake target branch
 state. Do not use real GitHub, Docker, or branch operations. Production code
 changes are only allowed if the red test reveals an actual behavior gap.
 
@@ -93,7 +93,7 @@ Test name:
 
 Arrange:
 
-- Use an in-memory SQLite engine and `Base.metadata.create_all`.
+- Use an isolated PostgreSQL engine and `Base.metadata.create_all`.
 - Seed two workspaces on the same repo/base with `auto_merge=True`, PR metadata,
   canonical attempts, and open merge candidates:
   - Candidate A: older, same repo/base, initially ready.
@@ -238,7 +238,7 @@ uv run --python 3.12 --extra dev pytest tests/integration/test_parallel_candidat
 
 ## Risks And Assumptions
 
-- Assumption: An in-memory SQLite integration test is sufficient because this
+- Assumption: An isolated PostgreSQL integration test is sufficient because this
   slice validates control-plane state transitions, not GitHub or Docker
   mechanics.
 - Assumption: The production recovery path records successful rebase and

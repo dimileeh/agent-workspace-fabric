@@ -28,6 +28,7 @@ from awf.api.schemas import (
     OperationListResponse,
     OperationResponse,
     OwnedPath,
+    PullRequestMonitorAdoptionRequest,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
     WorkspaceLockListResponse,
@@ -63,6 +64,7 @@ from awf.service.metrics import (
 )
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
+from awf.service.pr_monitor_adoption import PRMonitorAdoptionError
 from awf.service.provider_readiness import ProviderName
 from awf.service.tasks import build_task_attempt_list_response, build_task_list_response
 from awf.service.validation_provenance import (
@@ -97,6 +99,8 @@ RuntimeHealthSummaryProvider = Callable[
     [Settings, AsyncSession, OrphanResourceSummary],
     WorkspaceRuntimeHealthSummary | Awaitable[WorkspaceRuntimeHealthSummary],
 ]
+
+
 class ReadinessProvider(Protocol):
     def __call__(
         self,
@@ -104,6 +108,8 @@ class ReadinessProvider(Protocol):
         *,
         validated_strict_providers: set[ProviderName] | None = None,
     ) -> dict[str, Any] | Awaitable[dict[str, Any]]: ...
+
+
 HealthProvider = Callable[
     [],
     dict[str, Any] | Awaitable[dict[str, Any]],
@@ -133,8 +139,7 @@ def build_mcp_server(
     """Construct a FastMCP instance with AWF's tools bound to ``service``.
 
     The service is captured in closures rather than pulled from a framework
-    context var — keeps MCP tools testable by constructing a throwaway
-    FastMCP per test with a service over an in-memory SQLite factory.
+    context var, which keeps MCP tools testable with an injected service.
     """
     mcp = FastMCP(
         name=name,
@@ -423,7 +428,9 @@ def build_mcp_server(
     ) -> StructuredToolResult:
         """Operator control: stop a workspace stack; this is not shell access."""
         try:
-            result = await service.stop_workspace(workspace_id, reason=reason, idempotency_key=idempotency_key)
+            result = await service.stop_workspace(
+                workspace_id, reason=reason, idempotency_key=idempotency_key
+            )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
         return _tool_result(result.model_dump(mode="json"))
@@ -820,7 +827,9 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_list_task_attempts")
     async def awf_list_task_attempts(
-        task_ref: str = Field(..., min_length=1, max_length=256, description="Task ID or external reference."),
+        task_ref: str = Field(
+            ..., min_length=1, max_length=256, description="Task ID or external reference."
+        ),
         limit: int = Field(default=100, ge=1, le=500, description="Maximum attempts to return."),
     ) -> StructuredToolResult:
         """Read-only operator observability: list attempts for a given task."""
@@ -961,9 +970,99 @@ def build_mcp_server(
         )
         return _safe_result(payload)
 
+    @mcp.tool(name="awf_adopt_pull_request_monitor")
+    async def awf_adopt_pull_request_monitor(
+        repo_url: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="GitHub repo URL. Use with pr_number, or pass pr_url instead.",
+        ),
+        repo_slug: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=256,
+            description="GitHub owner/repo slug. Use with pr_number, or pass pr_url instead.",
+        ),
+        pr_number: int | None = Field(
+            default=None,
+            ge=1,
+            description="GitHub pull request number when repo_url or repo_slug is supplied.",
+        ),
+        pr_url: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="Full GitHub pull request URL to adopt.",
+        ),
+        agent: AgentRuntime = Field(
+            default=AgentRuntime.codex,
+            description="Coding agent runtime used later by the PR monitor for repair work.",
+        ),
+        profile_ref: str | None = Field(
+            default="auto",
+            max_length=128,
+            description="Workspace profile reference for the adopted monitor workspace.",
+        ),
+        profile: dict[str, Any] | None = Field(
+            default=None,
+            description="Optional inline workspace profile dictionary.",
+        ),
+        auto_merge: bool = Field(
+            default=True,
+            description="Whether AWF may merge the adopted PR once monitor gates are green.",
+        ),
+        initial_review_grace_period_seconds: float | None = Field(
+            default=None,
+            ge=0,
+            le=86400,
+            description="Optional monitor grace override before auto-merge.",
+        ),
+        task_title: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="Optional adopted workspace title.",
+        ),
+        task_prompt: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=16384,
+            description="Optional adopted workspace prompt.",
+        ),
+        reason: str | None = Field(
+            default=None,
+            max_length=512,
+            description="Optional operator audit reason.",
+        ),
+    ) -> StructuredToolResult:
+        """Operator control: adopt an existing GitHub PR into AWF monitoring; this is not shell access."""
+        try:
+            response = await service.adopt_pull_request_monitor(
+                PullRequestMonitorAdoptionRequest(
+                    repo_url=repo_url,
+                    repo_slug=repo_slug,
+                    pr_number=pr_number,
+                    pr_url=pr_url,
+                    agent=agent,
+                    profile_ref=profile_ref,
+                    profile=profile,
+                    auto_merge=auto_merge,
+                    initial_review_grace_period_seconds=(initial_review_grace_period_seconds),
+                    task_title=task_title,
+                    task_prompt=task_prompt,
+                    reason=reason,
+                )
+            )
+        except PRMonitorAdoptionError as exc:
+            return _workspace_error_result(exc)
+        return _tool_result(response.model_dump(mode="json"))
+
     @mcp.tool(name="awf_remonitor_workspace")
     async def awf_remonitor_workspace(
-        workspace_id: str = Field(..., min_length=1, max_length=256, description="Workspace ID to remonitor."),
+        workspace_id: str = Field(
+            ..., min_length=1, max_length=256, description="Workspace ID to remonitor."
+        ),
         reason: str | None = Field(
             default=None,
             max_length=1024,
@@ -989,7 +1088,9 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_request_workspace_validation")
     async def awf_request_workspace_validation(
-        workspace_id: str = Field(..., min_length=1, max_length=256, description="Workspace ID to validate."),
+        workspace_id: str = Field(
+            ..., min_length=1, max_length=256, description="Workspace ID to validate."
+        ),
         reason: str | None = Field(
             default=None,
             max_length=1024,
@@ -1167,9 +1268,7 @@ async def _provided_readiness(
     runner = AsyncioSubprocessRunner()
     db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(session_factory))
     cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
-    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
-        _check_docker_daemon(runner)
-    )
+    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_daemon(runner))
     compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_docker_compose(runner)
     )
@@ -1278,8 +1377,7 @@ def _redact_sensitive_value(
         return {
             _redact_sensitive_text(key, settings, service_settings=service_settings)
             if isinstance(key, str)
-            else key:
-            _redact_sensitive_value(item, settings, service_settings=service_settings)
+            else key: _redact_sensitive_value(item, settings, service_settings=service_settings)
             for key, item in value.items()
         }
     return value

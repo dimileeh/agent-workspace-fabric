@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -720,11 +721,7 @@ class PullRequestMonitorRunner:
             await s.commit()
             if result == "terminal" or result == "stale":
                 return "deterministic"
-            if (
-                result is not None
-                and result.action == "fallback"
-                and not result.in_place
-            ):
+            if result is not None and result.action == "fallback" and not result.in_place:
                 return "fallback"
             return "retry"
 
@@ -880,9 +877,7 @@ class PullRequestMonitorRunner:
                     )
                     await self._terminate_failed(
                         workspace_id,
-                        message=f"monitor: could not calculate base-behind count: {exc}"[
-                            :2000
-                        ],
+                        message=f"monitor: could not calculate base-behind count: {exc}"[:2000],
                         reason_code=_GIT_BASE_BEHIND_FAILED_REASON,
                     )
                     return
@@ -954,6 +949,7 @@ class PullRequestMonitorRunner:
                     )
                     return
 
+                remote_push_url = _remote_push_url_for_workspace(ws, base_repo=repo)
                 action = decide(status, state, self._config)
                 terminal = await self._execute(
                     action=action,
@@ -965,6 +961,7 @@ class PullRequestMonitorRunner:
                     state=state,
                     base_branch=ws.branch_base,
                     remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
@@ -1041,6 +1038,7 @@ class PullRequestMonitorRunner:
         compose_project: str,
         compose_file: Path,
         monitor_log: WorkspaceLogSink | None,
+        remote_push_url: str | None = None,
     ) -> bool:
         """Execute one action. Returns True iff the monitor has reached a
         terminal state (merged / notified / aborted / short-circuited)."""
@@ -1187,6 +1185,7 @@ class PullRequestMonitorRunner:
                     pr_number=pr_number,
                     base_branch=base_branch,
                     remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
                     compose_project=compose_project,
                     compose_file=compose_file,
                 )
@@ -1353,6 +1352,7 @@ class PullRequestMonitorRunner:
                     compose_file=compose_file,
                     workspace_id=workspace_id,
                     remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
                 )
             except ProviderRecoveryRetryError:
                 await self._finish_monitor_operation(
@@ -1495,6 +1495,7 @@ class PullRequestMonitorRunner:
                     state=state,
                     base_branch=base_branch,
                     remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
@@ -2844,6 +2845,7 @@ class PullRequestMonitorRunner:
         initial_reviews: tuple[ReviewComment, ...],
         state: MonitorState,
         remote_branch: str,
+        remote_push_url: str | None = None,
         compose_project: str,
         compose_file: Path,
         monitor_log: WorkspaceLogSink | None = None,
@@ -2933,6 +2935,7 @@ class PullRequestMonitorRunner:
         push_result = await self._git_push_result(
             worktree_path=worktree_path,
             remote_branch=remote_branch,
+            remote_url=remote_push_url,
         )
         pushed_head_sha: str | None = None
         if push_result.failed:
@@ -3178,6 +3181,7 @@ class PullRequestMonitorRunner:
         pr_number: int,
         base_branch: str,
         remote_branch: str,
+        remote_push_url: str | None = None,
         compose_project: str,
         compose_file: Path,
     ) -> _GitPushResult:
@@ -3252,6 +3256,7 @@ class PullRequestMonitorRunner:
         return await self._git_push_result(
             worktree_path=worktree_path,
             remote_branch=remote_branch,
+            remote_url=remote_push_url,
         )
 
     # ── CI failure ─────────────────────────────────────────────────────────
@@ -3266,6 +3271,7 @@ class PullRequestMonitorRunner:
         compose_file: Path,
         workspace_id: str,
         remote_branch: str,
+        remote_push_url: str | None = None,
     ) -> _GitPushResult:
         prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
         agent_run_err = None
@@ -3301,6 +3307,7 @@ class PullRequestMonitorRunner:
         return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
             remote_branch=remote_branch,
+            remote_url=remote_push_url,
         )
 
     # ── Git plumbing ───────────────────────────────────────────────────────
@@ -3671,12 +3678,19 @@ class PullRequestMonitorRunner:
         r = await self._deps.runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
         return r.stdout.strip() if r.ok else ""
 
-    async def _git_push(self, *, worktree_path: Path, remote_branch: str) -> bool:
+    async def _git_push(
+        self,
+        *,
+        worktree_path: Path,
+        remote_branch: str,
+        remote_url: str | None = None,
+    ) -> bool:
         refspec = f"HEAD:refs/heads/{remote_branch}"
         result = await self._git_push_result(
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             refspec=refspec,
+            remote_url=remote_url,
         )
         return result.pushed
 
@@ -3685,9 +3699,10 @@ class PullRequestMonitorRunner:
         *,
         worktree_path: Path,
         remote_branch: str,
+        remote_url: str | None = None,
         refspec: str | None = None,
     ) -> _GitPushResult:
-        """Push current HEAD to ``origin/<remote_branch>`` with an
+        """Push current HEAD to the PR head branch with an
         explicit refspec.
 
         Returns a structured result that distinguishes a real publication,
@@ -3709,23 +3724,21 @@ class PullRequestMonitorRunner:
         remote branch has advanced past local (divergence from a prior
         monitor run whose push succeeded but whose local worktree is
         now a stale clone), this method silently resyncs local to
-        remote — ``git fetch origin <remote>`` + ``git reset --hard
-        origin/<remote>``. GitHub is truth for pushed state; any local
-        commits that didn't make it onto the remote represent dead
-        work from the failed previous push and can be safely discarded.
-        The next outer-loop iteration then operates on an aligned
-        worktree and its SyncBase / fix-cycle commits will fast-forward
-        cleanly.
+        the same remote it just pushed. GitHub is truth for pushed
+        state; any local commits that didn't make it onto the remote
+        represent dead work from the failed previous push and can be
+        safely discarded. The next outer-loop iteration then operates
+        on an aligned worktree and its SyncBase / fix-cycle commits
+        will fast-forward cleanly.
 
         Without this recovery, a diverged worktree caused PR #335 and
         #336 to loop until iter_cap: each failed push added another
         local merge commit, the next SyncBase piled another on top, and
         the head SHA on GitHub never moved.
         """
+        remote = remote_url or "origin"
         refspec = refspec or f"HEAD:refs/heads/{remote_branch}"
-        r = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "push", "origin", refspec]
-        )
+        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "push", remote, refspec])
         if r.ok:
             # git prints "Everything up-to-date" to stderr when the ref didn't move.
             pushed = "up-to-date" not in (r.stderr or "").lower()
@@ -3765,18 +3778,44 @@ class PullRequestMonitorRunner:
             remote_branch=remote_branch,
             stderr=(r.stderr or "")[:400],
         )
+        if remote_url:
+            fetch_result = await self._deps.runner.run(
+                [
+                    "git",
+                    "-C",
+                    str(worktree_path),
+                    "fetch",
+                    remote_url,
+                    f"refs/heads/{remote_branch}",
+                ]
+            )
+            reset_target = "FETCH_HEAD"
+        else:
+            fetch_result = await self._deps.runner.run(
+                ["git", "-C", str(worktree_path), "fetch", "origin", remote_branch]
+            )
+            reset_target = f"origin/{remote_branch}"
+        if not fetch_result.ok:
+            stderr = _append_git_recovery_failure(
+                push_stderr=r.stderr,
+                recovery_stderr=fetch_result.stderr,
+                operation="resync fetch",
+            )
+            _log.warning(
+                "monitor.push_rejected_resync_fetch_failed",
+                worktree_path=str(worktree_path),
+                remote_branch=remote_branch,
+                stderr=stderr[:400],
+            )
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=r.returncode,
+                stdout=r.stdout,
+                stderr=stderr,
+            )
         await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "fetch", "origin", remote_branch]
-        )
-        await self._deps.runner.run(
-            [
-                "git",
-                "-C",
-                str(worktree_path),
-                "reset",
-                "--hard",
-                f"origin/{remote_branch}",
-            ]
+            ["git", "-C", str(worktree_path), "reset", "--hard", reset_target]
         )
         return _GitPushResult(
             pushed=False,
@@ -4545,6 +4584,17 @@ def _git_failure_message(operation: str, result: CommandResult) -> str:
     )
 
 
+def _append_git_recovery_failure(
+    *,
+    push_stderr: str,
+    recovery_stderr: str,
+    operation: str,
+) -> str:
+    parts = [push_stderr.strip()] if push_stderr.strip() else []
+    parts.append(f"{operation} failed: {recovery_stderr.strip() or '<no output>'}")
+    return redact_audit_text("\n".join(parts), limit=2000)
+
+
 def _is_transient_github_client_error(exc: GitHubClientError) -> bool:
     """Classify GitHub/gh failures that should keep the monitor polling."""
 
@@ -5065,6 +5115,41 @@ def _collect_defer_items(
             }
         )
     return bot_items, human_items
+
+
+def _remote_push_url_for_workspace(ws: Workspace, *, base_repo: RepoRef) -> str | None:
+    if ws.task_kind != "sync_feature_pr":
+        return None
+    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    adoption = policy.get("pr_adoption")
+    if not isinstance(adoption, Mapping):
+        return None
+    head_repo_value = adoption.get("head_repo_slug") or adoption.get("head_repo_url")
+    if not isinstance(head_repo_value, str) or not head_repo_value.strip():
+        return None
+    try:
+        head_repo = RepoRef.from_url(head_repo_value)
+    except ValueError:
+        return None
+    if head_repo.slug().lower() == base_repo.slug().lower():
+        return None
+    return _github_repo_url_like(ws.repo_url, head_repo)
+
+
+def _github_repo_url_like(repo_url: str, repo: RepoRef) -> str:
+    stripped = repo_url.strip()
+    if stripped.startswith("git@github.com:") or stripped.startswith("ssh://git@github.com/"):
+        return f"git@github.com:{repo.owner}/{repo.name}.git"
+    parsed = urlsplit(stripped)
+    if (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname is not None
+        and parsed.hostname.lower() == "github.com"
+    ):
+        userinfo, sep, _host = parsed.netloc.rpartition("@")
+        if sep and userinfo:
+            return f"https://{userinfo}@github.com/{repo.owner}/{repo.name}.git"
+    return repo.https_url()
 
 
 def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:

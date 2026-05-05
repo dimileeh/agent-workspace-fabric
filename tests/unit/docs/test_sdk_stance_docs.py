@@ -11,9 +11,7 @@ def test_sdk_stance_in_docs() -> None:
     docs_to_check = ["README.md", "docs/CLIENT_SURFACES.md", "docs/MCP_CLIENT_PARITY.md"]
 
     expected_surfaces_phrase = "REST, CLI, and MCP are the supported client surfaces for v0.1"
-    expected_warning_phrase = (
-        "do not import internal AWF modules"
-    )
+    expected_warning_phrase = "do not import internal AWF modules"
 
     for doc_path in docs_to_check:
         full_path = repo_root / doc_path

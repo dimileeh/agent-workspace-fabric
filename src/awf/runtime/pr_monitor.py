@@ -314,6 +314,7 @@ class NotifyHuman:
     merged, closed, or fails; human-attention comments are just status
     notifications while the workspace remains alive.
     """
+
     message: str | None = None
 
 
@@ -384,10 +385,7 @@ def sync_base_no_progress_signature(status: PRStatus) -> str:
 
     mergeable = status.mergeable.value
     merge_state = status.merge_state_status.value if status.merge_state_status else "UNKNOWN"
-    return (
-        f"{status.head_sha}|{mergeable}|{merge_state}|"
-        f"base_behind={status.base_behind_count}"
-    )
+    return f"{status.head_sha}|{mergeable}|{merge_state}|base_behind={status.base_behind_count}"
 
 
 def _sync_base_no_progress_exhausted(
@@ -499,9 +497,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         MergeStateStatus.DIRTY,
     ):
         if _sync_base_no_progress_exhausted(status, state, config):
-            if status.merge_state_status == MergeStateStatus.DIRTY and (
-                new_threads or new_reviews
-            ):
+            if status.merge_state_status == MergeStateStatus.DIRTY and (new_threads or new_reviews):
                 return AddressComments(threads=new_threads, review_comments=new_reviews)
             if status.merge_state_status == MergeStateStatus.DIRTY:
                 return Abort(reason=AbortReason.merge_conflict_not_reproduced)

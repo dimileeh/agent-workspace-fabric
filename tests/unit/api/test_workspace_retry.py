@@ -173,9 +173,7 @@ async def test_retry_endpoint_creates_new_requested_workspace(
         f"/v1/workspaces/{body['new_workspace_id']}/operations?type=retry"
     )
     assert operations.status_code == 200
-    assert [item["id"] for item in operations.json()["items"]] == [
-        body["operation_id"]
-    ]
+    assert [item["id"] for item in operations.json()["items"]] == [body["operation_id"]]
 
     retried = await client.get(f"/v1/workspaces/{body['new_workspace_id']}")
     assert retried.status_code == 200

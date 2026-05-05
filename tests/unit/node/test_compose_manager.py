@@ -126,9 +126,7 @@ class TestRender:
         rendered = manager.render(_spec(tmp_path)).compose_file.read_text()
         parsed = yaml.safe_load(rendered)
 
-        assert parsed["services"]["agent"]["extra_hosts"] == [
-            "host.docker.internal:host-gateway"
-        ]
+        assert parsed["services"]["agent"]["extra_hosts"] == ["host.docker.internal:host-gateway"]
         assert "\n    \n    extra_hosts:" not in rendered
 
     @pytest.mark.unit
@@ -144,9 +142,7 @@ class TestRender:
         )
 
         assert "internal" not in parsed["networks"]["awf_net"]
-        assert parsed["services"]["agent"]["extra_hosts"] == [
-            "host.docker.internal:host-gateway"
-        ]
+        assert parsed["services"]["agent"]["extra_hosts"] == ["host.docker.internal:host-gateway"]
 
     @pytest.mark.unit
     def test_offline_egress_policy_renders_internal_network_without_host_gateway(
@@ -406,9 +402,7 @@ class TestRender:
 
         volumes = parsed["services"]["agent"]["volumes"]
         assert f"{secret_file}:/run/awf/secrets/openai-token:ro" in volumes
-        assert parsed["services"]["agent"]["environment"]["OPENAI_API_KEY"] == (
-            "${OPENAI_API_KEY}"
-        )
+        assert parsed["services"]["agent"]["environment"]["OPENAI_API_KEY"] == ("${OPENAI_API_KEY}")
         assert raw_secret not in rendered
 
     @pytest.mark.unit
@@ -509,9 +503,7 @@ class TestRender:
 
         parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
 
-        assert parsed["volumes"] == {
-            "cache_data": {"name": "awf-ws_test123-cache_data"}
-        }
+        assert parsed["volumes"] == {"cache_data": {"name": "awf-ws_test123-cache_data"}}
 
     @pytest.mark.unit
     def test_named_volume_detection_skips_malformed_volume_entries(
@@ -574,8 +566,7 @@ class TestRender:
         )
 
         assert (
-            parsed["services"]["agent"]["environment"]["DOCKER_HOST"]
-            == "tcp://custom-docker:2375"
+            parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://custom-docker:2375"
         )
 
     @pytest.mark.unit

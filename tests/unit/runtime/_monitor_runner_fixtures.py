@@ -1,7 +1,7 @@
 """Shared helpers for the new PR-monitor runner unit tests.
 
 The action-logging, bot-defer, and defer-signal-artifact tests all need
-the same setup: a real in-memory SQLite, a ``FakeCommandRunner``, a
+the same setup: a real PostgreSQL, a ``FakeCommandRunner``, a
 ``FakeAdapter`` returning canned verdicts, and a workspace row already in
 ``monitoring_pr``. Reuse the same shapes as
 ``tests/integration/runtime/test_pr_monitor_runner.py`` (which is where
@@ -71,7 +71,9 @@ class FakeAdapter(AgentAdapter):
         exc: Exception | None = None,
     ) -> None:
         self._queued.append(
-            exc if exc is not None else AgentRunResult(returncode=returncode, stdout=stdout, stderr=stderr)
+            exc
+            if exc is not None
+            else AgentRunResult(returncode=returncode, stdout=stdout, stderr=stderr)
         )
 
     async def run(  # type: ignore[override]

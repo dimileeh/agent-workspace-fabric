@@ -298,9 +298,7 @@ async def finish_monitor_operation(
         status=status,
         result=redact_monitor_operation_value(dict(result or {})),
         error_code=error_code,
-        error_message=(
-            redact_audit_text(error_message) if error_message is not None else None
-        ),
+        error_message=(redact_audit_text(error_message) if error_message is not None else None),
     )
 
 
@@ -310,10 +308,7 @@ def redact_monitor_operation_value(value: Any) -> Any:
 
 def _collapse_monitor_secret_assignments(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {
-            str(key): _collapse_monitor_secret_assignments(item)
-            for key, item in value.items()
-        }
+        return {str(key): _collapse_monitor_secret_assignments(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_collapse_monitor_secret_assignments(item) for item in value]
     if isinstance(value, str):

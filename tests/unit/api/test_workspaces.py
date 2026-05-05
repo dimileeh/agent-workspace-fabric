@@ -1,6 +1,6 @@
 """Workspace API contract tests.
 
-Each test runs against a fresh in-memory SQLite via the ``client`` fixture.
+Each test runs against an isolated PostgreSQL schema via the ``client`` fixture.
 These are *unit*-flavoured tests because they don't spin up Docker or Postgres;
 true integration + E2E tests live under tests/integration/ and tests/e2e/.
 """
@@ -11,6 +11,7 @@ import base64
 import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,7 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 import awf.api.routes.workspaces as workspaces_route
 import awf.service.workspace_observability as workspace_observability
 from awf.api.app import configure_database, create_app
-from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
+from awf.api.schemas import (
+    PullRequestMonitorAdoptionRequest,
+    WorkspaceCreateRequest,
+    WorkspaceCreateV2Request,
+)
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
@@ -89,9 +94,7 @@ def _endpoint_profile_body() -> dict[str, object]:
     return {
         "name": "api-endpoints",
         "runtime": {
-            "environment": {
-                "SECRET_URL": "http://user:password@app:3000/secret?token=abc"
-            }
+            "environment": {"SECRET_URL": "http://user:password@app:3000/secret?token=abc"}
         },
         "services": [{"name": "app", "image": "example/app:latest"}],
         "app_endpoints": [
@@ -199,6 +202,115 @@ def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() ->
         False,
         None,
     )
+
+
+@pytest.mark.unit
+def test_provider_readiness_override_reason_match_redaction_edges() -> None:
+    assert workspaces_route._override_reasons_match("same", "same") is True
+    assert workspaces_route._override_reasons_match(None, "reason") is False
+    assert workspaces_route._override_reasons_match("reason", None) is False
+    assert workspaces_route._override_reasons_match("stored", "requested") is False
+    assert (
+        workspaces_route._override_reasons_match(
+            "stored",
+            "prefix-secret-suffix",
+            stored_redaction_parts=["prefix-", "-suffix"],
+        )
+        is False
+    )
+
+    missing_preflight = SimpleNamespace(task_policy={})
+    malformed_parts = SimpleNamespace(
+        task_policy={
+            "provider_readiness_preflight": {"override_reason_redaction_parts": ["prefix-only"]}
+        }
+    )
+    non_string_parts = SimpleNamespace(
+        task_policy={
+            "provider_readiness_preflight": {
+                "override_reason_redaction_parts": ["prefix-", 42, "-suffix"]
+            }
+        }
+    )
+
+    assert (
+        workspaces_route._stored_task_provider_readiness_override_redaction_parts(missing_preflight)
+        is None
+    )
+    assert (
+        workspaces_route._stored_task_provider_readiness_override_redaction_parts(malformed_parts)
+        is None
+    )
+    assert (
+        workspaces_route._stored_task_provider_readiness_override_redaction_parts(non_string_parts)
+        is None
+    )
+
+
+@pytest.mark.unit
+async def test_workspace_stale_reasons_route_maps_invalid_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _raise_invalid_cursor(*_args: Any, **_kwargs: Any) -> object:
+        raise workspaces_route.InvalidBoundedListCursorError("bad cursor")
+
+    monkeypatch.setattr(
+        workspaces_route,
+        "list_workspace_stale_reasons_response",
+        _raise_invalid_cursor,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await workspaces_route.list_workspace_stale_reasons(
+            "ws_test",
+            cursor="bad",
+            session=object(),  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == {
+        "error_code": "INVALID_CURSOR",
+        "message": "Invalid stale reason cursor.",
+    }
+
+
+@pytest.mark.unit
+async def test_adopt_pr_route_maps_service_errors_to_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _FailingAdoptionService:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def adopt(self, _payload: PullRequestMonitorAdoptionRequest) -> object:
+            raise workspaces_route.PRMonitorAdoptionError(
+                error_code="PR_ALREADY_CLOSED",
+                message="PR is closed.",
+                status_code=409,
+                detail={"repo_slug": "x/y", "pr_number": 42},
+            )
+
+    monkeypatch.setattr(
+        workspaces_route,
+        "PullRequestMonitorAdoptionService",
+        _FailingAdoptionService,
+    )
+
+    response = await workspaces_route.adopt_pull_request_monitor(
+        PullRequestMonitorAdoptionRequest(repo_slug="x/y", pr_number=42),
+        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+        settings=Settings(_env_file=None, work_dir=str(tmp_path / "awf-state")),
+        session=object(),  # type: ignore[arg-type]
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 409
+    assert json.loads(response.body) == {
+        "error_code": "PR_ALREADY_CLOSED",
+        "message": "PR is closed.",
+        "detail": {"repo_slug": "x/y", "pr_number": 42},
+    }
 
 
 async def _create_workspace(client: AsyncClient, **overrides: object) -> str:
@@ -774,7 +886,6 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
-
 class TestWorkspaceCreateProviderReadinessPreflight:
     @pytest.fixture(autouse=True)
     def _clear_provider_auth_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -788,9 +899,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
 
         response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
 
@@ -812,9 +921,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
@@ -839,9 +946,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
@@ -870,9 +975,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         codex_home = home / ".codex"
         codex_home.mkdir(parents=True)
         (codex_home / "auth.json").write_text('{"token":"codex_file_secret"}')
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         headers = {"Idempotency-Key": "provider-readiness-replay"}
 
         first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
@@ -896,9 +999,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         codex_home = home / ".codex"
         codex_home.mkdir(parents=True)
         (codex_home / "auth.json").write_text('{"token":"codex_file_secret"}')
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
@@ -961,33 +1062,25 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
                 "provider_readiness_override": True,
-                "provider_readiness_override_reason": (
-                    "operator typed <redacted> manually"
-                ),
+                "provider_readiness_override_reason": ("operator typed <redacted> manually"),
             },
         }
         replay_payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
                 "provider_readiness_override": True,
-                "provider_readiness_override_reason": (
-                    "operator typed changed text manually"
-                ),
+                "provider_readiness_override_reason": ("operator typed changed text manually"),
             },
         }
         headers = {"Idempotency-Key": "provider-readiness-literal-redacted-conflict"}
 
         first = await client.post("/v2/workspaces", json=payload, headers=headers)
-        replay = await client.post(
-            "/v2/workspaces", json=replay_payload, headers=headers
-        )
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 409
@@ -1023,9 +1116,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
                 ),
             },
         }
-        headers = {
-            "Idempotency-Key": "provider-readiness-redacted-rotated-reason-replay"
-        }
+        headers = {"Idempotency-Key": "provider-readiness-redacted-rotated-reason-replay"}
 
         first = await client.post("/v2/workspaces", json=payload, headers=headers)
         active_settings = new_settings
@@ -1045,9 +1136,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
@@ -1880,7 +1969,10 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert workspaces_route._resolved_profile_requested_tier(workspace) == 2  # type: ignore[arg-type]
         assert workspaces_route._resolved_profile_requested_tier(malformed_workspace) is None  # type: ignore[arg-type]
         assert workspaces_route._resolved_profile_requested_tier(missing_profile_workspace) is None  # type: ignore[arg-type]
-        assert workspaces_route._resolved_profile_requested_tier(malformed_validation_workspace) is None  # type: ignore[arg-type]
+        assert (
+            workspaces_route._resolved_profile_requested_tier(malformed_validation_workspace)
+            is None
+        )  # type: ignore[arg-type]
         assert workspaces_route._stored_task_agent_model(workspace) == "gpt-test"  # type: ignore[arg-type]
         assert workspaces_route._stored_task_agent_model(malformed_workspace) is None  # type: ignore[arg-type]
         assert workspaces_route._stored_task_out_of_scope_policy(workspace) == {"mode": "warn"}  # type: ignore[arg-type]
@@ -2495,7 +2587,9 @@ class TestWorkspaceDirectRoutes:
         )
 
         assert len(cursor) <= 128
-        assert workspaces_route._decode_overview_cursor(cursor) == workspaces_route._WorkspaceOverviewCursor(
+        assert workspaces_route._decode_overview_cursor(
+            cursor
+        ) == workspaces_route._WorkspaceOverviewCursor(
             created_at=created_at,
             workspace_id=workspace_id,
         )
@@ -2512,7 +2606,9 @@ class TestWorkspaceDirectRoutes:
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
 
-        assert workspaces_route._decode_overview_cursor(cursor) == workspaces_route._WorkspaceOverviewCursor(
+        assert workspaces_route._decode_overview_cursor(
+            cursor
+        ) == workspaces_route._WorkspaceOverviewCursor(
             created_at=created_at,
             workspace_id=workspace_id,
         )

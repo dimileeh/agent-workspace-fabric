@@ -381,9 +381,7 @@ async def scan_docker_resources_async(
             failures.append(f"{command.kind}: docker resource scan exceeded {timeout:g}s")
             continue
         if isinstance(outcome, Exception):
-            failures.append(
-                f"{command.kind}: {_truncate(f'{type(outcome).__name__}: {outcome}')}"
-            )
+            failures.append(f"{command.kind}: {_truncate(f'{type(outcome).__name__}: {outcome}')}")
             continue
 
         result = outcome
@@ -545,9 +543,7 @@ def build_orphan_resource_summary(
             ready=False,
             status="unknown",
             reason="DB_UNAVAILABLE",
-            action=(
-                "Restore control-plane database access and re-run orphan resource detection."
-            ),
+            action=("Restore control-plane database access and re-run orphan resource detection."),
         )
         return OrphanResourceSummary(
             ok=True,
@@ -640,7 +636,9 @@ def legacy_orphan_workspaces_payload(summary: OrphanResourceSummary) -> dict[str
 
     if summary.status == "unavailable":
         detail = str(summary.detail or "")
-        reason = "DOCKER_CLI_NOT_FOUND" if "docker binary not found" in detail else "DOCKER_UNAVAILABLE"
+        reason = (
+            "DOCKER_CLI_NOT_FOUND" if "docker binary not found" in detail else "DOCKER_UNAVAILABLE"
+        )
         return {
             "ok": True,
             "status": "unavailable",
@@ -651,9 +649,7 @@ def legacy_orphan_workspaces_payload(summary: OrphanResourceSummary) -> dict[str
         }
 
     orphan_records = [
-        record
-        for record in summary.records
-        if record.classification in {"terminal", "missing"}
+        record for record in summary.records if record.classification in {"terminal", "missing"}
     ]
     expected_workspace_ids = {
         record.workspace_id for record in summary.records if record.classification == "expected"
@@ -738,9 +734,7 @@ async def default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
     try:
         engine = make_engine(database_url)
         async with engine.connect() as conn:
-            rows = (
-                await conn.execute(stmt, {"statuses": KNOWN_WORKSPACE_STATUSES})
-            ).all()
+            rows = (await conn.execute(stmt, {"statuses": KNOWN_WORKSPACE_STATUSES})).all()
     except SQLAlchemyError:
         return unavailable_workspace_view()
     finally:

@@ -1,15 +1,8 @@
-"""Repository tests against in-memory SQLite.
-
-SQLite is fine for pure CRUD + state-transition tests because the ORM layer
-hides dialect differences. Any Postgres-only behaviour (native JSONB ops,
-row-level locking, FOR UPDATE SKIP LOCKED) needs a dedicated integration test
-under tests/integration/ with testcontainers.
-"""
+"""Repository tests against isolated PostgreSQL schemas."""
 
 from __future__ import annotations
 
 import os
-import sqlite3
 import subprocess
 import sys
 from collections.abc import AsyncIterator
@@ -17,12 +10,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.control.state_machine import InvalidWorkspaceTransitionError
-from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
@@ -37,20 +29,17 @@ from awf.db.repositories import (
     validation_command_set_hash,
 )
 from awf.db.session import make_engine, make_session_factory
+from tests.postgres import (
+    create_postgres_test_engine,
+    postgres_empty_test_url,
+    postgres_test_session,
+)
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    """One fresh in-memory SQLite DB per test, schema created from ORM metadata."""
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = make_session_factory(engine)
-    async with factory() as s:
+    async with postgres_test_session() as s:
         yield s
-
-    await engine.dispose()
 
 
 async def _create_policy_workspace(
@@ -193,9 +182,7 @@ class TestCreate:
 class TestRelationshipLoading:
     @pytest.mark.unit
     async def test_list_does_not_eager_load_secret_leases(self) -> None:
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
 
         factory = make_session_factory(engine)
         async with factory() as s:
@@ -264,16 +251,12 @@ class TestRelationshipLoading:
 
         assert len(rows) == 1
         assert not [
-            statement
-            for statement in statements
-            if "from workspace_secret_leases" in statement
+            statement for statement in statements if "from workspace_secret_leases" in statement
         ]
 
     @pytest.mark.unit
     async def test_list_does_not_eager_load_validation_runs(self) -> None:
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
 
         factory = make_session_factory(engine)
         async with factory() as s:
@@ -333,9 +316,7 @@ class TestRelationshipLoading:
             await engine.dispose()
 
         assert len(rows) == 1
-        assert not [
-            statement for statement in statements if "from validation_runs" in statement
-        ]
+        assert not [statement for statement in statements if "from validation_runs" in statement]
 
 
 class TestValidationRunRepository:
@@ -362,9 +343,7 @@ class TestValidationRunRepository:
 
     @pytest.mark.unit
     async def test_find_reusable_coverage_evidence_matches_exact_fresh_identity(self) -> None:
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
 
         now = datetime(2026, 1, 2, tzinfo=UTC)
         commands = [{"phase": "coverage", "command": "pytest --cov=awf"}]
@@ -418,9 +397,7 @@ class TestValidationRunRepository:
     async def test_find_reusable_coverage_evidence_rejects_changed_stale_or_failed_identity(
         self,
     ) -> None:
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
 
         now = datetime(2026, 1, 2, tzinfo=UTC)
         old = datetime(2026, 1, 1, tzinfo=UTC)
@@ -520,9 +497,7 @@ class TestValidationRunRepository:
 
     @pytest.mark.unit
     async def test_find_reusable_coverage_evidence_requires_workspace_head_sha(self) -> None:
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
 
         async with make_session_factory(engine)() as s:
             repo = ValidationRunRepository(s)
@@ -546,9 +521,7 @@ class TestValidationRunRepository:
     async def test_list_by_workspace_ids_can_filter_by_status(
         self,
     ) -> None:
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
 
         factory = make_session_factory(engine)
         async with factory() as s:
@@ -654,9 +627,7 @@ class TestValidationRunRepository:
     async def test_latest_by_workspace_ids_uses_window_query(
         self,
     ) -> None:
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
 
         factory = make_session_factory(engine)
         async with factory() as s:
@@ -768,120 +739,147 @@ class TestValidationRunRepository:
 
 class TestMonitorPolicyMigration:
     @pytest.mark.unit
-    def test_monitor_policy_columns_backfill_existing_rows(
+    async def test_monitor_policy_columns_backfill_existing_rows(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         repo_root = Path(__file__).resolve().parents[3]
-        db_path = tmp_path / "awf.db"
-        env = {
-            **os.environ,
-            "AWF_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
-        }
+        async with postgres_empty_test_url() as database_url:
+            env = {
+                **os.environ,
+                "AWF_DATABASE_URL": database_url,
+            }
 
-        def _alembic(*args: str) -> None:
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                cwd=repo_root,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-
-        monkeypatch.chdir(repo_root)
-        _alembic("upgrade", "e5f6a1b2c3d4")
-
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO workspaces (
-                    id, status, version, repo_url, branch_base,
-                    task_title, task_prompt, agent, test_commands,
-                    requires_database, created_at, updated_at
+            def _alembic(*args: str) -> None:
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                    cwd=repo_root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
                 )
-                VALUES (
-                    'ws_old_policy', 'requested', 1, 'git@example.com:repo.git',
-                    'development', 'old row', 'do work', 'codex', '[]',
-                    0, '2026-04-25 00:00:00', '2026-04-25 00:00:00'
-                )
-                """
-            )
-            conn.commit()
 
-        _alembic("upgrade", "head")
+            monkeypatch.chdir(repo_root)
+            _alembic("upgrade", "e5f6a1b2c3d4")
 
-        with sqlite3.connect(db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT auto_merge, initial_review_grace_period_seconds
-                FROM workspaces
-                WHERE id = 'ws_old_policy'
-                """
-            ).fetchone()
+            engine = make_engine(database_url)
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO workspaces (
+                                id, status, version, repo_url, branch_base,
+                                task_title, task_prompt, agent, test_commands,
+                                requires_database, created_at, updated_at
+                            )
+                            VALUES (
+                                'ws_old_policy', 'requested', 1, 'git@example.com:repo.git',
+                                'development', 'old row', 'do work', 'codex', '[]'::json,
+                                false, '2026-04-25 00:00:00', '2026-04-25 00:00:00'
+                            )
+                            """
+                        )
+                    )
+            finally:
+                await engine.dispose()
 
-        assert row == (1, None)
+            _alembic("upgrade", "head")
+
+            engine = make_engine(database_url)
+            try:
+                async with engine.connect() as conn:
+                    row = (
+                        await conn.execute(
+                            text(
+                                """
+                                SELECT auto_merge, initial_review_grace_period_seconds
+                                FROM workspaces
+                                WHERE id = 'ws_old_policy'
+                                """
+                            )
+                        )
+                    ).one()
+            finally:
+                await engine.dispose()
+
+        assert row == (True, None)
 
 
 class TestTaskPolicyMetadataMigration:
     @pytest.mark.unit
-    def test_policy_metadata_columns_backfill_existing_rows(
+    async def test_policy_metadata_columns_backfill_existing_rows(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         repo_root = Path(__file__).resolve().parents[3]
-        db_path = tmp_path / "awf.db"
-        env = {
-            **os.environ,
-            "AWF_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
-        }
+        async with postgres_empty_test_url() as database_url:
+            env = {
+                **os.environ,
+                "AWF_DATABASE_URL": database_url,
+            }
 
-        def _alembic(*args: str) -> None:
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-                cwd=repo_root,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-
-        monkeypatch.chdir(repo_root)
-        _alembic("upgrade", "f6a1b2c3d4e5")
-
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO workspaces (
-                    id, status, version, repo_url, branch_base,
-                    task_title, task_prompt, agent, test_commands,
-                    requires_database, created_at, updated_at
+            def _alembic(*args: str) -> None:
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                    cwd=repo_root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
                 )
-                VALUES (
-                    'ws_old_policy_metadata', 'requested', 1, 'git@example.com:repo.git',
-                    'development', 'old row', 'do work', 'codex', '[]',
-                    0, '2026-04-25 00:00:00', '2026-04-25 00:00:00'
-                )
-                """
-            )
-            conn.commit()
 
-        _alembic("upgrade", "head")
+            monkeypatch.chdir(repo_root)
+            _alembic("upgrade", "f6a1b2c3d4e5")
 
-        with sqlite3.connect(db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT task_class, owned_paths
-                FROM workspaces
-                WHERE id = 'ws_old_policy_metadata'
-                """
-            ).fetchone()
+            engine = make_engine(database_url)
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO workspaces (
+                                id, status, version, repo_url, branch_base,
+                                task_title, task_prompt, agent, test_commands,
+                                requires_database, created_at, updated_at
+                            )
+                            VALUES (
+                                'ws_old_policy_metadata', 'requested', 1,
+                                'git@example.com:repo.git', 'development', 'old row',
+                                'do work', 'codex', '[]'::json, false,
+                                '2026-04-25 00:00:00', '2026-04-25 00:00:00'
+                            )
+                            """
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+            _alembic("upgrade", "head")
+
+            engine = make_engine(database_url)
+            try:
+                async with engine.connect() as conn:
+                    row = (
+                        await conn.execute(
+                            text(
+                                """
+                                SELECT task_class, owned_paths
+                                FROM workspaces
+                                WHERE id = 'ws_old_policy_metadata'
+                                """
+                            )
+                        )
+                    ).one()
+            finally:
+                await engine.dispose()
 
         assert row is not None
         assert row[0] is None
-        assert row[1] == "[]"
+        assert row[1] == []
 
 
 class TestIdempotency:
@@ -1317,30 +1315,6 @@ class TestOwnedPathOverlapLookup:
         assert "workspaces.id > 'ws_cursor'" in sql
 
     @pytest.mark.unit
-    async def test_sqlite_scheduler_lists_use_portable_select(self) -> None:
-        session = _RecordingSchedulerSession(
-            "sqlite",
-            values=[_recorded_workspace_row("ws_claimed")],
-        )
-        repo = WorkspaceRepository(session, dialect_name="sqlite")  # type: ignore[arg-type]
-
-        listed = await repo.list_schedulable_ids(
-            status=WorkspaceStatus.requested,
-            limit=1,
-        )
-
-        assert listed == ["ws_claimed"]
-        assert len(session.executed) == 1
-        sql = str(
-            session.executed[0].compile(  # type: ignore[attr-defined]
-                dialect=postgresql.dialect(),
-                compile_kwargs={"literal_binds": True},
-            )
-        )
-        assert "FOR UPDATE" not in sql
-        assert "SKIP LOCKED" not in sql
-
-    @pytest.mark.unit
     async def test_postgres_get_for_update_locks_workspace_row(self) -> None:
         session = _RecordingSchedulerSession("postgresql", values=["ws_locked"])
         repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
@@ -1357,23 +1331,6 @@ class TestOwnedPathOverlapLookup:
         )
         assert "FOR UPDATE" in sql
         assert "workspaces.id = 'ws_locked'" in sql
-
-    @pytest.mark.unit
-    async def test_sqlite_get_for_update_uses_portable_select(self) -> None:
-        session = _RecordingSchedulerSession("sqlite", values=["ws_locked"])
-        repo = WorkspaceRepository(session, dialect_name="sqlite")  # type: ignore[arg-type]
-
-        locked = await repo.get_for_update("ws_locked")
-
-        assert locked == "ws_locked"
-        assert len(session.executed) == 1
-        sql = str(
-            session.executed[0].compile(  # type: ignore[attr-defined]
-                dialect=postgresql.dialect(),
-                compile_kwargs={"literal_binds": True},
-            )
-        )
-        assert "FOR UPDATE" not in sql
 
     @pytest.mark.unit
     async def test_session_info_dialect_drives_scheduler_locking(self) -> None:

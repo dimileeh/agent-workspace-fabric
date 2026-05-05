@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateV2Request
 from awf.common.config import Settings
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
     QueueDecisionRepository,
@@ -17,21 +16,17 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.service import workspaces
 from awf.service.disk import DiskCheck
 from awf.service.workspaces import WorkspaceService
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _request() -> WorkspaceCreateV2Request:
@@ -450,7 +445,9 @@ async def test_terminal_workspace_control_releases_active_reservation(
     )
 
     async with factory() as session:
-        reservation = (await ResourceReservationRepository(session).list_for_workspace(created.id))[0]
+        reservation = (await ResourceReservationRepository(session).list_for_workspace(created.id))[
+            0
+        ]
         active = await ResourceReservationRepository(session).active_for_workspace(created.id)
 
     assert active is None

@@ -16,6 +16,7 @@ file targets specific error branches that need dedicated fixtures:
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import subprocess
 from collections.abc import AsyncIterator
@@ -31,23 +32,39 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.control.executor as executor_module
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
+from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
-from awf.control.executor import ExecutorConfig, WorkspaceExecutor, _call_pr_monitor_factory
-from awf.db.base import Base
+from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
+from awf.control.executor import (
+    ExecutorConfig,
+    WorkspaceExecutor,
+    _call_pr_monitor_factory,
+    _required_metadata_str,
+)
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.models import Operation, TaskAttempt, Workspace, WorkspaceEvent
+from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
     WorkspaceEventRepository,
+    WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
+from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import ValidationResult, ValidationRunner
+from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
+from tests.postgres import create_postgres_test_engine, postgres_test_engine
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    pr_payload,
+)
 
 from .executor_paths import _test_worktree_path, _test_worktrees_root
 
@@ -60,13 +77,10 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'ex.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
-        yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
+        yield session_factory
 
 
 @pytest.fixture
@@ -83,6 +97,7 @@ def _make_executor(
     compose: Any = None,
     validation: Any = None,
     pr_creator: Any = None,
+    log_store: LogStore | None = None,
 ) -> WorkspaceExecutor:
     compose = compose or _NoopResumeCompose()
     validation = validation or ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -103,6 +118,7 @@ def _make_executor(
             },
         ),
         pr_monitor_factory=pr_monitor_factory,
+        log_store=log_store,
     )
 
 
@@ -193,7 +209,9 @@ class _CancellingSuccessfulValidation:
                 repo = WorkspaceRepository(s)
                 ws = await repo.get(workspace_id)
                 assert ws is not None
-                await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCELLED")
+                await repo.transition(
+                    ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCELLED"
+                )
                 await s.commit()
         return ValidationResult()
 
@@ -423,16 +441,13 @@ async def _seed_monitoring_pr(
 
 class TestConstructorValidation:
     @pytest.mark.unit
-    def test_monitor_and_factory_are_mutually_exclusive(
+    async def test_monitor_and_factory_are_mutually_exclusive(
         self, fake: FakeCommandRunner, tmp_path: Path
     ) -> None:
         """Line 107: supplying both pr_monitor and pr_monitor_factory
         is a programming error — the executor can only use one."""
-        from awf.db.session import make_engine
-        from awf.db.session import make_session_factory as _mk
-
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        factory = _mk(engine)
+        engine = await create_postgres_test_engine()
+        factory = make_session_factory(engine)
 
         compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
         validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -452,6 +467,7 @@ class TestConstructorValidation:
                 pr_monitor=object(),  # type: ignore[arg-type]
                 pr_monitor_factory=lambda _adapter: object(),
             )
+        await engine.dispose()
 
 
 class TestMissingBaseCommit:
@@ -554,9 +570,7 @@ class TestUnexpectedErrorDuringAgentRun:
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(ws_id)
             fallback = (
-                await session.execute(
-                    select(Workspace).where(Workspace.id != ws_id)
-                )
+                await session.execute(select(Workspace).where(Workspace.id != ws_id))
             ).scalar_one()
             attempts = list(
                 (
@@ -577,8 +591,7 @@ class TestUnexpectedErrorDuringAgentRun:
                     await session.execute(
                         select(WorkspaceEvent).where(
                             WorkspaceEvent.workspace_id == ws_id,
-                            WorkspaceEvent.event_type
-                            == "workspace.provider_recovery_requested",
+                            WorkspaceEvent.event_type == "workspace.provider_recovery_requested",
                         )
                     )
                 ).scalars()
@@ -606,8 +619,9 @@ class TestUnexpectedErrorDuringAgentRun:
             assert recovery["recommended_action"] == (
                 "Retry after provider cooldown or dispatch an approved fallback model."
             )
-            assert "AGENT_PROVIDER_CAPACITY_EXHAUSTED|quota|google|gemini-2.5-pro" in (
-                recovery["failure_fingerprint"]
+            assert (
+                "AGENT_PROVIDER_CAPACITY_EXHAUSTED|quota|google|gemini-2.5-pro"
+                in (recovery["failure_fingerprint"])
             )
 
         assert len(requested_events) == 1
@@ -631,9 +645,7 @@ class TestUnexpectedErrorDuringAgentRun:
         assert fallback.requested_profile == requested_profile
         assert fallback.resolved_profile == resolved_profile
         assert fallback.resolved_profile["validation"]["requested_tier"] == 2
-        assert fallback.resolved_profile["monitor"][
-            "initial_review_grace_period_seconds"
-        ] == 55
+        assert fallback.resolved_profile["monitor"]["initial_review_grace_period_seconds"] == 55
         assert fallback.auto_merge is False
         assert fallback.initial_review_grace_period_seconds == 55
         assert fallback.task_kind == "feature_branch_pr"
@@ -713,10 +725,7 @@ class TestUnexpectedErrorDuringAgentRun:
         before = datetime.now(UTC)
         fake.queue_result(
             returncode=1,
-            stderr=(
-                "RESOURCE_EXHAUSTED RetryableQuotaError "
-                f"Retry-After: {retry_after_seconds}"
-            ),
+            stderr=(f"RESOURCE_EXHAUSTED RetryableQuotaError Retry-After: {retry_after_seconds}"),
         )
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0)
@@ -734,16 +743,13 @@ class TestUnexpectedErrorDuringAgentRun:
 
         async with factory() as session:
             retry_workspace = (
-                await session.execute(
-                    select(Workspace).where(Workspace.id != ws_id)
-                )
+                await session.execute(select(Workspace).where(Workspace.id != ws_id))
             ).scalar_one()
             event = (
                 await session.execute(
                     select(WorkspaceEvent).where(
                         WorkspaceEvent.workspace_id == ws_id,
-                        WorkspaceEvent.event_type
-                        == "workspace.provider_recovery_requested",
+                        WorkspaceEvent.event_type == "workspace.provider_recovery_requested",
                     )
                 )
             ).scalar_one()
@@ -2105,10 +2111,7 @@ class TestPullRequestUnexpectedError:
         fake.queue_result(returncode=0)
         fake.queue_result(
             returncode=0,
-            stdout=(
-                "docs/awf-plans/ws_plan.md\n"
-                "docs/awf-plans/ws_plan.conformance.json\n"
-            ),
+            stdout=("docs/awf-plans/ws_plan.md\ndocs/awf-plans/ws_plan.conformance.json\n"),
         )
         validation = _RecordingValidation()
 
@@ -2826,10 +2829,13 @@ class TestPrMonitorResume:
             )
             is None
         )
-        assert await executor._recover_feature_branch_remote_push_branch(
-            workspace_id=existing_id,
-            remote_push_branch="awf/recovered",
-        ) == "awf/persisted"
+        assert (
+            await executor._recover_feature_branch_remote_push_branch(
+                workspace_id=existing_id,
+                remote_push_branch="awf/recovered",
+            )
+            == "awf/persisted"
+        )
         assert (
             await executor._recover_feature_branch_remote_push_branch(
                 workspace_id=sync_id,
@@ -2923,6 +2929,643 @@ class TestExecutorCoverageEdges:
             assert ws.failure_reason == "service_startup_failure"
             assert ws.failure_message == "profile setup failed: ./scripts/setup.sh"
             assert ws.events[-1].reason_code == "SERVICE_STARTUP_FAILURE"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_skips_agent_validation_and_pr_creation(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_calls: list[str] = []
+        validation = _RecordingValidation()
+
+        class _UnexpectedPrCreator:
+            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
+                raise AssertionError("adopted PRs must not create a new PR")
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                assert compose_project == "awf_x"
+                assert compose_file == tmp_path / "work" / "compose" / ws_id / "compose.yml"
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            create_task_attempt=True,
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.branch_name = f"feature-sync/{ws_id}"
+            ws.remote_push_branch = "feature/existing"
+            ws.pr_url = "https://github.com/x/y/pull/42"
+            ws.pr_number = 42
+            await s.commit()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_UnexpectedPrCreator(),
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert monitor_calls == [ws_id]
+        assert validation.calls == []
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_last_commit_sha == "h" * 40
+            assert ws.base_commit == "b" * 40
+            candidate = (
+                await s.execute(select(MergeCandidate).where(MergeCandidate.workspace_id == ws_id))
+            ).scalar_one()
+            assert candidate.status == "open"
+            assert candidate.head_sha == "h" * 40
+            assert candidate.base_sha == "b" * 40
+            assert candidate.pr_url == "https://github.com/x/y/pull/42"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_missing_initial_adoption_metadata_fails_cleanly(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        factory_calls: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={"pr_adoption": {"head_ref": " "}},
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.remote_push_branch = None
+            await s.commit()
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            factory_calls.append("called")
+            raise AssertionError("monitor factory must not run with missing metadata")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor.execute(ws_id)
+
+        assert factory_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "adopted PR workspace is missing" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "PR_ADOPTION_METADATA_MISSING"
+            missing = ws.events[-1].payload["details"]["missing"]
+            assert "pr_number" in missing
+            assert "pr_url" in missing
+            assert "remote_push_branch" in missing
+            assert "task_policy.pr_adoption.head_ref" in missing
+            assert "task_policy.pr_adoption.base_sha" in missing
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_without_monitor_configuration_fails_cleanly(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message == (
+                "adopted PR monitor handoff failed: no PR monitor configured"
+            )
+            assert ws.events[-1].reason_code == "PR_ADOPTION_MONITOR_UNAVAILABLE"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_monitor_factory_exception_fails_cleanly(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "ghp_factorysecret123456"
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            raise RuntimeError(f"factory exploded Authorization: Bearer {secret}")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "factory exploded" in (ws.failure_message or "")
+            assert secret not in (ws.failure_message or "")
+            assert "Authorization: Bearer [redacted]" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "PR_ADOPTION_MONITOR_UNAVAILABLE"
+        log_entry = next(
+            event
+            for event in captured
+            if event.get("event") == "executor.sync_feature_pr_monitor_build_failed"
+        )
+        assert "exc_info" not in log_entry
+        redacted_traceback = log_entry["redacted_traceback"]
+        assert "Traceback" in redacted_traceback
+        assert "RuntimeError: factory exploded Authorization: Bearer [redacted]" in (
+            redacted_traceback
+        )
+        assert secret not in redacted_traceback
+
+    @pytest.mark.unit
+    def test_redacted_exception_traceback_truncates_large_tracebacks(self) -> None:
+        secret = "ghp_tracebacksecret123456"
+        try:
+            raise RuntimeError(f"factory exploded Authorization: Bearer {secret}\n" + ("x" * 5000))
+        except RuntimeError as exc:
+            redacted_traceback = executor_module._redacted_exception_traceback(exc)
+
+        assert "Authorization: Bearer [redacted]" in redacted_traceback
+        assert secret not in redacted_traceback
+        assert redacted_traceback.endswith("...[truncated]")
+        assert len(redacted_traceback) <= executor_module._EXCEPTION_TRACEBACK_LIMIT + len(
+            "...[truncated]"
+        )
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_persisted_metadata_loss_fails_before_monitor_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        async def _ensure_available(**_kwargs: Any) -> bool:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                metadata = dict(ws.task_policy["pr_adoption"])
+                metadata.pop("base_sha")
+                ws.task_policy = {"pr_adoption": metadata}
+                await s.commit()
+            return True
+
+        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+
+        await executor.execute(ws_id)
+
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "task_policy.pr_adoption.base_sha" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "PR_ADOPTION_METADATA_MISSING"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_persisted_status_change_skips_handoff(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        async def _ensure_available(**_kwargs: Any) -> bool:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.status = WorkspaceStatus.cancelled.value
+                await s.commit()
+            return True
+
+        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+
+        await executor.execute(ws_id)
+
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+            assert ws.events[-1].payload["action"] == "sync_feature_pr_handoff"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_recheck_prevents_monitor_run_after_handoff(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            create_task_attempt=True,
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        async def _recheck_status(
+            workspace_id: str,
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+            reason_code: str = "EXECUTOR_STALE_STATUS",
+        ) -> bool:
+            del workspace_id, expected, reason_code
+            return action != "run_pr_monitor"
+
+        monkeypatch.setattr(executor, "_recheck_status", _recheck_status)
+
+        await executor.execute(ws_id)
+
+        assert monitor_runs == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.events[-1].reason_code == "PR_MONITOR_ADOPTED"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_unavailable_worktree_stops_before_monitor_factory(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        factory_calls: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+            create_worktree=False,
+        )
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> object:
+            factory_calls.append("called")
+            raise AssertionError("monitor factory must not run without a worktree")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        async def _ensure_available(**_kwargs: Any) -> bool:
+            return False
+
+        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+
+        await executor.execute(ws_id)
+
+        assert factory_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+
+    @pytest.mark.unit
+    def test_exclude_agent_salvage_artifacts_handles_gitdir_file(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake, factory, tmp_path)
+        worktree = tmp_path / "worktree"
+        git_dir = tmp_path / "actual.git"
+        worktree.mkdir()
+        (worktree / ".git").write_text("gitdir: ../actual.git\n", encoding="utf-8")
+
+        executor._exclude_agent_salvage_artifacts(worktree)
+
+        assert (git_dir / "info" / "exclude").read_text(encoding="utf-8") == ("/.awf/salvage/\n")
+
+    @pytest.mark.unit
+    def test_required_adoption_metadata_str_rejects_missing_key(self) -> None:
+        with pytest.raises(ValueError, match="missing adoption metadata key: head_sha"):
+            _required_metadata_str({}, "head_sha")
+
+    @pytest.mark.unit
+    async def test_adopted_sync_feature_pr_handoff_writes_monitor_log_and_redacts_reason(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "ghp_supersecretvalue123"
+
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            assert repo.slug() == "x/y"
+            assert pr_number == 42
+            return PullRequestAdoptionMetadata(
+                number=42,
+                head_ref="feature/existing",
+                head_repo_slug="x/y",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="OPEN",
+                is_draft=False,
+                closed=False,
+                merged=False,
+                author="octocat",
+                url="https://github.com/x/y/pull/42",
+                title="feature: existing",
+            )
+
+        async with factory() as s:
+            response = await PullRequestMonitorAdoptionService(
+                s,
+                metadata_fetcher=_fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="x/y",
+                    pr_number=42,
+                    agent="claude_code",
+                    reason=f"operator retry with GH_TOKEN={secret}",
+                )
+            )
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(response.workspace_id)
+            assert ws is not None
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(ws.id)
+            assert attempt is not None
+            validation_repo = ValidationRunRepository(s)
+            run = await validation_repo.start(
+                workspace_id=ws.id,
+                attempt_id=attempt.id,
+                tier=1,
+                commands=[],
+                base_commit="b" * 40,
+                target_branch="feature/existing",
+                target_head_sha="h" * 40,
+                workspace_head_sha="h" * 40,
+                log_stream_refs={},
+            )
+            await validation_repo.finish(
+                run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            ws.branch_name = f"feature-sync/{ws.id}"
+            ws.compose_project_name = "awf_x"
+            ws.compose_file_path = str(tmp_path / "compose.yml")
+            await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+            await s.commit()
+
+        worktrees_root = tmp_path / "work" / "worktrees"
+        (worktrees_root / response.workspace_id).mkdir(parents=True, exist_ok=True)
+        fake.queue_result(returncode=0)  # git fetch origin development
+        fake.queue_result(returncode=0, stdout="0\n")  # base-behind
+        fake.queue_result(returncode=0, stdout=pr_payload(head_sha="h" * 40))
+        fake.queue_result(returncode=0)  # gh pr merge
+        fake.queue_result(returncode=0, stdout="MERGESHA\n")
+        adapter = FakeAdapter()
+        sleep_fn = RecordedSleep()
+        log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
+
+        def _monitor_factory(*_args: Any, **_kwargs: Any) -> Any:
+            return make_runner(
+                factory=factory,
+                cmd=fake,
+                adapter=adapter,
+                sleep_fn=sleep_fn,
+                worktrees_root=worktrees_root,
+                log_store=log_store,
+            )
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=_monitor_factory,
+            log_store=log_store,
+        )
+
+        await executor.execute(response.workspace_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(response.workspace_id)
+            assert ws is not None
+            streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws.id)
+            operations = list(
+                (
+                    await s.execute(select(Operation).where(Operation.workspace_id == ws.id))
+                ).scalars()
+            )
+            events = list(
+                (
+                    await s.execute(
+                        select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == ws.id)
+                    )
+                ).scalars()
+            )
+
+        monitor_stream = next(stream for stream in streams if stream.stream_id == "monitor.log")
+        monitor_log = Path(monitor_stream.path).read_text()
+        durable_payloads = json.dumps(
+            {
+                "task_policy": ws.task_policy,
+                "operations": [op.payload for op in operations],
+                "operation_results": [op.result for op in operations],
+                "events": [
+                    {
+                        "event_type": event.event_type,
+                        "reason_code": event.reason_code,
+                        "payload": event.payload,
+                    }
+                    for event in events
+                ],
+                "monitor_log": monitor_log,
+            },
+            sort_keys=True,
+        )
+
+        assert monitor_stream.source == "monitor"
+        assert '"event": "monitor.start"' in monitor_log
+        assert "PR_MONITOR_ADOPTION_REQUESTED" in durable_payloads
+        assert "PR_MONITOR_ADOPTED" in durable_payloads
+        assert "MERGE" in durable_payloads
+        assert secret not in durable_payloads
+        assert "[redacted]" in durable_payloads
 
     @pytest.mark.unit
     async def test_transition_if_current_records_stale_skip_for_diverged_status(

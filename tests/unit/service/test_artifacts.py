@@ -9,9 +9,8 @@ import pytest
 
 import awf.service.artifacts as artifacts_module
 from awf.common.config import get_settings
-from awf.db.base import Base
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.service.artifacts import (
     ArtifactNotFoundError,
     ArtifactPathError,
@@ -25,6 +24,7 @@ from awf.service.artifacts import (
     list_artifacts,
     workspace_artifact_dir,
 )
+from tests.postgres import create_postgres_test_engine
 
 
 class TestArtifactService:
@@ -43,10 +43,13 @@ class TestArtifactService:
         monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "settings-work"))
         get_settings.cache_clear()
         try:
-            assert artifacts_module._workspace_artifact_dir(  # noqa: SLF001
-                "ws_123",
-                work_dir=tmp_path / "explicit-work",
-            ) == tmp_path / "explicit-work" / "artifacts" / "ws_123"
+            assert (
+                artifacts_module._workspace_artifact_dir(  # noqa: SLF001
+                    "ws_123",
+                    work_dir=tmp_path / "explicit-work",
+                )
+                == tmp_path / "explicit-work" / "artifacts" / "ws_123"
+            )
             assert artifacts_module._workspace_artifact_dir("ws_123") == (  # noqa: SLF001
                 tmp_path / "settings-work" / "artifacts" / "ws_123"
             )
@@ -76,7 +79,9 @@ class TestArtifactService:
         assert artifact.content_type == "application/json"
 
     @pytest.mark.unit
-    def test_artifact_compatibility_helpers_delegate_to_public_helpers(self, tmp_path: Path) -> None:
+    def test_artifact_compatibility_helpers_delegate_to_public_helpers(
+        self, tmp_path: Path
+    ) -> None:
         assert artifacts_module._artifact_id("ws_artifacts", "README").startswith("art_")
         assert artifacts_module._artifact_kind(tmp_path / "README") == "file"
 
@@ -525,9 +530,7 @@ class TestArtifactService:
         self,
         tmp_path: Path,
     ) -> None:
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
         factory = make_session_factory(engine)
         try:
             async with factory() as session:
@@ -547,9 +550,7 @@ class TestArtifactService:
         self,
         tmp_path: Path,
     ) -> None:
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
         factory = make_session_factory(engine)
         work_dir = tmp_path / "work"
         try:
@@ -616,9 +617,7 @@ class TestArtifactService:
             "ws_artifacts",
             "report.txt",
         )
-        assert _artifact_kind(Path("summary.json")) == artifact_kind(
-            Path("summary.json")
-        )
+        assert _artifact_kind(Path("summary.json")) == artifact_kind(Path("summary.json"))
         assert _artifact_kind(report) == artifact_kind(report) == "txt"
 
     @pytest.mark.unit

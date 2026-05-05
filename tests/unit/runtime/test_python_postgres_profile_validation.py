@@ -15,10 +15,7 @@ from awf.profiles.resolver import ProfileResolver
 from awf.runtime.validation import ValidationRunner
 
 _FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "fixtures"
-    / "workspace_services"
-    / "python_postgres_app"
+    Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "python_postgres_app"
 )
 _COMPOSE_PROJECT = "awf_ws_python_pg"
 _COMPOSE_FILE = Path("/fake/compose.yml")
@@ -113,7 +110,7 @@ async def test_python_postgres_profile_healthchecks_are_opt_in(tmp_path: Path) -
     assert result.all_passed
     assert [(command.phase, command.stdout_path.name) for command in result.commands] == [
         ("db_refresh", "01_db_refresh.stdout"),
-        ("validate", "01_validate.stdout")
+        ("validate", "01_validate.stdout"),
     ]
     assert len(fake.calls) == 2
     assert "/setup" in fake.calls[0].args[-1]

@@ -120,9 +120,7 @@ def test_resource_inventory_matches_by_compose_project_and_policy_must_request_r
 
     assert classify_resource_inventory(workspace, resources) is None
     assert (
-        retry_policy_allows_runtime_recovery(
-            {"runtime_recovery": {"stranded_workspace": "manual"}}
-        )
+        retry_policy_allows_runtime_recovery({"runtime_recovery": {"stranded_workspace": "manual"}})
         is False
     )
     assert retry_policy_allows_runtime_recovery({"runtime_recovery": "manual"}) is False
