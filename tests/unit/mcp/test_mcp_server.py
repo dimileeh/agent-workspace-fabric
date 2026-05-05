@@ -237,15 +237,31 @@ class TestToolRegistration:
         cancel_props = tools["awf_cancel_workspace"].inputSchema["properties"]
         assert cancel_props["reason"]["default"] is None
         assert cancel_props["stop_stack"]["default"] is True
+        assert cancel_props["expected_version"]["default"] is None
+        assert "expected_version" not in tools["awf_cancel_workspace"].inputSchema.get("required", [])
 
         stop_props = tools["awf_stop_workspace"].inputSchema["properties"]
         assert stop_props["reason"]["default"] is None
         assert "stop_stack" not in stop_props
+        assert stop_props["expected_version"]["default"] is None
 
         destroy_props = tools["awf_destroy_workspace"].inputSchema["properties"]
         assert destroy_props["force"]["default"] is False
         assert destroy_props["remove_volumes"]["default"] is True
         assert destroy_props["remove_worktree"]["default"] is True
+        assert destroy_props["expected_version"]["default"] is None
+
+        remonitor_props = tools["awf_remonitor_workspace"].inputSchema["properties"]
+        assert remonitor_props["expected_version"]["default"] is None
+
+        validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
+        assert validate_props["expected_version"]["default"] is None
+
+        refresh_props = tools["awf_refresh_workspace"].inputSchema["properties"]
+        assert refresh_props["expected_version"]["default"] is None
+
+        rebase_props = tools["awf_rebase_workspace"].inputSchema["properties"]
+        assert rebase_props["expected_version"]["default"] is None
 
     @pytest.mark.unit
     async def test_create_workspace_v2_owned_paths_declares_item_constraints(self, mcp) -> None:  # type: ignore[no-untyped-def]
@@ -552,6 +568,7 @@ class _RecordingControlService:
         reason: str | None,
         stop_stack: bool,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -561,6 +578,7 @@ class _RecordingControlService:
                     "reason": reason,
                     "stop_stack": stop_stack,
                     "idempotency_key": idempotency_key,
+                    "expected_version": expected_version,
                 },
             )
         )
@@ -578,6 +596,7 @@ class _RecordingControlService:
         *,
         reason: str | None,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -586,6 +605,7 @@ class _RecordingControlService:
                     "workspace_id": workspace_id,
                     "reason": reason,
                     "idempotency_key": idempotency_key,
+                    "expected_version": expected_version,
                 },
             )
         )
@@ -605,6 +625,7 @@ class _RecordingControlService:
         remove_volumes: bool,
         remove_worktree: bool,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -615,6 +636,7 @@ class _RecordingControlService:
                     "remove_volumes": remove_volumes,
                     "remove_worktree": remove_worktree,
                     "idempotency_key": idempotency_key,
+                    "expected_version": expected_version,
                 },
             )
         )
@@ -635,8 +657,9 @@ class _FailingControlService(_RecordingControlService):
         reason: str | None,
         stop_stack: bool,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
-        del workspace_id, reason, stop_stack, idempotency_key
+        del workspace_id, reason, stop_stack, idempotency_key, expected_version
         raise WorkspaceControlError(error_code="NOPE", message="cancel refused")
 
     async def stop_workspace(
@@ -645,8 +668,9 @@ class _FailingControlService(_RecordingControlService):
         *,
         reason: str | None,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
-        del workspace_id, reason, idempotency_key
+        del workspace_id, reason, idempotency_key, expected_version
         raise WorkspaceControlError(error_code="NOPE", message="stop refused")
 
 
@@ -676,6 +700,7 @@ class TestWorkspaceControls:
                     "reason": "stale task",
                     "stop_stack": False,
                     "idempotency_key": None,
+                    "expected_version": None,
                 },
             )
         ]
@@ -710,6 +735,7 @@ class TestWorkspaceControls:
                     "workspace_id": "ws_control",
                     "reason": "free local resources",
                     "idempotency_key": None,
+                    "expected_version": None,
                 },
             )
         ]
@@ -748,6 +774,7 @@ class TestWorkspaceControls:
                     "remove_volumes": False,
                     "remove_worktree": False,
                     "idempotency_key": None,
+                    "expected_version": None,
                 },
             )
         ]
