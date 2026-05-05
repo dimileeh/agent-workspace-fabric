@@ -77,6 +77,7 @@ Status values:
 | --- | --- | --- | --- | --- | --- |
 | P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_657b484a622544b6aee70924` | [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing the destroyed monitor `ws_941096a4dc4942dcb877656a`; AWF owns conflict, validation, comment, and merge monitoring. |
 | P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_3b90c8728f0c4862a28d82cc` | [#212](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/212) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing cancelled workspace `ws_7e7f6d54bc924c47a5723621`; AWF owns validation, comment, and merge monitoring. |
+| P1 MCP And Project Onboarding Client Parity | PR adoption terminal idempotency hardening | `ws_e5b86a598da842e0aaf50d1f` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to harden first-class PR adoption after the destroyed-row idempotency edge case found while reattaching PR #206. |
 
 ### Reschedule Required Slices
 
