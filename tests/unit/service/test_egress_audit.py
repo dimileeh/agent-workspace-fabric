@@ -461,3 +461,25 @@ async def test_workspace_response_egress_audit_null_when_no_record(
 
     assert detail is not None
     assert detail.model_dump().get("egress_audit") is None
+
+
+@pytest.mark.unit
+async def test_workspace_response_egress_audit_null_when_lookup_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit lookup failures must not block the workspace detail response."""
+    wid = await _workspace(session_factory)
+
+    async def _raise_lookup(
+        _repo: EgressAuditRepository,
+        _workspace_id: str,
+    ) -> EgressAuditRecord | None:
+        raise RuntimeError("audit lookup failed")
+
+    monkeypatch.setattr(EgressAuditRepository, "get_latest_for_workspace", _raise_lookup)
+
+    detail = await WorkspaceService(session_factory).get(wid)
+
+    assert detail is not None
+    assert detail.model_dump().get("egress_audit") is None

@@ -1229,11 +1229,18 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_get_egress_audit_evidence")
     async def awf_get_egress_audit_evidence(
-        workspace_id: str = Field(
-            ..., min_length=1, max_length=256, description="Workspace ID for egress audit evidence."
+        workspace_id: str | None = Field(
+            default=None,
+            max_length=256,
+            description="Workspace ID for egress audit evidence.",
         ),
     ) -> StructuredToolResult:
         """Read-only: return the latest outbound egress audit evidence for a workspace."""
+        if workspace_id is None or not workspace_id.strip():
+            return _safe_result(
+                {"error_code": "INVALID_REQUEST", "message": "workspace_id is required"},
+                is_error=True,
+            )
         try:
             response = await service.get(workspace_id)
             if response is None:

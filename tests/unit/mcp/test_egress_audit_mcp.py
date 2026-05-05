@@ -149,3 +149,38 @@ async def test_mcp_egress_audit_requires_workspace_id(
     )
     assert isinstance(result, CallToolResult)
     assert result.isError is True
+
+
+@pytest.mark.unit
+async def test_mcp_get_egress_audit_evidence_unknown_workspace_returns_null(
+    mcp,
+) -> None:
+    """Unknown workspaces return the same null evidence envelope as missing audit rows."""
+    result = await mcp.call_tool(
+        "awf_get_egress_audit_evidence",
+        {"workspace_id": "ws_missing"},
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent == {"workspace_id": "ws_missing", "evidence": None}
+
+
+class _FailingWorkspaceService:
+    async def get(self, _workspace_id: str) -> None:
+        raise RuntimeError("database unavailable")
+
+
+@pytest.mark.unit
+async def test_mcp_get_egress_audit_evidence_service_error_returns_error() -> None:
+    """Service failures are returned as redacted MCP error results."""
+    failing_mcp = build_mcp_server(service=_FailingWorkspaceService())  # type: ignore[arg-type]
+
+    result = await failing_mcp.call_tool(
+        "awf_get_egress_audit_evidence",
+        {"workspace_id": "ws_error"},
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error_code"] == "MCP_EGRESS_AUDIT_ERROR"

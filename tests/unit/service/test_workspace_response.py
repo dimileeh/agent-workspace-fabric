@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from awf.api.schemas import WorkspaceResponse
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
@@ -980,6 +980,29 @@ def test_failure_details_compacts_legacy_scope_forbidden_paths_and_defaults() ->
 
 
 @pytest.mark.unit
+def test_planning_scope_retry_context_requires_mapping_evidence() -> None:
+    workspace = SimpleNamespace(
+        id="ws_scope_missing",
+        failure_message="scope failed",
+        task_policy=None,
+        events=[
+            SimpleNamespace(
+                event_type="workspace.state_changed",
+                new_state=WorkspaceStatus.failed.value,
+                reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                payload={
+                    "reason_code": AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                    "message": "scope failed",
+                    "details": {},
+                },
+            )
+        ],
+    )
+
+    assert workspaces_service._planning_scope_retry_context(workspace) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
 def test_failure_detail_compactors_reject_malformed_values() -> None:
     workspace_without_policy = SimpleNamespace(task_policy=None)
     workspace_with_bad_model = SimpleNamespace(
@@ -1024,6 +1047,28 @@ def test_retry_recovery_payload_helpers_preserve_salvage_context() -> None:
     assert workspaces_service._retry_evidence_gaps({"gaps": " close gap "}) == ["close gap"]
     assert workspaces_service._retry_evidence_gaps({"gaps": object()}) == []
     assert workspaces_service._optional_retry_evidence_str(123) is None
+
+
+@pytest.mark.unit
+def test_workspace_retry_exhausted_error_includes_retry_limits() -> None:
+    exc = workspaces_service.WorkspaceRetryExhaustedError(attempt_count=4)
+
+    assert exc.message == "Conformance retry attempts exhausted."
+    assert exc.detail == {"attempt_count": 4, "max_attempts": 4}
+
+
+@pytest.mark.unit
+def test_workspace_scheduler_priority_helpers_delegate_to_scheduler_policy() -> None:
+    assert workspaces_service.task_class_priority(TaskClass.migration_task.value) == 5
+    assert (
+        workspaces_service.computed_priority(
+            base_priority=10,
+            task_class=TaskClass.migration_task.value,
+            age_boost=3,
+            retry_bonus=2,
+        )
+        == 30
+    )
 
 
 @pytest.mark.unit

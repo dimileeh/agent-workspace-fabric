@@ -17,7 +17,6 @@ from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import (
-    EgressAuditRecordResponse,
     FallbackTargetResponse,
     OperationResponse,
     OwnedPathOverlapResponse,
@@ -42,7 +41,14 @@ from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import EgressAuditRecord, Operation, Task, TaskAttempt, Workspace, WorkspaceSecretLease
+from awf.db.models import (
+    EgressAuditRecord,
+    Operation,
+    Task,
+    TaskAttempt,
+    Workspace,
+    WorkspaceSecretLease,
+)
 from awf.db.repositories import (
     EgressAuditRepository,
     OperationRepository,
