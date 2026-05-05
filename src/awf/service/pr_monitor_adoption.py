@@ -108,7 +108,7 @@ class PullRequestMonitorAdoptionService:
         # the race attaches here instead of surfacing the unique constraint.
         existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
-            _raise_if_policy_conflicts(existing, request)
+            _raise_if_policy_conflicts(existing, request, repo=repo)
             return await self._response(existing, attached_existing=True)
 
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
@@ -491,10 +491,24 @@ def _github_repo_url_like(repo_url: str, repo_slug: str) -> str:
 def _raise_if_policy_conflicts(
     workspace: Workspace,
     request: PullRequestMonitorAdoptionRequest,
+    *,
+    repo: RepoRef,
 ) -> None:
     requested_grace = request.initial_review_grace_period_seconds
     requested_agent = request.agent.value
     requested_profile = _requested_inline_profile_policy(request)
+    requested_repo_url = request.repo_url
+    if requested_repo_url is not None and workspace.repo_url != requested_repo_url:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different repo_url policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "repo_slug": repo.slug(),
+                "existing_repo_url": workspace.repo_url,
+                "requested_repo_url": requested_repo_url,
+            },
+        )
     if workspace.agent != requested_agent:
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",

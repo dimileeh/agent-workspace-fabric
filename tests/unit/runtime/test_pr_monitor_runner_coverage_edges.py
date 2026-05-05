@@ -2877,6 +2877,43 @@ async def test_git_helpers_handle_bad_base_count_and_push_rejection_recovery(
 
 
 @pytest.mark.unit
+async def test_fork_push_rejection_does_not_reset_when_fetch_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="[rejected] non-fast-forward")
+    cmd.queue_result(returncode=128, stderr="fatal: could not read Username")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / "ws_fork"
+
+    result = await runner._git_push_result(
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        remote_url="https://github.com/contributor/aira-web.git",
+    )
+
+    assert result.failed is True
+    assert result.recovered_by_resync is False
+    assert "resync fetch failed" in result.stderr
+    assert cmd.calls[0].args[-2:] == [
+        "https://github.com/contributor/aira-web.git",
+        "HEAD:refs/heads/fix/review",
+    ]
+    assert cmd.calls[1].args[-2:] == [
+        "https://github.com/contributor/aira-web.git",
+        "refs/heads/fix/review",
+    ]
+    assert not any("reset" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
 async def test_fetch_base_repairs_multiple_broken_awf_refs_before_failing_workspace(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

@@ -3779,7 +3779,7 @@ class PullRequestMonitorRunner:
             stderr=(r.stderr or "")[:400],
         )
         if remote_url:
-            await self._deps.runner.run(
+            fetch_result = await self._deps.runner.run(
                 [
                     "git",
                     "-C",
@@ -3791,10 +3791,29 @@ class PullRequestMonitorRunner:
             )
             reset_target = "FETCH_HEAD"
         else:
-            await self._deps.runner.run(
+            fetch_result = await self._deps.runner.run(
                 ["git", "-C", str(worktree_path), "fetch", "origin", remote_branch]
             )
             reset_target = f"origin/{remote_branch}"
+        if not fetch_result.ok:
+            stderr = _append_git_recovery_failure(
+                push_stderr=r.stderr,
+                recovery_stderr=fetch_result.stderr,
+                operation="resync fetch",
+            )
+            _log.warning(
+                "monitor.push_rejected_resync_fetch_failed",
+                worktree_path=str(worktree_path),
+                remote_branch=remote_branch,
+                stderr=stderr[:400],
+            )
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=r.returncode,
+                stdout=r.stdout,
+                stderr=stderr,
+            )
         await self._deps.runner.run(
             ["git", "-C", str(worktree_path), "reset", "--hard", reset_target]
         )
@@ -4563,6 +4582,17 @@ def _git_failure_message(operation: str, result: CommandResult) -> str:
         f"{operation} failed with exit code {result.returncode}: {detail}",
         limit=2000,
     )
+
+
+def _append_git_recovery_failure(
+    *,
+    push_stderr: str,
+    recovery_stderr: str,
+    operation: str,
+) -> str:
+    parts = [push_stderr.strip()] if push_stderr.strip() else []
+    parts.append(f"{operation} failed: {recovery_stderr.strip() or '<no output>'}")
+    return redact_audit_text("\n".join(parts), limit=2000)
 
 
 def _is_transient_github_client_error(exc: GitHubClientError) -> bool:

@@ -393,6 +393,37 @@ class TestPullRequestMonitorAdoptionService:
         assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
 
     @pytest.mark.unit
+    async def test_replay_with_changed_explicit_repo_url_conflicts(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_url="https://github.com/dimileeh/aira-web.git",
+                    pr_number=277,
+                )
+            )
+
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_url="git@github.com:dimileeh/aira-web.git",
+                        pr_number=277,
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": excinfo.value.detail["workspace_id"],
+            "repo_slug": "dimileeh/aira-web",
+            "existing_repo_url": "https://github.com/dimileeh/aira-web.git",
+            "requested_repo_url": "git@github.com:dimileeh/aira-web.git",
+        }
+
+    @pytest.mark.unit
     async def test_replay_with_changed_inline_profile_conflicts(
         self,
         factory: async_sessionmaker[AsyncSession],
