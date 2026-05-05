@@ -722,6 +722,73 @@
         "title": "EgressAllowlistTemplate",
         "type": "string"
       },
+      "EgressAuditRecordResponse": {
+        "description": "Immutable evidence of a workspace egress policy enforcement decision.",
+        "properties": {
+          "attempt_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Id"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "destination_category": {
+            "title": "Destination Category",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "enforced_at": {
+            "format": "date-time",
+            "title": "Enforced At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "policy_posture": {
+            "title": "Policy Posture",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "workspace_id": {
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "policy_posture",
+          "decision",
+          "destination_category",
+          "reason_code",
+          "enforced_at",
+          "created_at"
+        ],
+        "title": "EgressAuditRecordResponse",
+        "type": "object"
+      },
       "EgressMode": {
         "enum": [
           "open",
@@ -4292,6 +4359,14 @@
           "disk": {
             "$ref": "#/components/schemas/DiskCheckResponse",
             "description": "Disk pressure check for the AWF work directory."
+          },
+          "egress_posture_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Counts of egress audit records by policy posture.",
+            "title": "Egress Posture Counts",
+            "type": "object"
           },
           "generated_at": {
             "format": "date-time",
@@ -9270,6 +9345,16 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "egress_audit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EgressAuditRecordResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "env_profile": {
             "anyOf": [
