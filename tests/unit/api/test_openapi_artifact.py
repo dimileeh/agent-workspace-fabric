@@ -13,6 +13,7 @@ These tests verify that:
 from __future__ import annotations
 
 import json
+from collections import Counter
 
 import pytest
 
@@ -98,8 +99,8 @@ def test_no_duplicate_operation_ids(openapi_spec: dict) -> None:
         for method_obj in path_item.values():
             if isinstance(method_obj, dict) and "operationId" in method_obj:
                 operation_ids.append(method_obj["operationId"])
-    duplicates = [oid for oid in operation_ids if operation_ids.count(oid) > 1]
-    unique_duplicates = sorted(set(duplicates))
+    counts = Counter(operation_ids)
+    unique_duplicates = sorted(oid for oid, c in counts.items() if c > 1)
     assert not unique_duplicates, f"Duplicate operationIds found: {unique_duplicates}"
 
 
