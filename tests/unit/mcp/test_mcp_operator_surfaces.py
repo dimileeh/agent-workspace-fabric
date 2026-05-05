@@ -1,4 +1,4 @@
-"""MCP parity tests for read-only operator surfaces."""
+"""MCP parity tests for operator surfaces."""
 
 from __future__ import annotations
 
@@ -2064,7 +2064,11 @@ class TestMcpOperatorSurfaceParity:
         result = await _call(
             operator_stack.mcp,
             "awf_remonitor_workspace",
-            {"workspace_id": workspace_id, "reason": "PR monitor stuck"},
+            {
+                "workspace_id": workspace_id,
+                "reason": "PR monitor stuck",
+                "idempotency_key": "remonitor-parity",
+            },
         )
 
         assert isinstance(result, dict)
@@ -2086,7 +2090,7 @@ class TestMcpOperatorSurfaceParity:
         result = await _call_result(
             operator_stack.mcp,
             "awf_remonitor_workspace",
-            {"workspace_id": workspace_id},
+            {"workspace_id": workspace_id, "idempotency_key": "remonitor-wrong-state"},
         )
 
         assert result.isError is True
@@ -2152,7 +2156,12 @@ class TestMcpOperatorSurfaceParity:
         result = await _call(
             operator_stack.mcp,
             "awf_request_workspace_validation",
-            {"workspace_id": workspace_id, "reason": "recheck validation", "requested_tier": 2},
+            {
+                "workspace_id": workspace_id,
+                "reason": "recheck validation",
+                "requested_tier": 2,
+                "idempotency_key": "validate-parity",
+            },
         )
 
         assert isinstance(result, dict)
@@ -2174,7 +2183,7 @@ class TestMcpOperatorSurfaceParity:
         result = await _call_result(
             operator_stack.mcp,
             "awf_request_workspace_validation",
-            {"workspace_id": workspace_id},
+            {"workspace_id": workspace_id, "idempotency_key": "validate-wrong-state"},
         )
 
         assert result.isError is True

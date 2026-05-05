@@ -2,7 +2,7 @@
 
 We exercise the tools via ``mcp.call_tool(name, args)`` (FastMCP's in-process
 harness) against a throwaway PostgreSQL. This validates:
-- All five tools are registered under the expected names.
+- All tools are registered under the expected names.
 - Each tool's happy path returns the same payload shape as the REST API.
 - wait_for_workspace exits on terminal state without hanging.
 """
@@ -235,26 +235,43 @@ class TestToolRegistration:
         tools = {tool.name: tool for tool in await mcp.list_tools()}
 
         cancel_props = tools["awf_cancel_workspace"].inputSchema["properties"]
+        cancel_required = tools["awf_cancel_workspace"].inputSchema.get("required", [])
         assert cancel_props["reason"]["default"] is None
         assert cancel_props["stop_stack"]["default"] is True
+        assert "idempotency_key" in cancel_required
+        assert cancel_props["idempotency_key"]["minLength"] == 1
         assert cancel_props["expected_version"]["default"] is None
-        assert "expected_version" not in tools["awf_cancel_workspace"].inputSchema.get("required", [])
+        assert "expected_version" not in cancel_required
 
         stop_props = tools["awf_stop_workspace"].inputSchema["properties"]
+        stop_required = tools["awf_stop_workspace"].inputSchema.get("required", [])
         assert stop_props["reason"]["default"] is None
         assert "stop_stack" not in stop_props
+        assert "idempotency_key" in stop_required
+        assert stop_props["idempotency_key"]["minLength"] == 1
         assert stop_props["expected_version"]["default"] is None
 
         destroy_props = tools["awf_destroy_workspace"].inputSchema["properties"]
+        destroy_required = tools["awf_destroy_workspace"].inputSchema.get("required", [])
         assert destroy_props["force"]["default"] is False
         assert destroy_props["remove_volumes"]["default"] is True
         assert destroy_props["remove_worktree"]["default"] is True
+        assert "idempotency_key" in destroy_required
+        assert destroy_props["idempotency_key"]["minLength"] == 1
         assert destroy_props["expected_version"]["default"] is None
 
         remonitor_props = tools["awf_remonitor_workspace"].inputSchema["properties"]
+        remonitor_required = tools["awf_remonitor_workspace"].inputSchema.get("required", [])
+        assert "idempotency_key" in remonitor_required
+        assert remonitor_props["idempotency_key"]["minLength"] == 1
         assert remonitor_props["expected_version"]["default"] is None
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
+        validate_required = tools["awf_request_workspace_validation"].inputSchema.get(
+            "required", []
+        )
+        assert "idempotency_key" in validate_required
+        assert validate_props["idempotency_key"]["minLength"] == 1
         assert validate_props["expected_version"]["default"] is None
 
         refresh_props = tools["awf_refresh_workspace"].inputSchema["properties"]
@@ -454,9 +471,8 @@ class TestToolRegistration:
         assert "workspace_id" in remonitor_required
         assert remonitor_props["reason"]["default"] is None
         assert "idempotency_key" in remonitor_props
-        assert remonitor_props["idempotency_key"]["default"] is None
-        _ik_anyof = remonitor_props["idempotency_key"]["anyOf"]
-        assert any(s.get("minLength") == 1 for s in _ik_anyof if s.get("type") == "string")
+        assert "idempotency_key" in remonitor_required
+        assert remonitor_props["idempotency_key"]["minLength"] == 1
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
         assert "workspace_id" in validate_props
@@ -467,9 +483,8 @@ class TestToolRegistration:
         assert validate_props["reason"]["default"] is None
         assert validate_props["requested_tier"]["default"] is None
         assert "idempotency_key" in validate_props
-        assert validate_props["idempotency_key"]["default"] is None
-        _vk_anyof = validate_props["idempotency_key"]["anyOf"]
-        assert any(s.get("minLength") == 1 for s in _vk_anyof if s.get("type") == "string")
+        assert "idempotency_key" in validate_required
+        assert validate_props["idempotency_key"]["minLength"] == 1
 
 
 class TestOperationTools:
@@ -695,6 +710,7 @@ class TestWorkspaceControls:
                 "workspace_id": "ws_control",
                 "reason": "stale task",
                 "stop_stack": False,
+                "idempotency_key": "cancel-control",
             },
         )
 
@@ -705,7 +721,7 @@ class TestWorkspaceControls:
                     "workspace_id": "ws_control",
                     "reason": "stale task",
                     "stop_stack": False,
-                    "idempotency_key": None,
+                    "idempotency_key": "cancel-control",
                     "expected_version": None,
                 },
             )
@@ -731,6 +747,7 @@ class TestWorkspaceControls:
             {
                 "workspace_id": "ws_control",
                 "reason": "free local resources",
+                "idempotency_key": "stop-control",
             },
         )
 
@@ -740,7 +757,7 @@ class TestWorkspaceControls:
                 {
                     "workspace_id": "ws_control",
                     "reason": "free local resources",
-                    "idempotency_key": None,
+                    "idempotency_key": "stop-control",
                     "expected_version": None,
                 },
             )
@@ -768,6 +785,7 @@ class TestWorkspaceControls:
                 "force": True,
                 "remove_volumes": False,
                 "remove_worktree": False,
+                "idempotency_key": "destroy-control",
             },
         )
 
@@ -779,7 +797,7 @@ class TestWorkspaceControls:
                     "force": True,
                     "remove_volumes": False,
                     "remove_worktree": False,
-                    "idempotency_key": None,
+                    "idempotency_key": "destroy-control",
                     "expected_version": None,
                 },
             )
@@ -808,7 +826,10 @@ class TestWorkspaceControls:
         service = _FailingControlService()
         mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
 
-        result = await mcp.call_tool(tool_name, {"workspace_id": "ws_control"})
+        result = await mcp.call_tool(
+            tool_name,
+            {"workspace_id": "ws_control", "idempotency_key": "error-control"},
+        )
 
         assert isinstance(result, CallToolResult)
         assert result.isError is True
@@ -833,6 +854,7 @@ class TestWorkspaceControls:
                 "workspace_id": workspace_id,
                 "reason": "no longer needed",
                 "stop_stack": False,
+                "idempotency_key": "cancel-real-service",
             },
         )
         operations = await _call(
@@ -869,7 +891,7 @@ class TestWorkspaceControls:
 
         result = await mcp.call_tool(
             "awf_destroy_workspace",
-            {"workspace_id": workspace_id},
+            {"workspace_id": workspace_id, "idempotency_key": "destroy-requires-force"},
         )
 
         assert isinstance(result, CallToolResult)
