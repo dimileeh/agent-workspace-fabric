@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -58,22 +57,22 @@ def _real_cli_commands(app: typer.Typer, prefix: str = "awf") -> set[str]:
     return commands
 
 
-def _real_mcp_tools() -> set[str]:
+async def _real_mcp_tools() -> set[str]:
     from awf.mcp.server import build_mcp_server
 
     mcp = build_mcp_server(service=MagicMock(), settings=MagicMock())
-    return {tool.name for tool in asyncio.run(mcp.list_tools())}
+    return {tool.name for tool in await mcp.list_tools()}
 
 
 @pytest.mark.unit
-def test_adoption_docs_publish_real_rest_cli_and_mcp_names() -> None:
+async def test_adoption_docs_publish_real_rest_cli_and_mcp_names() -> None:
     from awf.cli.main import app as cli_app
 
     docs = _adoption_docs()
 
     assert "POST /v1/workspaces/adopt-pr" in _real_rest_routes()
     assert "awf workspace adopt-pr" in _real_cli_commands(cli_app)
-    assert "awf_adopt_pull_request_monitor" in _real_mcp_tools()
+    assert "awf_adopt_pull_request_monitor" in await _real_mcp_tools()
 
     for required in (
         "POST /v1/workspaces/adopt-pr",
