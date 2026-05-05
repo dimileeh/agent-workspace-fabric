@@ -1125,7 +1125,7 @@ def build_mcp_server(
 
 
 def _tool_error(exc: WorkspaceControlError) -> CallToolResult:
-    error = ErrorResponse(error_code=exc.error_code, message=exc.message)
+    error = ErrorResponse(error_code=exc.error_code, message=exc.message, detail=exc.detail)
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
