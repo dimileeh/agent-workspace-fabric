@@ -147,9 +147,7 @@ def test_supply_chain_policy_accepts_warn_block_modes_and_normalizes_hosts():
 
     dumped = profile.model_dump(mode="json")
 
-    assert dumped["security"]["supply_chain"]["unpinned_dependency_installs"] == {
-        "mode": "block"
-    }
+    assert dumped["security"]["supply_chain"]["unpinned_dependency_installs"] == {"mode": "block"}
     assert dumped["security"]["supply_chain"]["unexpected_registry_hosts"] == {
         "mode": "block",
         "allowed_hosts": ["registry.npmjs.org", "pypi.org", "localhost"],

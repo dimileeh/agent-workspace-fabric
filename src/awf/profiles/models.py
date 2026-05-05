@@ -684,9 +684,7 @@ class ProfileSecurity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     egress: ProfileEgress = Field(default_factory=ProfileEgress)
-    host_home_auth_mounts: HostHomeAuthMountPolicy = Field(
-        default_factory=HostHomeAuthMountPolicy
-    )
+    host_home_auth_mounts: HostHomeAuthMountPolicy = Field(default_factory=HostHomeAuthMountPolicy)
     supply_chain: ProfileSupplyChainPolicy = Field(default_factory=ProfileSupplyChainPolicy)
 
 

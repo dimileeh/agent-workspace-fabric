@@ -31,6 +31,7 @@ try:
 except ImportError:  # pragma: no cover - Windows does not run AWF Docker CI.
     fcntl = None  # type: ignore[assignment]
 
+
 def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
     threshold = settings.min_free_disk_bytes
     free = threshold + 1

@@ -2171,9 +2171,7 @@ class PullRequestMonitorRunner:
 
         try:
             async with self._deps.session_factory() as s:
-                result = await SupplyChainPolicyRefreshService(
-                    s
-                ).refresh_workspace_open_candidate(
+                result = await SupplyChainPolicyRefreshService(s).refresh_workspace_open_candidate(
                     workspace_id,
                     command_evidence=command_evidence,
                     changed_paths=changed_paths,
@@ -2187,9 +2185,7 @@ class PullRequestMonitorRunner:
             )
             return None
         blocking_codes = [
-            finding.reason_code
-            for finding in result.findings
-            if finding.severity == "blocking"
+            finding.reason_code for finding in result.findings if finding.severity == "blocking"
         ]
         if not blocking_codes:
             return None
@@ -2205,8 +2201,7 @@ class PullRequestMonitorRunner:
         blocking_codes = [
             finding.reason_code
             for finding in active_findings
-            if finding.severity == "blocking"
-            and finding.reason_code.startswith("SUPPLY_CHAIN_")
+            if finding.severity == "blocking" and finding.reason_code.startswith("SUPPLY_CHAIN_")
         ]
         if not blocking_codes:
             return None
@@ -3312,26 +3307,44 @@ class PullRequestMonitorRunner:
                 conflicting_files=conflicting_files,
             )
             agent_run_err = None
+            command_evidence: list[str] = []
             if await self._provider_recovery_suppresses_cli(workspace_id):
                 raise ProviderRecoveryRetryError()
             try:
-                await self._deps.adapter.run(
+                result = await self._deps.adapter.run(
                     compose_project=compose_project,
                     compose_file=compose_file,
                     prompt=prompt,
                     workspace_id=workspace_id,
                     log_source="recovery",
                 )
+                append_command_evidence(
+                    command_evidence, stdout=result.stdout, stderr=result.stderr
+                )
             except AgentRunError as exc:
                 agent_run_err = exc
+                append_command_evidence(
+                    command_evidence,
+                    stdout=exc.result.stdout,
+                    stderr=exc.result.stderr,
+                )
 
             if agent_run_err is not None:
                 await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
 
-            await self._commit_dirty_worktree(
-                workspace_id=workspace_id,
-                message=f"fix: resolve PR #{pr_number} base conflicts",
-            )
+            try:
+                await self._commit_dirty_worktree(
+                    workspace_id=workspace_id,
+                    message=f"fix: resolve PR #{pr_number} base conflicts",
+                    command_evidence=command_evidence,
+                )
+            except _MonitorPolicyBlockedError as exc:
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                )
 
             if agent_run_err is not None:
                 _log.warning(
@@ -3860,9 +3873,7 @@ class PullRequestMonitorRunner:
                 returncode=1,
                 stderr=policy_block_message,
             )
-        r = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "push", remote, refspec]
-        )
+        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "push", remote, refspec])
         if r.ok:
             # git prints "Everything up-to-date" to stderr when the ref didn't move.
             pushed = "up-to-date" not in (r.stderr or "").lower()

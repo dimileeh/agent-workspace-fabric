@@ -1592,9 +1592,7 @@ class WorkspaceExecutor:
                         from_status=WorkspaceStatus.running,
                         failure_reason=FailureReason.policy_failure,
                         reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
-                        message=_supply_chain_block_message(
-                            supply_chain_result.findings
-                        )[:2000],
+                        message=_supply_chain_block_message(supply_chain_result.findings)[:2000],
                     )
                     return
                 if staged_paths:

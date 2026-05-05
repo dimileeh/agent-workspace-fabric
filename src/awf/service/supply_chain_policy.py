@@ -27,16 +27,10 @@ from awf.db.repositories import (
 )
 from awf.profiles.models import ProfileSupplyChainPolicy
 
-SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL: Final[str] = (
-    "SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL"
-)
+SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL: Final[str] = "SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL"
 SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION: Final[str] = "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION"
-SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST: Final[str] = (
-    "SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST"
-)
-SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS: Final[str] = (
-    "SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS"
-)
+SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST: Final[str] = "SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST"
+SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS: Final[str] = "SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS"
 SUPPLY_CHAIN_REASON_CODES: Final[tuple[str, ...]] = (
     SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL,
     SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
@@ -94,9 +88,7 @@ _KNOWN_COMMANDS: Final[frozenset[str]] = frozenset(
         "command",
     }
 )
-_PYTHON_EXECUTABLE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^python(?:\d+(?:\.\d+)*)?$"
-)
+_PYTHON_EXECUTABLE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
 _REMOTE_SCRIPT_INTERPRETERS: Final[frozenset[str]] = frozenset(
     {"sh", "bash", "zsh", "dash", "fish", "python", "python3", "ruby", "perl", "node"}
 )
@@ -104,15 +96,9 @@ _SHELL_COMMAND_INTERPRETERS: Final[frozenset[str]] = frozenset(
     {"sh", "bash", "zsh", "dash", "fish"}
 )
 _SHELL_COMMAND_PAYLOAD_MAX_DEPTH: Final[int] = 4
-_SHELL_COMMAND_VALUE_OPTIONS: Final[frozenset[str]] = frozenset(
-    {"-o", "+o", "-O", "+O"}
-)
-_URL_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(https?://)[^/@\s]+(?::[^/@\s]+)?@"
-)
-_SHELL_ASSIGNMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_]*="
-)
+_SHELL_COMMAND_VALUE_OPTIONS: Final[frozenset[str]] = frozenset({"-o", "+o", "-O", "+O"})
+_URL_CREDENTIAL_PATTERN: Final[re.Pattern[str]] = re.compile(r"(https?://)[^/@\s]+(?::[^/@\s]+)?@")
+_SHELL_ASSIGNMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PIP_VCS_SPEC_PREFIXES: Final[tuple[str, ...]] = ("git+", "hg+", "svn+", "bzr+")
 _NODE_REMOTE_SPEC_PREFIXES: Final[tuple[str, ...]] = (
     "git+",
@@ -125,13 +111,9 @@ _NODE_REMOTE_SPEC_PREFIXES: Final[tuple[str, ...]] = (
     "bitbucket:",
 )
 _NODE_LOCAL_SPEC_PREFIXES: Final[tuple[str, ...]] = ("workspace:", "link:")
-_NODE_UNPINNED_VERSION_MARKERS: Final[frozenset[str]] = frozenset(
-    {"", "*", "latest"}
-)
+_NODE_UNPINNED_VERSION_MARKERS: Final[frozenset[str]] = frozenset({"", "*", "latest"})
 _NODE_SEMVER_RANGE_PREFIXES: Final[tuple[str, ...]] = ("^", "~", ">", "<")
-_NODE_PARTIAL_SEMVER_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^v?\d+(?:\.\d+)?$"
-)
+_NODE_PARTIAL_SEMVER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^v?\d+(?:\.\d+)?$")
 _NODE_SEMVER_WILDCARD_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(^|[.\-])(?:x|\*)($|[.\-])",
     re.IGNORECASE,
@@ -141,9 +123,7 @@ _NODE_GIT_COMMIT_FRAGMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 _NODE_SCP_GIT_SPEC_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^:\s]+:.+")
-_PIP_REGISTRY_ENV_VARS: Final[frozenset[str]] = frozenset(
-    {"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"}
-)
+_PIP_REGISTRY_ENV_VARS: Final[frozenset[str]] = frozenset({"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"})
 _PIP_GLOBAL_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
     {
         "--cache-dir",
@@ -163,9 +143,7 @@ _PIP_GLOBAL_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
 )
 _SHELL_CONTROL_OPERATORS: Final[frozenset[str]] = frozenset({";", "&&", "||"})
 _SHELL_PIPE_OPERATORS: Final[frozenset[str]] = frozenset({"|", "|&"})
-_SHELL_PACKAGE_BOUNDARIES: Final[frozenset[str]] = (
-    _SHELL_CONTROL_OPERATORS | _SHELL_PIPE_OPERATORS
-)
+_SHELL_PACKAGE_BOUNDARIES: Final[frozenset[str]] = _SHELL_CONTROL_OPERATORS | _SHELL_PIPE_OPERATORS
 
 
 @dataclass(frozen=True)
@@ -244,9 +222,7 @@ def evaluate_supply_chain_policy(
                 reason_code=SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS,
                 severity=severity,
                 subject_path=path,
-                explanation=(
-                    f"Lockfile '{path}' changed outside declared owned_paths."
-                ),
+                explanation=(f"Lockfile '{path}' changed outside declared owned_paths."),
                 details={
                     "guardrail": "lockfile_changes_outside_owned_paths",
                     "owned_paths": list(owned_paths),
@@ -349,8 +325,10 @@ class SupplyChainPolicyRefreshService:
     ) -> SupplyChainPolicyRefreshResult:
         normalized_changed_paths = tuple(_normalized_unique_paths(changed_paths))
         policy = supply_chain_policy_for_workspace(workspace)
-        owned_paths = tuple(workspace.owned_paths) if workspace.owned_paths else (
-            tuple(attempt.owned_paths) if attempt is not None else ()
+        owned_paths = (
+            tuple(workspace.owned_paths)
+            if workspace.owned_paths
+            else (tuple(attempt.owned_paths) if attempt is not None else ())
         )
         findings = evaluate_supply_chain_policy(
             command_evidence=command_evidence,
@@ -590,9 +568,7 @@ def _unexpected_registry_finding(
     policy: ProfileSupplyChainPolicy,
 ) -> SupplyChainFinding | None:
     allowed_hosts = set(policy.unexpected_registry_hosts.allowed_hosts)
-    unexpected = [
-        host for host in package_command.registry_hosts if host not in allowed_hosts
-    ]
+    unexpected = [host for host in package_command.registry_hosts if host not in allowed_hosts]
     if not unexpected:
         return None
     severity = _severity(policy.unexpected_registry_hosts.mode.value)
@@ -820,9 +796,7 @@ def _pip_command(
         return None
     args = tokens[install_index + 1 :]
     packages = tuple(_package_args(args, manager="pip"))
-    registries = tuple(
-        _registry_hosts(args, manager="pip", env_assignments=env_assignments)
-    )
+    registries = tuple(_registry_hosts(args, manager="pip", env_assignments=env_assignments))
     return _PackageCommand(
         manager=manager,
         operation="install",
@@ -848,7 +822,9 @@ def _node_package_command(tokens: list[str], *, manager: str) -> _PackageCommand
     operation = tokens[0]
     install_ops = {"install", "i", "add"}
     if manager == "npm" and operation == "ci":
-        return _PackageCommand(manager=manager, operation=operation, package_specs=(), registry_hosts=())
+        return _PackageCommand(
+            manager=manager, operation=operation, package_specs=(), registry_hosts=()
+        )
     if operation not in install_ops:
         return None
     args = tokens[1:]
@@ -1018,11 +994,7 @@ def _is_pinned_pip_vcs_spec(spec: str) -> bool:
     target = spec.split(direct_ref, maxsplit=1)[1] if direct_ref in spec else spec
     normalized = target.strip()
     prefix = next(
-        (
-            candidate
-            for candidate in _PIP_VCS_SPEC_PREFIXES
-            if normalized.startswith(candidate)
-        ),
+        (candidate for candidate in _PIP_VCS_SPEC_PREFIXES if normalized.startswith(candidate)),
         None,
     )
     if prefix is None:
@@ -1081,9 +1053,8 @@ def _node_pin_value_is_pinned(value: str) -> bool:
     normalized = value.strip().lower()
     if normalized.startswith("semver:"):
         normalized = normalized.removeprefix("semver:").strip()
-    return (
-        normalized not in _NODE_UNPINNED_VERSION_MARKERS
-        and not _node_pin_value_is_semver_range(normalized)
+    return normalized not in _NODE_UNPINNED_VERSION_MARKERS and not _node_pin_value_is_semver_range(
+        normalized
     )
 
 
@@ -1259,9 +1230,7 @@ def _command_with_shell_payloads(command: str, *, depth: int = 0) -> list[str]:
         for line in payload.splitlines():
             nested = line.strip()
             if nested:
-                commands.extend(
-                    _command_with_shell_payloads(nested, depth=depth + 1)
-                )
+                commands.extend(_command_with_shell_payloads(nested, depth=depth + 1))
     return commands
 
 

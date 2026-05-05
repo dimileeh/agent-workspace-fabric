@@ -241,7 +241,7 @@ class TestArtifactService:
         assert list_artifacts("ws_artifacts", artifact_dir) == []
 
     @pytest.mark.unit
-    def test_listing_skips_directory_that_resolves_outside_root(
+    def test_listing_skips_directory_that_resolves_to_outside_file(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,

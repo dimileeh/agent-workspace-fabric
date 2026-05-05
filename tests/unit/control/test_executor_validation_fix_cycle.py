@@ -663,9 +663,7 @@ class TestSupplyChainPolicy:
         message = _supply_chain_block_message(findings)
 
         assert evidence == ["out", "err"]
-        assert _supply_chain_block_message([]) == (
-            "Supply-chain policy blocked workspace output."
-        )
+        assert _supply_chain_block_message([]) == ("Supply-chain policy blocked workspace output.")
         assert "SUPPLY_CHAIN_TEST_0 (lock0.lock)" in message
         assert "Recovery: fix 0" in message
         assert "1 additional blocking finding" in message
@@ -688,7 +686,7 @@ class TestSupplyChainPolicy:
                         "unpinned_dependency_installs": {"mode": "block"},
                         "lockfile_changes_outside_owned_paths": {"mode": "block"},
                     }
-                }
+                },
             },
         )
         fake.queue_result(returncode=0, stdout="$ npm install left-pad\n")  # adapter.run
@@ -731,7 +729,7 @@ class TestSupplyChainPolicy:
                     "supply_chain": {
                         "unpinned_dependency_installs": {"mode": "warn"},
                     }
-                }
+                },
             },
         )
         fake.queue_result(returncode=0, stdout="$ pip install requests\n")  # adapter.run
