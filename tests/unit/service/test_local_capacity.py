@@ -73,6 +73,21 @@ def test_detect_local_capacity_returns_unknown_when_docker_info_fails() -> None:
 
 
 @pytest.mark.unit
+def test_detect_local_capacity_truncates_long_docker_error_detail() -> None:
+    long_error = "docker unavailable: " + ("x" * 400)
+
+    def run_subprocess(*args: Any, **kwargs: Any) -> _Completed:
+        return _Completed(returncode=1, stdout="", stderr=long_error)
+
+    capacity = detect_local_capacity(Settings(_env_file=None), run_subprocess=run_subprocess)
+
+    assert capacity.reason_code == "DOCKER_INFO_UNAVAILABLE"
+    assert capacity.detail is not None
+    assert len(capacity.detail) == 240
+    assert capacity.detail.endswith("...")
+
+
+@pytest.mark.unit
 def test_detect_local_capacity_returns_unknown_on_timeout() -> None:
     def run_subprocess(*args: Any, **kwargs: Any) -> _Completed:
         raise subprocess.TimeoutExpired(cmd=["docker", "info"], timeout=5)
@@ -82,3 +97,42 @@ def test_detect_local_capacity_returns_unknown_on_timeout() -> None:
     assert capacity.cpu_cores is None
     assert capacity.memory_gb is None
     assert capacity.reason_code == "DOCKER_INFO_UNAVAILABLE"
+
+
+@pytest.mark.unit
+def test_detect_local_capacity_reports_json_parse_failure() -> None:
+    def run_subprocess(*args: Any, **kwargs: Any) -> _Completed:
+        return _Completed(returncode=0, stdout="{not valid json")
+
+    capacity = detect_local_capacity(Settings(_env_file=None), run_subprocess=run_subprocess)
+
+    assert capacity.cpu_cores is None
+    assert capacity.memory_gb is None
+    assert capacity.source == "docker"
+    assert capacity.reason_code == "DOCKER_INFO_PARSE_FAILED"
+    assert "Expecting property name" in (capacity.detail or "")
+
+
+@pytest.mark.unit
+def test_detect_local_capacity_reports_missing_capacity_fields() -> None:
+    def run_subprocess(*args: Any, **kwargs: Any) -> _Completed:
+        return _Completed(returncode=0, stdout="{}")
+
+    capacity = detect_local_capacity(Settings(_env_file=None), run_subprocess=run_subprocess)
+
+    assert capacity.cpu_cores is None
+    assert capacity.memory_gb is None
+    assert capacity.reason_code == "DOCKER_INFO_CAPACITY_MISSING"
+    assert "NCPU or MemTotal" in (capacity.detail or "")
+
+
+@pytest.mark.unit
+def test_detect_local_capacity_rejects_non_numeric_capacity_values() -> None:
+    def run_subprocess(*args: Any, **kwargs: Any) -> _Completed:
+        return _Completed(returncode=0, stdout='{"NCPU": true, "MemTotal": "unknown"}')
+
+    capacity = detect_local_capacity(Settings(_env_file=None), run_subprocess=run_subprocess)
+
+    assert capacity.cpu_cores is None
+    assert capacity.memory_gb is None
+    assert capacity.reason_code == "DOCKER_INFO_CAPACITY_MISSING"

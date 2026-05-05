@@ -2199,7 +2199,7 @@ function UsageSummaryBlock({
 }) {
   const safeUsage = fallbackLlmUsage(usage);
   const pricingReason = pricingAvailabilityReason(pricing);
-  const showCost = safeUsage.cost_estimate !== null && pricing && pricing.is_current;
+  const showCost = safeUsage.cost_estimate !== null && (!pricing || pricing.is_current);
   
   if (safeUsage.status === "unavailable" || (safeUsage.input_tokens == null && safeUsage.output_tokens == null && safeUsage.total_tokens == null && safeUsage.cost_estimate == null)) {
     return (

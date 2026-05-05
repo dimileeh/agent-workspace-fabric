@@ -84,13 +84,10 @@ export function formatCostWithPricing(
   if (cost === null || cost === undefined) {
     return "—";
   }
-  if (!pricing) {
+  if (pricing && !pricing.is_current) {
     return "—";
   }
-  if (!pricing.is_current) {
-    return "—";
-  }
-  const c = currency || pricing.currency || "USD";
+  const c = currency || pricing?.currency || "USD";
   try {
     return new Intl.NumberFormat(undefined, {
       style: "currency",

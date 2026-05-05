@@ -45,6 +45,7 @@ from awf.service.orphan_resources import (
     scan_managed_worktrees,
 )
 from awf.service.readiness import CoreReadinessCheck, CoreReadinessReport
+from awf.service.resource_capacity import LocalCapacityLimits
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 
 
@@ -189,6 +190,7 @@ async def resource_stack(
     configure_database(app, factory)
     app.dependency_overrides[get_settings] = lambda: settings
     app.state.workspace_admission_disk_check = _ok_disk_check
+    app.state.local_capacity_detector = _local_capacity
     app.state.orphan_resource_summary_provider = _no_orphan_summary
     app.state.runtime_health_summary_provider = _empty_runtime_health_summary
 
@@ -196,6 +198,7 @@ async def resource_stack(
         service=WorkspaceService(factory),
         settings=settings,
         disk_check_provider=_ok_disk_check,
+        local_capacity_provider=_local_capacity,
         orphan_resource_summary_provider=_no_orphan_summary,
         runtime_health_summary_provider=_empty_runtime_health_summary,
     )
@@ -236,6 +239,10 @@ def _no_orphan_summary(settings: Settings, _session: AsyncSession) -> Any:
             available=True,
         ),
     )
+
+
+def _local_capacity(_settings: Settings) -> LocalCapacityLimits:
+    return LocalCapacityLimits(cpu_cores=8.0, memory_gb=24.0, source="test")
 
 
 def _empty_runtime_health_summary(
@@ -940,9 +947,13 @@ class TestMcpOperatorSurfaceParity:
     async def test_resource_provider_helpers_support_async_and_absent_providers(
         self,
         resource_stack: OperatorStack,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         async def async_disk(settings: Settings) -> DiskCheck:
             return _ok_disk_check(settings)
+
+        async def async_local_capacity(settings: Settings) -> LocalCapacityLimits:
+            return LocalCapacityLimits(cpu_cores=12.0, memory_gb=64.0, source="test")
 
         async def async_orphan(settings: Settings, session: AsyncSession) -> Any:
             return _no_orphan_summary(settings, session)
@@ -968,6 +979,37 @@ class TestMcpOperatorSurfaceParity:
             )
             assert disk_check is not None
             assert disk_check.reason == "SUFFICIENT_DISK"
+
+            explicit_capacity = await mcp_server._provided_local_capacity(
+                local_capacity_provider=None,
+                settings=Settings(
+                    _env_file=None,
+                    local_capacity_cpu_cores=4.0,
+                    local_capacity_memory_gb=8.0,
+                ),
+            )
+            assert explicit_capacity == LocalCapacityLimits()
+            local_capacity = await mcp_server._provided_local_capacity(
+                local_capacity_provider=async_local_capacity,
+                settings=resource_stack.settings,
+            )
+            assert local_capacity.cpu_cores == 12.0
+            assert local_capacity.memory_gb == 64.0
+            monkeypatch.setattr(
+                mcp_server,
+                "detect_local_capacity",
+                lambda _settings: LocalCapacityLimits(
+                    cpu_cores=16.0,
+                    memory_gb=128.0,
+                    source="docker",
+                ),
+            )
+            detected_capacity = await mcp_server._provided_local_capacity(
+                local_capacity_provider=None,
+                settings=resource_stack.settings,
+            )
+            assert detected_capacity.cpu_cores == 16.0
+            assert detected_capacity.memory_gb == 128.0
 
             assert (
                 await mcp_server._provided_orphan_resources(

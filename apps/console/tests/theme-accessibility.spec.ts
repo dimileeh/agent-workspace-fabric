@@ -82,6 +82,8 @@ test("mobile theme screenshots cover dashboard, workspace, and logs views", asyn
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("mobile-workspace.png"), fullPage: true });
 
+  await page.getByRole("button", { name: "Close inspector" }).click();
+  await expect(page.getByRole("heading", { name: "Workspace", exact: true })).not.toBeVisible();
   await page.getByRole("button", { name: "Logs", exact: true }).first().click();
   await expect(page.getByText("agent stdout ready").first()).toBeVisible();
   await expectNoViewportOverflow(page);

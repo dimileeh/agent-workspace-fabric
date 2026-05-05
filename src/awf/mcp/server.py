@@ -12,6 +12,7 @@ cleanly when they show up alongside other MCP servers.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable
@@ -48,6 +49,7 @@ from awf.service.artifacts import (
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
+from awf.service.local_capacity import detect_local_capacity
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
 from awf.service.merge_queue import InvalidMergeQueueCursorError, list_merge_queue_response
 from awf.service.metrics import (
@@ -66,6 +68,7 @@ from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
 from awf.service.pr_monitor_adoption import PRMonitorAdoptionError
 from awf.service.provider_readiness import ProviderName
+from awf.service.resource_capacity import LocalCapacityLimits
 from awf.service.tasks import build_task_attempt_list_response, build_task_list_response
 from awf.service.validation_provenance import (
     DEFAULT_VALIDATION_PROVENANCE_LIMIT,
@@ -91,6 +94,10 @@ if TYPE_CHECKING:
 
 StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
 DiskCheckProvider = Callable[[Settings], DiskCheck | Awaitable[DiskCheck]]
+LocalCapacityProvider = Callable[
+    [Settings],
+    LocalCapacityLimits | Awaitable[LocalCapacityLimits],
+]
 OrphanResourceSummaryProvider = Callable[
     [Settings, AsyncSession],
     OrphanResourceSummary | Awaitable[OrphanResourceSummary],
@@ -131,6 +138,7 @@ def build_mcp_server(
     instructions: str | None = None,
     settings: Settings | None = None,
     disk_check_provider: DiskCheckProvider | None = None,
+    local_capacity_provider: LocalCapacityProvider | None = None,
     orphan_resource_summary_provider: OrphanResourceSummaryProvider | None = None,
     runtime_health_summary_provider: RuntimeHealthSummaryProvider | None = None,
     readiness_provider: ReadinessProvider | None = None,
@@ -707,6 +715,10 @@ def build_mcp_server(
                 disk_check_provider=disk_check_provider,
                 settings=settings_value,
             )
+            local_capacity = await _provided_local_capacity(
+                local_capacity_provider=local_capacity_provider,
+                settings=settings_value,
+            )
             orphan_resources = await _provided_orphan_resources(
                 orphan_resource_summary_provider=orphan_resource_summary_provider,
                 settings=settings_value,
@@ -722,6 +734,7 @@ def build_mcp_server(
                 session,
                 settings=settings_value,
                 disk_check=disk_check,
+                detected_local_capacity=local_capacity,
                 orphan_resources=orphan_resources,
                 runtime_health=runtime_health,
             )
@@ -1281,6 +1294,24 @@ async def _provided_disk_check(
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+async def _provided_local_capacity(
+    *,
+    local_capacity_provider: LocalCapacityProvider | None,
+    settings: Settings,
+) -> LocalCapacityLimits:
+    if local_capacity_provider is not None:
+        result = local_capacity_provider(settings)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    if (
+        settings.local_capacity_cpu_cores is not None
+        and settings.local_capacity_memory_gb is not None
+    ):
+        return LocalCapacityLimits()
+    return await asyncio.to_thread(detect_local_capacity, settings)
 
 
 async def _provided_orphan_resources(

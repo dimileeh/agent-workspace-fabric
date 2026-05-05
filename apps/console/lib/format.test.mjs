@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   fallbackLifecycleStages,
   fallbackLlmUsage,
+  formatCostWithPricing,
   pickWorkspaceLogStreams,
   renderLogEntries,
   toneFillClass,
@@ -70,6 +71,10 @@ test("fallbackLlmUsage preserves available provider usage", () => {
       reason: null,
     },
   );
+});
+
+test("formatCostWithPricing renders computed usage cost without pricing metadata", () => {
+  assert.equal(formatCostWithPricing(0.05, "USD", null), "$0.0500");
 });
 
 test("toneFillClass maps warning and bad pressure to distinct fills", () => {
