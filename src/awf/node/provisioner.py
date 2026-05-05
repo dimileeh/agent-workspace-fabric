@@ -25,13 +25,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.logging import get_logger
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import EgressAuditRepository, ResourceReservationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    EgressAuditRepository,
+    ResourceReservationRepository,
+    WorkspaceRepository,
+)
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPolicyError, local_egress_plan
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
-from awf.profiles.models import WorkspaceProfile
 from awf.profiles.models import EgressMode as ProfileEgressMode
+from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 from awf.service.secret_leases import (
     PROVISIONING_FAILED_REVOKE_REASON,
@@ -600,4 +604,6 @@ def _egress_plan_decision(mode: ProfileEgressMode) -> EgressDecision:
 def _egress_plan_destination_category(mode: ProfileEgressMode) -> str:
     if mode == ProfileEgressMode.open:
         return "public_internet"
-    return "internal_only"
+    if mode == ProfileEgressMode.offline:
+        return "internal_only"
+    return "policy_decision"

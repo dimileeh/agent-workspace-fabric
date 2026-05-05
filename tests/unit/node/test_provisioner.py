@@ -31,6 +31,7 @@ from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import (
     Provisioner,
     ProvisionerConfig,
+    _egress_plan_destination_category,
     _provision_checkout_base_branch,
     _provision_remote_push_branch,
 )
@@ -106,6 +107,22 @@ def _secret_profile() -> WorkspaceProfile:
             )
         ],
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("mode", "expected_category"),
+    [
+        (EgressMode.open, "public_internet"),
+        (EgressMode.offline, "internal_only"),
+        (EgressMode.restricted, "policy_decision"),
+    ],
+)
+def test_egress_plan_destination_category_keeps_restricted_distinct_from_offline(
+    mode: EgressMode,
+    expected_category: str,
+) -> None:
+    assert _egress_plan_destination_category(mode) == expected_category
 
 
 class TestSuccess:
