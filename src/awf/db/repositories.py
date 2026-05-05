@@ -2389,9 +2389,6 @@ class WorkspaceRepository:
 
 
     async def update_activity(self, workspace_id: str, *, subphase: str | None = None) -> None:
-        from datetime import UTC, datetime
-
-        from sqlalchemy import update
         stmt = update(Workspace).where(Workspace.id == workspace_id).values(
             last_activity_at=datetime.now(UTC),
         )
@@ -4136,9 +4133,6 @@ class WorkspaceLogStreamRepository:
         byte_delta: int,
         line_delta: int,
     ) -> WorkspaceLogStream | None:
-        from datetime import UTC, datetime, timedelta
-
-        from sqlalchemy import or_, update
         stream = await self.get(workspace_id=workspace_id, stream_id=stream_id)
         if stream is None:
             return None
