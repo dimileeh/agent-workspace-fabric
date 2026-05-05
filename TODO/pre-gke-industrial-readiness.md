@@ -613,6 +613,19 @@ coding agent in any project to use AWF for a feature.
   service/api/cli/mcp/control/node/runtime/scripts unit gate all passed. PR
   [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198)
   merged 2026-05-05.
+- [ ] Harden PR monitor adoption when a previous repo/PR adoption workspace is
+  terminal. Acceptance: adoption attaches only to live adoption workspaces that
+  can still monitor the PR; terminal rows such as `destroyed`, `cancelled`,
+  `failed`, and `superseded` must not satisfy the deterministic repo/PR
+  idempotency key as a successful monitor attachment. For an open PR with only
+  terminal adoption history, AWF creates a fresh monitor workspace while
+  preserving audit/lineage context and avoiding unique idempotency conflicts.
+  Active monitor policy mismatches must still return
+  `PR_ADOPTION_POLICY_CONFLICT`, and concurrent adoption attempts must create at
+  most one live monitor. Add regression coverage for destroyed, cancelled,
+  failed, and superseded prior adoption rows; active idempotent reattach; active
+  policy conflict; and concurrent adoption races across REST/CLI/MCP-visible
+  behavior.
 - [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
