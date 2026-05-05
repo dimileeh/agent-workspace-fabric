@@ -256,7 +256,7 @@ class Workspace(Base):
     egress_audit_records: Mapped[list[EgressAuditRecord]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
         order_by="EgressAuditRecord.enforced_at",
     )
     task_attempt: Mapped[TaskAttempt | None] = relationship(
