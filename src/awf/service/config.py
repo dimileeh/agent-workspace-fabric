@@ -75,6 +75,7 @@ def resolve_service_settings(
 
     settings = base or Settings()
     env = os.environ if environ is None else environ
+    work_dir_env = local_service_environ(env) if environ is None else env
     database_url = settings.database_url
 
     database_url_explicit = _has_env_key(env, "AWF_DATABASE_URL")
@@ -84,7 +85,7 @@ def resolve_service_settings(
     if not database_url_explicit:
         database_url = DEFAULT_LOCAL_SERVICE_DATABASE_URL
 
-    work_dir = _resolve_service_work_dir(settings, env)
+    work_dir = _resolve_service_work_dir(settings, work_dir_env)
 
     return ServiceSettings(
         service_name=settings.service_name,

@@ -151,6 +151,25 @@ def test_explicit_awf_work_dir_takes_precedence_over_host_work_dir(tmp_path: Pat
 
 
 @pytest.mark.unit
+def test_local_service_work_dir_resolves_from_compose_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_work_dir = tmp_path / "compose-service-state"
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AWF_WORK_DIR", raising=False)
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.work_dir == str(host_work_dir)
+
+
+@pytest.mark.unit
 def test_workspace_cleanup_policy_defaults_are_documented_in_payload() -> None:
     settings = resolve_service_settings(Settings(_env_file=None), environ={})
     payload = service_config_payload(settings)
