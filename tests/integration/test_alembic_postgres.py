@@ -35,7 +35,8 @@ def _raw_postgres_database_url() -> str | None:
     # Load only this test URL from the repo-local dotenv file. Pulling the whole
     # file into os.environ would leak host provider/auth settings into hermetic
     # readiness tests.
-    dotenv_url = dotenv_values(_REPO_ROOT / ".env").get("AWF_TEST_DATABASE_URL")
+    dotenv_config = dotenv_values(_REPO_ROOT / ".env")
+    dotenv_url = dotenv_config.get("AWF_TEST_DATABASE_URL") or dotenv_config.get("AWF_DATABASE_URL")
     if isinstance(dotenv_url, str) and dotenv_url.strip():
         return dotenv_url
     return None
@@ -65,6 +66,22 @@ def test_postgres_database_url_reads_repo_dotenv_when_environment_is_unset(
     monkeypatch.setattr(sys.modules[__name__], "_REPO_ROOT", tmp_path)
     (tmp_path / ".env").write_text(
         "AWF_TEST_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf\n",
+        encoding="utf-8",
+    )
+
+    assert _postgres_database_url().render_as_string(hide_password=False) == (
+        "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    )
+
+
+def test_postgres_database_url_reads_repo_dotenv_database_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AWF_TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "_REPO_ROOT", tmp_path)
+    (tmp_path / ".env").write_text(
+        "AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf\n",
         encoding="utf-8",
     )
 
