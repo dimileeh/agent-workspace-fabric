@@ -122,10 +122,7 @@ def _iter_artifacts(workspace_id: str, artifact_dir: Path) -> Iterator[ArtifactM
                 if candidate.is_symlink():
                     continue
                 resolved_directory = candidate.resolve(strict=True)
-                if (
-                    not resolved_directory.is_relative_to(root)
-                    or not resolved_directory.is_dir()
-                ):
+                if not resolved_directory.is_relative_to(root) or not resolved_directory.is_dir():
                     continue
             except OSError:
                 continue

@@ -185,9 +185,7 @@ async def create_workspace_v2(
                 existing.version,
                 existing.created_at,
                 warnings=owned_path_overlap_warnings(existing),
-                provider_readiness_preflight=workspace_provider_readiness_preflight(
-                    existing
-                ),
+                provider_readiness_preflight=workspace_provider_readiness_preflight(existing),
             )
 
     disk_check = await _workspace_admission_disk_check(request, settings)
@@ -437,9 +435,7 @@ async def adopt_pull_request_monitor(
 async def retry_workspace(
     workspace_id: str,
     provider_readiness_override: Annotated[bool, Query()] = False,
-    provider_readiness_override_reason: Annotated[
-        str | None, Query(max_length=512)
-    ] = None,
+    provider_readiness_override_reason: Annotated[str | None, Query(max_length=512)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceRetryResponse | JSONResponse:
     try:
@@ -670,9 +666,7 @@ def _task_provider_readiness_override_matches(
     payload: WorkspaceCreateV2Request,
 ) -> bool:
     stored_override, stored_reason = _stored_task_provider_readiness_override(existing)
-    stored_redaction_parts = _stored_task_provider_readiness_override_redaction_parts(
-        existing
-    )
+    stored_redaction_parts = _stored_task_provider_readiness_override_redaction_parts(existing)
     requested_override, requested_reason = _requested_provider_readiness_override(payload)
     return stored_override == requested_override and _override_reasons_match(
         stored_reason,

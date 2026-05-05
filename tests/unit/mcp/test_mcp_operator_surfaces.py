@@ -477,7 +477,9 @@ async def _seed_validation(factory: async_sessionmaker[AsyncSession]) -> str:
             resolved_profile_digest="p" * 64,
             environment_identity_digest="e" * 64,
             environment_identity_inputs={"python": "3.12"},
-            log_stream_refs={"commands": [{"stdout": stdout.stream_id, "stderr": stderr.stream_id}]},
+            log_stream_refs={
+                "commands": [{"stdout": stdout.stream_id, "stderr": stderr.stream_id}]
+            },
             started_at=now,
         )
         await ValidationRunRepository(session).finish(
@@ -500,11 +502,9 @@ async def _seed_validation(factory: async_sessionmaker[AsyncSession]) -> str:
 async def _seed_stale_reasons(factory: async_sessionmaker[AsyncSession]) -> str:
     workspace_id = await _seed_merge_queue(factory)
     async with factory() as session:
-        candidate = (
-            await MergeCandidateRepository(session).get_open_for_workspace_with_merge_inputs(
-                workspace_id
-            )
-        )
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
         assert candidate is not None
         await StaleReasonRepository(session).replace_active_findings(
             workspace_id=workspace_id,
@@ -695,7 +695,13 @@ class TestMcpOperatorSurfaceParity:
         resource_stack: OperatorStack,
     ) -> None:
         list_cases: list[tuple[str, str, dict[str, Any], str, dict[str, Any]]] = [
-            ("merge_queue", "/v1/merge-queue", {"limit": 10}, "awf_list_merge_queue", {"limit": 10}),
+            (
+                "merge_queue",
+                "/v1/merge-queue",
+                {"limit": 10},
+                "awf_list_merge_queue",
+                {"limit": 10},
+            ),
             (
                 "workspace_overview",
                 "/v1/workspaces/overview",
@@ -1288,9 +1294,7 @@ class TestMcpOperatorSurfaceParity:
         assert item["required_next_action"] == "rebase"
         assert item["validation_freshness_status"] == "fresh"
         assert item["validation_reason_code"] == "validation_fresh"
-        assert [reason["reason_code"] for reason in item["stale_reasons"]] == [
-            "STALE_DEPENDENCY"
-        ]
+        assert [reason["reason_code"] for reason in item["stale_reasons"]] == ["STALE_DEPENDENCY"]
 
     @pytest.mark.unit
     async def test_workspace_overview_tool_matches_rest_payload(
@@ -1762,10 +1766,7 @@ class TestMcpOperatorSurfaceParity:
         assert item["is_canonical_for_merge"] is True
         assert item["canonical_attempt_id"] is not None
         assert item["agent_model"] is not None
-        legacy_item = next(
-            item for item in rest["items"]
-            if item.get("attempt_id") is None
-        )
+        legacy_item = next(item for item in rest["items"] if item.get("attempt_id") is None)
         assert legacy_item["task_id"] is not None
 
     @pytest.mark.unit
@@ -1814,7 +1815,8 @@ class TestMcpOperatorSurfaceParity:
         assert isinstance(mcp_payload, dict)
         items = mcp_payload["items"]
         no_candidate_item = next(
-            item for item in items
+            item
+            for item in items
             if item.get("candidate_id") is None and item.get("attempt_id") is not None
         )
         assert no_candidate_item["readiness"] is None
@@ -1960,8 +1962,14 @@ class TestMcpOperatorSurfaceParity:
         assert mcp_payload["status"] in {"ok", "degraded", "fail"}
         assert "checks" in mcp_payload
         assert "agent_readiness" in mcp_payload
-        for check_name in ("db", "docker_cli", "docker_daemon", "docker_compose",
-                           "agent_runtime_image", "orphan_resources"):
+        for check_name in (
+            "db",
+            "docker_cli",
+            "docker_daemon",
+            "docker_compose",
+            "agent_runtime_image",
+            "orphan_resources",
+        ):
             assert check_name in mcp_payload["checks"]
             check = mcp_payload["checks"][check_name]
             assert "ok" in check
@@ -2057,7 +2065,11 @@ class TestMcpOperatorSurfaceParity:
         first = await _call(
             operator_stack.mcp,
             "awf_remonitor_workspace",
-            {"workspace_id": workspace_id, "reason": "first call", "idempotency_key": "remonitor-mcp-1"},
+            {
+                "workspace_id": workspace_id,
+                "reason": "first call",
+                "idempotency_key": "remonitor-mcp-1",
+            },
         )
         assert isinstance(first, dict)
         first_op_id = first["operation_id"]
@@ -2065,7 +2077,11 @@ class TestMcpOperatorSurfaceParity:
         second = await _call(
             operator_stack.mcp,
             "awf_remonitor_workspace",
-            {"workspace_id": workspace_id, "reason": "first call", "idempotency_key": "remonitor-mcp-1"},
+            {
+                "workspace_id": workspace_id,
+                "reason": "first call",
+                "idempotency_key": "remonitor-mcp-1",
+            },
         )
         assert isinstance(second, dict)
         assert second["operation_id"] == first_op_id

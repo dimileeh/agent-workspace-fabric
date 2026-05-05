@@ -133,9 +133,7 @@ def test_writable_declared_local_auth_lease_is_rejected_with_explicit_reason() -
 
     errors = profile_lint_errors(profile)
 
-    assert [finding.reason_code for finding in errors] == [
-        "SECRET_LEASE_WRITABLE_UNSUPPORTED"
-    ]
+    assert [finding.reason_code for finding in errors] == ["SECRET_LEASE_WRITABLE_UNSUPPORTED"]
     assert ".config/gh" not in json.dumps([finding.model_dump(mode="json") for finding in errors])
 
 
@@ -384,9 +382,7 @@ def test_profile_lint_private_path_and_raw_secret_edges() -> None:
     assert profile_lint._looks_like_raw_secret("   ") is False
     assert profile_lint._looks_like_raw_secret("-----BEGIN PRIVATE KEY-----") is True
     assert profile_lint._looks_like_raw_secret("line-one\nline-two") is True
-    assert profile_lint._looks_like_raw_secret(
-        "a" * 16 + "." + "b" * 16 + "." + "c" * 16
-    ) is True
+    assert profile_lint._looks_like_raw_secret("a" * 16 + "." + "b" * 16 + "." + "c" * 16) is True
     assert profile_lint._looks_like_raw_secret(("x" * 128) + "!") is True
 
     home_source = profile_lint._host_home_source("~")
@@ -423,11 +419,7 @@ def test_blank_provider_ref_is_not_treated_as_raw_secret() -> None:
     "raw_ref",
     [
         "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
-        (
-            "aaaaaaaaaaaaaaaa."
-            "bbbbbbbbbbbbbbbb."
-            "cccccccccccccccc"
-        ),
+        ("aaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbb.cccccccccccccccc"),
     ],
 )
 def test_pem_and_jwt_refs_are_rejected_without_exposing_value(raw_ref: str) -> None:

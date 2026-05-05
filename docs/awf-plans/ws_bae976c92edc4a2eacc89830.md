@@ -155,7 +155,7 @@ uv run --python 3.12 --extra dev pytest tests/unit -q
 
 ## Risks and Assumptions
 
-- SQLite in-memory tests suffice for the classification, decision, and
+- PostgreSQL in-memory tests suffice for the classification, decision, and
   lineage logic. No integration test with live containers is required
   for this slice.
 - The executor's current behavior (surfacing structured provider failures

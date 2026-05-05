@@ -16,12 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.base import Base
 from awf.db.enums import OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import Merge, MonitorState, decide
 from awf.runtime.pr_monitor_runner import _initial_review_grace_started_key
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -38,13 +38,8 @@ REPO = RepoRef.from_url(REPO_URL)
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _disabled_review_boilerplate() -> dict:

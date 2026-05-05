@@ -12,10 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime import pr_monitor_runner as runner_mod
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -34,6 +33,7 @@ from awf.runtime.pr_monitor_runner import (
     _non_check_reviewer_settle_started_key,
     _normalize_non_check_reviewer_logins,
 )
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -48,13 +48,8 @@ REPO_URL = "git@github.com:dimileeh/aira-web.git"
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _ready_status(
@@ -117,9 +112,12 @@ def test_non_check_reviewer_wait_starts_for_green_pr_without_visible_reviewer_ch
     assert decision.action == "started"
     assert decision.wait_seconds == 60
     assert decision.missing_reviewers == ("greptile-apps",)
-    assert state.threads_addressed_ids[
-        _non_check_reviewer_settle_started_key(pr_number=93, head_sha="head-a")
-    ] == "1000.000000"
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_started_key(pr_number=93, head_sha="head-a")
+        ]
+        == "1000.000000"
+    )
     assert (
         _non_check_reviewer_settle_done_key(pr_number=93, head_sha="head-a")
         not in state.threads_addressed_ids
@@ -216,9 +214,12 @@ def test_visible_greptile_check_skips_extra_wait() -> None:
     assert decision.action == "visible_check"
     assert decision.wait_seconds == 0
     assert decision.visible_reviewers == ("greptile-apps",)
-    assert state.threads_addressed_ids[
-        _non_check_reviewer_settle_skip_visible_key(pr_number=93, head_sha="head-a")
-    ] == "visible_check"
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_skip_visible_key(pr_number=93, head_sha="head-a")
+        ]
+        == "visible_check"
+    )
 
 
 @pytest.mark.unit
@@ -297,9 +298,12 @@ def test_pr_166_regression_visible_greptile_check_still_waits_for_codex_review()
     assert decision.wait_seconds == 60
     assert decision.visible_reviewers == ("greptile-apps",)
     assert decision.missing_reviewers == ("chatgpt-codex-connector",)
-    assert state.threads_addressed_ids[
-        _non_check_reviewer_settle_started_key(pr_number=166, head_sha="head-a")
-    ] == "1000.000000"
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_started_key(pr_number=166, head_sha="head-a")
+        ]
+        == "1000.000000"
+    )
 
 
 @pytest.mark.unit
@@ -331,9 +335,7 @@ def test_done_key_skips_wait_for_same_head() -> None:
 def test_invalid_started_marker_restarts_wait_for_current_head() -> None:
     state = MonitorState(
         threads_addressed_ids={
-            _non_check_reviewer_settle_started_key(
-                pr_number=93, head_sha="head-a"
-            ): "not-a-float"
+            _non_check_reviewer_settle_started_key(pr_number=93, head_sha="head-a"): "not-a-float"
         }
     )
     cfg = MonitorConfig(
@@ -353,9 +355,12 @@ def test_invalid_started_marker_restarts_wait_for_current_head() -> None:
 
     assert decision.action == "started"
     assert decision.started_at == 2000.0
-    assert state.threads_addressed_ids[
-        _non_check_reviewer_settle_started_key(pr_number=93, head_sha="head-a")
-    ] == "2000.000000"
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_started_key(pr_number=93, head_sha="head-a")
+        ]
+        == "2000.000000"
+    )
 
 
 @pytest.mark.unit
@@ -457,14 +462,20 @@ def test_wait_is_per_head_sha_and_restarts_after_new_head() -> None:
     assert first.action == "started"
     assert elapsed.action == "elapsed"
     assert elapsed.wait_seconds == 0
-    assert state.threads_addressed_ids[
-        _non_check_reviewer_settle_done_key(pr_number=93, head_sha="head-a")
-    ] == "elapsed"
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_done_key(pr_number=93, head_sha="head-a")
+        ]
+        == "elapsed"
+    )
     assert restarted.action == "started"
     assert restarted.wait_seconds == 60
-    assert state.threads_addressed_ids[
-        _non_check_reviewer_settle_started_key(pr_number=93, head_sha="head-b")
-    ] == "1182.000000"
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_started_key(pr_number=93, head_sha="head-b")
+        ]
+        == "1182.000000"
+    )
 
 
 @pytest.mark.unit
@@ -572,9 +583,12 @@ async def test_execute_merge_skips_extra_wait_when_greptile_has_visible_status(
     assert terminal is True
     assert sleep_fn.calls == []
     assert any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    assert state.threads_addressed_ids[
-        _non_check_reviewer_settle_skip_visible_key(pr_number=94, head_sha="head-a")
-    ] == "visible_check"
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_skip_visible_key(pr_number=94, head_sha="head-a")
+        ]
+        == "visible_check"
+    )
 
 
 @pytest.mark.unit
@@ -602,9 +616,7 @@ async def test_elapsed_non_check_wait_proceeds_to_existing_merge_path(
     )
     state = MonitorState(
         threads_addressed_ids={
-            _non_check_reviewer_settle_started_key(pr_number=95, head_sha="head-a"): (
-                "1000.000000"
-            )
+            _non_check_reviewer_settle_started_key(pr_number=95, head_sha="head-a"): ("1000.000000")
         }
     )
 
@@ -626,9 +638,12 @@ async def test_elapsed_non_check_wait_proceeds_to_existing_merge_path(
     assert terminal is True
     assert sleep_fn.calls == []
     assert any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    assert state.threads_addressed_ids[
-        _non_check_reviewer_settle_done_key(pr_number=95, head_sha="head-a")
-    ] == "elapsed"
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_done_key(pr_number=95, head_sha="head-a")
+        ]
+        == "elapsed"
+    )
 
 
 @pytest.mark.unit
@@ -704,13 +719,10 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
     assert clock.calls[:2] == [60, 30]
     async with factory() as session:
         operations = await OperationRepository(session).list_all(workspace_id=ws_id)
-    recovery_operations = [
-        op for op in operations if op.type == OperationType.validate.value
-    ]
+    recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
     assert recovery_operations
     assert recovery_operations[-1].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
     assert recovery_operations[-1].payload["source_head_sha"] == "head-b"
     assert any(
-        entry.get("event") == "monitor.non_check_reviewer_settle_started"
-        for entry in captured
+        entry.get("event") == "monitor.non_check_reviewer_settle_started" for entry in captured
     )

@@ -10,7 +10,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.service.merge_queue as merge_queue
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace
 from awf.db.repositories import (
@@ -20,23 +19,19 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.service.merge_queue import (
     MergeQueueBlocker,
     list_merge_queue_blockers_for_candidate,
     list_merge_queue_blockers_for_workspace,
 )
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.mark.unit
@@ -277,15 +272,12 @@ def test_merge_queue_response_helpers_cover_legacy_and_advisory_edges() -> None:
         waiting_for_monitor=False,
         ready=False,
     )
-    assert (
-        merge_queue._merge_blocker_reason(
-            candidate,
-            stale_reasons=[],
-            policy_findings=[],
-            queue_blockers=[],
-        )
-        == ("workspace_not_terminal", None)
-    )
+    assert merge_queue._merge_blocker_reason(
+        candidate,
+        stale_reasons=[],
+        policy_findings=[],
+        queue_blockers=[],
+    ) == ("workspace_not_terminal", None)
 
 
 @pytest.mark.unit
@@ -547,9 +539,12 @@ def test_merge_queue_private_policy_helpers_cover_false_paths() -> None:
         _candidate(candidate_id="newer", created_at=now + timedelta(seconds=1)),
         target,
     )
-    assert merge_queue._workspace_status(
-        _candidate(candidate_id="bad", created_at=now, workspace_status="unknown").workspace
-    ) is None
+    assert (
+        merge_queue._workspace_status(
+            _candidate(candidate_id="bad", created_at=now, workspace_status="unknown").workspace
+        )
+        is None
+    )
     assert not merge_queue._is_merge_ready_candidate(
         _candidate(candidate_id="closed", created_at=now, status="closed")
     )

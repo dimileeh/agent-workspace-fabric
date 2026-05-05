@@ -89,7 +89,7 @@ uv run --python 3.12 --extra dev pytest --cov=awf --cov-report=term-missing
 ```
 
 ## Risks
-- Keeping SQL row locking and Python-level score ordering consistent may be subtle; tests must cover Postgres `SKIP LOCKED` statement shape and SQLite behavior.
+- Keeping SQL row locking and Python-level score ordering consistent may be subtle; tests must cover Postgres `SKIP LOCKED` statement shape and PostgreSQL behavior.
 - Existing API consumers may assume only `admitted` decisions exist. New `ordered` and `deferred` records must be additive and preserve current scalar fields.
 - Age/fairness can create unexpected ordering changes if not capped and documented in the payload.
 - Retry/backoff state is split between workspace failure fields and provider recovery policy; the score helper must handle missing or legacy metadata safely.

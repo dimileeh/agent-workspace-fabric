@@ -41,7 +41,6 @@ from awf.control.executor import (
     _call_pr_monitor_factory,
     _required_metadata_str,
 )
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
@@ -52,13 +51,14 @@ from awf.db.repositories import (
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import ValidationResult, ValidationRunner
 from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
+from tests.postgres import create_postgres_test_engine, postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -77,15 +77,10 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    session_factory = make_session_factory(engine)
-    session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
-    try:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
         yield session_factory
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -214,7 +209,9 @@ class _CancellingSuccessfulValidation:
                 repo = WorkspaceRepository(s)
                 ws = await repo.get(workspace_id)
                 assert ws is not None
-                await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCELLED")
+                await repo.transition(
+                    ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCELLED"
+                )
                 await s.commit()
         return ValidationResult()
 
@@ -444,16 +441,13 @@ async def _seed_monitoring_pr(
 
 class TestConstructorValidation:
     @pytest.mark.unit
-    def test_monitor_and_factory_are_mutually_exclusive(
+    async def test_monitor_and_factory_are_mutually_exclusive(
         self, fake: FakeCommandRunner, tmp_path: Path
     ) -> None:
         """Line 107: supplying both pr_monitor and pr_monitor_factory
         is a programming error — the executor can only use one."""
-        from awf.db.session import make_engine
-        from awf.db.session import make_session_factory as _mk
-
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        factory = _mk(engine)
+        engine = await create_postgres_test_engine()
+        factory = make_session_factory(engine)
 
         compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
         validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -473,6 +467,7 @@ class TestConstructorValidation:
                 pr_monitor=object(),  # type: ignore[arg-type]
                 pr_monitor_factory=lambda _adapter: object(),
             )
+        await engine.dispose()
 
 
 class TestMissingBaseCommit:
@@ -575,9 +570,7 @@ class TestUnexpectedErrorDuringAgentRun:
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(ws_id)
             fallback = (
-                await session.execute(
-                    select(Workspace).where(Workspace.id != ws_id)
-                )
+                await session.execute(select(Workspace).where(Workspace.id != ws_id))
             ).scalar_one()
             attempts = list(
                 (
@@ -598,8 +591,7 @@ class TestUnexpectedErrorDuringAgentRun:
                     await session.execute(
                         select(WorkspaceEvent).where(
                             WorkspaceEvent.workspace_id == ws_id,
-                            WorkspaceEvent.event_type
-                            == "workspace.provider_recovery_requested",
+                            WorkspaceEvent.event_type == "workspace.provider_recovery_requested",
                         )
                     )
                 ).scalars()
@@ -627,8 +619,9 @@ class TestUnexpectedErrorDuringAgentRun:
             assert recovery["recommended_action"] == (
                 "Retry after provider cooldown or dispatch an approved fallback model."
             )
-            assert "AGENT_PROVIDER_CAPACITY_EXHAUSTED|quota|google|gemini-2.5-pro" in (
-                recovery["failure_fingerprint"]
+            assert (
+                "AGENT_PROVIDER_CAPACITY_EXHAUSTED|quota|google|gemini-2.5-pro"
+                in (recovery["failure_fingerprint"])
             )
 
         assert len(requested_events) == 1
@@ -652,9 +645,7 @@ class TestUnexpectedErrorDuringAgentRun:
         assert fallback.requested_profile == requested_profile
         assert fallback.resolved_profile == resolved_profile
         assert fallback.resolved_profile["validation"]["requested_tier"] == 2
-        assert fallback.resolved_profile["monitor"][
-            "initial_review_grace_period_seconds"
-        ] == 55
+        assert fallback.resolved_profile["monitor"]["initial_review_grace_period_seconds"] == 55
         assert fallback.auto_merge is False
         assert fallback.initial_review_grace_period_seconds == 55
         assert fallback.task_kind == "feature_branch_pr"
@@ -734,10 +725,7 @@ class TestUnexpectedErrorDuringAgentRun:
         before = datetime.now(UTC)
         fake.queue_result(
             returncode=1,
-            stderr=(
-                "RESOURCE_EXHAUSTED RetryableQuotaError "
-                f"Retry-After: {retry_after_seconds}"
-            ),
+            stderr=(f"RESOURCE_EXHAUSTED RetryableQuotaError Retry-After: {retry_after_seconds}"),
         )
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0)
@@ -755,16 +743,13 @@ class TestUnexpectedErrorDuringAgentRun:
 
         async with factory() as session:
             retry_workspace = (
-                await session.execute(
-                    select(Workspace).where(Workspace.id != ws_id)
-                )
+                await session.execute(select(Workspace).where(Workspace.id != ws_id))
             ).scalar_one()
             event = (
                 await session.execute(
                     select(WorkspaceEvent).where(
                         WorkspaceEvent.workspace_id == ws_id,
-                        WorkspaceEvent.event_type
-                        == "workspace.provider_recovery_requested",
+                        WorkspaceEvent.event_type == "workspace.provider_recovery_requested",
                     )
                 )
             ).scalar_one()
@@ -2126,10 +2111,7 @@ class TestPullRequestUnexpectedError:
         fake.queue_result(returncode=0)
         fake.queue_result(
             returncode=0,
-            stdout=(
-                "docs/awf-plans/ws_plan.md\n"
-                "docs/awf-plans/ws_plan.conformance.json\n"
-            ),
+            stdout=("docs/awf-plans/ws_plan.md\ndocs/awf-plans/ws_plan.conformance.json\n"),
         )
         validation = _RecordingValidation()
 
@@ -2847,10 +2829,13 @@ class TestPrMonitorResume:
             )
             is None
         )
-        assert await executor._recover_feature_branch_remote_push_branch(
-            workspace_id=existing_id,
-            remote_push_branch="awf/recovered",
-        ) == "awf/persisted"
+        assert (
+            await executor._recover_feature_branch_remote_push_branch(
+                workspace_id=existing_id,
+                remote_push_branch="awf/recovered",
+            )
+            == "awf/persisted"
+        )
         assert (
             await executor._recover_feature_branch_remote_push_branch(
                 workspace_id=sync_id,
@@ -3013,9 +2998,7 @@ class TestExecutorCoverageEdges:
             assert ws.monitor_last_commit_sha == "h" * 40
             assert ws.base_commit == "b" * 40
             candidate = (
-                await s.execute(
-                    select(MergeCandidate).where(MergeCandidate.workspace_id == ws_id)
-                )
+                await s.execute(select(MergeCandidate).where(MergeCandidate.workspace_id == ws_id))
             ).scalar_one()
             assert candidate.status == "open"
             assert candidate.head_sha == "h" * 40
@@ -3169,9 +3152,7 @@ class TestExecutorCoverageEdges:
     def test_redacted_exception_traceback_truncates_large_tracebacks(self) -> None:
         secret = "ghp_tracebacksecret123456"
         try:
-            raise RuntimeError(
-                f"factory exploded Authorization: Bearer {secret}\n" + ("x" * 5000)
-            )
+            raise RuntimeError(f"factory exploded Authorization: Bearer {secret}\n" + ("x" * 5000))
         except RuntimeError as exc:
             redacted_traceback = executor_module._redacted_exception_traceback(exc)
 
@@ -3430,9 +3411,7 @@ class TestExecutorCoverageEdges:
 
         executor._exclude_agent_salvage_artifacts(worktree)
 
-        assert (git_dir / "info" / "exclude").read_text(encoding="utf-8") == (
-            "/.awf/salvage/\n"
-        )
+        assert (git_dir / "info" / "exclude").read_text(encoding="utf-8") == ("/.awf/salvage/\n")
 
     @pytest.mark.unit
     def test_required_adoption_metadata_str_rejects_missing_key(self) -> None:
@@ -3549,9 +3528,7 @@ class TestExecutorCoverageEdges:
             streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws.id)
             operations = list(
                 (
-                    await s.execute(
-                        select(Operation).where(Operation.workspace_id == ws.id)
-                    )
+                    await s.execute(select(Operation).where(Operation.workspace_id == ws.id))
                 ).scalars()
             )
             events = list(

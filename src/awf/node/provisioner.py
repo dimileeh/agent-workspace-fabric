@@ -472,9 +472,7 @@ async def _reconcile_active_reservation_for_profile(
     node_id: str,
     profile: WorkspaceProfile,
 ) -> None:
-    reservation = await ResourceReservationRepository(session).active_for_workspace(
-        workspace_id
-    )
+    reservation = await ResourceReservationRepository(session).active_for_workspace(workspace_id)
     if reservation is None:
         return
     reservation.node_id = node_id
@@ -489,9 +487,7 @@ def _stack_secret_lease_mount_metadata(
     plan_metadata = stack_paths.secret_lease_mount_metadata
     metadata: dict[str, Any] = {
         "schema": str(plan_metadata.get("schema", "secret_lease_mount_metadata.v1")),
-        "mount_plan": str(
-            plan_metadata.get("mount_plan", "profile_declared_secret_leases")
-        ),
+        "mount_plan": str(plan_metadata.get("mount_plan", "profile_declared_secret_leases")),
         "compose_project": f"awf_{workspace_id}",
         "compose_file": str(stack_paths.compose_file),
     }
@@ -521,11 +517,7 @@ def _provision_local_branch_name(
 
 
 def _provision_checkout_base_branch(ws: Workspace) -> str:
-    return (
-        _sync_feature_pr_pull_head_ref(ws)
-        or _sync_feature_pr_head_ref(ws)
-        or ws.branch_base
-    )
+    return _sync_feature_pr_pull_head_ref(ws) or _sync_feature_pr_head_ref(ws) or ws.branch_base
 
 
 def _provision_remote_push_branch(ws: Workspace) -> str | None:

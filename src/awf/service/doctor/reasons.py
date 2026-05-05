@@ -21,7 +21,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "DOCKER_OK": _ReasonText(
         "Docker daemon is reachable.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "DOCKER_CLI_NOT_FOUND": _ReasonText(
         "Docker CLI is not installed or is not on PATH.",
@@ -47,7 +49,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "API_OK": _ReasonText(
         "AWF API health endpoint is reachable.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "API_UNREACHABLE": _ReasonText(
         "AWF API is not reachable.",
@@ -59,7 +63,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "WORKER_RUNNING": _ReasonText(
         "AWF worker container is running.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "WORKER_CONTAINER_MISSING": _ReasonText(
         "AWF worker container was not found in the local Compose project.",
@@ -106,27 +112,37 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "GITHUB_AUTH_OK": _ReasonText(
         "GitHub CLI auth is usable for PR operations.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "CODEX_AUTH_OK": _ReasonText(
         "Codex auth is usable for agent workspaces.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "CLAUDE_CODE_AUTH_OK": _ReasonText(
         "Claude Code auth is usable for agent workspaces.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "GEMINI_AUTH_OK": _ReasonText(
         "Gemini auth is usable for agent workspaces.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "OPENCODE_AUTH_OK": _ReasonText(
         "OpenCode/Ollama auth is usable for agent workspaces.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "GITHUB_TOKEN_ENV_MISSING": _ReasonText(
         "No service-visible GitHub token was found.",
@@ -180,7 +196,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "PORT_OPEN": _ReasonText(
         "Required local port is accepting connections.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "PORT_CLOSED": _ReasonText(
         "Required local port is not accepting connections.",
@@ -199,7 +217,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "SUFFICIENT_DISK": _ReasonText(
         "Free disk is above the configured AWF threshold.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "INSUFFICIENT_DISK": _ReasonText(
         "Free disk is below the configured AWF threshold.",
@@ -218,7 +238,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "NO_STRANDED_WORKSPACES": _ReasonText(
         "No stale or exited AWF workspace containers were detected.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "STRANDED_WORKSPACES_PRESENT": _ReasonText(
         "Stale or exited AWF workspace containers need operator review.",
@@ -230,7 +252,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "NO_ORPHANS": _ReasonText(
         "No orphan AWF Docker resources were detected.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "ORPHAN_RESOURCES_PRESENT": _ReasonText(
         "Orphan AWF Docker resources were detected.",
@@ -242,7 +266,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "NETWORK_POSTURE_NO_ACTIVE_OPEN": _ReasonText(
         "No active workspace is using open network posture.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "NETWORK_POSTURE_OPEN_ACTIVE": _ReasonText(
         "One or more active workspaces have unrestricted internet access.",
@@ -261,7 +287,9 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "LOCAL_CONFIG_OK": _ReasonText(
         "Local AWF configuration looks usable.",
         "No action required.",
-        "", "", "",
+        "",
+        "",
+        "",
     ),
     "LOCAL_CONFIG_INVALID": _ReasonText(
         "Local AWF configuration has issues that block reliable service use.",
@@ -306,7 +334,13 @@ def _reason_text(
         if status == "ok":
             return _ReasonText(f"{label} check passed.", "No action required.", "", "", "")
         if status == "skipped":
-            return _ReasonText(f"{label} check was skipped.", "Fix prerequisite checks first.", "Prerequisites failed.", "awf doctor", "")
+            return _ReasonText(
+                f"{label} check was skipped.",
+                "Fix prerequisite checks first.",
+                "Prerequisites failed.",
+                "awf doctor",
+                "",
+            )
         return _ReasonText(
             f"{label} check reported {status}.",
             "Inspect the diagnostic detail and the matching service status check.",
@@ -323,5 +357,11 @@ def _reason_text(
             text.docs_link,
         )
     if reason == "PORT_OPEN" and context and context.get("endpoint"):
-        return _ReasonText(f"{context['endpoint']} is accepting connections.", text.action, text.likely_cause, text.related_command, text.docs_link)
+        return _ReasonText(
+            f"{context['endpoint']} is accepting connections.",
+            text.action,
+            text.likely_cause,
+            text.related_command,
+            text.docs_link,
+        )
     return text

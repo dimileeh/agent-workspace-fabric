@@ -721,11 +721,7 @@ class PullRequestMonitorRunner:
             await s.commit()
             if result == "terminal" or result == "stale":
                 return "deterministic"
-            if (
-                result is not None
-                and result.action == "fallback"
-                and not result.in_place
-            ):
+            if result is not None and result.action == "fallback" and not result.in_place:
                 return "fallback"
             return "retry"
 
@@ -881,9 +877,7 @@ class PullRequestMonitorRunner:
                     )
                     await self._terminate_failed(
                         workspace_id,
-                        message=f"monitor: could not calculate base-behind count: {exc}"[
-                            :2000
-                        ],
+                        message=f"monitor: could not calculate base-behind count: {exc}"[:2000],
                         reason_code=_GIT_BASE_BEHIND_FAILED_REASON,
                     )
                     return
@@ -3744,9 +3738,7 @@ class PullRequestMonitorRunner:
         """
         remote = remote_url or "origin"
         refspec = refspec or f"HEAD:refs/heads/{remote_branch}"
-        r = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "push", remote, refspec]
-        )
+        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "push", remote, refspec])
         if r.ok:
             # git prints "Everything up-to-date" to stderr when the ref didn't move.
             pushed = "up-to-date" not in (r.stderr or "").lower()

@@ -25,7 +25,6 @@ from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.base import Base
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -44,7 +43,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     AddressComments,
     CheckFailure,
@@ -91,6 +90,7 @@ from awf.runtime.pr_monitor_runner import (
     _target_reconcile_payload,
     _with_ci_failures,
 )
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -103,13 +103,8 @@ from tests.unit.runtime.test_pr_monitor import _status
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _monitor_runner(tmp_path: Path, fake: FakeCommandRunner) -> PullRequestMonitorRunner:
@@ -238,9 +233,7 @@ async def _provider_recovery_snapshot(
         requested_ids = list(
             (
                 await session.execute(
-                    select(Workspace.id).where(
-                        Workspace.status == WorkspaceStatus.requested.value
-                    )
+                    select(Workspace.id).where(Workspace.status == WorkspaceStatus.requested.value)
                 )
             ).scalars()
         )
@@ -321,9 +314,7 @@ async def test_advisory_plan_artifact_stale_reason_does_not_dispatch_recovery(
                     reason_code=ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON,
                     trigger_type="path_overlap",
                     trigger_ref="docs/awf-plans/ws_other.md",
-                    explanation=(
-                        "Target branch changed another workspace's AWF plan artifact."
-                    ),
+                    explanation=("Target branch changed another workspace's AWF plan artifact."),
                 )
             ],
         )
@@ -358,12 +349,8 @@ async def test_advisory_plan_artifact_stale_reason_does_not_dispatch_recovery(
             session
         ).get_open_for_workspace_with_merge_inputs(workspace_id)
         assert candidate is not None
-        stale_reasons = await StaleReasonRepository(session).list_active_for_candidate(
-            candidate.id
-        )
-        operations = await OperationRepository(session).list_all(
-            workspace_id=workspace_id
-        )
+        stale_reasons = await StaleReasonRepository(session).list_active_for_candidate(candidate.id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
 
     assert gate.stale_reason is None
     assert gate.req_action is None
@@ -606,9 +593,7 @@ async def test_auto_merge_dispatches_active_stale_recovery_before_merge(
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
         assert workspace is not None
         recovery_events = [
-            event
-            for event in workspace.events
-            if event.event_type == "monitor.recovery_dispatched"
+            event for event in workspace.events if event.event_type == "monitor.recovery_dispatched"
         ]
         state_events = [
             event
@@ -745,9 +730,7 @@ async def test_auto_merge_clears_docs_scope_stale_after_current_head_validation(
         assert attempt is not None
         candidate = await MergeCandidateRepository(session).get_by_attempt_id(attempt.id)
         assert candidate is not None
-        stale_reasons = await StaleReasonRepository(session).list_for_candidate(
-            candidate.id
-        )
+        stale_reasons = await StaleReasonRepository(session).list_for_candidate(candidate.id)
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
 
     assert terminal is True
@@ -818,14 +801,12 @@ async def test_auto_merge_waits_for_non_check_reviewer_settle_before_merge(
 
     assert terminal is False
     assert sleep_fn.calls == [60]
-    assert (
-        state.threads_addressed_ids[
-            _non_check_reviewer_settle_started_key(
-                pr_number=pr_number,
-                head_sha=head_sha,
-            )
-        ]
-    )
+    assert state.threads_addressed_ids[
+        _non_check_reviewer_settle_started_key(
+            pr_number=pr_number,
+            head_sha=head_sha,
+        )
+    ]
     assert _gh_pr_merge_calls(cmd) == []
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
@@ -1550,9 +1531,7 @@ async def test_execute_sync_base_failed_push_resets_no_progress_streak(
         worktrees_root=tmp_path / "worktrees",
     )
     state = MonitorState(
-        sync_base_no_progress_signature=(
-            "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
-        ),
+        sync_base_no_progress_signature=("abc1234567890def|CONFLICTING|DIRTY|base_behind=0"),
         sync_base_no_progress_count=2,
     )
 
@@ -1598,9 +1577,7 @@ async def test_sync_base_progress_increments_same_snapshot_and_resets_on_failure
         merge_state_status=MergeStateStatus.DIRTY,
     )
     state = MonitorState(
-        sync_base_no_progress_signature=(
-            "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
-        ),
+        sync_base_no_progress_signature=("abc1234567890def|CONFLICTING|DIRTY|base_behind=0"),
         sync_base_no_progress_count=1,
     )
 
@@ -2205,13 +2182,16 @@ class TestPendingCheckHelpers:
             "check_conclusion": None,
             "details_url": "https://checks.example/build",
         }
-        assert _stale_pending_check_warning_key(
-            workspace_id="ws_1",
-            head_sha="abc123",
-            check_name="ci/build",
-            threshold_seconds=120,
-            threshold_window=5,
-        ) == '__awf_pending_check_stale__:["ws_1","abc123","ci/build","120",5]'
+        assert (
+            _stale_pending_check_warning_key(
+                workspace_id="ws_1",
+                head_sha="abc123",
+                check_name="ci/build",
+                threshold_seconds=120,
+                threshold_window=5,
+            )
+            == '__awf_pending_check_stale__:["ws_1","abc123","ci/build","120",5]'
+        )
 
     @pytest.mark.unit
     def test_pending_check_classifier_handles_provider_status_edges(self) -> None:
@@ -2253,10 +2233,13 @@ class TestNotificationAndGraceHelpers:
             )
             or ""
         )
-        assert _notify_human_reason(
-            _status(reviews=(deferred_review,)),
-            deferred_state,
-        ) == "human review feedback was deferred by the agent and remains unresolved"
+        assert (
+            _notify_human_reason(
+                _status(reviews=(deferred_review,)),
+                deferred_state,
+            )
+            == "human review feedback was deferred by the agent and remains unresolved"
+        )
         assert _notify_human_reason(_status(), MonitorState()) is None
 
     @pytest.mark.unit
@@ -2272,9 +2255,12 @@ class TestNotificationAndGraceHelpers:
         assert _initial_review_grace_wall_seconds("not-a-number") is None
         assert _initial_review_grace_wall_seconds("123.0") is None
         assert _initial_review_grace_wall_seconds(wall_started) == wall_started
-        assert _initial_review_grace_wall_started_value_from_datetime(
-            datetime(2026, 4, 27, 12, 0),
-        ) == f"{wall_started:.6f}"
+        assert (
+            _initial_review_grace_wall_started_value_from_datetime(
+                datetime(2026, 4, 27, 12, 0),
+            )
+            == f"{wall_started:.6f}"
+        )
 
         converted_runtime = _initial_review_grace_state_for_runtime(
             runtime_state,
@@ -2315,26 +2301,32 @@ class TestNotificationAndGraceHelpers:
         assert unchanged_persistence == {}
 
         waiting = MonitorState(started_at=10.0)
-        assert _initial_review_grace_wait_seconds(
-            waiting,
-            pr_number=pr_number,
-            now=12.0,
-            grace_seconds=10.0,
-            poll_interval_seconds=3.0,
-        ) == 3.0
+        assert (
+            _initial_review_grace_wait_seconds(
+                waiting,
+                pr_number=pr_number,
+                now=12.0,
+                grace_seconds=10.0,
+                poll_interval_seconds=3.0,
+            )
+            == 3.0
+        )
         assert waiting.threads_addressed_ids[started_key] == "10.000000"
 
         invalid_started = MonitorState(
             started_at=20.0,
             threads_addressed_ids={started_key: "not-float"},
         )
-        assert _initial_review_grace_wait_seconds(
-            invalid_started,
-            pr_number=pr_number,
-            now=35.0,
-            grace_seconds=10.0,
-            poll_interval_seconds=5.0,
-        ) == 0.0
+        assert (
+            _initial_review_grace_wait_seconds(
+                invalid_started,
+                pr_number=pr_number,
+                now=35.0,
+                grace_seconds=10.0,
+                poll_interval_seconds=5.0,
+            )
+            == 0.0
+        )
         assert invalid_started.threads_addressed_ids[started_key] == "20.000000"
         assert invalid_started.threads_addressed_ids[done_key] == "elapsed"
 
@@ -2414,47 +2406,65 @@ class TestMiscMonitorHelpers:
             )
 
         assert await run_case("ws_missing", [], make_worktree=False) is False
-        assert await run_case(
-            "ws_status_failed",
-            [{"returncode": 1, "stderr": "not a git repo"}],
-        ) is False
-        assert await run_case(
-            "ws_clean",
-            [{"returncode": 0, "stdout": ""}],
-        ) is False
-        assert await run_case(
-            "ws_add_failed",
-            [
-                {"returncode": 0, "stdout": " M file.py\n"},
-                {"returncode": 1, "stderr": "add failed"},
-            ],
-        ) is False
-        assert await run_case(
-            "ws_cached_clean",
-            [
-                {"returncode": 0, "stdout": " M file.py\n"},
-                {"returncode": 0},
-                {"returncode": 0},
-            ],
-        ) is False
-        assert await run_case(
-            "ws_commit_failed",
-            [
-                {"returncode": 0, "stdout": " M file.py\n"},
-                {"returncode": 0},
-                {"returncode": 1},
-                {"returncode": 1, "stderr": "commit failed"},
-            ],
-        ) is False
-        assert await run_case(
-            "ws_committed",
-            [
-                {"returncode": 0, "stdout": " M file.py\n"},
-                {"returncode": 0},
-                {"returncode": 1},
-                {"returncode": 0},
-            ],
-        ) is True
+        assert (
+            await run_case(
+                "ws_status_failed",
+                [{"returncode": 1, "stderr": "not a git repo"}],
+            )
+            is False
+        )
+        assert (
+            await run_case(
+                "ws_clean",
+                [{"returncode": 0, "stdout": ""}],
+            )
+            is False
+        )
+        assert (
+            await run_case(
+                "ws_add_failed",
+                [
+                    {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 1, "stderr": "add failed"},
+                ],
+            )
+            is False
+        )
+        assert (
+            await run_case(
+                "ws_cached_clean",
+                [
+                    {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 0},
+                    {"returncode": 0},
+                ],
+            )
+            is False
+        )
+        assert (
+            await run_case(
+                "ws_commit_failed",
+                [
+                    {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 0},
+                    {"returncode": 1},
+                    {"returncode": 1, "stderr": "commit failed"},
+                ],
+            )
+            is False
+        )
+        assert (
+            await run_case(
+                "ws_committed",
+                [
+                    {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 0},
+                    {"returncode": 1},
+                    {"returncode": 0},
+                ],
+            )
+            is True
+        )
 
 
 @pytest.mark.unit
@@ -2485,9 +2495,7 @@ async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_conte
         assert workspace is not None
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
         recovery_events = [
-            event
-            for event in workspace.events
-            if event.event_type == "monitor.recovery_dispatched"
+            event for event in workspace.events if event.event_type == "monitor.recovery_dispatched"
         ]
         state_events = [
             event
@@ -2628,13 +2636,9 @@ async def test_validation_recovery_dispatch_is_idempotent_for_duplicate_tick_rep
         assert workspace is not None
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
         recovery_events = [
-            event
-            for event in workspace.events
-            if event.event_type == "monitor.recovery_dispatched"
+            event for event in workspace.events if event.event_type == "monitor.recovery_dispatched"
         ]
-    recovery_operations = [
-        op for op in operations if op.type == OperationType.validate.value
-    ]
+    recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
     wait_operations = [
         op
         for op in operations
@@ -2780,6 +2784,7 @@ async def test_monitor_operation_payload_redacts_secret_like_values(
     assert "token=" not in persisted
     assert "password=" not in persisted
     assert "[redacted]" in persisted
+
 
 @pytest.mark.unit
 async def test_review_comment_provider_failure_records_retry_and_ignores_comment(

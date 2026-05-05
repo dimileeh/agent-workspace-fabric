@@ -585,10 +585,7 @@ def test_compose_parser_ignores_unreadable_or_invalid_documents(tmp_path: Path) 
     assert no_services.inspection.compose_services == ()
 
     (tmp_path / "compose.yml").write_text(
-        "services:\n"
-        "  123:\n"
-        "    image: ignored\n"
-        "  api: example/api\n",
+        "services:\n  123:\n    image: ignored\n  api: example/api\n",
         encoding="utf-8",
     )
     mixed_services = preview_project_onboarding(tmp_path)
@@ -684,7 +681,13 @@ def test_onboarding_restricted_draft_includes_default_allowlist_templates(
     assert profile.security.egress.allowlist_templates
     assert all(
         template in [t.value for t in profile.security.egress.allowlist_templates]
-        for template in ("github", "model_providers", "package_registries", "os_mirrors", "documentation")
+        for template in (
+            "github",
+            "model_providers",
+            "package_registries",
+            "os_mirrors",
+            "documentation",
+        )
     )
     dumped = profile.model_dump(mode="json", by_alias=True, exclude_none=True)
     assert "allowlist_templates" in dumped["security"]["egress"]
@@ -704,7 +707,9 @@ def test_onboarding_open_profile_can_carry_open_explanation(tmp_path: Path) -> N
     )
     dumped = profile.model_dump(mode="json", by_alias=True, exclude_none=True)
     assert dumped["security"]["egress"]["mode"] == "open"
-    assert dumped["security"]["egress"]["open_explanation"] == "Intentionally open for local dogfood."
+    assert (
+        dumped["security"]["egress"]["open_explanation"] == "Intentionally open for local dogfood."
+    )
 
 
 @pytest.mark.unit

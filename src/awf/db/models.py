@@ -382,7 +382,6 @@ class TaskAttempt(Base):
             "uq_task_attempts_one_canonical_per_task",
             "task_id",
             unique=True,
-            sqlite_where=text("is_canonical_for_merge = 1"),
             postgresql_where=text("is_canonical_for_merge = true"),
         ),
         Index("ix_task_attempts_task", "task_id"),
@@ -478,13 +477,9 @@ class ProviderModelCircuitBreaker(Base):
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="closed")
     failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    cooldown_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    last_failure_fingerprint: Mapped[str | None] = mapped_column(
-        String(512), nullable=True
-    )
+    last_failure_fingerprint: Mapped[str | None] = mapped_column(String(512), nullable=True)
     last_workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     last_attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -754,13 +749,13 @@ class ValidationRun(Base):
     profile_source: Mapped[str | None] = mapped_column(String(256), nullable=True)
     resolved_profile_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     environment_identity_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    environment_identity_inputs: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON, nullable=True
-    )
+    environment_identity_inputs: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    retry_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

@@ -78,9 +78,7 @@ def test_decode_bounded_list_cursor_round_trips_unpadded_payload() -> None:
 
 
 def _cursor(payload: dict[str, Any]) -> str:
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    )
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     return encoded.decode("ascii").rstrip("=")
 
 

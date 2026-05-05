@@ -277,9 +277,7 @@ async def test_readyz_response_shape_matches_contract(
     }
     assert body["agent_readiness"]["security"]["status"] == "warning"
     assert "DOCKER_HOST_BROAD_CONTROL" in body["agent_readiness"]["security"]["reason_codes"]
-    assert body["agent_readiness"]["providers"]["github"]["reason"] == (
-        "GITHUB_TOKEN_ENV_MISSING"
-    )
+    assert body["agent_readiness"]["providers"]["github"]["reason"] == ("GITHUB_TOKEN_ENV_MISSING")
 
 
 @pytest.mark.unit
@@ -316,9 +314,7 @@ async def test_readyz_strict_github_provider_missing_auth_returns_503(
     assert body["status"] == "fail"
     assert body["agent_readiness"]["status"] == "fail"
     assert body["agent_readiness"]["providers"]["github"]["status"] == "fail"
-    assert body["agent_readiness"]["providers"]["github"]["reason"] == (
-        "GITHUB_TOKEN_ENV_MISSING"
-    )
+    assert body["agent_readiness"]["providers"]["github"]["reason"] == ("GITHUB_TOKEN_ENV_MISSING")
 
 
 @pytest.mark.unit
@@ -357,10 +353,7 @@ async def test_readyz_docker_provider_is_validated_and_reports_security_metadata
     docker = body["agent_readiness"]["providers"]["docker"]
     assert docker["status"] == "ok"
     assert docker["credential_scope"] == "docker_host_control"
-    assert any(
-        warning["reason"] == "DOCKER_HOST_BROAD_CONTROL"
-        for warning in docker["warnings"]
-    )
+    assert any(warning["reason"] == "DOCKER_HOST_BROAD_CONTROL" for warning in docker["warnings"])
 
 
 @pytest.mark.unit

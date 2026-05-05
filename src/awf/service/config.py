@@ -50,9 +50,7 @@ class ServiceSettings:
     min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES
     completed_workspace_retention_hours: float = DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS
     workspace_cleanup_enabled: bool = True
-    workspace_cleanup_scan_interval_seconds: float = (
-        DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS
-    )
+    workspace_cleanup_scan_interval_seconds: float = DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS
     workspace_cleanup_batch_limit: int = DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT
     network_posture_open_legacy_cutoff: datetime | None = None
     local_capacity_cpu_cores: float | None = None
@@ -67,11 +65,10 @@ def resolve_service_settings(
 ) -> ServiceSettings:
     """Resolve settings for service mode.
 
-    ``Settings`` intentionally keeps SQLite as its default so tests and
-    compatibility scripts can run without a service stack. Service mode promotes
-    the default to local Postgres unless ``AWF_DATABASE_URL`` is explicitly set.
-    When ``environ`` is ``None``, values loaded from ``.env`` by pydantic-settings
-    count as explicit.
+    AWF is PostgreSQL-only. Service mode uses the configured database URL, with
+    the local Postgres URL as the default unless ``AWF_DATABASE_URL`` is
+    explicitly set. When ``environ`` is ``None``, values loaded from ``.env`` by
+    pydantic-settings count as explicit.
     """
 
     settings = base or Settings()
@@ -148,11 +145,7 @@ def local_service_environ(
     merged: dict[str, str] = {}
     if env_file.exists():
         merged.update(
-            {
-                key: value
-                for key, value in dotenv_values(env_file).items()
-                if value is not None
-            }
+            {key: value for key, value in dotenv_values(env_file).items() if value is not None}
         )
     merged.update(os.environ if environ is None else dict(environ))
     return merged

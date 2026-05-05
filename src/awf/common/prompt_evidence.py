@@ -73,6 +73,8 @@ def _quoted_text_lines(text: str) -> list[str]:
     lines = text.splitlines()
     if not lines:
         lines = [""]
-    elif text.endswith(("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")):
+    elif text.endswith(
+        ("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+    ):
         lines.append("")
     return [f"{EVIDENCE_QUOTE_PREFIX}{line}" for line in lines]

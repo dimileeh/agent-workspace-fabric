@@ -13,11 +13,11 @@ import structlog
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError
-from awf.db.base import Base
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from scripts import run_awf
+from tests.postgres import create_postgres_test_engine
 
 # ── github_client error paths ──────────────────────────────────────────────
 
@@ -93,9 +93,7 @@ class TestExecutorFixPassWarnings:
         template = (
             Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
         )
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
         factory = make_session_factory(engine)
         async with factory() as s:
             repo = WorkspaceRepository(s)
@@ -136,6 +134,7 @@ class TestExecutorFixPassWarnings:
         fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (hack: still has change)
         fake.queue_result(returncode=1, stderr="commit would be empty")  # fix_commit FAILS
         fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
+
         class _FixPassValidation:
             def __init__(self, artifacts_dir: Path) -> None:
                 self.artifacts_dir = artifacts_dir
@@ -270,9 +269,7 @@ class TestExecutorMarkFailedStatusDiverged:
         template = (
             Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
         )
-        engine = make_engine("sqlite+aiosqlite:///:memory:")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
         factory = make_session_factory(engine)
         async with factory() as s:
             repo = WorkspaceRepository(s)

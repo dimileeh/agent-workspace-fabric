@@ -20,17 +20,17 @@ import awf.api.routes.ws as ws_route
 import awf.service.workspaces as workspace_service
 from awf.api.app import configure_database, create_app
 from awf.common.config import get_settings
-from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.events import WorkspaceEventFrame
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LOG_BROADCASTER
+from tests.postgres import create_postgres_test_engine
 
 _BODY = {
     "repo_url": "git@github.com:example/console.git",
@@ -502,7 +502,8 @@ class TestWorkspaceWebSocket:
         with _temporary_api_token("secret"):
             client = TestClient(app)
             with (
-                client, pytest.raises(WebSocketDisconnect) as exc_info,
+                client,
+                pytest.raises(WebSocketDisconnect) as exc_info,
                 client.websocket_connect(
                     "/v1/workspaces/ws_missing/ws",
                     headers={"Authorization": "Bearer secret"},
@@ -517,10 +518,13 @@ class TestWorkspaceWebSocket:
         with _temporary_api_token("secret"):
             client, engine = _make_empty_sync_test_client(tmp_path)
             try:
-                with client, client.websocket_connect(
-                    "/v1/workspaces/ws_missing/ws",
-                    headers={"Authorization": "Bearer secret"},
-                ) as websocket:
+                with (
+                    client,
+                    client.websocket_connect(
+                        "/v1/workspaces/ws_missing/ws",
+                        headers={"Authorization": "Bearer secret"},
+                    ) as websocket,
+                ):
                     assert websocket.receive_json() == {
                         "type": "error",
                         "error_code": "NOT_FOUND",
@@ -541,10 +545,13 @@ class TestWorkspaceWebSocket:
         with _temporary_api_token("secret"):
             client, engine = _make_empty_sync_test_client(tmp_path)
             try:
-                with client, client.websocket_connect(
-                    "/v1/workspaces/ws_missing/ws?channels=agent",
-                    headers={"Authorization": "Bearer secret"},
-                ) as websocket:
+                with (
+                    client,
+                    client.websocket_connect(
+                        "/v1/workspaces/ws_missing/ws?channels=agent",
+                        headers={"Authorization": "Bearer secret"},
+                    ) as websocket,
+                ):
                     assert websocket.receive_json() == {
                         "type": "error",
                         "error_code": "NOT_FOUND",
@@ -566,7 +573,8 @@ class TestWorkspaceWebSocket:
         workspace_id, client, engine = _make_sync_test_client(monkeypatch, tmp_path)
         try:
             with (
-                client, pytest.raises(WebSocketDenialResponse) as exc_info,
+                client,
+                pytest.raises(WebSocketDenialResponse) as exc_info,
                 client.websocket_connect(f"/v1/workspaces/{workspace_id}/ws"),
             ):
                 pass
@@ -588,7 +596,8 @@ class TestWorkspaceWebSocket:
         )
         try:
             with (
-                client, pytest.raises(WebSocketDenialResponse) as exc_info,
+                client,
+                pytest.raises(WebSocketDenialResponse) as exc_info,
                 client.websocket_connect(f"/v1/workspaces/{workspace_id}/ws"),
             ):
                 pass
@@ -605,10 +614,13 @@ class TestWorkspaceWebSocket:
     ) -> None:
         workspace_id, client, engine = _make_sync_test_client(monkeypatch, tmp_path)
         try:
-            with client, client.websocket_connect(
-                f"/v1/workspaces/{workspace_id}/ws?channels=events,agent&tail_bytes=20",
-                headers={"Authorization": "Bearer secret"},
-            ) as websocket:
+            with (
+                client,
+                client.websocket_connect(
+                    f"/v1/workspaces/{workspace_id}/ws?channels=events,agent&tail_bytes=20",
+                    headers={"Authorization": "Bearer secret"},
+                ) as websocket,
+            ):
                 snapshot = websocket.receive_json()
                 event = websocket.receive_json()
                 tail = websocket.receive_json()
@@ -632,10 +644,13 @@ class TestWorkspaceWebSocket:
             client, engine = _make_empty_sync_test_client(tmp_path)
             try:
                 workspace_id = asyncio.run(_seed_websocket_workspace(engine, tmp_path))
-                with client, client.websocket_connect(
-                    f"/v1/workspaces/{workspace_id}/ws?channels=agent&tail_bytes=100",
-                    headers={"Authorization": "Bearer secret"},
-                ) as websocket:
+                with (
+                    client,
+                    client.websocket_connect(
+                        f"/v1/workspaces/{workspace_id}/ws?channels=agent&tail_bytes=100",
+                        headers={"Authorization": "Bearer secret"},
+                    ) as websocket,
+                ):
                     snapshot = websocket.receive_json()
                     tail = websocket.receive_json()
             finally:
@@ -1108,6 +1123,7 @@ class TestWorkspaceWebSocket:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from tests.unit.api.test_observability_api import _auth, _create_workspace
+
         ws_id = await _create_workspace(client)
         headers = _auth(monkeypatch)
 
@@ -1148,6 +1164,7 @@ class TestWorkspaceWebSocket:
             _make_empty_sync_test_client,
             _temporary_api_token,
         )
+
         with _temporary_api_token("secret"):
             sync_client, engine = _make_empty_sync_test_client(tmp_path)
             try:
@@ -1193,12 +1210,16 @@ class TestWorkspaceWebSocket:
                         )
                         await session.commit()
                         return ws.id
+
                 ws_id = asyncio.run(setup())
 
-                with sync_client, sync_client.websocket_connect(
-                    f"/v1/workspaces/{ws_id}/ws?channels=monitor,recovery&tail_bytes=100",
-                    headers={"Authorization": "Bearer secret"},
-                ) as websocket:
+                with (
+                    sync_client,
+                    sync_client.websocket_connect(
+                        f"/v1/workspaces/{ws_id}/ws?channels=monitor,recovery&tail_bytes=100",
+                        headers={"Authorization": "Bearer secret"},
+                    ) as websocket,
+                ):
                     snapshot = websocket.receive_json()
                     first_tail = websocket.receive_json()
                     second_tail = websocket.receive_json()
@@ -1213,6 +1234,7 @@ class TestWorkspaceWebSocket:
         assert tails["monitor.log"]["data"] == "monitor data\n"
         assert tails["recovery.stdout"]["source"] == "recovery"
         assert tails["recovery.stdout"]["data"] == "recovery data\n"
+
 
 class TestOperationsAndControls:
     @pytest.mark.unit
@@ -1338,15 +1360,12 @@ def _make_sync_test_client(
     else:
         monkeypatch.setenv("AWF_API_TOKEN", api_token)
     get_settings.cache_clear()
-    db_path = tmp_path / "ws.db"
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+    engine = asyncio.run(create_postgres_test_engine())
     factory = make_session_factory(engine)
     log_path = tmp_path / "agent.log"
     log_path.write_text("hello websocket\n", encoding="utf-8")
 
     async def seed() -> str:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
         async with factory() as session:
             workspace = await WorkspaceRepository(session).create(
                 repo_url=str(_BODY["repo_url"]),
@@ -1382,15 +1401,9 @@ def _make_sync_test_client(
 
 
 def _make_empty_sync_test_client(tmp_path: Path) -> tuple[TestClient, AsyncEngine]:
-    db_path = tmp_path / "empty-ws.db"
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+    del tmp_path
+    engine = asyncio.run(create_postgres_test_engine())
     factory = make_session_factory(engine)
-
-    async def create_schema() -> None:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.run(create_schema())
     app = create_app(use_lifespan=False)
     configure_database(app, factory)
     return TestClient(app), engine

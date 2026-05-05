@@ -21,9 +21,7 @@ _COMPOSE_FILE = Path("/fake/compose.yml")
 def _write_alembic_ini(repo: Path) -> None:
     (repo / "migrations" / "versions").mkdir(parents=True)
     (repo / "alembic.ini").write_text(
-        "[alembic]\n"
-        "script_location = migrations\n"
-        "version_path_separator = os\n",
+        "[alembic]\nscript_location = migrations\nversion_path_separator = os\n",
         encoding="utf-8",
     )
 
@@ -89,12 +87,11 @@ async def test_enabled_policy_blocks_multiple_heads_before_validation_commands(
     assert result.first_failure.reason_code == "ALEMBIC_MULTIPLE_HEADS"
     assert result.first_failure.policy_failed is True
     assert result.first_failure.metadata["heads"] == ["left001", "right001"]
-    assert result.first_failure.metadata["findings"][0]["reason_code"] == (
-        "ALEMBIC_MULTIPLE_HEADS"
+    assert result.first_failure.metadata["findings"][0]["reason_code"] == ("ALEMBIC_MULTIPLE_HEADS")
+    assert (
+        json.loads(result.first_failure.stderr_path.read_text(encoding="utf-8"))["reason_code"]
+        == "ALEMBIC_MULTIPLE_HEADS"
     )
-    assert json.loads(result.first_failure.stderr_path.read_text(encoding="utf-8"))[
-        "reason_code"
-    ] == "ALEMBIC_MULTIPLE_HEADS"
     assert fake.calls == []
 
 
@@ -180,9 +177,10 @@ async def test_clean_single_head_policy_logs_pass_then_runs_validation_command(
         ("validate", "COMMAND_FAILED"),
     ]
     assert result.commands[0].stdout_path.name == "01_migration_policy.stdout"
-    assert json.loads(result.commands[0].stdout_path.read_text(encoding="utf-8"))[
-        "reason_code"
-    ] == "ALEMBIC_GRAPH_OK"
+    assert (
+        json.loads(result.commands[0].stdout_path.read_text(encoding="utf-8"))["reason_code"]
+        == "ALEMBIC_GRAPH_OK"
+    )
     assert len(fake.calls) == 1
     assert "pytest -q" in fake.calls[0].args[-1]
 
@@ -362,14 +360,8 @@ async def test_policy_writes_durable_stdout_and_stderr_log_streams(tmp_path: Pat
     assert clean.all_passed
     assert not broken.all_passed
     assert (
-        tmp_path
-        / "logs"
-        / "ws_policy_stdout"
-        / "validation.01_migration_policy.stdout.log"
+        tmp_path / "logs" / "ws_policy_stdout" / "validation.01_migration_policy.stdout.log"
     ).read_text(encoding="utf-8").find("ALEMBIC_GRAPH_OK") >= 0
     assert (
-        tmp_path
-        / "logs"
-        / "ws_policy_stderr"
-        / "validation.01_migration_policy.stderr.log"
+        tmp_path / "logs" / "ws_policy_stderr" / "validation.01_migration_policy.stderr.log"
     ).read_text(encoding="utf-8").find("ALEMBIC_MULTIPLE_HEADS") >= 0

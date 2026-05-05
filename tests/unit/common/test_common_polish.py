@@ -87,7 +87,10 @@ class TestSettings:
         # Clear cache so the test drives a fresh Settings() call.
         get_settings.cache_clear()
         # Explicit env to satisfy any required field in future extensions.
-        monkeypatch.setenv("AWF_DATABASE_URL", "sqlite+aiosqlite:///./x.db")
+        monkeypatch.setenv(
+            "AWF_DATABASE_URL",
+            "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
+        )
         s1 = get_settings()
         s2 = get_settings()
         assert s1 is s2  # lru_cache returns the same instance
@@ -102,7 +105,7 @@ class TestSettings:
         override per-test."""
         monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
         s = Settings(_env_file=None)
-        assert s.database_url.startswith("sqlite")
+        assert s.database_url.startswith("postgresql+asyncpg://")
         assert s.service_name == "awf"
         assert s.env == "local"
 

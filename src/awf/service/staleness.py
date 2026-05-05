@@ -606,11 +606,7 @@ def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
 
 def _primary_blocking_reason(findings: Sequence[StalenessFinding]) -> str | None:
     primary = min(
-        (
-            (index, finding)
-            for index, finding in enumerate(findings)
-            if finding.blocks_merge
-        ),
+        ((index, finding) for index, finding in enumerate(findings) if finding.blocks_merge),
         key=lambda item: (
             _BLOCKING_REASON_PRIORITY.get(
                 item[1].reason_code,

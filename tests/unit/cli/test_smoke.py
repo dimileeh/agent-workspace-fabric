@@ -44,7 +44,10 @@ def _stub_smoke_collector(
             "project": str(kwargs.get("project", "/tmp/test")),
             "mode": mode,
             "phases": phases or [],
-            "console_links": {"ui": "http://localhost:3000", "api_docs": "http://localhost:8000/docs"},
+            "console_links": {
+                "ui": "http://localhost:3000",
+                "api_docs": "http://localhost:8000/docs",
+            },
             "next_actions": [],
         }
 
@@ -66,10 +69,22 @@ class TestSmokeRunCommand:
         _stub_smoke_collector(
             monkeypatch,
             phases=[
-                {"name": "service_readiness", "status": "ok", "reason_code": "SMOKE_SERVICE_READY",
-                 "message": "ready", "evidence": {}, "action": "none"},
-                {"name": "auth_readiness", "status": "ok", "reason_code": "SMOKE_AUTH_READY",
-                 "message": "ready", "evidence": {}, "action": "none"},
+                {
+                    "name": "service_readiness",
+                    "status": "ok",
+                    "reason_code": "SMOKE_SERVICE_READY",
+                    "message": "ready",
+                    "evidence": {},
+                    "action": "none",
+                },
+                {
+                    "name": "auth_readiness",
+                    "status": "ok",
+                    "reason_code": "SMOKE_AUTH_READY",
+                    "message": "ready",
+                    "evidence": {},
+                    "action": "none",
+                },
             ],
         )
         result = _runner.invoke(app, ["smoke", "run", "--format", "pretty"])

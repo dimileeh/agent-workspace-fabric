@@ -15,7 +15,9 @@ from awf.profiles.compose import profile_services
 from awf.profiles.resolver import ProfileResolver
 from awf.runtime.validation import ValidationRunner
 
-_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "workspace_services" / "python_postgres_app"
+_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "workspace_services" / "python_postgres_app"
+)
 _TEMPLATE = Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
@@ -113,12 +115,9 @@ async def test_python_postgres_profile_runs_setup_health_validate_and_cleans_up(
             "validate",
         ]
         assert (
-            validation_result.commands[0].stdout_path.read_text(encoding="utf-8")
-            == "refresh ok\n"
+            validation_result.commands[0].stdout_path.read_text(encoding="utf-8") == "refresh ok\n"
         )
-        healthcheck_stdout = validation_result.commands[1].stdout_path.read_text(
-            encoding="utf-8"
-        )
+        healthcheck_stdout = validation_result.commands[1].stdout_path.read_text(encoding="utf-8")
         assert healthcheck_stdout.splitlines()[0].startswith("[healthcheck attempt 1 elapsed ")
         assert healthcheck_stdout.endswith("ok\n")
         assert (

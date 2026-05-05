@@ -16,8 +16,7 @@ COORDINATION_TASK_POLICY_KEY: Final = "coordination"
 COORDINATION_WARNINGS_KEY: Final = "warnings"
 OWNED_PATH_OVERLAP_RISK_CODE: Final = "OWNED_PATH_OVERLAP_RISK"
 OWNED_PATH_OVERLAP_RISK_MESSAGE: Final = (
-    "Owned paths overlap active workspaces; coordinate before editing the same "
-    "paths."
+    "Owned paths overlap active workspaces; coordinate before editing the same paths."
 )
 COORDINATION_WARNING_SEVERITY_ADVISORY: Final = "advisory"
 OWNED_PATH_OVERLAP_BLOCKS_LAUNCH: Final = False
@@ -173,11 +172,9 @@ def _overlap_items(value: object) -> list[dict[str, Any]]:
 def _string_list(value: object) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, str | bytes):
         return []
-    return [
-        item.strip()
-        for item in value
-        if isinstance(item, str) and item.strip()
-    ][:MAX_COORDINATION_WARNING_WORKSPACES]
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()][
+        :MAX_COORDINATION_WARNING_WORKSPACES
+    ]
 
 
 def _string_mapping(value: object) -> dict[str, str]:

@@ -10,7 +10,7 @@ from awf.service.doctor.reasons import _REASON_TEXT
 def generate_expected_catalog(existing_content: str = "") -> str:
     lines = [
         "# AWF Reason and Error Code Catalog\n",
-        "This catalog documents common API/CLI/MCP failures, likely causes, and operator fixes.\n"
+        "This catalog documents common API/CLI/MCP failures, likely causes, and operator fixes.\n",
     ]
 
     sections = {}

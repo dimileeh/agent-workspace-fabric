@@ -261,7 +261,7 @@ async def orchestrate_attach(
 
         # Spawn run_awf.py detached. --keep-state is retained for
         # compatibility with older runners; current run_awf.py preserves
-        # the shared SQLite DB by default.
+        # PostgreSQL-backed run state by default.
         #
         # ``sys.executable`` (not a hardcoded ``.venv/bin/python``) so the
         # script works under ``uv run``, system python, or a venv rooted

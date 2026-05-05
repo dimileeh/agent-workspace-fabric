@@ -262,9 +262,7 @@ def test_workspace_response_includes_sanitized_app_endpoint_metadata() -> None:
         {
             "name": "endpoint-profile",
             "runtime": {
-                "environment": {
-                    "SECRET_URL": "http://user:password@app:3000/secret?token=abc"
-                }
+                "environment": {"SECRET_URL": "http://user:password@app:3000/secret?token=abc"}
             },
             "services": [{"name": "app", "image": "example/app:latest"}],
             "app_endpoints": [
@@ -451,18 +449,14 @@ def test_workspace_response_sanitizes_raw_profile_snapshots() -> None:
     profile_snapshot = {
         "name": "endpoint-profile",
         "runtime": {
-            "environment": {
-                "SECRET_URL": "http://user:password@app:3000/secret?token=abc"
-            }
+            "environment": {"SECRET_URL": "http://user:password@app:3000/secret?token=abc"}
         },
         "services": [
             {
                 "name": "app",
                 "image": "example/app:latest",
                 "environment": {
-                    "DATABASE_URL": (
-                        "postgresql://awf:password@postgres:5432/app?sslmode=disable"
-                    )
+                    "DATABASE_URL": ("postgresql://awf:password@postgres:5432/app?sslmode=disable")
                 },
             }
         ],
@@ -607,9 +601,7 @@ def test_workspace_response_network_posture_handles_missing_or_malformed_profile
 def test_profile_snapshot_sanitizer_handles_malformed_and_portless_urls() -> None:
     assert workspaces_service._sanitize_profile_string("http://[::1") == "http://[::1"
     assert (
-        workspaces_service._sanitize_profile_string(
-            "http://user:password@app/admin?token=abc"
-        )
+        workspaces_service._sanitize_profile_string("http://user:password@app/admin?token=abc")
         == "http://app/admin"
     )
     assert (
@@ -619,9 +611,7 @@ def test_profile_snapshot_sanitizer_handles_malformed_and_portless_urls() -> Non
         == "http://app/admin"
     )
     assert (
-        workspaces_service._sanitize_profile_string(
-            "http://user:password@:8080/admin?token=abc"
-        )
+        workspaces_service._sanitize_profile_string("http://user:password@:8080/admin?token=abc")
         == "http://<redacted>/admin"
     )
     assert (
@@ -838,8 +828,7 @@ def test_workspace_response_includes_planning_scope_failure_recovery_details() -
                             "fallback_model": {
                                 "model": "gpt-5.5",
                                 "source": (
-                                    "task_policy.planning_scope_recovery."
-                                    "approved_fallback_model"
+                                    "task_policy.planning_scope_recovery.approved_fallback_model"
                                 ),
                             },
                         },
@@ -999,12 +988,12 @@ def test_failure_detail_compactors_reject_malformed_values() -> None:
 
     assert workspaces_service._compact_string_list("not-a-list") == []
     assert workspaces_service._compact_fallback_model({"model": " "}) is None
-    assert workspaces_service._approved_planning_scope_fallback_model(
-        workspace_without_policy
-    ) is None
-    assert workspaces_service._approved_planning_scope_fallback_model(
-        workspace_with_bad_model
-    ) is None
+    assert (
+        workspaces_service._approved_planning_scope_fallback_model(workspace_without_policy) is None
+    )
+    assert (
+        workspaces_service._approved_planning_scope_fallback_model(workspace_with_bad_model) is None
+    )
 
 
 @pytest.mark.unit
@@ -1031,9 +1020,7 @@ def test_retry_recovery_payload_helpers_preserve_salvage_context() -> None:
     assert planning_payload["salvage"] == {"branch_name": "awf/ws_old"}
     assert planning_payload["fallback_model"] == {"agent": "codex", "model": "gpt-5.5"}
     assert conformance_payload["remaining_gaps"] == ["add regression test"]
-    assert conformance_payload["conformance_evidence_ref"] == {
-        "source_workspace_id": "ws_failed"
-    }
+    assert conformance_payload["conformance_evidence_ref"] == {"source_workspace_id": "ws_failed"}
     assert workspaces_service._retry_evidence_gaps({"gaps": " close gap "}) == ["close gap"]
     assert workspaces_service._retry_evidence_gaps({"gaps": object()}) == []
     assert workspaces_service._optional_retry_evidence_str(123) is None

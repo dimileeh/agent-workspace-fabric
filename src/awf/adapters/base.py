@@ -206,7 +206,9 @@ class AgentAdapter(ABC):
                 workspace_id=workspace_id,
                 base_stream_id=log_source,
                 source=log_source,
-                name=f"{log_source.capitalize()} ({self.name.value})" if log_source != "agent" else self.name.value,
+                name=f"{log_source.capitalize()} ({self.name.value})"
+                if log_source != "agent"
+                else self.name.value,
             )
 
         try:

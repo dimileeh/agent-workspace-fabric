@@ -158,8 +158,7 @@ def test_implemented_rows_have_rest_endpoint_and_mcp_tool() -> None:
             rest = row.get("Canonical REST surface", "").strip()
             mcp = row.get("MCP tool name", "").strip()
             assert rest, (
-                f"Row '{row.get('Capability', '?')}' is MCP implemented "
-                f"but has empty REST surface"
+                f"Row '{row.get('Capability', '?')}' is MCP implemented but has empty REST surface"
             )
             mcp_tools = _split_cell(mcp)
             assert any(t.startswith("awf_") for t in mcp_tools), (
@@ -187,9 +186,7 @@ def test_security_boundary_column_non_empty() -> None:
     rows = _parity_rows()
     for row in rows:
         boundary = row.get("Security Boundary", "").strip()
-        assert boundary, (
-            f"Row '{row.get('Capability', '?')}' has empty Security Boundary"
-        )
+        assert boundary, f"Row '{row.get('Capability', '?')}' has empty Security Boundary"
 
 
 @pytest.mark.unit

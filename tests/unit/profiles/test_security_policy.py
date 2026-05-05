@@ -26,9 +26,7 @@ def test_minimal_profile_defaults_to_restricted_network_posture():
 @pytest.mark.parametrize("mode", ["allowlist", "mirrored", "bogus"])
 def test_invalid_and_legacy_network_postures_are_rejected(mode: str):
     with pytest.raises(ValidationError):
-        WorkspaceProfile.model_validate(
-            {"name": "test", "security": {"egress": {"mode": mode}}}
-        )
+        WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": mode}}})
 
 
 @pytest.mark.unit
@@ -46,12 +44,14 @@ def test_allowlist_metadata_is_not_accepted_as_enforced_posture():
             }
         )
 
+
 @pytest.mark.unit
 def test_broad_secret_targets():
     profile = WorkspaceProfile.model_validate(
         {"name": "test", "secrets": [{"name": "s1", "target": "/", "kind": "mount"}]}
     )
     assert profile_lint_errors(profile)[0].reason_code == "SECRET_TARGET_TOO_BROAD"
+
 
 @pytest.mark.unit
 def test_raw_looking_secret_values():
@@ -69,6 +69,7 @@ def test_raw_looking_secret_values():
         }
     )
     assert profile_lint_errors(profile)[0].reason_code == "SECRET_REF_LOOKS_RAW"
+
 
 @pytest.mark.unit
 def test_missing_provider_or_ref():
@@ -88,26 +89,29 @@ def test_missing_provider_or_ref():
     assert profile_lint_errors(provider_only)[0].reason_code == "SECRET_PROVIDER_REF_MISMATCH"
     assert profile_lint_errors(ref_only)[0].reason_code == "SECRET_PROVIDER_REF_MISMATCH"
 
+
 @pytest.mark.unit
 def test_profile_security_serialization():
-    profile = WorkspaceProfile.model_validate({
-        "name": "test",
-        "secrets": [
-            {
-                "name": "API_KEY",
-                "target": "API_KEY",
-                "kind": "env",
-                "required": True,
-                "provider": "aws",
-                "ref": "my-secret-id",
-            }
-        ],
-        "security": {
-            "egress": {
-                "mode": "restricted",
-            }
-        },
-    })
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "test",
+            "secrets": [
+                {
+                    "name": "API_KEY",
+                    "target": "API_KEY",
+                    "kind": "env",
+                    "required": True,
+                    "provider": "aws",
+                    "ref": "my-secret-id",
+                }
+            ],
+            "security": {
+                "egress": {
+                    "mode": "restricted",
+                }
+            },
+        }
+    )
     dumped = profile.model_dump(mode="json")
     assert "secrets" in dumped
     assert len(dumped["secrets"]) == 1

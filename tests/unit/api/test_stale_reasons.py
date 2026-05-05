@@ -574,8 +574,7 @@ class TestWorkspaceStaleReasonsEndpoint:
         assert second_response.status_code == 200
         assert stale_reason_selects
         assert any(
-            " limit " in statement and " offset " in statement
-            for statement in stale_reason_selects
+            " limit " in statement and " offset " in statement for statement in stale_reason_selects
         )
 
     @pytest.mark.unit

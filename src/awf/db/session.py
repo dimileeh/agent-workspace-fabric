@@ -1,49 +1,71 @@
 """Async engine + session factory.
 
 Engines are process-global (cached per URL); sessions are per-request and should
-not be shared across task boundaries. Tests get a fresh engine + in-memory SQLite
-via the fixtures in tests/conftest.py.
+not be shared across task boundaries. Tests use PostgreSQL schemas through the
+fixtures in tests/conftest.py.
 """
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import date, datetime
 
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.runtime.events import ensure_workspace_event_broadcasting
 
-_SQLITE_DATETIME_ADAPTERS_REGISTERED = False
 
-
-def make_engine(url: str, *, echo: bool = False) -> AsyncEngine:
+def make_engine(
+    url: str,
+    *,
+    echo: bool = False,
+    connect_args: dict[str, object] | None = None,
+) -> AsyncEngine:
     """Create a new async engine for the given URL.
 
     ``echo`` enables SQL statement logging — handy for debugging tests but noisy
     in prod. Do not default it to True.
     """
-    if url.startswith("sqlite"):
-        _ensure_sqlite_datetime_adapters()
-    return create_async_engine(url, echo=echo, future=True)
+    parsed_url = make_url(url)
+    if parsed_url.drivername != "postgresql+asyncpg":
+        raise ValueError("AWF requires a postgresql+asyncpg:// database URL.")
+    resolved_connect_args = dict(connect_args or {})
+    query = dict(parsed_url.query)
+    search_path = query.pop("awf_search_path", None)
+    null_pool = query.pop("awf_null_pool", None)
+    engine_options: dict[str, object] = {}
+    if search_path is not None:
+        if isinstance(search_path, tuple):
+            search_path = search_path[0]
+        existing_server_settings = resolved_connect_args.get("server_settings")
+        server_settings = (
+            dict(existing_server_settings) if isinstance(existing_server_settings, dict) else {}
+        )
+        server_settings.setdefault("search_path", str(search_path))
+        resolved_connect_args["server_settings"] = server_settings
+    if null_pool is not None:
+        if isinstance(null_pool, tuple):
+            null_pool = null_pool[0]
+        if str(null_pool).lower() in {"1", "true", "yes"}:
+            engine_options["poolclass"] = NullPool
+    if search_path is not None or null_pool is not None:
+        parsed_url = parsed_url.set(query=query)
 
-
-def _ensure_sqlite_datetime_adapters() -> None:
-    """Install explicit datetime adapters for raw SQLite binds on Python 3.12+."""
-    global _SQLITE_DATETIME_ADAPTERS_REGISTERED
-    if _SQLITE_DATETIME_ADAPTERS_REGISTERED:
-        return
-    sqlite3.register_adapter(date, lambda value: value.isoformat())
-    sqlite3.register_adapter(datetime, lambda value: value.isoformat(" "))
-    _SQLITE_DATETIME_ADAPTERS_REGISTERED = True
+    return create_async_engine(
+        parsed_url.render_as_string(hide_password=False),
+        echo=echo,
+        future=True,
+        connect_args=resolved_connect_args,
+        **engine_options,
+    )
 
 
 def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

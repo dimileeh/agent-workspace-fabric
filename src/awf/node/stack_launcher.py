@@ -55,6 +55,7 @@ class WorkspaceSecretLeaseResolver(Protocol):
 
 class WorkspaceServiceExecutionError(Exception):
     """Raised when profile-declared workspace services fail to start."""
+
     pass
 
 
@@ -105,9 +106,7 @@ class ComposeStackLauncher:
             if secret_lease_resolution is not None
             else frozenset()
         )
-        suppressed_legacy_targets = satisfied_targets | legacy_provider_targets(
-            satisfied_providers
-        )
+        suppressed_legacy_targets = satisfied_targets | legacy_provider_targets(satisfied_providers)
         if self._auth_mount_resolver is not None:
             legacy_mounts = await asyncio.to_thread(
                 self._auth_mount_resolver.resolve,
@@ -116,9 +115,7 @@ class ComposeStackLauncher:
                 suppressed_providers=satisfied_providers,
             )
             auth_mounts.extend(
-                mount
-                for mount in legacy_mounts
-                if mount.target not in suppressed_legacy_targets
+                mount for mount in legacy_mounts if mount.target not in suppressed_legacy_targets
             )
         services = await asyncio.to_thread(
             profile_services,

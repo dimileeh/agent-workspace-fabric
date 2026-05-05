@@ -107,6 +107,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `docker system prune`
 **Docs Link:** [docs/REASON_CATALOG.md#insufficient_disk](#insufficient_disk)
 
+### INVALID_GITHUB_REPO
+**Problem:** A GitHub repository identifier or URL could not be parsed.
+**Likely Cause:** The PR adoption request used an unsupported repository format.
+**Operator Fix:** Use an `owner/repo` slug or a valid GitHub repository URL.
+**Related Command:** `awf workspace adopt-pr-monitor`
+**Docs Link:** [docs/REASON_CATALOG.md#invalid_github_repo](#invalid_github_repo)
+
 ### LOCAL_CONFIG_INVALID
 **Problem:** Local AWF configuration has issues that block reliable service use.
 **Likely Cause:** Invalid values in .env or missing required paths.
@@ -155,6 +162,55 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Fix the local AWF URL configuration and re-run doctor.
 **Related Command:** `awf doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#port_config_invalid](#port_config_invalid)
+
+### PR_ADOPTION_INPUT_REQUIRED
+**Problem:** A PR monitor adoption request omitted required input.
+**Likely Cause:** The request did not include enough repository or PR information to identify the PR.
+**Operator Fix:** Provide the repository and PR number, or use a complete GitHub PR URL.
+**Related Command:** `awf workspace adopt-pr-monitor`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_adoption_input_required](#pr_adoption_input_required)
+
+### PR_ADOPTION_POLICY_CONFLICT
+**Problem:** The requested PR cannot be adopted under the current workspace policy.
+**Likely Cause:** The PR targets an unsupported branch, conflicts with requested metadata, or violates adoption policy.
+**Operator Fix:** Review the PR target and adoption options, then retry with policy-compatible input.
+**Related Command:** `awf workspace adopt-pr-monitor`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_adoption_policy_conflict](#pr_adoption_policy_conflict)
+
+### PR_ALREADY_CLOSED
+**Problem:** The PR selected for monitor adoption is already closed.
+**Likely Cause:** The PR was closed before AWF could adopt monitoring.
+**Operator Fix:** Reopen the PR or adopt an active replacement PR.
+**Related Command:** `awf workspace adopt-pr-monitor`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_already_closed](#pr_already_closed)
+
+### PR_ALREADY_MERGED
+**Problem:** The PR selected for monitor adoption is already merged.
+**Likely Cause:** There is no open PR monitor work left for AWF to own.
+**Operator Fix:** No monitor adoption is needed; use workspace cleanup or status commands instead.
+**Related Command:** `awf workspace adopt-pr-monitor`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_already_merged](#pr_already_merged)
+
+### PR_METADATA_FETCH_FAILED
+**Problem:** AWF could not fetch GitHub metadata for the requested PR.
+**Likely Cause:** GitHub auth, network access, rate limits, or repository permissions blocked the metadata query.
+**Operator Fix:** Verify `gh auth status`, repository access, and network connectivity, then retry adoption.
+**Related Command:** `gh pr view`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_metadata_fetch_failed](#pr_metadata_fetch_failed)
+
+### PR_METADATA_INVALID
+**Problem:** GitHub returned PR metadata that AWF could not use safely.
+**Likely Cause:** Required PR fields were missing or had an unexpected shape.
+**Operator Fix:** Inspect the PR metadata with `gh pr view --json` and retry after GitHub/API data is consistent.
+**Related Command:** `gh pr view`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_metadata_invalid](#pr_metadata_invalid)
+
+### PR_NOT_FOUND
+**Problem:** The requested PR was not found.
+**Likely Cause:** The PR number is wrong, the repository is wrong, or the token lacks access.
+**Operator Fix:** Confirm the repository, PR number, and GitHub permissions.
+**Related Command:** `gh pr view`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_not_found](#pr_not_found)
 
 ### SERVICE_STATUS_COLLECTION_FAILED
 **Problem:** AWF service status checks could not be collected.

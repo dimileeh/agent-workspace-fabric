@@ -12,10 +12,7 @@ from awf.profiles.compose import profile_services
 from awf.profiles.resolver import ProfileResolver
 
 _FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "fixtures"
-    / "workspace_services"
-    / "redis_worker_app"
+    Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "redis_worker_app"
 )
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -71,9 +68,7 @@ def test_redis_worker_profile_renders_service_health_waits(
         "python /app/scripts/container_healthcheck.py worker",
     ]
     assert services["app"]["depends_on"] == {"redis": {"condition": "service_healthy"}}
-    assert services["worker"]["depends_on"] == {
-        "redis": {"condition": "service_healthy"}
-    }
+    assert services["worker"]["depends_on"] == {"redis": {"condition": "service_healthy"}}
     assert services["agent"]["depends_on"] == {
         "redis": {"condition": "service_healthy"},
         "app": {"condition": "service_healthy"},
@@ -88,9 +83,7 @@ def test_redis_worker_profile_renders_prefixed_named_volume_and_no_host_ports(
     parsed = _rendered_profile_compose(manager)
     services = parsed["services"]
 
-    assert parsed["volumes"] == {
-        "redis_data": {"name": "awf-ws_redis_worker-redis_data"}
-    }
+    assert parsed["volumes"] == {"redis_data": {"name": "awf-ws_redis_worker-redis_data"}}
     assert services["redis"]["volumes"] == ["redis_data:/data"]
     assert "ports" not in services["redis"]
     assert "ports" not in services["app"]

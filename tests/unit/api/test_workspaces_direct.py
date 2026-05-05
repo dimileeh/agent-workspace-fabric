@@ -6,7 +6,7 @@ coverage.py doesn't instrument the async handler bodies correctly in
 that path (known limitation: httpx's ASGITransport runs the coroutine
 in a context that ``sys.settrace`` doesn't fully follow).
 
-This file calls the route functions DIRECTLY with an in-memory
+This file calls the route functions DIRECTLY with a PostgreSQL-backed
 session, which instruments cleanly. Same business logic, different
 coverage path. Tests in both files together give us end-to-end
 confidence plus instrumented line coverage."""
@@ -31,22 +31,19 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
 )
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = make_session_factory(engine)
-    async with factory() as s:
-        yield s
-        await s.commit()
-    await engine.dispose()
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        async with factory() as s:
+            yield s
+            await s.commit()
 
 
 def _payload(**overrides: object) -> WorkspaceCreateRequest:

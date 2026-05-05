@@ -272,9 +272,11 @@ class TestWatchdogScan:
 
         run_one_scan(
             config=_cfg(["dimileeh/aira-web", "dimileeh/aira-agent"], tmp_path),
-            gh_lister=lambda repo: json.dumps({"not": "a list"})
-            if repo == "dimileeh/aira-web"
-            else json.dumps([{"headRefName": "awf/ws"}]),
+            gh_lister=lambda repo: (
+                json.dumps({"not": "a list"})
+                if repo == "dimileeh/aira-web"
+                else json.dumps([{"headRefName": "awf/ws"}])
+            ),
             process_lister=lambda: "",
             spawn_attach=spawn,
         )
@@ -462,7 +464,9 @@ class TestWatchdogLoopAndCli:
 
         assert flag.stop is True
 
-    def test_run_loop_exits_after_signal(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_run_loop_exits_after_signal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         handlers: dict[int, object] = {}
         scans: list[str] = []
 

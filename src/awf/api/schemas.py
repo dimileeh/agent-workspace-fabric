@@ -244,9 +244,7 @@ class WorkspaceCreateV2Request(BaseModel):
     resources: WorkspaceV2Resources = Field(
         default_factory=lambda: WorkspaceV2Resources(cpu=None, memory=None)
     )
-    preflight: WorkspaceLaunchPreflight = Field(
-        default_factory=lambda: WorkspaceLaunchPreflight()
-    )
+    preflight: WorkspaceLaunchPreflight = Field(default_factory=lambda: WorkspaceLaunchPreflight())
 
 
 class PullRequestMonitorAdoptionRequest(BaseModel):
@@ -688,9 +686,7 @@ class WorkspaceResponse(BaseModel):
 
     latest_queue_decision: QueueDecisionSummaryResponse | None = None
     active_resource_reservation: ResourceReservationSummaryResponse | None = None
-    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(
-        default_factory=list
-    )
+    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(default_factory=list)
     policy_findings: list[PolicyFindingResponse] = Field(
         default_factory=list,
         validation_alias="active_policy_findings",
@@ -886,9 +882,7 @@ class WorkspaceOverviewResponse(BaseModel):
     )
     pricing: WorkspacePricingMetadataResponse | None = None
     recovery: WorkspaceRecoverySummaryResponse | None = None
-    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(
-        default_factory=list
-    )
+    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(default_factory=list)
     provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
     status: WorkspaceStatus
     current_phase: str

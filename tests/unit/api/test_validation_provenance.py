@@ -1458,9 +1458,7 @@ async def test_validation_provenance_next_cursor_fetches_second_page(
 
     assert first_response.status_code == 200
     first_page = first_response.json()
-    assert [item["validation_run_id"] for item in first_page["items"]] == [
-        "vr_page_000000000001"
-    ]
+    assert [item["validation_run_id"] for item in first_page["items"]] == ["vr_page_000000000001"]
     assert first_page["has_more"] is True
     assert first_page["next_cursor"] is not None
 
@@ -1471,9 +1469,7 @@ async def test_validation_provenance_next_cursor_fetches_second_page(
 
     assert second_response.status_code == 200
     second_page = second_response.json()
-    assert [item["validation_run_id"] for item in second_page["items"]] == [
-        "vr_page_000000000002"
-    ]
+    assert [item["validation_run_id"] for item in second_page["items"]] == ["vr_page_000000000002"]
     assert second_page["has_more"] is False
     assert second_page["next_cursor"] is None
     assert second_page["cursor"] == first_page["next_cursor"]
@@ -1514,9 +1510,7 @@ async def test_validation_provenance_paginates_persisted_items_before_building_r
     assert [item.validation_run_id for item in response.items] == ["vr_build_window_000001"]
     assert response.has_more is True
     assert response.next_cursor is not None
-    assert [item["validation_run_id"] for item in built_items] == [
-        "vr_build_window_000001"
-    ]
+    assert [item["validation_run_id"] for item in built_items] == ["vr_build_window_000001"]
 
 
 @pytest.mark.unit
@@ -1553,9 +1547,7 @@ async def test_validation_provenance_paginates_stream_items_before_building_resp
     assert [(item.command_index, item.command) for item in response.items] == [(1, "uv sync")]
     assert response.has_more is True
     assert response.next_cursor is not None
-    assert [(item["command_index"], item["command"]) for item in built_items] == [
-        (1, "uv sync")
-    ]
+    assert [(item["command_index"], item["command"]) for item in built_items] == [(1, "uv sync")]
 
 
 @pytest.mark.unit

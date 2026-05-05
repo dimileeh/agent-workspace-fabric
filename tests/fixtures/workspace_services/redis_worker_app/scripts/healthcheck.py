@@ -19,19 +19,27 @@ def _check_redis() -> None:
 
 
 def _check_app() -> None:
-    body = urllib.request.urlopen(
-        os.environ["APP_BASE_URL"] + "/healthz",
-        timeout=10,
-    ).read().decode()
+    body = (
+        urllib.request.urlopen(
+            os.environ["APP_BASE_URL"] + "/healthz",
+            timeout=10,
+        )
+        .read()
+        .decode()
+    )
     assert body == "ok\n", body
     print(body, end="")
 
 
 def _check_worker() -> None:
-    body = urllib.request.urlopen(
-        os.environ["WORKER_STATUS_URL"],
-        timeout=10,
-    ).read().decode()
+    body = (
+        urllib.request.urlopen(
+            os.environ["WORKER_STATUS_URL"],
+            timeout=10,
+        )
+        .read()
+        .decode()
+    )
     assert body == EXPECTED_WORKER_RESULT, body
     print(body, end="")
 

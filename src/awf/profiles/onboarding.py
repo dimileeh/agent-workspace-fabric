@@ -271,7 +271,9 @@ def preview_project_onboarding(
 
     inspection = inspect_project(path)
     draft = draft_workspace_profile(inspection, template=template)
-    smoke_request = _smoke_request(inspection.path, draft.profile) if include_smoke_request else None
+    smoke_request = (
+        _smoke_request(inspection.path, draft.profile) if include_smoke_request else None
+    )
     return ProjectOnboardingPreview(
         path=inspection.path,
         inspection=inspection,
@@ -396,9 +398,7 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
 def _ensure_restricted_egress(profile: WorkspaceProfile) -> WorkspaceProfile:
     if profile.security.egress.mode == EgressMode.restricted:
         profile.security.egress.mode = EgressMode.restricted
-        profile.security.egress.allowlist_templates = list(
-            _DEFAULT_RESTRICTED_ALLOWLIST_TEMPLATES
-        )
+        profile.security.egress.allowlist_templates = list(_DEFAULT_RESTRICTED_ALLOWLIST_TEMPLATES)
     return profile
 
 
@@ -445,10 +445,7 @@ def _diagnostics_for(
     template: str,
 ) -> PreviewDiagnostics:
     declared_secrets = {
-        item
-        for secret in profile.secrets
-        for item in (secret.name, secret.target)
-        if item
+        item for secret in profile.secrets for item in (secret.name, secret.target) if item
     }
     missing_services: list[str] = []
     if template == "node-playwright":
@@ -654,11 +651,7 @@ def _compose_service_secret_names(service: Mapping[object, object]) -> tuple[str
 
 
 def _secret_placeholders(value: str) -> set[str]:
-    return {
-        name
-        for name in _PLACEHOLDER_RE.findall(value)
-        if _looks_like_secret_name(name)
-    }
+    return {name for name in _PLACEHOLDER_RE.findall(value) if _looks_like_secret_name(name)}
 
 
 def _looks_like_secret_name(name: str) -> bool:

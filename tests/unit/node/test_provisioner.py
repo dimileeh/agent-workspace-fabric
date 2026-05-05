@@ -1,4 +1,4 @@
-"""Provisioner tests — real GitManager against a throwaway git repo + SQLite DB.
+"""Provisioner tests — real GitManager against a throwaway git repo + PostgreSQL DB.
 
 We exercise the full provisioner flow rather than mocking git, because the whole
 point is the integration between state transitions and filesystem operations.
@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -25,7 +24,7 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
@@ -38,6 +37,7 @@ from awf.node.provisioner import (
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import EgressMode, ProfileSecret, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError
+from tests.postgres import postgres_test_engine
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -59,13 +59,8 @@ def origin_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -1076,9 +1071,7 @@ class TestOperatorControlRaces:
                 return "c" * 40
 
         class _DestroyAfterClaimProvisioner(Provisioner):
-            async def _load_and_claim(
-                self, session: AsyncSession, workspace_id: str
-            ) -> Any:
+            async def _load_and_claim(self, session: AsyncSession, workspace_id: str) -> Any:
                 ws = await super()._load_and_claim(session, workspace_id)
                 assert ws is not None
                 await _force_destroy_provisioning_workspace(session_factory, workspace_id)
@@ -1218,9 +1211,7 @@ class TestOperatorControlRaces:
     ) -> None:
         class _DestroyingFailingStackLauncher:
             async def launch(self, request: Any) -> object:
-                await _force_destroy_provisioning_workspace(
-                    session_factory, request.workspace_id
-                )
+                await _force_destroy_provisioning_workspace(session_factory, request.workspace_id)
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
@@ -1364,9 +1355,7 @@ class TestOperatorControlRaces:
     ) -> None:
         class _DestroyingStackLauncher:
             async def launch(self, request: Any) -> object:
-                await _force_destroy_provisioning_workspace(
-                    session_factory, request.workspace_id
-                )
+                await _force_destroy_provisioning_workspace(session_factory, request.workspace_id)
                 return ComposeProjectPaths(
                     project_dir=Path("/tmp/awf-compose/ws_launcher"),
                     compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),

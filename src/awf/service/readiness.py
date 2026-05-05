@@ -225,8 +225,10 @@ async def collect_core_readiness_report(
         )
     )
 
-    status: CoreReadinessStatus = "fail" if any(c.status == "fail" for c in checks) else (
-        "warn" if any(c.status == "warn" for c in checks) else "ok"
+    status: CoreReadinessStatus = (
+        "fail"
+        if any(c.status == "fail" for c in checks)
+        else ("warn" if any(c.status == "warn" for c in checks) else "ok")
     )
     return CoreReadinessReport(
         status=status,
@@ -258,9 +260,7 @@ def _service_status_check(payload: Mapping[str, object]) -> CoreReadinessCheck:
         status="ok" if ok else "fail",
         reason_code="SERVICE_STATUS_OK" if ok else "SERVICE_STATUS_NOT_READY",
         message=(
-            "service dependencies are ready"
-            if ok
-            else "service dependencies are not all ready"
+            "service dependencies are ready" if ok else "service dependencies are not all ready"
         ),
         evidence={
             "status": payload.get("status"),
@@ -546,7 +546,9 @@ def _failure_taxonomy_check(
     )
 
 
-def _generic_failure_findings(summary: FailureAnalysisSummary | Mapping[str, object]) -> list[dict[str, object]]:
+def _generic_failure_findings(
+    summary: FailureAnalysisSummary | Mapping[str, object],
+) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for group in _items(_get(summary, "failure_groups")):
         reason = _string(_get(group, "failure_reason")).lower()

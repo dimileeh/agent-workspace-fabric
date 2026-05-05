@@ -234,9 +234,7 @@ async def list_merge_queue_blockers_for_candidates(
             blocker_state = _blocking_state(blocker_candidate)
             if blocker_state is None:
                 continue
-            blockers.append(
-                _blocker_from_candidate(blocker_candidate, blocker_state=blocker_state)
-            )
+            blockers.append(_blocker_from_candidate(blocker_candidate, blocker_state=blocker_state))
     return blockers_by_candidate
 
 
@@ -692,9 +690,7 @@ async def _load_older_open_candidate_pool(
                 ),
             ),
         )
-        for (repo_url, base_branch), candidate in sorted(
-            latest_candidate_by_repo_base.items()
-        )
+        for (repo_url, base_branch), candidate in sorted(latest_candidate_by_repo_base.items())
     ]
     if not repo_base_conditions:
         return []

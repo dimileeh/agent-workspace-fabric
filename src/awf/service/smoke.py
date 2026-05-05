@@ -40,14 +40,10 @@ async def collect_smoke_report(
     phases: list[dict[str, Any]] = []
     overall: list[str] = []
 
-    phases.append(await _phase_service_readiness(
-        settings, mocked_local, service_collector
-    ))
+    phases.append(await _phase_service_readiness(settings, mocked_local, service_collector))
     overall.append(phases[-1]["status"])
 
-    phases.append(_phase_auth_readiness(
-        settings, mocked_local, auth_collector
-    ))
+    phases.append(_phase_auth_readiness(settings, mocked_local, auth_collector))
     overall.append(phases[-1]["status"])
 
     if project.exists() and (demo_path is None or _project_has_awf_profile(project)):
@@ -61,7 +57,10 @@ async def collect_smoke_report(
             "status": "fail",
             "reason_code": "SMOKE_DEMO_PROJECT_MISSING",
             "message": f"Project path does not resolve: {missing}",
-            "evidence": {"project": str(project), "demo_path": str(demo_path) if demo_path else None},
+            "evidence": {
+                "project": str(project),
+                "demo_path": str(demo_path) if demo_path else None,
+            },
             "action": "Provide a valid --project path or --demo-path pointing to a valid project.",
         }
         phases.append(profile_phase)
@@ -189,7 +188,8 @@ def _phase_auth_readiness(
     auth_status = result.get("status", "fail")
     providers = result.get("providers", {})
     agent_providers = {
-        name: p for name, p in providers.items()
+        name: p
+        for name, p in providers.items()
         if name != "docker" and p.get("credential_scope") != "not_observed"
     }
     usable = sum(1 for p in agent_providers.values() if p.get("ok", False))
@@ -252,9 +252,7 @@ def _phase_profile_preview(
             "action": "Verify the project is a valid AWF workspace project.",
         }
 
-    detected_template = getattr(
-        getattr(preview, "draft", None), "template", "unknown"
-    )
+    detected_template = getattr(getattr(preview, "draft", None), "template", "unknown")
     if detected_template == "unknown":
         return preview, {
             "name": "profile_preview",
@@ -265,9 +263,7 @@ def _phase_profile_preview(
             "action": "Add project structure files (pyproject.toml, package.json, etc.) or create .awf/workspace.yml manually.",
         }
 
-    confidence = getattr(
-        getattr(preview, "inspection", None), "confidence", "unknown"
-    )
+    confidence = getattr(getattr(preview, "inspection", None), "confidence", "unknown")
     return preview, {
         "name": "profile_preview",
         "status": "ok",
@@ -284,9 +280,7 @@ def _phase_profile_preview(
 
 def _extract_validation_commands(preview: Any) -> list[str]:
     try:
-        profile_phases = getattr(
-            getattr(preview, "draft", None), "profile", None
-        )
+        profile_phases = getattr(getattr(preview, "draft", None), "profile", None)
         if profile_phases is None:
             return []
         validate_commands = getattr(

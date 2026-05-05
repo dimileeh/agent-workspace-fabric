@@ -284,9 +284,7 @@ async def list_workspace_stale_reasons_response(
     has_more = len(rows) > bounded_limit
     return StaleReasonListResponse(
         items=[StaleReasonResponse.model_validate(row) for row in page_rows],
-        next_cursor=(
-            encode_bounded_list_cursor(offset + bounded_limit) if has_more else None
-        ),
+        next_cursor=(encode_bounded_list_cursor(offset + bounded_limit) if has_more else None),
         has_more=has_more,
         limit=bounded_limit,
         cursor=cursor,
@@ -331,9 +329,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         pricing=_overview_pricing_metadata(ws),
         recovery=observability["recovery"],
         coordination_warnings=coordination_warnings_from_task_policy(ws.task_policy),
-        provider_readiness_preflight=_provider_readiness_preflight_from_task_policy(
-            ws.task_policy
-        ),
+        provider_readiness_preflight=_provider_readiness_preflight_from_task_policy(ws.task_policy),
         status=WorkspaceStatus(ws.status),
         current_phase=ws.status,
         active_operation=active_operation.type if active_operation is not None else None,
@@ -472,9 +468,7 @@ def workspace_lifecycle_summary(
     terminal_after_stage: WorkspaceStatus | None = None
 
     events = (
-        ordered_events
-        if ordered_events is not None
-        else workspace_events_by_occurrence(workspace)
+        ordered_events if ordered_events is not None else workspace_events_by_occurrence(workspace)
     )
     for event in events:
         event_status = _coerce_workspace_status(event.new_state)
@@ -544,6 +538,7 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
     has_usage = False
 
     from sqlalchemy import inspect
+
     insp = inspect(workspace, raiseerr=False)
     if insp is not None and "operations" in insp.unloaded:
         raise RuntimeError("Workspace.operations must be eager-loaded to compute usage summary")
@@ -594,7 +589,11 @@ def workspace_usage_summary(workspace: Workspace) -> LlmUsageSummary:
                         currency = "MIXED"
                         cost_estimate = None
 
-                if isinstance(op_cost, (int, float)) and not isinstance(op_cost, bool) and currency != "MIXED":
+                if (
+                    isinstance(op_cost, (int, float))
+                    and not isinstance(op_cost, bool)
+                    and currency != "MIXED"
+                ):
                     if cost_estimate is None:
                         cost_estimate = 0.0
                     cost_estimate += float(op_cost)
@@ -649,9 +648,7 @@ def workspace_pricing_metadata(workspace: Workspace) -> PricingMetadata | None:
         return None
 
 
-_PRICING_UNIT_PATTERN = re.compile(
-    r"per_(?P<multiplier>\d+)(?P<suffix>[kKmMbB]?)_tokens$"
-)
+_PRICING_UNIT_PATTERN = re.compile(r"per_(?P<multiplier>\d+)(?P<suffix>[kKmMbB]?)_tokens$")
 
 _SUFFIX_MULTIPLIERS: dict[str, int] = {
     "k": 10**3,
@@ -755,9 +752,7 @@ def workspace_recovery_summary(
     ordered_events: Sequence[WorkspaceEvent] | None = None,
 ) -> WorkspaceRecoverySummary | None:
     events = list(
-        ordered_events
-        if ordered_events is not None
-        else workspace_events_by_occurrence(workspace)
+        ordered_events if ordered_events is not None else workspace_events_by_occurrence(workspace)
     )
     reverse_event = _latest_reverse_state_event(events)
     if reverse_event is None:
@@ -783,9 +778,7 @@ def workspace_recovery_summary(
     action = _recovery_action(payload_sources)
     recovery_mode = _recovery_mode(payload_sources)
     current_operation = (
-        _recovery_current_operation(active_operation)
-        if active_operation is not None
-        else None
+        _recovery_current_operation(active_operation) if active_operation is not None else None
     )
     payload = _bounded_payload(operation_payload or event_payload or reverse_payload)
     provider_recovery_view = provider_recovery_state_for_workspace(workspace)
@@ -961,6 +954,7 @@ def _latest_recovery_operation(
     active_only: bool,
 ) -> _RecoveryOperationLike | None:
     from sqlalchemy import inspect
+
     insp = inspect(workspace, raiseerr=False)
     if insp is not None and "operations" in insp.unloaded:
         raise ValueError("operations relationship must be preloaded")
@@ -993,10 +987,7 @@ def _is_recovery_operation(operation: object, *, active_only: bool) -> bool:
     if source == _PR_MONITOR_SOURCE or owner == _PR_MONITOR_SOURCE:
         return True
 
-    return (
-        source == _OPERATOR_API_SOURCE
-        and payload.get("recovery_mode") in _RECOVERY_MODES
-    )
+    return source == _OPERATOR_API_SOURCE and payload.get("recovery_mode") in _RECOVERY_MODES
 
 
 def _operation_sort_key(operation: _RecoveryOperationLike) -> tuple[datetime, str]:
@@ -1127,9 +1118,7 @@ def _recovery_summary_text(
     if action_label is not None:
         parts.append(f"AWF dispatched {action_label}.")
     if current_operation is not None:
-        parts.append(
-            f"current {current_operation.type} recovery is {current_operation.status}."
-        )
+        parts.append(f"current {current_operation.type} recovery is {current_operation.status}.")
     workspace_status = getattr(workspace, "status", None)
     if isinstance(workspace_status, str) and workspace_status:
         parts.append(f"workspace is {workspace_status}.")

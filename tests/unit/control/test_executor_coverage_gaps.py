@@ -375,8 +375,7 @@ def test_failure_message_coverage_not_found_ignores_gaps(tmp_path: Path) -> None
 @pytest.mark.unit
 def test_failure_message_caps_gap_list_at_five(tmp_path: Path) -> None:
     gaps: list[dict[str, object]] = [
-        {"file": f"src/file_{i:02d}.py", "missing_lines": [f"{i}0-{i}9"]}
-        for i in range(10)
+        {"file": f"src/file_{i:02d}.py", "missing_lines": [f"{i}0-{i}9"]} for i in range(10)
     ]
     result = ValidationResult(
         coverage=_coverage(

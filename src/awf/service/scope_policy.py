@@ -96,11 +96,7 @@ def out_of_scope_policy_for_workspace(workspace: Workspace) -> OutOfScopeChangeP
         or _nested_dict(workspace.resolved_profile, "task_policy", "out_of_scope_changes")
     )
 
-    mode = (
-        "block"
-        if profile_policy.mode == "block" or task_policy.mode == "block"
-        else "warn"
-    )
+    mode = "block" if profile_policy.mode == "block" or task_policy.mode == "block" else "warn"
     allowlist_patterns = [
         *profile_policy.allowlist_patterns,
         *task_policy.allowlist_patterns,
@@ -234,9 +230,7 @@ def _policy_from_profile_section(value: dict[str, object] | None) -> OutOfScopeC
     allowlist = value.get("allowlist_patterns")
     return OutOfScopeChangePolicy(
         mode="block" if mode == "block" else "warn",
-        allowlist_patterns=[
-            item for item in allowlist if isinstance(item, str)
-        ]
+        allowlist_patterns=[item for item in allowlist if isinstance(item, str)]
         if isinstance(allowlist, list)
         else [],
     )

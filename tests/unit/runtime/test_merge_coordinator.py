@@ -228,9 +228,12 @@ class TestPostgresAdvisoryMergeCoordinator:
 
         monkeypatch.setattr(merge_coordinator_mod.asyncpg, "connect", _connect)
 
-        assert await merge_coordinator_mod._connect_asyncpg(  # noqa: SLF001
-            "postgresql://awf@db/awf"
-        ) is connection
+        assert (
+            await merge_coordinator_mod._connect_asyncpg(  # noqa: SLF001
+                "postgresql://awf@db/awf"
+            )
+            is connection
+        )
 
     @pytest.mark.unit
     async def test_context_manager_acquires_before_body_and_releases_after_body(self) -> None:

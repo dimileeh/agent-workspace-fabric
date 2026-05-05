@@ -377,9 +377,7 @@ class GitCheckoutTargetBranchStateProvider(TargetBranchStateProvider):
             ["diff", "--name-only", f"{base_sha}..HEAD"],
             operation="target_branch_state.diff_name_only",
         )
-        changed_paths = tuple(
-            line for line in diff_result.stdout.strip().split("\n") if line
-        )
+        changed_paths = tuple(line for line in diff_result.stdout.strip().split("\n") if line)
 
         return TargetBranchState(
             branch=branch,

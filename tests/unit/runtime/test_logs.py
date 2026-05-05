@@ -827,12 +827,12 @@ async def test_stream_compose_service_logs_terminates_process_on_cancel(tmp_path
 
     assert process.terminated is True
     assert process.killed is False
-    assert (
-        tmp_path / "logs" / "ws_compose_logs" / "services.compose.stdout.log"
-    ).read_text(encoding="utf-8") == "service out\n"
-    assert (
-        tmp_path / "logs" / "ws_compose_logs" / "services.compose.stderr.log"
-    ).read_text(encoding="utf-8") == "service err\n"
+    assert (tmp_path / "logs" / "ws_compose_logs" / "services.compose.stdout.log").read_text(
+        encoding="utf-8"
+    ) == "service out\n"
+    assert (tmp_path / "logs" / "ws_compose_logs" / "services.compose.stderr.log").read_text(
+        encoding="utf-8"
+    ) == "service err\n"
 
 
 @pytest.mark.unit
@@ -870,7 +870,9 @@ async def test_stream_compose_service_logs_cancel_does_not_signal_already_exited
 ) -> None:
     process = _AlreadyExitedComposeLogsProcess()
 
-    async def process_factory(*_args: object, **_kwargs: object) -> _AlreadyExitedComposeLogsProcess:
+    async def process_factory(
+        *_args: object, **_kwargs: object
+    ) -> _AlreadyExitedComposeLogsProcess:
         return process
 
     task = asyncio.create_task(

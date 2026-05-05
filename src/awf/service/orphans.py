@@ -32,9 +32,7 @@ _AWF_PROJECT_PREFIXES = ("awf_", "awf-")
 _RESOURCE_KINDS = ("container", "network", "volume", "worktree")
 _WORKSPACE_ID_PATTERN = r"ws_[A-Za-z0-9][A-Za-z0-9_]*"
 _WORKSPACE_ID_RE = re.compile(rf"^{_WORKSPACE_ID_PATTERN}$")
-_HYPHEN_DELIMITED_MANAGED_TAIL_RE = re.compile(
-    rf"^(?P<workspace_id>{_WORKSPACE_ID_PATTERN})-"
-)
+_HYPHEN_DELIMITED_MANAGED_TAIL_RE = re.compile(rf"^(?P<workspace_id>{_WORKSPACE_ID_PATTERN})-")
 
 
 class CompletedProcessLike(Protocol):
@@ -777,7 +775,11 @@ def _workspace_id_from_managed_name(
         return workspace_id
 
     workspace_id = _legacy_workspace_id_from_managed_tail(tail)
-    return workspace_id if workspace_id is not None and _looks_like_workspace_id(workspace_id) else None
+    return (
+        workspace_id
+        if workspace_id is not None and _looks_like_workspace_id(workspace_id)
+        else None
+    )
 
 
 def _managed_name_tail(name: str) -> str | None:

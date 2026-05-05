@@ -10,12 +10,11 @@ from awf.profiles.compose import profile_services
 from awf.profiles.models import DockerMode, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolver
 
-_FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "dockerized_app"
+_FIXTURE = (
+    Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "dockerized_app"
+)
 _POSTGRES_FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "fixtures"
-    / "workspace_services"
-    / "python_postgres_app"
+    Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "python_postgres_app"
 )
 _NODE_BROWSER_FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -24,10 +23,7 @@ _NODE_BROWSER_FIXTURE = (
     / "node_next_browser_app"
 )
 _REDIS_WORKER_FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "fixtures"
-    / "workspace_services"
-    / "redis_worker_app"
+    Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "redis_worker_app"
 )
 
 
@@ -230,7 +226,7 @@ def test_python_postgres_workspace_services_profile_preserves_service_schema() -
     }
     assert app.depends_on == ["postgres"]
     assert app.healthcheck_cmd == (
-        "python -c \"import urllib.request; "
+        'python -c "import urllib.request; '
         "urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).read()\""
     )
     assert app.command == "python /app/app.py"
@@ -238,14 +234,14 @@ def test_python_postgres_workspace_services_profile_preserves_service_schema() -
 
     assert [command.command for command in profile.phases.setup] == [
         (
-            "python -c \"import os, urllib.request; "
+            'python -c "import os, urllib.request; '
             "body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', timeout=10)"
             ".read().decode(); assert body == 'setup ok\\n', body; print(body, end='')\""
         )
     ]
     assert [command.command for command in profile.phases.validate_commands] == [
         (
-            "python -c \"import os, urllib.request; "
+            'python -c "import os, urllib.request; '
             "body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/validate', timeout=10)"
             ".read().decode(); assert body == 'validated awf-db-profile-fixture\\n', body; "
             "print(body, end='')\""
@@ -255,7 +251,7 @@ def test_python_postgres_workspace_services_profile_preserves_service_schema() -
         (
             "app",
             (
-                "python -c \"import os, urllib.request; "
+                'python -c "import os, urllib.request; '
                 "body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/healthz', "
                 "timeout=10).read().decode(); assert body == 'ok\\n', body; "
                 "print(body, end='')\""
@@ -274,12 +270,11 @@ def test_python_postgres_profile_declares_workspace_local_db_hooks() -> None:
         "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
     )
     assert [
-        (command.command, command.timeout_seconds)
-        for command in profile.database.generated_setup
+        (command.command, command.timeout_seconds) for command in profile.database.generated_setup
     ] == [
         (
             (
-                "python -c \"import os, urllib.request; "
+                'python -c "import os, urllib.request; '
                 "assert os.environ['DATABASE_URL'].startswith('postgresql://awf:'); "
                 "body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', "
                 "timeout=10).read().decode(); assert body == 'setup ok\\n', body; "
@@ -294,7 +289,7 @@ def test_python_postgres_profile_declares_workspace_local_db_hooks() -> None:
     ] == [
         (
             (
-                "python -c \"import os, urllib.request; "
+                'python -c "import os, urllib.request; '
                 "assert os.environ['DATABASE_URL'].startswith('postgresql://awf:'); "
                 "body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', "
                 "timeout=10).read().decode(); assert body == 'setup ok\\n', body; "
@@ -419,9 +414,7 @@ def test_node_next_browser_workspace_services_profile_preserves_service_schema()
     assert browser.ports == []
     assert browser.command == "node /app/browser/validator-server.mjs"
 
-    assert [command.command for command in profile.phases.setup] == [
-        "node scripts/setup.mjs"
-    ]
+    assert [command.command for command in profile.phases.setup] == ["node scripts/setup.mjs"]
     assert [command.command for command in profile.phases.validate_commands] == [
         "node scripts/validate-browser.mjs"
     ]
@@ -522,8 +515,7 @@ def test_redis_worker_workspace_services_profile_preserves_service_schema() -> N
         ("python scripts/setup.py", 30)
     ]
     assert [
-        (command.command, command.timeout_seconds)
-        for command in profile.phases.validate_commands
+        (command.command, command.timeout_seconds) for command in profile.phases.validate_commands
     ] == [("python scripts/validate.py", 30)]
     assert [
         (check.name, check.command, check.timeout_seconds, check.attempt_timeout_seconds)

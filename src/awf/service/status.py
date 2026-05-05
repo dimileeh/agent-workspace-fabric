@@ -111,6 +111,7 @@ async def collect_service_status(
     resolved_socket_exists = socket_exists or Path.exists
     resolved_workspace_lookup: WorkspaceIdLookup
     if workspace_id_lookup is None:
+
         async def _settings_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
             return await _default_workspace_id_lookup(
                 database_url,
@@ -204,8 +205,7 @@ async def collect_service_status(
         "workspace_cleanup": workspace_cleanup_check,
     }
     overall_ok = (
-        all(bool(check["ok"]) for check in checks.values())
-        and agent_readiness["status"] == "ok"
+        all(bool(check["ok"]) for check in checks.values()) and agent_readiness["status"] == "ok"
     )
     return {
         "service": settings.service_name,
@@ -444,9 +444,7 @@ def _network_posture_check_payload(workspace_view: WorkspaceIdView) -> CheckPayl
         "ok": True,
         "status": "warn" if open_count else "ok",
         "reason": (
-            "NETWORK_POSTURE_OPEN_ACTIVE"
-            if open_count
-            else "NETWORK_POSTURE_NO_ACTIVE_OPEN"
+            "NETWORK_POSTURE_OPEN_ACTIVE" if open_count else "NETWORK_POSTURE_NO_ACTIVE_OPEN"
         ),
         "active_counts_by_posture": active_counts,
         "active_restricted_templates": sorted(set(active_restricted_templates)),

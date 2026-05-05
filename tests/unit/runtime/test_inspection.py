@@ -224,8 +224,7 @@ def test_runtime_helper_fallbacks() -> None:
     assert inspection._service_name({"ID": "abc123"}, {"Config": {"Labels": []}}) == "abc123"
     assert inspection._service_name({}, {}) == "unknown"
     assert (
-        inspection._command_from({}, {"Config": {"Cmd": ["sleep", "infinity"]}})
-        == "sleep infinity"
+        inspection._command_from({}, {"Config": {"Cmd": ["sleep", "infinity"]}}) == "sleep infinity"
     )
     assert (
         inspection._command_from({"Command": "echo hi"}, {"Config": {"Cmd": ["sleep"]}})

@@ -233,7 +233,11 @@ def _loaded_collection(obj: object, name: str) -> list[Any]:
 
 def _candidate_updated_at(candidate: MergeCandidate) -> datetime:
     updated_at = getattr(candidate, "updated_at", None)
-    return _ensure_utc(updated_at) if isinstance(updated_at, datetime) else datetime.min.replace(tzinfo=UTC)
+    return (
+        _ensure_utc(updated_at)
+        if isinstance(updated_at, datetime)
+        else datetime.min.replace(tzinfo=UTC)
+    )
 
 
 def _ensure_utc(value: datetime) -> datetime:

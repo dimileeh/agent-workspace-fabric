@@ -305,7 +305,9 @@ def _operation_envelope(operation: Operation, *, event_type: str) -> dict[str, A
             "kind": CallbackEventKind.operation.value,
             "type": event_type,
             "source_id": operation.id,
-            "occurred_at": _isoformat(operation.finished_at or operation.started_at or operation.created_at),
+            "occurred_at": _isoformat(
+                operation.finished_at or operation.started_at or operation.created_at
+            ),
         },
         "operation": {
             "id": operation.id,

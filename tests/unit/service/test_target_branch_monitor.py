@@ -11,7 +11,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -21,7 +20,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.service.alembic_resolver import (
     AlembicResolveResult,
     AlembicResolveStatus,
@@ -38,11 +37,13 @@ from awf.service.target_branch_monitor import (
     reconcile_and_refresh_stale_candidates,
     run_target_branch_reconcile_once,
 )
+from tests.postgres import postgres_test_engine
 
 
 def async_lambda(value: TargetBranchState) -> Any:
     async def _fn(_base_sha: str) -> TargetBranchState:
         return value
+
     return _fn
 
 
@@ -204,9 +205,7 @@ async def test_monitor_policy_blocked_result_does_not_stage_commit_or_push(
     payload = result.to_dict()
     assert payload["commit_allowed"] is False
     assert payload["policy_reason_code"] == "TARGET_BRANCH_COMMIT_POLICY_DENIED"
-    assert payload["changed_paths"] == [
-        "migrations/versions/merge001_merge_alembic_heads.py"
-    ]
+    assert payload["changed_paths"] == ["migrations/versions/merge001_merge_alembic_heads.py"]
 
 
 @pytest.mark.unit
@@ -396,13 +395,8 @@ _BASE_BRANCH = "development"
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 _pr_counter = 0
@@ -540,9 +534,7 @@ class TestReconcileAndRefreshStaleCandidates:
         assert all(s.stale is True for s in result.candidate_refreshes)
 
         async with factory() as session:
-            c1 = await MergeCandidateRepository(session).get_by_attempt_id(
-                _attempt_id_1
-            )
+            c1 = await MergeCandidateRepository(session).get_by_attempt_id(_attempt_id_1)
         assert c1 is not None
         assert c1.stale is True
 
@@ -899,12 +891,14 @@ class TestReconcileAndRefreshStaleCandidates:
                 repo_url=_REPO_URL,
                 branch=_BASE_BRANCH,
                 session_factory=factory,
-                target_state_for_base_sha=async_lambda(TargetBranchState(
-                    branch=_BASE_BRANCH,
-                    head_sha="c" * 40,
-                    changed_paths=(),
-                    advanced_commits=0,
-                )),
+                target_state_for_base_sha=async_lambda(
+                    TargetBranchState(
+                        branch=_BASE_BRANCH,
+                        head_sha="c" * 40,
+                        changed_paths=(),
+                        advanced_commits=0,
+                    )
+                ),
             )
 
     @pytest.mark.unit
@@ -935,12 +929,14 @@ class TestReconcileAndRefreshStaleCandidates:
             repo_url=_REPO_URL,
             branch=_BASE_BRANCH,
             session_factory=factory,
-            target_state_for_base_sha=async_lambda(TargetBranchState(
-                branch=_BASE_BRANCH,
-                head_sha="c" * 40,
-                changed_paths=("src/awf/api/routes/health.py",),
-                advanced_commits=1,
-            )),
+            target_state_for_base_sha=async_lambda(
+                TargetBranchState(
+                    branch=_BASE_BRANCH,
+                    head_sha="c" * 40,
+                    changed_paths=("src/awf/api/routes/health.py",),
+                    advanced_commits=1,
+                )
+            ),
         )
 
         assert len(result.candidate_refreshes) == 1
@@ -965,12 +961,14 @@ class TestReconcileAndRefreshStaleCandidates:
             repo_url=_REPO_URL,
             branch=_BASE_BRANCH,
             session_factory=factory,
-            target_state_for_base_sha=async_lambda(TargetBranchState(
-                branch=_BASE_BRANCH,
-                head_sha="c" * 40,
-                changed_paths=(),
-                advanced_commits=0,
-            )),
+            target_state_for_base_sha=async_lambda(
+                TargetBranchState(
+                    branch=_BASE_BRANCH,
+                    head_sha="c" * 40,
+                    changed_paths=(),
+                    advanced_commits=0,
+                )
+            ),
         )
 
         assert result.candidate_refreshes == ()
@@ -1056,20 +1054,38 @@ class TestGitCheckoutTargetBranchStateProvider:
         assert first.head_sha == "c" * 40
         assert second.head_sha == "c" * 40
         assert len(runner.calls) == 5
-        assert runner.calls[0].args == [
-            "git", "-C", str(tmp_path), "rev-parse", "HEAD"
-        ]
+        assert runner.calls[0].args == ["git", "-C", str(tmp_path), "rev-parse", "HEAD"]
         assert runner.calls[1].args == [
-            "git", "-C", str(tmp_path), "rev-list", "--count", "a" * 40 + "..HEAD"
+            "git",
+            "-C",
+            str(tmp_path),
+            "rev-list",
+            "--count",
+            "a" * 40 + "..HEAD",
         ]
         assert runner.calls[2].args == [
-            "git", "-C", str(tmp_path), "diff", "--name-only", "a" * 40 + "..HEAD"
+            "git",
+            "-C",
+            str(tmp_path),
+            "diff",
+            "--name-only",
+            "a" * 40 + "..HEAD",
         ]
         assert runner.calls[3].args == [
-            "git", "-C", str(tmp_path), "rev-list", "--count", "b" * 40 + "..HEAD"
+            "git",
+            "-C",
+            str(tmp_path),
+            "rev-list",
+            "--count",
+            "b" * 40 + "..HEAD",
         ]
         assert runner.calls[4].args == [
-            "git", "-C", str(tmp_path), "diff", "--name-only", "b" * 40 + "..HEAD"
+            "git",
+            "-C",
+            str(tmp_path),
+            "diff",
+            "--name-only",
+            "b" * 40 + "..HEAD",
         ]
 
 
@@ -1137,9 +1153,7 @@ class TestTargetBranchMonitorResult:
         assert payload["status"] == "committed"
         assert payload["commit_sha"] == "abc123"
         assert payload["pushed"] is True
-        assert payload["changed_paths"] == [
-            "migrations/versions/merge001_merge_alembic_heads.py"
-        ]
+        assert payload["changed_paths"] == ["migrations/versions/merge001_merge_alembic_heads.py"]
         resolver = payload["resolver_results"][0]
         assert resolver["reason_code"] == "ALEMBIC_HEADS_MERGED"
         assert resolver["heads"] == ["left001", "right001"]

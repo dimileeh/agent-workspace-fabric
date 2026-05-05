@@ -3,36 +3,28 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import TaskAttempt
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_engine
+from tests.postgres import postgres_empty_test_url, postgres_test_session
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    factory = make_session_factory(engine)
-    async with factory() as s:
+    async with postgres_test_session() as s:
         yield s
-
-    await engine.dispose()
 
 
 async def _workspace(
@@ -368,42 +360,51 @@ class TestTaskAttemptRepository:
 
 class TestTaskAttemptMigration:
     @pytest.mark.unit
-    def test_task_attempt_migration_creates_tables(
+    async def test_task_attempt_migration_creates_tables(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         repo_root = Path(__file__).resolve().parents[3]
-        db_path = tmp_path / "awf.db"
-        env = {
-            **os.environ,
-            "AWF_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
-        }
+        async with postgres_empty_test_url() as database_url:
+            env = {
+                **os.environ,
+                "AWF_DATABASE_URL": database_url,
+            }
 
-        monkeypatch.chdir(repo_root)
-        subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
-            cwd=repo_root,
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+            monkeypatch.chdir(repo_root)
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+                cwd=repo_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
-        with sqlite3.connect(db_path) as conn:
-            tables = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
-            task_columns = {
-                row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
-            }
-            attempt_columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(task_attempts)").fetchall()
-            }
+            engine = make_engine(database_url)
+            try:
+                async with engine.connect() as conn:
+                    tables = set(
+                        await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names())
+                    )
+                    task_columns = set(
+                        await conn.run_sync(
+                            lambda sync_conn: [
+                                column["name"] for column in inspect(sync_conn).get_columns("tasks")
+                            ]
+                        )
+                    )
+                    attempt_columns = set(
+                        await conn.run_sync(
+                            lambda sync_conn: [
+                                column["name"]
+                                for column in inspect(sync_conn).get_columns("task_attempts")
+                            ]
+                        )
+                    )
+            finally:
+                await engine.dispose()
 
         assert "tasks" in tables
         assert "task_attempts" in tables

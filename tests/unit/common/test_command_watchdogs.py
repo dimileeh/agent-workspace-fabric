@@ -48,11 +48,7 @@ async def test_asyncio_runner_wall_timeout_terminates_and_preserves_partial_outp
         [
             sys.executable,
             "-c",
-            (
-                "import sys,time;"
-                "sys.stdout.write('started\\n');sys.stdout.flush();"
-                "time.sleep(10)"
-            ),
+            ("import sys,time;sys.stdout.write('started\\n');sys.stdout.flush();time.sleep(10)"),
         ],
         on_stdout=stdout.append,
         on_stderr=stderr.append,
@@ -77,11 +73,7 @@ async def test_asyncio_runner_idle_timeout_terminates_when_output_stalls() -> No
         [
             sys.executable,
             "-c",
-            (
-                "import sys,time;"
-                "sys.stdout.write('first\\n');sys.stdout.flush();"
-                "time.sleep(10)"
-            ),
+            ("import sys,time;sys.stdout.write('first\\n');sys.stdout.flush();time.sleep(10)"),
         ],
         on_stdout=stdout.append,
         on_stderr=stderr.append,

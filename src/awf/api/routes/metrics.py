@@ -163,13 +163,23 @@ class SloMetricsSummaryResponse(BaseModel):
     since_hours: int
 
     creation_total: int = Field(description="Workspaces created in the window.")
-    creation_succeeded: int = Field(description="Workspaces created in the window that reached completed.")
-    creation_failed: int = Field(description="Workspaces created in the window that reached failed.")
-    creation_cancelled: int = Field(description="Workspaces created in the window that reached cancelled.")
+    creation_succeeded: int = Field(
+        description="Workspaces created in the window that reached completed."
+    )
+    creation_failed: int = Field(
+        description="Workspaces created in the window that reached failed."
+    )
+    creation_cancelled: int = Field(
+        description="Workspaces created in the window that reached cancelled."
+    )
 
     cleanup_total: int = Field(description="Destroy operations finished in the window.")
-    cleanup_succeeded: int = Field(description="Destroy operations finished in the window with succeeded status.")
-    cleanup_failure_count: int = Field(description="Destroy operations finished in the window with failed status.")
+    cleanup_succeeded: int = Field(
+        description="Destroy operations finished in the window with succeeded status."
+    )
+    cleanup_failure_count: int = Field(
+        description="Destroy operations finished in the window with failed status."
+    )
 
     stuck_running_count: int = Field(
         description="Non-terminal workspaces beyond 2x SLA without a failure reason code.",
@@ -178,7 +188,9 @@ class SloMetricsSummaryResponse(BaseModel):
         description="Non-terminal workspaces beyond 2x SLA with a failure reason code.",
     )
 
-    recovery_total: int = Field(description="Recovery operations (remonitor/rebase/retry) created in the window.")
+    recovery_total: int = Field(
+        description="Recovery operations (remonitor/rebase/retry) created in the window."
+    )
     recovery_succeeded: int = Field(description="Recovery operations that succeeded.")
     recovery_failed_count: int = Field(description="Recovery operations that failed.")
 

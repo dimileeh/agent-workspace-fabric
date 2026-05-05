@@ -79,7 +79,9 @@ async def adoption_client(
 
 
 @pytest.mark.unit
-async def test_adopt_pr_requires_api_token(adoption_client: tuple[AsyncClient, _MetadataFetcher]) -> None:
+async def test_adopt_pr_requires_api_token(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
     client, _fetcher = adoption_client
 
     response = await client.post(

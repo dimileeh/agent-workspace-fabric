@@ -21,26 +21,21 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from scripts.run_awf import (
     TaskConfig,
     _mark_orphan_workspace_failed,
     _run_task_with_failure_guard,
 )
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 async def _seed_ws(

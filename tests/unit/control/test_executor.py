@@ -1,4 +1,4 @@
-"""Executor tests with FakeCommandRunner + in-memory SQLite.
+"""Executor tests with FakeCommandRunner + PostgreSQL.
 
 Each test drives one workspace through the full pipeline with canned
 subprocess output. The single runner handles all compose/adapter/pr calls
@@ -24,10 +24,9 @@ from awf.control.executor import (
     WorkspaceExecutor,
     _apply_baseline_coverage_ratchet,
 )
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -40,6 +39,7 @@ from awf.runtime.validation import (
     ValidationResult,
     ValidationRunner,
 )
+from tests.postgres import postgres_test_engine
 
 from .executor_paths import _test_worktrees_root
 
@@ -48,15 +48,10 @@ _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "worksp
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    session_factory = make_session_factory(engine)
-    session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
-    try:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
         yield session_factory
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -118,6 +113,10 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
 def _created_pr_body(fake: FakeCommandRunner) -> str:
     create_call = next(call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "create"])
     return create_call[create_call.index("--body") + 1]
+
+
+def _json_value(value: object) -> object:
+    return json.loads(value) if isinstance(value, str) else value
 
 
 class TestCoverageBaselineRatchet:
@@ -243,6 +242,7 @@ async def _seed_ready_workspace(
             (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
         return ws.id
 
+
 class TestHappyPath:
     @pytest.mark.unit
     async def test_claim_ready_persists_execution_claim(
@@ -265,7 +265,7 @@ class TestHappyPath:
             assert persisted is not None
             assert persisted.status == WorkspaceStatus.running.value
             assert persisted.execution_claimed_by == "worker-a"
-            assert persisted.execution_claim_expires_at == lease_expires_at.replace(tzinfo=None)
+            assert persisted.execution_claim_expires_at == lease_expires_at
 
     @pytest.mark.unit
     async def test_drives_ready_to_completed_and_records_pr_url(
@@ -841,9 +841,7 @@ class TestHappyPath:
                     )
                 return AgentRunResult(returncode=0, stdout="ok", stderr="")
 
-        monkeypatch.setitem(
-            adapter_base._REGISTRY, AgentRuntime.codex, _IdleConformanceAdapter
-        )
+        monkeypatch.setitem(adapter_base._REGISTRY, AgentRuntime.codex, _IdleConformanceAdapter)
 
         executor = WorkspaceExecutor(
             session_factory=factory,
@@ -864,7 +862,9 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="")  # before planning git status
         fake.queue_result(returncode=0, stdout="sha_pre\n")  # rev-parse HEAD baseline
         # Planning adapter (custom) — no runner call
-        fake.queue_result(returncode=0, stdout="")  # changed_paths after planning (plan committed, not dirty)
+        fake.queue_result(
+            returncode=0, stdout=""
+        )  # changed_paths after planning (plan committed, not dirty)
         fake.queue_result(  # committed_paths_since (planning committed the plan)
             returncode=0,
             stdout=f"docs/awf-plans/{ws_id}.md\n",
@@ -933,16 +933,14 @@ class TestHappyPath:
         # plan-artifact commit made during planning would inflate
         # ``implementation_commit_count``.
         revlist_calls = [
-            call for call in fake.calls
-            if "rev-list" in call.args and "--count" in call.args
+            call for call in fake.calls if "rev-list" in call.args and "--count" in call.args
         ]
         assert len(revlist_calls) == 1
         assert "sha_post..HEAD" in revlist_calls[0].args
         post_stall_diff = [
-            call for call in fake.calls
-            if "diff" in call.args
-            and "--name-only" in call.args
-            and "sha_post..HEAD" in call.args
+            call
+            for call in fake.calls
+            if "diff" in call.args and "--name-only" in call.args and "sha_post..HEAD" in call.args
         ]
         assert len(post_stall_diff) == 1
 
@@ -1033,9 +1031,7 @@ class TestHappyPath:
                     )
                 return AgentRunResult(returncode=0, stdout="ok", stderr="")
 
-        monkeypatch.setitem(
-            adapter_base._REGISTRY, AgentRuntime.codex, _IdleConformanceAdapter
-        )
+        monkeypatch.setitem(adapter_base._REGISTRY, AgentRuntime.codex, _IdleConformanceAdapter)
 
         executor = WorkspaceExecutor(
             session_factory=factory,
@@ -1056,8 +1052,7 @@ class TestHappyPath:
         # the planning scope check does not fire on it.
         stale_only_status = f"?? docs/awf-plans/{ws_id}.conformance.json\n"
         plan_plus_stale_status = (
-            f"?? docs/awf-plans/{ws_id}.md\n"
-            f"?? docs/awf-plans/{ws_id}.conformance.json\n"
+            f"?? docs/awf-plans/{ws_id}.md\n?? docs/awf-plans/{ws_id}.conformance.json\n"
         )
 
         fake.queue_result(  # before planning git status (stale JSON already present)
@@ -1150,12 +1145,16 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
         fake.queue_result(returncode=0, stdout="fixed gap")  # iteration execute
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n")
+        fake.queue_result(
+            returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n"
+        )
         fake.queue_result(  # compare satisfied
             returncode=0,
             stdout='{"status":"satisfied","summary":"done","gaps":[]}',
         )
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n")
+        fake.queue_result(
+            returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n"
+        )
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)
@@ -1176,9 +1175,7 @@ class TestHappyPath:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             failed_events = [
-                event
-                for event in ws.events
-                if event.reason_code == AGENT_STALLED_IN_CONFORMANCE
+                event for event in ws.events if event.reason_code == AGENT_STALLED_IN_CONFORMANCE
             ]
             assert failed_events == []
             stall_events = [
@@ -1265,9 +1262,7 @@ class TestHappyPath:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert [
-                event
-                for event in ws.events
-                if event.reason_code == AGENT_STALLED_IN_CONFORMANCE
+                event for event in ws.events if event.reason_code == AGENT_STALLED_IN_CONFORMANCE
             ] == []
 
     @pytest.mark.unit
@@ -1662,7 +1657,7 @@ class TestHappyPath:
         assert run["tier"] == 1
         assert isinstance(run["command_set_hash"], str)
         assert len(run["command_set_hash"]) == 64
-        assert json.loads(run["commands"]) == [
+        assert _json_value(run["commands"]) == [
             {
                 "phase": "validate",
                 "command_index": 1,
@@ -1695,14 +1690,14 @@ class TestHappyPath:
         assert isinstance(run["profile_source"], str)
         assert len(run["resolved_profile_digest"]) == 64
         assert len(run["environment_identity_digest"]) == 64
-        identity_inputs = json.loads(run["environment_identity_inputs"])
+        identity_inputs = _json_value(run["environment_identity_inputs"])
         assert identity_inputs["schema_version"] == 1
         assert "runtime" in identity_inputs
         assert run["status"] == "succeeded"
         assert run["reason_code"] == "VALIDATION_OK"
         assert run["started_at"] is not None
         assert run["finished_at"] is not None
-        assert json.loads(run["log_stream_refs"]) == {
+        assert _json_value(run["log_stream_refs"]) == {
             "commands": [
                 {
                     "stdout": "validation.01_validate.stdout",
@@ -1810,8 +1805,8 @@ class TestHappyPath:
         assert rows == [{"tier": 2, "status": "succeeded"}]
         assert operations["status"] == "succeeded"
         assert operations["finished_at"] is not None
-        assert json.loads(operations["payload"])["requested_tier"] == 2
-        assert json.loads(operations["result"])["requested_tier"] == 2
+        assert _json_value(operations["payload"])["requested_tier"] == 2
+        assert _json_value(operations["result"])["requested_tier"] == 2
 
 
 class TestFailurePaths:
@@ -2069,7 +2064,7 @@ class TestFailurePaths:
         assert "coverage" in (workspace.failure_message or "").lower()
         assert run["status"] == "failed"
         assert run["reason_code"] == "COVERAGE_BELOW_THRESHOLD"
-        assert json.loads(run["log_stream_refs"])["coverage"] == {
+        assert _json_value(run["log_stream_refs"])["coverage"] == {
             "provider": "python",
             "percent": 87.0,
             "minimum_percent": 99.0,
@@ -2082,7 +2077,7 @@ class TestFailurePaths:
         }
         assert operation["status"] == "failed"
         assert operation["error_code"] == "COVERAGE_BELOW_THRESHOLD"
-        assert json.loads(operation["result"])["coverage"] == {
+        assert _json_value(operation["result"])["coverage"] == {
             "provider": "python",
             "percent": 87.0,
             "minimum_percent": 99.0,
@@ -2179,7 +2174,7 @@ class TestFailurePaths:
         assert "validation.01_healthcheck.stderr" in (workspace.failure_message or "")
         assert run["status"] == "failed"
         assert run["reason_code"] == "HEALTHCHECK_COMMAND_FAILED"
-        commands = json.loads(run["commands"])
+        commands = _json_value(run["commands"])
         assert commands[0]["phase"] == "healthcheck"
         assert commands[0]["retry_count"] == 0
         assert len(events) == 1
@@ -2218,8 +2213,7 @@ class TestFailurePaths:
         fake.queue_result(
             returncode=128,
             stderr=(
-                "remote: perm denied for "
-                "https://user:ghp_should_not_persist@github.com/org/repo"
+                "remote: perm denied for https://user:ghp_should_not_persist@github.com/org/repo"
             ),
         )  # push fails
 
@@ -2231,9 +2225,7 @@ class TestFailurePaths:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "infrastructure_failure"
             assert "ghp_should_not_persist" not in (ws.failure_message or "")
-            assert "https://[redacted]@github.com/org/repo" in (
-                ws.failure_message or ""
-            )
+            assert "https://[redacted]@github.com/org/repo" in (ws.failure_message or "")
             push_events = await WorkspaceEventRepository(s).list(
                 workspace_id=ws_id,
                 event_type="workspace.audit.git_push",
@@ -2250,10 +2242,7 @@ class TestFailurePaths:
             assert push_events[0].payload["evidence"] == {
                 "operation": "git push",
                 "returncode": 128,
-                "error_message": (
-                    "remote: perm denied for "
-                    "https://[redacted]@github.com/org/repo"
-                ),
+                "error_message": ("remote: perm denied for https://[redacted]@github.com/org/repo"),
             }
 
     @pytest.mark.unit
@@ -2290,9 +2279,7 @@ class TestFailurePaths:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert "ghp_should_not_persist" not in (ws.failure_message or "")
-            assert "https://[redacted]@github.com/org/repo" in (
-                ws.failure_message or ""
-            )
+            assert "https://[redacted]@github.com/org/repo" in (ws.failure_message or "")
             events = WorkspaceEventRepository(s)
             push_events = await events.list(
                 workspace_id=ws_id,

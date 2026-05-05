@@ -35,12 +35,12 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from scripts import run_awf
+from tests.postgres import postgres_test_engine, postgres_test_url
 
 # ── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -184,19 +184,19 @@ class _FakeRunner:
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'handlers.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
-async def _seed_workspace_db(db_path: Path, workspace_id: str = "ws_existing") -> None:
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+@pytest.fixture
+async def database_url(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
+    async with postgres_test_url() as url:
+        monkeypatch.setenv("AWF_DATABASE_URL", url)
+        yield url
+
+
+async def _seed_workspace_db(database_url: str, workspace_id: str = "ws_existing") -> None:
+    engine = make_engine(database_url)
     factory = make_session_factory(engine)
     try:
         async with factory() as session:
@@ -218,8 +218,8 @@ async def _seed_workspace_db(db_path: Path, workspace_id: str = "ws_existing") -
         await engine.dispose()
 
 
-async def _workspace_exists(db_path: Path, workspace_id: str = "ws_existing") -> bool:
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+async def _workspace_exists(database_url: str, workspace_id: str = "ws_existing") -> bool:
+    engine = make_engine(database_url)
     factory = make_session_factory(engine)
     try:
         async with factory() as session:
@@ -1050,18 +1050,12 @@ class TestMainEntry:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        database_url: str,
     ) -> None:
-        """A reused work dir must not silently replace ``awf.db``.
-
-        The API process may have this SQLite file open while an operator
-        launches another ``run_awf.py`` against the same work dir. If the
-        launcher unlinks the file, the API keeps serving the old anonymous
-        inode while the new run writes to a fresh DB path.
-        """
+        """A reused service database must preserve existing control-plane rows."""
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        db_path = work_dir / "awf.db"
-        await _seed_workspace_db(db_path)
+        await _seed_workspace_db(database_url)
 
         config = tmp_path / "tasks.json"
         config.write_text(
@@ -1097,18 +1091,18 @@ class TestMainEntry:
         await run_awf._main(config_path=config, work_dir=work_dir, keep_state=False)
 
         assert saw_existing_row == [True]
-        assert await _workspace_exists(db_path)
+        assert await _workspace_exists(database_url)
 
     @pytest.mark.unit
-    async def test_main_resets_db_only_when_explicitly_requested(
+    async def test_main_reset_state_is_deprecated_noop(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        database_url: str,
     ) -> None:
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        db_path = work_dir / "awf.db"
-        await _seed_workspace_db(db_path)
+        await _seed_workspace_db(database_url)
 
         config = tmp_path / "tasks.json"
         config.write_text("[]")
@@ -1128,7 +1122,7 @@ class TestMainEntry:
             reset_state=True,
         )
 
-        assert not await _workspace_exists(db_path)
+        assert await _workspace_exists(database_url)
 
 
 class TestBuildAuthMounts:
@@ -1216,7 +1210,7 @@ class TestBuildAuthMounts:
         (host_codex / "auth.json").write_text('{"token": "redacted"}')
         (host_codex / "config.toml").write_text("model = 'gpt-5.5'\n")
         (host_codex / "installation_id").write_text("install-123")
-        (host_codex / "logs_2.sqlite").write_text("do not copy")
+        (host_codex / "logs_2.db").write_text("do not copy")
         (host_codex / "sessions").mkdir()
         (host_codex / "rules").mkdir()
         (host_codex / "rules" / "default.rules").write_text("rule")
@@ -1242,7 +1236,7 @@ class TestBuildAuthMounts:
         assert (codex_home / "config.toml").read_text() == "model = 'gpt-5.5'\n"
         assert (codex_home / "installation_id").read_text() == "install-123"
         assert (codex_home / "rules" / "default.rules").read_text() == "rule"
-        assert not (codex_home / "logs_2.sqlite").exists()
+        assert not (codex_home / "logs_2.db").exists()
         assert not (codex_home / "sessions").exists()
         assert mounts[1] == base_mount
 

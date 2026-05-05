@@ -169,9 +169,7 @@ class WorkspaceRuntimeHealthSummary:
             "fail_candidate_count": self.fail_candidate_count,
             "recoverable_count": self.recoverable_count,
             "reason_counts": self.reason_counts,
-            "examples": [
-                finding.to_check_example() for finding in self.findings[:example_limit]
-            ],
+            "examples": [finding.to_check_example() for finding in self.findings[:example_limit]],
         }
         if self.scanner_detail:
             payload["detail"] = self.scanner_detail
@@ -185,9 +183,7 @@ def runtime_workspace_from_workspace(workspace: Workspace) -> RuntimeWorkspace:
         compose_project_name=workspace.compose_project_name,
         compose_file_path=workspace.compose_file_path,
         pr_url=workspace.pr_url,
-        retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(
-            workspace.task_policy
-        ),
+        retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(workspace.task_policy),
     )
 
 
@@ -206,17 +202,13 @@ async def runtime_workspaces_from_session(session: AsyncSession) -> tuple[Runtim
             workspace_id=str(row.id),
             status=str(row.status),
             compose_project_name=(
-                str(row.compose_project_name)
-                if row.compose_project_name is not None
-                else None
+                str(row.compose_project_name) if row.compose_project_name is not None else None
             ),
             compose_file_path=(
                 str(row.compose_file_path) if row.compose_file_path is not None else None
             ),
             pr_url=str(row.pr_url) if row.pr_url is not None else None,
-            retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(
-                row.task_policy
-            ),
+            retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(row.task_policy),
         )
         for row in rows
     )
@@ -240,9 +232,7 @@ def runtime_resource_from_detected(resource: object) -> RuntimeResource:
             or getattr(resource, "id", None)
             or getattr(resource, "resource_id", None)
         ),
-        status_text=_optional_text(
-            getattr(resource, "status_text", None) or detail.get("status")
-        ),
+        status_text=_optional_text(getattr(resource, "status_text", None) or detail.get("status")),
     )
 
 
@@ -295,8 +285,7 @@ def summarize_runtime_health(
     findings = tuple(
         finding
         for workspace in workspaces
-        if (finding := classify_resource_inventory(workspace, normalized_resources))
-        is not None
+        if (finding := classify_resource_inventory(workspace, normalized_resources)) is not None
     )
     return WorkspaceRuntimeHealthSummary(findings=findings)
 
@@ -354,11 +343,7 @@ def _classify_services(
         )
 
     agent = next(
-        (
-            service
-            for service in services
-            if service.get("name", "").lower() == _AGENT_SERVICE
-        ),
+        (service for service in services if service.get("name", "").lower() == _AGENT_SERVICE),
         None,
     )
     if agent is None:

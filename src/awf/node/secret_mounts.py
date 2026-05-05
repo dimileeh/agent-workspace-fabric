@@ -242,7 +242,9 @@ class LocalSecretLeaseMountResolver:
             self._raise(SECRET_LEASE_TARGET_KIND_MISMATCH, secret, provider=provider)
         if secret.target not in _GITHUB_TOKEN_TARGET_NAMES:
             self._raise(SECRET_LEASE_TARGET_MISMATCH, secret, provider=provider)
-        source_name = next((name for name in _GITHUB_TOKEN_SOURCE_NAMES if source_env.get(name)), None)
+        source_name = next(
+            (name for name in _GITHUB_TOKEN_SOURCE_NAMES if source_env.get(name)), None
+        )
         if source_name is None:
             self._missing(secret, provider=provider, omitted_optional=omitted_optional)
             return ()

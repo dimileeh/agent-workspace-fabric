@@ -71,9 +71,7 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     ).read_text() == '{"model": "ollama/x"}\n'
     assert by_target["/home/agent/.ollama"].source == str(ollama_home / ".ollama")
     assert by_target["/home/agent/.ollama"].mode == "rw"
-    assert (ollama_home / ".ollama" / "config.json").read_text() == (
-        '{"integrations": {}}\n'
-    )
+    assert (ollama_home / ".ollama" / "config.json").read_text() == ('{"integrations": {}}\n')
     assert (ollama_home / ".ollama" / "id_ed25519").read_text() == "private-key\n"
     assert not (ollama_home / ".ollama" / "models").exists()
 
@@ -108,7 +106,7 @@ def test_service_auth_mounts_copy_codex_into_workspace_isolated_home(tmp_path: P
     (host_codex / "auth.json").write_text('{"token": "redacted"}')
     (host_codex / "config.toml").write_text("model = 'gpt-5.5'\n")
     (host_codex / "installation_id").write_text("installation-123\n")
-    (host_codex / "logs_2.sqlite").write_text("do not copy")
+    (host_codex / "logs_2.db").write_text("do not copy")
     (host_codex / "sessions").mkdir()
     (host_codex / "rules").mkdir()
     (host_codex / "rules" / "default.rules").write_text("rule")
@@ -130,7 +128,7 @@ def test_service_auth_mounts_copy_codex_into_workspace_isolated_home(tmp_path: P
     assert (codex_home / "config.toml").read_text() == "model = 'gpt-5.5'\n"
     assert (codex_home / "installation_id").read_text() == "installation-123\n"
     assert (codex_home / "rules" / "default.rules").read_text() == "rule"
-    assert not (codex_home / "logs_2.sqlite").exists()
+    assert not (codex_home / "logs_2.db").exists()
     assert not (codex_home / "sessions").exists()
 
 
@@ -325,9 +323,7 @@ def test_service_auth_mounts_preserve_existing_workspace_opencode_and_ollama_aut
         host_env={},
     )
 
-    assert (opencode_dir / "opencode.json").read_text() == (
-        '{"model": "agent-refreshed"}\n'
-    )
+    assert (opencode_dir / "opencode.json").read_text() == ('{"model": "agent-refreshed"}\n')
     assert (ollama_dir / "config.json").read_text() == '{"token": "agent-refreshed"}\n'
 
 

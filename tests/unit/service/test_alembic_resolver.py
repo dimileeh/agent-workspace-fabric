@@ -244,17 +244,11 @@ def test_alembic_graph_validation_accepts_absolute_config_and_script_override(
     config_path = tmp_path / "config" / "alembic.ini"
     config_path.parent.mkdir()
     config_path.write_text(
-        "[alembic]\n"
-        "script_location = ignored\n"
-        "path_separator = os\n"
-        "version_path_separator = os\n",
+        "[alembic]\nscript_location = ignored\npath_separator = os\nversion_path_separator = os\n",
         encoding="utf-8",
     )
     (migrations / "versions" / "base001.py").write_text(
-        'revision = "base001"\n'
-        "down_revision = None\n"
-        "branch_labels = None\n"
-        "depends_on = None\n",
+        'revision = "base001"\ndown_revision = None\nbranch_labels = None\ndepends_on = None\n',
         encoding="utf-8",
     )
 

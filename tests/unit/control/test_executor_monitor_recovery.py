@@ -27,7 +27,6 @@ from awf.control.executor import (
     _get_active_recovery_payload,
     _MonitorRebaseRecoveryError,
 )
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace as WorkspaceModel
 from awf.db.repositories import (
@@ -36,10 +35,11 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
+from tests.postgres import postgres_test_engine
 
 from .executor_paths import _test_worktree_path, _test_worktrees_root
 
@@ -66,15 +66,10 @@ async def _force_workspace_status(
 
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    session_factory = make_session_factory(engine)
-    session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
-    try:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
         yield session_factory
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -391,8 +386,7 @@ def test_get_active_recovery_payload_returns_payload_when_pending() -> None:
     assert _get_active_recovery_payload(_FakeWorkspace([running])) == running.payload
     assert _get_active_recovery_payload(_FakeWorkspace([operator_api])) == operator_api.payload
     assert (
-        _get_active_recovery_payload(_FakeWorkspace([operator_rebase]))
-        == operator_rebase.payload
+        _get_active_recovery_payload(_FakeWorkspace([operator_rebase])) == operator_rebase.payload
     )
     assert _get_active_recovery_payload(_FakeWorkspace([succeeded])) is None
     assert _get_active_recovery_payload(_FakeWorkspace([operator])) is None
@@ -416,9 +410,7 @@ async def test_executor_skips_planning_and_agent_run_when_recovery_dispatched(
 
     # Pre-write a sentinel plan file so we can verify recovery does not
     # overwrite it.
-    plan_path = (
-        _test_worktree_path(factory, ws_id) / "docs" / "awf-plans" / f"{ws_id}.md"
-    )
+    plan_path = _test_worktree_path(factory, ws_id) / "docs" / "awf-plans" / f"{ws_id}.md"
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     sentinel = "# pre-existing plan content — must survive monitor recovery\n"
     plan_path.write_text(sentinel, encoding="utf-8")
@@ -500,9 +492,7 @@ async def test_recovery_operation_helpers_start_and_finish_only_recovery_rows(
     assert by_id[non_recovery.id].status == OperationStatus.pending.value
     assert by_id[running_recovery.id].status == OperationStatus.running.value
     started_recovery = next(
-        operation
-        for operation in ops
-        if operation.id not in {non_recovery.id, running_recovery.id}
+        operation for operation in ops if operation.id not in {non_recovery.id, running_recovery.id}
     )
     assert started_recovery.status == OperationStatus.running.value
 
@@ -614,9 +604,7 @@ async def test_executor_recovery_closes_operation_row_for_rebase_only_mode(
     """``recovery_mode='rebase_only'`` performs a real rebase/push, then
     still closes the monitor-created validate operation cleanly."""
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
-    ws_id = await _seed_ready_workspace_with_recovery(
-        factory, recovery_mode="rebase_only"
-    )
+    ws_id = await _seed_ready_workspace_with_recovery(factory, recovery_mode="rebase_only")
 
     _queue_rebase_recovery(fake)
     fake.queue_result(returncode=0, stdout="c" * 40 + "\n")  # pre-validation rev-parse HEAD
@@ -798,7 +786,8 @@ async def test_open_pr_ready_without_recovery_operation_is_blocked_before_featur
     assert any(
         event.event_type == "workspace.pr_reexecution_blocked"
         and event.reason_code == "PR_REEXECUTION_GUARD"
-        and event.payload == {
+        and event.payload
+        == {
             "pr_number": 9,
             "pr_url": "https://github.com/x/y/pull/9",
             "status": WorkspaceStatus.running.value,
@@ -917,8 +906,7 @@ def _all_push_and_pr_create_calls(fake: FakeCommandRunner) -> list[list[str]]:
     return [
         c.args
         for c in fake.calls
-        if ("push" in c.args and "git" in c.args)
-        or (c.args[:3] == ["gh", "pr", "create"])
+        if ("push" in c.args and "git" in c.args) or (c.args[:3] == ["gh", "pr", "create"])
     ]
 
 
@@ -933,7 +921,9 @@ async def test_recovery_skips_push_when_pr_already_exists(
     path and transition directly back to monitoring_pr (or completed if
     no monitor is wired)."""
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
-    ws_id = await _seed_ready_workspace_with_recovery(factory, pr_url="https://github.com/x/y/pull/1")
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, pr_url="https://github.com/x/y/pull/1"
+    )
 
     # Only validation should run; no push or PR creation commands.
     _queue_validation_head(fake, head="d" * 40)
@@ -969,9 +959,7 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
     monitor_calls: list[dict[str, Any]] = []
 
     class _FakeMonitor:
-        async def run(
-            self, *, workspace_id: str, compose_project: str, compose_file: Path
-        ) -> None:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
             monitor_calls.append({"workspace_id": workspace_id, "compose_project": compose_project})
 
     def _monitor_factory(*_args: Any, **_kwargs: Any) -> _FakeMonitor:
@@ -1019,9 +1007,7 @@ async def test_validate_only_recovery_pushes_existing_pr_after_fix_commit(
     monitor_calls: list[str] = []
 
     class _FakeMonitor:
-        async def run(
-            self, *, workspace_id: str, compose_project: str, compose_file: Path
-        ) -> None:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
             del compose_project, compose_file
             monitor_calls.append(workspace_id)
 
@@ -1068,8 +1054,7 @@ async def test_validate_only_recovery_pushes_existing_pr_after_fix_commit(
     assert runs[-1].workspace_head_sha == fixed_head
     assert runs[-1].target_head_sha == fixed_head
     assert any(
-        event.event_type == "workspace.audit.git_push"
-        and event.reason_code == "PR_UPDATED"
+        event.event_type == "workspace.audit.git_push" and event.reason_code == "PR_UPDATED"
         for event in events
     )
 
@@ -1109,9 +1094,7 @@ async def test_rebase_only_recovery_rebases_pushes_and_skips_pr_recreate(
     """Rebase-only recovery updates the existing PR branch but does not
     recreate the PR."""
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
-    ws_id = await _seed_ready_workspace_with_recovery(
-        factory, recovery_mode="rebase_only"
-    )
+    ws_id = await _seed_ready_workspace_with_recovery(factory, recovery_mode="rebase_only")
 
     _queue_rebase_recovery(fake)
     _queue_validation_head(fake, head="c" * 40)
@@ -1171,9 +1154,7 @@ async def test_rebase_only_recovery_push_failure_records_redacted_audit(
     tmp_path: Path,
 ) -> None:
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
-    ws_id = await _seed_ready_workspace_with_recovery(
-        factory, recovery_mode="rebase_only"
-    )
+    ws_id = await _seed_ready_workspace_with_recovery(factory, recovery_mode="rebase_only")
 
     fake.queue_result(returncode=0)  # git fetch origin <base>
     fake.queue_result(returncode=0)  # git switch <branch>
@@ -1183,10 +1164,7 @@ async def test_rebase_only_recovery_push_failure_records_redacted_audit(
     fake.queue_result(returncode=0, stdout="c" * 40 + "\n")  # rev-parse HEAD
     fake.queue_result(
         returncode=128,
-        stderr=(
-            "fatal: unable to access "
-            "https://user:ghp_should_not_persist@github.com/org/repo"
-        ),
+        stderr=("fatal: unable to access https://user:ghp_should_not_persist@github.com/org/repo"),
     )
 
     await executor.execute(ws_id)
@@ -1224,9 +1202,7 @@ async def test_rebase_only_recovery_marks_operation_failed_when_recording_raises
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
-    ws_id = await _seed_ready_workspace_with_recovery(
-        factory, recovery_mode="rebase_only"
-    )
+    ws_id = await _seed_ready_workspace_with_recovery(factory, recovery_mode="rebase_only")
 
     async def fail_record_success(**_kwargs: object) -> None:
         raise RuntimeError("write exploded")
@@ -1436,9 +1412,7 @@ async def test_rebase_only_recovery_skips_rebase_when_target_already_merged(
     PR branch, rebase recovery should record that refreshed head and move
     straight to Tier 2 validation instead of replaying commits again."""
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
-    ws_id = await _seed_ready_workspace_with_recovery(
-        factory, recovery_mode="rebase_only"
-    )
+    ws_id = await _seed_ready_workspace_with_recovery(factory, recovery_mode="rebase_only")
 
     _queue_already_synced_rebase_recovery(fake)
     _queue_validation_head(fake, head="c" * 40)
@@ -1470,8 +1444,6 @@ async def test_rebase_only_recovery_skips_rebase_when_target_already_merged(
         "pushed": False,
         "rebased": False,
     }
-
-
 
 
 @pytest.mark.unit
@@ -1692,9 +1664,7 @@ async def test_executor_recovery_does_not_run_planning_when_planning_profile_req
         ws_id = ws.id
         (_test_worktrees_root(factory) / ws_id).mkdir(parents=True, exist_ok=True)
 
-    plan_path = (
-        _test_worktree_path(factory, ws_id) / "docs" / "awf-plans" / f"{ws_id}.md"
-    )
+    plan_path = _test_worktree_path(factory, ws_id) / "docs" / "awf-plans" / f"{ws_id}.md"
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text("# pre-existing plan\n", encoding="utf-8")
     plan_mtime_before = plan_path.stat().st_mtime

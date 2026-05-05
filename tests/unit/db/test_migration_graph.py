@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +10,10 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy import inspect
+
+from awf.db.session import make_engine
+from tests.postgres import postgres_empty_test_url
 
 
 @pytest.mark.unit
@@ -24,62 +27,115 @@ def test_alembic_revision_graph_has_single_head() -> None:
 
 
 @pytest.mark.unit
-def test_alembic_upgrade_head_creates_scheduler_record_tables(
+async def test_alembic_upgrade_head_creates_scheduler_record_tables(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    db_path = tmp_path / "awf.db"
-    env = {
-        **os.environ,
-        "AWF_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
-    }
+    async with postgres_empty_test_url() as database_url:
+        env = {
+            **os.environ,
+            "AWF_DATABASE_URL": database_url,
+        }
 
-    monkeypatch.chdir(repo_root)
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
-        cwd=repo_root,
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+        monkeypatch.chdir(repo_root)
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
-    with sqlite3.connect(db_path) as conn:
-        tables = {
-            row[0]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
-        queue_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(queue_decisions)")
-        }
-        reservation_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(resource_reservations)")
-        }
-        policy_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(policy_findings)")
-        }
-        merge_candidate_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(merge_candidates)")
-        }
-        workspace_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(workspaces)")
-        }
-        validation_run_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(validation_runs)")
-        }
-        secret_lease_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(workspace_secret_leases)")
-        }
-        secret_lease_indexes = {
-            row[1] for row in conn.execute("PRAGMA index_list(workspace_secret_leases)")
-        }
-        callback_subscription_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(callback_subscriptions)")
-        }
-        callback_delivery_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(callback_deliveries)")
-        }
+        engine = make_engine(database_url)
+        try:
+            async with engine.connect() as conn:
+                tables = set(
+                    await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names())
+                )
+                queue_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("queue_decisions")
+                        ]
+                    )
+                )
+                reservation_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("resource_reservations")
+                        ]
+                    )
+                )
+                policy_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("policy_findings")
+                        ]
+                    )
+                )
+                merge_candidate_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("merge_candidates")
+                        ]
+                    )
+                )
+                workspace_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("workspaces")
+                        ]
+                    )
+                )
+                validation_run_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("validation_runs")
+                        ]
+                    )
+                )
+                secret_lease_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("workspace_secret_leases")
+                        ]
+                    )
+                )
+                secret_lease_indexes = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            index["name"]
+                            for index in inspect(sync_conn).get_indexes("workspace_secret_leases")
+                        ]
+                    )
+                )
+                callback_subscription_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("callback_subscriptions")
+                        ]
+                    )
+                )
+                callback_delivery_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("callback_deliveries")
+                        ]
+                    )
+                )
+        finally:
+            await engine.dispose()
 
     assert {
         "queue_decisions",

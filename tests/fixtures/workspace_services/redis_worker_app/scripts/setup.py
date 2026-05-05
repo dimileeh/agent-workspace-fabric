@@ -7,10 +7,14 @@ EXPECTED = "enqueued awf-redis-worker-fixture\n"
 
 
 def main() -> None:
-    body = urllib.request.urlopen(
-        os.environ["APP_BASE_URL"] + "/enqueue",
-        timeout=10,
-    ).read().decode()
+    body = (
+        urllib.request.urlopen(
+            os.environ["APP_BASE_URL"] + "/enqueue",
+            timeout=10,
+        )
+        .read()
+        .decode()
+    )
     assert body == EXPECTED, body
     print(body, end="")
 

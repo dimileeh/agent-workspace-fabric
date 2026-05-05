@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 import awf.db.repositories as repository_module
 from awf.db.enums import CallbackDeliveryStatus
-from awf.db.models import CallbackSubscription
+from awf.db.models import CallbackSubscription, Workspace
 from awf.db.repositories import (
     CallbackDeliveryRepository,
     CallbackIdempotencyConflictError,
@@ -51,11 +51,26 @@ async def _subscription(
     return subscription
 
 
+async def _workspaces(session: AsyncSession, *workspace_ids: str) -> None:
+    for workspace_id in workspace_ids:
+        session.add(
+            Workspace(
+                id=workspace_id,
+                status="running",
+                repo_url="git@github.com:example/callbacks.git",
+                branch_base="development",
+                task_title=f"callback parent {workspace_id}",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+        )
+    await session.flush()
+
+
 @pytest.mark.unit
 def test_callback_insert_helpers_cover_postgres_and_unsupported_dialects() -> None:
-    subscription_stmt = repository_module._callback_subscription_insert_if_absent_stmt(
-        "postgresql"
-    )
+    subscription_stmt = repository_module._callback_subscription_insert_if_absent_stmt("postgresql")
     delivery_stmt = repository_module._callback_delivery_insert_if_absent_stmt("postgresql")
 
     assert subscription_stmt is not None
@@ -73,9 +88,7 @@ def test_callback_insert_helpers_cover_postgres_and_unsupported_dialects() -> No
         ("workspace.state_changed",),
         "postgresql",
     )
-    assert "jsonb_array_elements_text" in str(
-        event_filter.compile(dialect=postgresql.dialect())
-    )
+    assert "jsonb_array_elements_text" in str(event_filter.compile(dialect=postgresql.dialect()))
 
 
 @pytest.mark.unit
@@ -287,9 +300,7 @@ async def test_subscription_event_matching_filters_nonmatches_in_database(
     session.expunge_all()
 
     def fail_python_filtering(subscription_event_type: str, event_type: str) -> bool:
-        raise AssertionError(
-            "subscription event matching should be pushed into the database query"
-        )
+        raise AssertionError("subscription event matching should be pushed into the database query")
 
     monkeypatch.setattr(
         repository_module,
@@ -303,9 +314,7 @@ async def test_subscription_event_matching_filters_nonmatches_in_database(
     )
 
     loaded_subscription_ids = {
-        row.id
-        for row in session.identity_map.values()
-        if isinstance(row, CallbackSubscription)
+        row.id for row in session.identity_map.values() if isinstance(row, CallbackSubscription)
     }
     assert [row.id for row in rows] == [matching.id]
     assert nonmatching.id not in loaded_subscription_ids
@@ -321,6 +330,7 @@ async def test_subscription_queries_do_not_eager_load_delivery_history(
     subscription = await _subscription(session)
     subscription_id = subscription.id
     now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    await _workspaces(session, "ws_history")
     await CallbackDeliveryRepository(session).enqueue_once(
         subscription=subscription,
         event_kind="workspace",
@@ -375,6 +385,7 @@ async def test_delivery_enqueue_once_deduplicates_subscription_source_event(
     subscription = await _subscription(session)
     repo = CallbackDeliveryRepository(session)
     now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    await _workspaces(session, "ws_123")
 
     first, first_created = await repo.enqueue_once(
         subscription=subscription,
@@ -420,6 +431,7 @@ async def test_delivery_enqueue_once_falls_back_without_insert_guard(
     repo = CallbackDeliveryRepository(session)
     repo._dialect_name = "mysql"
     now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    await _workspaces(session, "ws_fallback")
 
     delivery, was_created = await repo.enqueue_once(
         subscription=subscription,
@@ -446,6 +458,7 @@ async def test_delivery_enqueue_once_replays_after_duplicate_key_race(
     subscription = await _subscription(session)
     repo = CallbackDeliveryRepository(session)
     now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    await _workspaces(session, "ws_race")
     winner, _created = await repo.enqueue_once(
         subscription=subscription,
         event_kind="workspace",
@@ -502,6 +515,7 @@ async def test_delivery_enqueue_once_falls_back_without_conflict_helper(
     subscription = await _subscription(session)
     repo = CallbackDeliveryRepository(session, dialect_name="unsupported")
     now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    await _workspaces(session, "ws_fallback")
 
     created, was_created = await repo.enqueue_once(
         subscription=subscription,
@@ -528,6 +542,7 @@ async def test_due_delivery_query_returns_only_due_pending_rows_oldest_first(
     subscription = await _subscription(session)
     repo = CallbackDeliveryRepository(session)
     now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    await _workspaces(session, "ws_old", "ws_future", "ws_newer")
     old_due, _ = await repo.enqueue_once(
         subscription=subscription,
         event_kind="workspace",

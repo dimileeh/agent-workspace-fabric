@@ -194,9 +194,7 @@ class WorkspaceRemonitorStateError(WorkspaceControlError):
             message="Workspace is not in a state eligible for remonitor recovery.",
             detail={
                 "status": workspace.status,
-                "eligible_statuses": [
-                    status.value for status in _REMONITOR_ELIGIBLE_STATUSES
-                ],
+                "eligible_statuses": [status.value for status in _REMONITOR_ELIGIBLE_STATUSES],
             },
         )
 
@@ -217,9 +215,7 @@ class WorkspaceValidateStateError(WorkspaceControlError):
             message="Workspace is not in a state eligible for validate recovery.",
             detail={
                 "status": workspace.status,
-                "eligible_statuses": [
-                    status.value for status in _VALIDATE_ELIGIBLE_STATUSES
-                ],
+                "eligible_statuses": [status.value for status in _VALIDATE_ELIGIBLE_STATUSES],
             },
         )
 
@@ -258,9 +254,7 @@ class WorkspaceRebaseStateError(WorkspaceControlError):
             message="Workspace is not in a state eligible for rebase recovery.",
             detail={
                 "status": workspace.status,
-                "eligible_statuses": [
-                    status.value for status in _REBASE_ELIGIBLE_STATUSES
-                ],
+                "eligible_statuses": [status.value for status in _REBASE_ELIGIBLE_STATUSES],
             },
         )
 
@@ -544,11 +538,9 @@ class WorkspaceControlService:
             self._session,
             workspace,
         )
-        cancelled_recovery_operations = (
-            await _cancel_stale_pr_monitor_recovery_operations(
-                operations,
-                workspace_id=workspace.id,
-            )
+        cancelled_recovery_operations = await _cancel_stale_pr_monitor_recovery_operations(
+            operations,
+            workspace_id=workspace.id,
         )
         workspace.monitor_claimed_by = None
         workspace.monitor_claim_expires_at = None
@@ -566,9 +558,7 @@ class WorkspaceControlService:
         if cancelled_recovery_operations:
             event_payload["cancelled_recovery_operations"] = cancelled_recovery_operations
             event_payload["cancelled_recovery_reason_code"] = _OPERATOR_REMONITOR_REASON_CODE
-            event_payload["cancelled_recovery_requested_action"] = (
-                OperationType.remonitor.value
-            )
+            event_payload["cancelled_recovery_requested_action"] = OperationType.remonitor.value
         if state_reset is not None:
             workspace.events.append(
                 WorkspaceEvent(
@@ -784,9 +774,7 @@ class WorkspaceControlService:
             expected_version=expected_version,
             active_payload_identity=base_payload,
             idempotency_payload_identity=idempotency_payload,
-            idempotency_identity_keys=frozenset(
-                {*base_payload.keys(), "expected_version"}
-            ),
+            idempotency_identity_keys=frozenset({*base_payload.keys(), "expected_version"}),
         )
         workspace = prepared.workspace
         replay = prepared.replay
@@ -808,9 +796,7 @@ class WorkspaceControlService:
             raise WorkspaceRebaseActiveConflictError(
                 destructive_conflict,
                 error_code="WORKSPACE_OPERATION_CONFLICT",
-                message=(
-                    "Workspace rebase conflicts with an active destructive operation."
-                ),
+                message=("Workspace rebase conflicts with an active destructive operation."),
             )
 
         active_rebase = await _find_active_operation(
@@ -933,9 +919,9 @@ class WorkspaceControlService:
         )
         secret_lease_summary = await self._revoke_destroy_secret_leases(workspace)
         if current == WorkspaceStatus.destroyed:
-            await ResourceReservationRepository(
-                self._session
-            ).release_active_for_workspace(workspace_id)
+            await ResourceReservationRepository(self._session).release_active_for_workspace(
+                workspace_id
+            )
             cleanup_result = WorkspaceCleanupResult.skipped(
                 reason_code="WORKSPACE_ALREADY_DESTROYED"
             )
@@ -1013,9 +999,7 @@ class WorkspaceControlService:
         cleanup_payload = cleanup_result.to_dict()
         await self._session.refresh(workspace)
         requested_status = (
-            WorkspaceStatus.failed
-            if not cleanup_result.ok
-            else WorkspaceStatus.destroyed
+            WorkspaceStatus.failed if not cleanup_result.ok else WorkspaceStatus.destroyed
         )
         if (
             workspace.status != WorkspaceStatus.destroying.value
@@ -1345,7 +1329,7 @@ def default_cleaner() -> WorkspaceCleaner:
     return WorkspaceCleaner(
         git=GitManager(work_dir / "git"),
         compose=ComposeManager(work_dir=work_dir, template_path=template),
-        )
+    )
 
 
 async def _reset_failed_workspace_for_remonitor(
@@ -1431,10 +1415,10 @@ def _is_pr_monitor_recovery_operation(operation: Operation) -> bool:
     payload = operation.payload
     if not isinstance(payload, Mapping):
         return False
-    return (
-        payload.get("source") == "pr_monitor"
-        and payload.get("recovery_mode") in {"validate_only", "rebase_only"}
-    )
+    return payload.get("source") == "pr_monitor" and payload.get("recovery_mode") in {
+        "validate_only",
+        "rebase_only",
+    }
 
 
 def _control_response(
@@ -1730,9 +1714,7 @@ def _claim_reset_snapshot(workspace: Workspace) -> dict[str, str | None]:
         "monitor_claimed_by": workspace.monitor_claimed_by,
         "monitor_claim_expires_at": _json_datetime(workspace.monitor_claim_expires_at),
         "execution_claimed_by": workspace.execution_claimed_by,
-        "execution_claim_expires_at": _json_datetime(
-            workspace.execution_claim_expires_at
-        ),
+        "execution_claim_expires_at": _json_datetime(workspace.execution_claim_expires_at),
     }
 
 

@@ -6,8 +6,7 @@ the migration round-trip never downgrades the operator's real AWF database.
 
 What this covers:
 - asyncpg driver + ``async_engine_from_config`` path in migrations/env.py
-- The autogen migration's Postgres dialect output (which differs subtly from
-  SQLite; e.g., index creation for JSON columns)
+- The autogen migration's Postgres dialect output for JSON and index DDL
 - Round-trip upgrade → downgrade → upgrade on the real DB
 """
 
@@ -107,6 +106,7 @@ async def _drop_database(maintenance_url: URL, database_name: str) -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.timeout(120)
 def test_alembic_upgrade_downgrade_upgrade_on_postgres() -> None:
     """Apply → revert → re-apply the full migration chain against live Postgres."""
     configured_url = _postgres_database_url()

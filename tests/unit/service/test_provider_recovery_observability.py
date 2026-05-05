@@ -488,14 +488,10 @@ def test_recovery_payload_provider_recovery_includes_all_state_view_fields() -> 
             else None
         ),
         "cooldown_until": (
-            pr.cooldown_until.isoformat()
-            if pr.cooldown_until is not None
-            else None
+            pr.cooldown_until.isoformat() if pr.cooldown_until is not None else None
         ),
         "next_eligible_at": (
-            pr.next_eligible_at.isoformat()
-            if pr.next_eligible_at is not None
-            else None
+            pr.next_eligible_at.isoformat() if pr.next_eligible_at is not None else None
         ),
         "source_workspace_id": pr.source_workspace_id,
         "source_attempt_id": pr.source_attempt_id,

@@ -14,17 +14,12 @@ PUBLIC_CALLBACK_EVENT_TYPES: Final[tuple[str, ...]] = (
     "merge.candidate_updated",
 )
 
-_PUBLIC_CALLBACK_EVENT_TYPE_SET: Final[frozenset[str]] = frozenset(
-    PUBLIC_CALLBACK_EVENT_TYPES
-)
+_PUBLIC_CALLBACK_EVENT_TYPE_SET: Final[frozenset[str]] = frozenset(PUBLIC_CALLBACK_EVENT_TYPES)
 
 
 def is_valid_callback_subscription_event_type(event_type: str) -> bool:
     """Return whether an event type is part of the public subscription contract."""
-    return (
-        event_type in CALLBACK_EVENT_WILDCARDS
-        or event_type in _PUBLIC_CALLBACK_EVENT_TYPE_SET
-    )
+    return event_type in CALLBACK_EVENT_WILDCARDS or event_type in _PUBLIC_CALLBACK_EVENT_TYPE_SET
 
 
 def callback_subscription_matches_event_type(

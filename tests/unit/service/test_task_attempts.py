@@ -11,22 +11,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateV2Request
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.service.tasks import _pricing_from_workspace
 from awf.service.workspaces import WorkspaceService
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _request(

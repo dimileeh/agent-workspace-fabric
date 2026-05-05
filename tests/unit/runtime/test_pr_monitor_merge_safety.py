@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.base import Base
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -33,9 +32,10 @@ from awf.db.repositories import (
     WorkspaceRepository,
     sync_candidate_readiness,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import Merge, MonitorState, PRStatus
 from awf.runtime.pr_monitor_operations import monitor_operation_idempotency_key
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import FakeAdapter, RecordedSleep, make_runner
 from tests.unit.runtime.test_pr_monitor import _status
 
@@ -44,13 +44,8 @@ REPO_URL = "git@github.com:dimileeh/aira-web.git"
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -342,12 +337,8 @@ async def test_auto_merge_blocks_when_required_validation_is_only_on_other_attem
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    recovery_operations = [
-        op for op in operations if op.type == OperationType.validate.value
-    ]
-    monitor_operations = [
-        op for op in operations if op.type == OperationType.monitor_state.value
-    ]
+    recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
+    monitor_operations = [op for op in operations if op.type == OperationType.monitor_state.value]
     assert [(op.type, op.payload) for op in recovery_operations] == [
         (
             OperationType.validate.value,
@@ -407,9 +398,7 @@ async def test_pr_166_regression_auto_merge_blocks_when_pr_head_changed_after_va
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    recovery_operations = [
-        op for op in operations if op.type == OperationType.validate.value
-    ]
+    recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
     assert len(recovery_operations) == 1
     assert recovery_operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
     assert recovery_operations[0].payload["requested_action"] == "validate"
@@ -449,12 +438,8 @@ async def test_auto_merge_blocks_persisted_stale_candidate(
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    recovery_operations = [
-        op for op in operations if op.type == OperationType.validate.value
-    ]
-    monitor_operations = [
-        op for op in operations if op.type == OperationType.monitor_state.value
-    ]
+    recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
+    monitor_operations = [op for op in operations if op.type == OperationType.monitor_state.value]
     assert [(op.type, op.payload) for op in recovery_operations] == [
         (
             OperationType.validate.value,
@@ -604,12 +589,8 @@ async def test_auto_merge_rechecks_candidate_gate_inside_merge_lock(
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    recovery_operations = [
-        op for op in operations if op.type == OperationType.validate.value
-    ]
-    monitor_operations = [
-        op for op in operations if op.type == OperationType.monitor_state.value
-    ]
+    recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
+    monitor_operations = [op for op in operations if op.type == OperationType.monitor_state.value]
     assert [(op.type, op.payload) for op in recovery_operations] == [
         (
             OperationType.validate.value,
@@ -739,9 +720,7 @@ async def test_auto_merge_does_not_duplicate_active_monitor_recovery(
     assert terminal is False
     assert sleep_fn.calls == [60]
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    recovery_operations = [
-        op for op in operations if op.type == OperationType.validate.value
-    ]
+    recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
     wait_operations = [
         op
         for op in operations

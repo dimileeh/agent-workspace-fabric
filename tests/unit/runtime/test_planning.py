@@ -103,7 +103,9 @@ def test_parse_conformance_report_defaults_and_aliases() -> None:
     satisfied = parse_conformance_report(
         '{"status":"ok","summary":"","gaps":[],"reason_code":"   "}'
     )
-    needs_iteration = parse_conformance_report('{"status":"unknown","summary":"","gaps":"rerun mypy"}')
+    needs_iteration = parse_conformance_report(
+        '{"status":"unknown","summary":"","gaps":"rerun mypy"}'
+    )
     blank_reason = parse_conformance_report(
         '{"status":"needs_iteration","summary":"x","gaps":[],"reason_code":"  "}'
     )
@@ -1072,7 +1074,9 @@ def test_classify_conformance_stall_no_output_streak_breaks_on_changed_report_di
 
 
 @pytest.mark.unit
-def test_classify_conformance_stall_no_output_streak_includes_iter_zero_with_stale_preexisting_digest() -> None:
+def test_classify_conformance_stall_no_output_streak_includes_iter_zero_with_stale_preexisting_digest() -> (
+    None
+):
     # A preserved worktree (retry/salvage) can leave a report file on disk
     # before iteration 0 ever runs, so iteration 0's report_digest is non-
     # None even when the iteration produced no output and made no
@@ -1154,7 +1158,9 @@ def test_classify_conformance_stall_returns_repeated_output_when_report_digest_r
 
 
 @pytest.mark.unit
-def test_classify_conformance_stall_returns_over_duration_when_cumulative_seconds_exceed_threshold() -> None:
+def test_classify_conformance_stall_returns_over_duration_when_cumulative_seconds_exceed_threshold() -> (
+    None
+):
     history = [
         _iter_record(
             iteration=0,

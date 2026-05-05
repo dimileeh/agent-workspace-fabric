@@ -68,7 +68,6 @@ DEFAULT_VALIDATION_PROVENANCE_LIMIT = 50
 MAX_VALIDATION_PROVENANCE_LIMIT = 500
 
 
-
 async def list_validation_provenance_response(
     session: AsyncSession,
     *,
@@ -165,8 +164,7 @@ def _build_validation_items_page(
     )
     return BoundedListPage(
         items=[
-            _build_validation_item(workspace, record, failed_record)
-            for record in record_page.items
+            _build_validation_item(workspace, record, failed_record) for record in record_page.items
         ],
         next_cursor=record_page.next_cursor,
         has_more=record_page.has_more,

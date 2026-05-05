@@ -276,9 +276,8 @@ def _declared_local_lease_source_is_too_broad(secret: ProfileSecret) -> bool:
 
 
 def _declared_secret_mount_target_is_too_broad(secret: ProfileSecret) -> bool:
-    return (
-        not _declared_local_auth_target_is_allowed(secret)
-        and _secret_mount_target_is_too_broad(secret.target)
+    return not _declared_local_auth_target_is_allowed(secret) and _secret_mount_target_is_too_broad(
+        secret.target
     )
 
 
@@ -406,7 +405,11 @@ def _lint_service_volume(
             ),
         )
 
-    if host_source.is_root or _is_broad_auth_target(target_path) or _is_auth_like_target(target_path):
+    if (
+        host_source.is_root
+        or _is_broad_auth_target(target_path)
+        or _is_auth_like_target(target_path)
+    ):
         return (
             ProfileLintFinding(
                 reason_code=HOST_HOME_AUTH_MOUNT_TOO_BROAD,

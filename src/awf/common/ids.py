@@ -1,8 +1,8 @@
 """ID generation helpers.
 
-We use string UUIDs everywhere so the same ID format works across Postgres
-(uuid), SQLite (varchar), API payloads, and log lines. Generated with uuid4 for
-unguessability; callers that need sortable IDs should use ULIDs in a later phase.
+We use string UUIDs everywhere so the same ID format works across PostgreSQL,
+API payloads, and log lines. Generated with uuid4 for unguessability; callers
+that need sortable IDs should use ULIDs in a later phase.
 """
 
 from __future__ import annotations

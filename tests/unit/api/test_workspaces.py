@@ -1,6 +1,6 @@
 """Workspace API contract tests.
 
-Each test runs against a fresh in-memory SQLite via the ``client`` fixture.
+Each test runs against an isolated PostgreSQL schema via the ``client`` fixture.
 These are *unit*-flavoured tests because they don't spin up Docker or Postgres;
 true integration + E2E tests live under tests/integration/ and tests/e2e/.
 """
@@ -94,9 +94,7 @@ def _endpoint_profile_body() -> dict[str, object]:
     return {
         "name": "api-endpoints",
         "runtime": {
-            "environment": {
-                "SECRET_URL": "http://user:password@app:3000/secret?token=abc"
-            }
+            "environment": {"SECRET_URL": "http://user:password@app:3000/secret?token=abc"}
         },
         "services": [{"name": "app", "image": "example/app:latest"}],
         "app_endpoints": [
@@ -224,9 +222,7 @@ def test_provider_readiness_override_reason_match_redaction_edges() -> None:
     missing_preflight = SimpleNamespace(task_policy={})
     malformed_parts = SimpleNamespace(
         task_policy={
-            "provider_readiness_preflight": {
-                "override_reason_redaction_parts": ["prefix-only"]
-            }
+            "provider_readiness_preflight": {"override_reason_redaction_parts": ["prefix-only"]}
         }
     )
     non_string_parts = SimpleNamespace(
@@ -238,21 +234,15 @@ def test_provider_readiness_override_reason_match_redaction_edges() -> None:
     )
 
     assert (
-        workspaces_route._stored_task_provider_readiness_override_redaction_parts(
-            missing_preflight
-        )
+        workspaces_route._stored_task_provider_readiness_override_redaction_parts(missing_preflight)
         is None
     )
     assert (
-        workspaces_route._stored_task_provider_readiness_override_redaction_parts(
-            malformed_parts
-        )
+        workspaces_route._stored_task_provider_readiness_override_redaction_parts(malformed_parts)
         is None
     )
     assert (
-        workspaces_route._stored_task_provider_readiness_override_redaction_parts(
-            non_string_parts
-        )
+        workspaces_route._stored_task_provider_readiness_override_redaction_parts(non_string_parts)
         is None
     )
 
@@ -896,7 +886,6 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
-
 class TestWorkspaceCreateProviderReadinessPreflight:
     @pytest.fixture(autouse=True)
     def _clear_provider_auth_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -910,9 +899,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
 
         response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
 
@@ -934,9 +921,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
@@ -961,9 +946,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
@@ -992,9 +975,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         codex_home = home / ".codex"
         codex_home.mkdir(parents=True)
         (codex_home / "auth.json").write_text('{"token":"codex_file_secret"}')
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         headers = {"Idempotency-Key": "provider-readiness-replay"}
 
         first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
@@ -1018,9 +999,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         codex_home = home / ".codex"
         codex_home.mkdir(parents=True)
         (codex_home / "auth.json").write_text('{"token":"codex_file_secret"}')
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
@@ -1083,33 +1062,25 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
                 "provider_readiness_override": True,
-                "provider_readiness_override_reason": (
-                    "operator typed <redacted> manually"
-                ),
+                "provider_readiness_override_reason": ("operator typed <redacted> manually"),
             },
         }
         replay_payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
                 "provider_readiness_override": True,
-                "provider_readiness_override_reason": (
-                    "operator typed changed text manually"
-                ),
+                "provider_readiness_override_reason": ("operator typed changed text manually"),
             },
         }
         headers = {"Idempotency-Key": "provider-readiness-literal-redacted-conflict"}
 
         first = await client.post("/v2/workspaces", json=payload, headers=headers)
-        replay = await client.post(
-            "/v2/workspaces", json=replay_payload, headers=headers
-        )
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
 
         assert first.status_code == 202
         assert replay.status_code == 409
@@ -1145,9 +1116,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
                 ),
             },
         }
-        headers = {
-            "Idempotency-Key": "provider-readiness-redacted-rotated-reason-replay"
-        }
+        headers = {"Idempotency-Key": "provider-readiness-redacted-rotated-reason-replay"}
 
         first = await client.post("/v2/workspaces", json=payload, headers=headers)
         active_settings = new_settings
@@ -1167,9 +1136,7 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         tmp_path: Any,
     ) -> None:
         app, client = disk_app_and_client
-        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
-            tmp_path
-        )
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(tmp_path)
         payload = {
             **_V2_MINIMAL_BODY,
             "preflight": {
@@ -2002,7 +1969,10 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert workspaces_route._resolved_profile_requested_tier(workspace) == 2  # type: ignore[arg-type]
         assert workspaces_route._resolved_profile_requested_tier(malformed_workspace) is None  # type: ignore[arg-type]
         assert workspaces_route._resolved_profile_requested_tier(missing_profile_workspace) is None  # type: ignore[arg-type]
-        assert workspaces_route._resolved_profile_requested_tier(malformed_validation_workspace) is None  # type: ignore[arg-type]
+        assert (
+            workspaces_route._resolved_profile_requested_tier(malformed_validation_workspace)
+            is None
+        )  # type: ignore[arg-type]
         assert workspaces_route._stored_task_agent_model(workspace) == "gpt-test"  # type: ignore[arg-type]
         assert workspaces_route._stored_task_agent_model(malformed_workspace) is None  # type: ignore[arg-type]
         assert workspaces_route._stored_task_out_of_scope_policy(workspace) == {"mode": "warn"}  # type: ignore[arg-type]
@@ -2617,7 +2587,9 @@ class TestWorkspaceDirectRoutes:
         )
 
         assert len(cursor) <= 128
-        assert workspaces_route._decode_overview_cursor(cursor) == workspaces_route._WorkspaceOverviewCursor(
+        assert workspaces_route._decode_overview_cursor(
+            cursor
+        ) == workspaces_route._WorkspaceOverviewCursor(
             created_at=created_at,
             workspace_id=workspace_id,
         )
@@ -2634,7 +2606,9 @@ class TestWorkspaceDirectRoutes:
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
 
-        assert workspaces_route._decode_overview_cursor(cursor) == workspaces_route._WorkspaceOverviewCursor(
+        assert workspaces_route._decode_overview_cursor(
+            cursor
+        ) == workspaces_route._WorkspaceOverviewCursor(
             created_at=created_at,
             workspace_id=workspace_id,
         )

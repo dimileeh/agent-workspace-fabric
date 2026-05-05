@@ -57,9 +57,7 @@ def test_untrusted_evidence_closes_before_authoritative_prompt_text() -> None:
     prompt = f"{evidence}\n\nDecide in this order:\n  (1) If the reviewer is right..."
 
     assert (
-        "AWF-EVIDENCE> reviewer text\n"
-        "### END UNTRUSTED EXTERNAL EVIDENCE\n\n"
-        "Decide in this order:"
+        "AWF-EVIDENCE> reviewer text\n### END UNTRUSTED EXTERNAL EVIDENCE\n\nDecide in this order:"
     ) in prompt
 
 

@@ -99,6 +99,8 @@ RuntimeHealthSummaryProvider = Callable[
     [Settings, AsyncSession, OrphanResourceSummary],
     WorkspaceRuntimeHealthSummary | Awaitable[WorkspaceRuntimeHealthSummary],
 ]
+
+
 class ReadinessProvider(Protocol):
     def __call__(
         self,
@@ -106,6 +108,8 @@ class ReadinessProvider(Protocol):
         *,
         validated_strict_providers: set[ProviderName] | None = None,
     ) -> dict[str, Any] | Awaitable[dict[str, Any]]: ...
+
+
 HealthProvider = Callable[
     [],
     dict[str, Any] | Awaitable[dict[str, Any]],
@@ -135,8 +139,7 @@ def build_mcp_server(
     """Construct a FastMCP instance with AWF's tools bound to ``service``.
 
     The service is captured in closures rather than pulled from a framework
-    context var — keeps MCP tools testable by constructing a throwaway
-    FastMCP per test with a service over an in-memory SQLite factory.
+    context var, which keeps MCP tools testable with an injected service.
     """
     mcp = FastMCP(
         name=name,
@@ -425,7 +428,9 @@ def build_mcp_server(
     ) -> StructuredToolResult:
         """Operator control: stop a workspace stack; this is not shell access."""
         try:
-            result = await service.stop_workspace(workspace_id, reason=reason, idempotency_key=idempotency_key)
+            result = await service.stop_workspace(
+                workspace_id, reason=reason, idempotency_key=idempotency_key
+            )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
         return _tool_result(result.model_dump(mode="json"))
@@ -822,7 +827,9 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_list_task_attempts")
     async def awf_list_task_attempts(
-        task_ref: str = Field(..., min_length=1, max_length=256, description="Task ID or external reference."),
+        task_ref: str = Field(
+            ..., min_length=1, max_length=256, description="Task ID or external reference."
+        ),
         limit: int = Field(default=100, ge=1, le=500, description="Maximum attempts to return."),
     ) -> StructuredToolResult:
         """Read-only operator observability: list attempts for a given task."""
@@ -1041,9 +1048,7 @@ def build_mcp_server(
                     profile_ref=profile_ref,
                     profile=profile,
                     auto_merge=auto_merge,
-                    initial_review_grace_period_seconds=(
-                        initial_review_grace_period_seconds
-                    ),
+                    initial_review_grace_period_seconds=(initial_review_grace_period_seconds),
                     task_title=task_title,
                     task_prompt=task_prompt,
                     reason=reason,
@@ -1055,7 +1060,9 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_remonitor_workspace")
     async def awf_remonitor_workspace(
-        workspace_id: str = Field(..., min_length=1, max_length=256, description="Workspace ID to remonitor."),
+        workspace_id: str = Field(
+            ..., min_length=1, max_length=256, description="Workspace ID to remonitor."
+        ),
         reason: str | None = Field(
             default=None,
             max_length=1024,
@@ -1081,7 +1088,9 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_request_workspace_validation")
     async def awf_request_workspace_validation(
-        workspace_id: str = Field(..., min_length=1, max_length=256, description="Workspace ID to validate."),
+        workspace_id: str = Field(
+            ..., min_length=1, max_length=256, description="Workspace ID to validate."
+        ),
         reason: str | None = Field(
             default=None,
             max_length=1024,
@@ -1259,9 +1268,7 @@ async def _provided_readiness(
     runner = AsyncioSubprocessRunner()
     db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(session_factory))
     cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
-    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
-        _check_docker_daemon(runner)
-    )
+    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_daemon(runner))
     compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_docker_compose(runner)
     )
@@ -1370,8 +1377,7 @@ def _redact_sensitive_value(
         return {
             _redact_sensitive_text(key, settings, service_settings=service_settings)
             if isinstance(key, str)
-            else key:
-            _redact_sensitive_value(item, settings, service_settings=service_settings)
+            else key: _redact_sensitive_value(item, settings, service_settings=service_settings)
             for key, item in value.items()
         }
     return value

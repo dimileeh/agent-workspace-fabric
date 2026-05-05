@@ -68,9 +68,7 @@ def test_plan_only_output_detects_internal_plan_artifacts() -> None:
 
 @pytest.mark.unit
 def test_plan_only_output_allows_real_docs_and_source_changes() -> None:
-    assert not changed_paths_are_only_internal_plan_artifacts(
-        ["docs/PROJECT_ONBOARDING.md"]
-    )
+    assert not changed_paths_are_only_internal_plan_artifacts(["docs/PROJECT_ONBOARDING.md"])
     assert not changed_paths_are_only_internal_plan_artifacts(
         ["docs/awf-plans/ws_123.md", "src/awf/control/executor.py"]
     )

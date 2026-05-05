@@ -115,9 +115,7 @@ class TestTaskList:
         assert body["has_more"] is False
         assert body["limit"] == 50
         assert body["cursor"] is None
-        items_by_workspace = {
-            item["workspace_id"]: item for item in body["items"]
-        }
+        items_by_workspace = {item["workspace_id"]: item for item in body["items"]}
         legacy = items_by_workspace[legacy_workspace_id]
         new = items_by_workspace[new_workspace_id]
 
@@ -151,9 +149,7 @@ class TestTaskList:
         response = await client.get("/v1/tasks")
 
         assert response.status_code == 200
-        items_by_workspace = {
-            item["workspace_id"]: item for item in response.json()["items"]
-        }
+        items_by_workspace = {item["workspace_id"]: item for item in response.json()["items"]}
         legacy = items_by_workspace[legacy_workspace_id]
         attempt = items_by_workspace[attempt_workspace_id]
         assert legacy["agent_model"] == "gpt-5.5"
@@ -285,11 +281,7 @@ class TestTaskList:
         response = await client.get("/v1/tasks")
 
         assert response.status_code == 200
-        items = [
-            item
-            for item in response.json()["items"]
-            if item["task_id"] == "TICKET-LATEST"
-        ]
+        items = [item for item in response.json()["items"] if item["task_id"] == "TICKET-LATEST"]
         assert len(items) == 1
         assert items[0]["attempt_id"] == second_attempt.id
         assert items[0]["attempt_number"] == 2
@@ -338,9 +330,7 @@ class TestTaskList:
 
         assert response.status_code == 200
         item = next(
-            item
-            for item in response.json()["items"]
-            if item["task_id"] == "TICKET-CANONICAL"
+            item for item in response.json()["items"] if item["task_id"] == "TICKET-CANONICAL"
         )
         assert item["is_canonical_for_merge"] is True
         assert item["canonical_attempt_id"] == item["attempt_id"]
@@ -403,9 +393,7 @@ class TestTaskList:
             self: TaskAttemptRepository,
             task_id: str,
         ) -> object:
-            raise AssertionError(
-                f"list_tasks should batch canonical lookup for task {task_id}"
-            )
+            raise AssertionError(f"list_tasks should batch canonical lookup for task {task_id}")
 
         monkeypatch.setattr(
             TaskAttemptRepository,

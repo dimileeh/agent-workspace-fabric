@@ -24,16 +24,17 @@ ISSUE_TEMPLATE_PATH = ".github/ISSUE_TEMPLATE/bug_report.yml"
 _SAFE_EXAMPLE_KEYS = frozenset(
     {"workspace_id", "failure_reason", "reason_code", "status", "updated_at", "count"}
 )
-_SAFE_CLUSTER_KEYS = frozenset(
-    {"failure_reason", "reason_code", "count", "sample_workspace_ids"}
-)
+_SAFE_CLUSTER_KEYS = frozenset({"failure_reason", "reason_code", "count", "sample_workspace_ids"})
 
 
 def _redact_value(value: object, secrets: frozenset[str]) -> Any:
     if isinstance(value, str):
         return _redact_text(value, secrets)
     if isinstance(value, Mapping):
-        return {str(_redact_value(key, secrets)): _redact_value(nested, secrets) for key, nested in value.items()}
+        return {
+            str(_redact_value(key, secrets)): _redact_value(nested, secrets)
+            for key, nested in value.items()
+        }
     if isinstance(value, list | tuple):
         return [_redact_value(item, secrets) for item in value]
     if value is None or isinstance(value, bool | int | float):
@@ -103,9 +104,7 @@ async def collect_support_bundle(
         doctor_report = doctor_result
 
     agent_readiness = (
-        service_status.get("agent_readiness", {})
-        if isinstance(service_status, Mapping)
-        else {}
+        service_status.get("agent_readiness", {}) if isinstance(service_status, Mapping) else {}
     )
     provider_readiness_summary = agent_readiness
 
@@ -119,9 +118,7 @@ async def collect_support_bundle(
 
     try:
         if failure_analysis_collector is not None:
-            failure_summary = await failure_analysis_collector(
-                since_hours=failure_window_hours
-            )
+            failure_summary = await failure_analysis_collector(since_hours=failure_window_hours)
         else:
             failure_summary = await _default_failure_analysis_collector(
                 settings,
@@ -191,9 +188,7 @@ async def _default_failure_analysis_collector(
         await engine.dispose()
 
 
-def _sanitize_failure_summary(
-    summary: object, secrets: frozenset[str]
-) -> dict[str, object]:
+def _sanitize_failure_summary(summary: object, secrets: frozenset[str]) -> dict[str, object]:
     if dataclasses.is_dataclass(summary) and not isinstance(summary, type):
         payload: dict[str, object] = dataclasses.asdict(summary)
     elif isinstance(summary, Mapping):
@@ -205,15 +200,11 @@ def _sanitize_failure_summary(
 
     examples = payload.get("latest_examples")
     if isinstance(examples, list):
-        payload["latest_examples"] = [
-            _safe_example_item(item) for item in examples
-        ]
+        payload["latest_examples"] = [_safe_example_item(item) for item in examples]
 
     clusters = payload.get("root_cause_clusters")
     if isinstance(clusters, list):
-        payload["root_cause_clusters"] = [
-            _safe_cluster_item(item) for item in clusters
-        ]
+        payload["root_cause_clusters"] = [_safe_cluster_item(item) for item in clusters]
 
     return payload
 

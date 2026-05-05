@@ -1,6 +1,6 @@
 """ControlWorker tests.
 
-We use the real Provisioner against real git + SQLite to validate the full
+We use the real Provisioner against real git + PostgreSQL to validate the full
 pipeline, rather than mocking the provisioner. The worker's contract is
 primarily about listing work off the DB in the right order and bounding
 concurrency, so end-to-end is the most useful test.
@@ -30,7 +30,6 @@ from awf.control.worker import (
     _scheduler_candidate_fetch_limit,
     _stale_active_execution_failure_message,
 )
-from awf.db.base import Base
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -42,7 +41,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.node.cleanup import (
     CLEANUP_PARTIAL,
     COMPOSE_DOWN_SUCCEEDED,
@@ -55,6 +54,7 @@ from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.controls import WorkspaceControlService
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
+from tests.postgres import postgres_test_engine
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -76,14 +76,8 @@ def origin_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    db_path = tmp_path / "awf-test.db"
-    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -275,9 +269,7 @@ async def _create_active_execution(
         ws.node_id = node_id
         if persist_compose_project:
             ws.compose_project_name = (
-                compose_project_name
-                if compose_project_name is not None
-                else f"awf_{ws.id}"
+                compose_project_name if compose_project_name is not None else f"awf_{ws.id}"
             )
         else:
             ws.compose_project_name = None
@@ -1125,10 +1117,7 @@ class TestRunOnceExecution:
             _executemany: bool,
         ) -> None:
             normalized = statement.upper()
-            if (
-                normalized.lstrip().startswith("SELECT")
-                and "FROM WORKSPACES" in normalized
-            ):
+            if normalized.lstrip().startswith("SELECT") and "FROM WORKSPACES" in normalized:
                 workspace_selects.append(statement)
 
         engine = session_factory.kw["bind"]
@@ -1192,7 +1181,7 @@ class TestRunOnceExecution:
         ordered_ids = [*suppressed_ids, allowed_id]
         base_exclude_ids = {"active-workspace"}
         created_at_by_id: dict[str, datetime] = {}
-        base_created_at = datetime(2026, 1, 1)
+        base_created_at = datetime(2026, 1, 1, tzinfo=UTC)
         async with session_factory() as session:
             for index, workspace_id in enumerate(ordered_ids):
                 created_at = base_created_at + timedelta(seconds=index)
@@ -1216,9 +1205,7 @@ class TestRunOnceExecution:
             assert status == WorkspaceStatus.ready
             excluded = set(exclude_ids or set())
             queries.append((after, excluded))
-            visible = [
-                workspace_id for workspace_id in ordered_ids if workspace_id not in excluded
-            ]
+            visible = [workspace_id for workspace_id in ordered_ids if workspace_id not in excluded]
             if after is not None:
                 visible = [
                     workspace_id
@@ -1228,9 +1215,7 @@ class TestRunOnceExecution:
             visible = visible[:limit]
             if not visible:
                 return []
-            result = await self._session.execute(
-                select(Workspace).where(Workspace.id.in_(visible))
-            )
+            result = await self._session.execute(select(Workspace).where(Workspace.id.in_(visible)))
             rows = {workspace.id: workspace for workspace in result.scalars()}
             return [rows[workspace_id] for workspace_id in visible]
 
@@ -1326,9 +1311,7 @@ class TestRunOnceExecution:
 
         assert executor.calls == [allowed_id]
         async with session_factory() as session:
-            decisions = await QueueDecisionRepository(session).list_for_workspace(
-                suppressed_ids[0]
-            )
+            decisions = await QueueDecisionRepository(session).list_for_workspace(suppressed_ids[0])
 
         assert decisions[0].decision == "deferred"
         assert decisions[0].reason_code == "PROVIDER_MODEL_CIRCUIT_OPEN"
@@ -1708,10 +1691,13 @@ class TestRunOnceExecution:
             for i in range(3)
         ]
 
-        assert await worker._list_monitoring_pr(
-            limit=2,
-            exclude_ids={monitor_ids[0]},
-        ) == monitor_ids[1:]
+        assert (
+            await worker._list_monitoring_pr(
+                limit=2,
+                exclude_ids={monitor_ids[0]},
+            )
+            == monitor_ids[1:]
+        )
 
     @pytest.mark.unit
     async def test_ready_workspace_is_noop_when_no_executor_is_wired(
@@ -1768,9 +1754,7 @@ class TestRunOnceExecution:
             assert ws.failure_reason is None
 
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed]
-    )
+    @pytest.mark.parametrize("final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed])
     async def test_stale_ready_list_entry_is_rechecked_before_dispatch(
         self,
         final_status: WorkspaceStatus,
@@ -2136,9 +2120,7 @@ class TestRunOnceMonitorRecovery:
                 limit=10,
             )
             workspace = await WorkspaceRepository(session).get(monitor_id)
-            operations = await OperationRepository(session).list_all(
-                workspace_id=monitor_id
-            )
+            operations = await OperationRepository(session).list_all(workspace_id=monitor_id)
             events = await WorkspaceEventRepository(session).list(
                 workspace_id=monitor_id,
                 event_type="workspace.monitor_recovery_started",
@@ -2153,9 +2135,7 @@ class TestRunOnceMonitorRecovery:
         assert operations[0].payload["pr_url"] == "https://github.com/example/repo/pull/169"
         assert operations[0].payload["pr_number"] == 169
         assert operations[0].payload["monitor_state"] == {
-            "monitor_started_at": operations[0].payload["monitor_state"][
-                "monitor_started_at"
-            ],
+            "monitor_started_at": operations[0].payload["monitor_state"]["monitor_started_at"],
             "monitor_iter_count": 4,
             "monitor_threads_addressed_count": 1,
             "monitor_last_commit_sha": "e" * 40,
@@ -2226,9 +2206,7 @@ class TestRunOnceMonitorRecovery:
             events = await WorkspaceEventRepository(s).list(workspace_id=monitor_id)
 
         remonitor_operations = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
         assert len(remonitor_operations) == 1
         operation = remonitor_operations[0]
@@ -2252,9 +2230,7 @@ class TestRunOnceMonitorRecovery:
         assert operation.result["status"] == WorkspaceStatus.monitoring_pr.value
 
         recovery_events = [
-            event
-            for event in events
-            if event.event_type == "workspace.monitor_recovery_started"
+            event for event in events if event.event_type == "workspace.monitor_recovery_started"
         ]
         assert len(recovery_events) == 1
         assert recovery_events[0].reason_code == "MONITOR_RECOVERY_AFTER_RESTART"
@@ -2351,9 +2327,7 @@ class TestRunOnceMonitorRecovery:
             )
 
         remonitor_operations = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
         assert len(remonitor_operations) == 1
         operation = remonitor_operations[0]
@@ -2381,9 +2355,7 @@ class TestRunOnceMonitorRecovery:
         assert len(recovery_events) == 1
         assert recovery_events[0].payload is not None
         assert recovery_events[0].payload["operation_id"] == operation.id
-        assert recovery_events[0].payload["claim_cleanup"] == operation.payload[
-            "claim_cleanup"
-        ]
+        assert recovery_events[0].payload["claim_cleanup"] == operation.payload["claim_cleanup"]
 
         executor.release.set()
         await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=1.0)
@@ -2398,9 +2370,7 @@ class TestRunOnceMonitorRecovery:
             operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
 
         remonitor_operations = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
         assert len(remonitor_operations) == 1
         assert remonitor_operations[0].status == OperationStatus.succeeded.value
@@ -2455,9 +2425,7 @@ class TestRunOnceMonitorRecovery:
             )
 
         remonitor_operations = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
         assert len(remonitor_operations) == 1
         operation = remonitor_operations[0]
@@ -2476,9 +2444,7 @@ class TestRunOnceMonitorRecovery:
         }
         assert len(recovery_events) == 1
         assert recovery_events[0].payload is not None
-        assert recovery_events[0].payload["claim_cleanup"] == operation.payload[
-            "claim_cleanup"
-        ]
+        assert recovery_events[0].payload["claim_cleanup"] == operation.payload["claim_cleanup"]
 
     @pytest.mark.unit
     async def test_restart_recovery_rechecks_execution_claim_before_stale_clear(
@@ -2566,9 +2532,7 @@ class TestRunOnceMonitorRecovery:
             operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
 
         remonitor_operations = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
         assert len(remonitor_operations) == 1
         assert remonitor_operations[0].payload is not None
@@ -2633,15 +2597,11 @@ class TestRunOnceMonitorRecovery:
             )
 
         remonitor_operations = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
         assert len(remonitor_operations) == 1
         assert remonitor_operations[0].payload is not None
-        execution_cleanup = remonitor_operations[0].payload["claim_cleanup"][
-            "execution_claim"
-        ]
+        execution_cleanup = remonitor_operations[0].payload["claim_cleanup"]["execution_claim"]
         assert execution_cleanup == {
             "action": "preserved_unexpired",
             "reason_code": "UNEXPIRED_EXECUTION_CLAIM_PRESERVED_DURING_MONITOR_RECOVERY",
@@ -2650,9 +2610,7 @@ class TestRunOnceMonitorRecovery:
         }
         assert len(recovery_events) == 1
         assert recovery_events[0].payload is not None
-        assert recovery_events[0].payload["claim_cleanup"]["execution_claim"] == (
-            execution_cleanup
-        )
+        assert recovery_events[0].payload["claim_cleanup"]["execution_claim"] == (execution_cleanup)
 
     @pytest.mark.unit
     async def test_repeated_restart_recovery_preserves_active_monitor_claim_idempotently(
@@ -2721,16 +2679,15 @@ class TestRunOnceMonitorRecovery:
             )
 
         remonitor_operations = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
         assert len(remonitor_operations) == 1
         assert len(recovery_events) == 1
         assert remonitor_operations[0].payload is not None
-        assert remonitor_operations[0].payload["claim_cleanup"]["execution_claim"][
-            "action"
-        ] == "cleared_stale"
+        assert (
+            remonitor_operations[0].payload["claim_cleanup"]["execution_claim"]["action"]
+            == "cleared_stale"
+        )
 
         executor_a.release.set()
         await asyncio.wait_for(worker_a.wait_for_execution_tasks(), timeout=1.0)
@@ -2745,9 +2702,7 @@ class TestRunOnceMonitorRecovery:
             operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
 
         remonitor_operations = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
         assert len(remonitor_operations) == 1
         assert remonitor_operations[0].status == OperationStatus.succeeded.value
@@ -2794,9 +2749,7 @@ class TestRunOnceMonitorRecovery:
             assert ws.monitor_claimed_by == "healthy-monitor-worker"
             assert ws.monitor_claim_expires_at is not None
         assert [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ] == []
         assert recovery_events == []
 
@@ -2873,16 +2826,12 @@ class TestRunOnceMonitorRecovery:
         assert recovery_events[0].payload is not None
         assert recovery_events[0].payload["runtime_stranding_reason"] == "STRANDED_WORKSPACE"
         remonitor_operations = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.remonitor.value
+            operation for operation in operations if operation.type == OperationType.remonitor.value
         ]
         assert len(remonitor_operations) == 1
         assert remonitor_operations[0].status == OperationStatus.succeeded.value
         assert remonitor_operations[0].payload is not None
-        assert remonitor_operations[0].payload["runtime_stranding_reason"] == (
-            "STRANDED_WORKSPACE"
-        )
+        assert remonitor_operations[0].payload["runtime_stranding_reason"] == ("STRANDED_WORKSPACE")
 
     @pytest.mark.unit
     async def test_runtime_inspection_unavailable_does_not_block_open_pr_remonitor(
@@ -2952,9 +2901,7 @@ class TestRunOnceMonitorRecovery:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        monitor_id = await _create_monitoring_pr(
-            session_factory, origin_repo, "claimed-monitor"
-        )
+        monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "claimed-monitor")
         async with session_factory() as s:
             workspace = await WorkspaceRepository(s).get(monitor_id)
             assert workspace is not None
@@ -3051,18 +2998,14 @@ class TestRunOnceMonitorRecovery:
         assert executor.calls == [ready_id]
 
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed]
-    )
+    @pytest.mark.parametrize("final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed])
     async def test_stale_monitoring_list_entry_is_rechecked_before_dispatch(
         self,
         final_status: WorkspaceStatus,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        monitor_id = await _create_monitoring_pr(
-            session_factory, origin_repo, "stale-monitor"
-        )
+        monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "stale-monitor")
         await _move_to_operator_control_status(session_factory, monitor_id, final_status)
 
         executor = _RecordingExecutor()
@@ -4446,10 +4389,13 @@ def test_monitor_recovery_claim_payload_derives_execution_cleanup_when_omitted()
 async def test_list_by_status_uses_repository_alias_for_non_scheduler_statuses(
     worker: ControlWorker,
 ) -> None:
-    assert await worker._list_by_status(  # noqa: SLF001
-        WorkspaceStatus.failed,
-        limit=10,
-    ) == []
+    assert (
+        await worker._list_by_status(  # noqa: SLF001
+            WorkspaceStatus.failed,
+            limit=10,
+        )
+        == []
+    )
 
 
 @pytest.mark.unit

@@ -181,9 +181,10 @@ class PullRequestMonitorAdoptionService:
                 or metadata.title
                 or f"PR monitor adoption: {repo.slug()}#{metadata.number}"
             ),
-            task_prompt=request.task_prompt
-            or _adoption_task_prompt(repo=repo, metadata=metadata),
-            task_external_id=_adoption_external_id(repo_slug=repo.slug(), pr_number=metadata.number),
+            task_prompt=request.task_prompt or _adoption_task_prompt(repo=repo, metadata=metadata),
+            task_external_id=_adoption_external_id(
+                repo_slug=repo.slug(), pr_number=metadata.number
+            ),
             agent=request.agent.value,
             test_commands=[],
             requires_database=False,
@@ -513,9 +514,7 @@ def _raise_if_policy_conflicts(
             message="Existing adopted PR monitor uses a different inline profile policy.",
             detail={
                 "workspace_id": workspace.id,
-                "existing_inline_profile_name": _inline_profile_name(
-                    workspace.requested_profile
-                ),
+                "existing_inline_profile_name": _inline_profile_name(workspace.requested_profile),
                 "requested_inline_profile_name": _inline_profile_name(requested_profile),
             },
         )
@@ -532,10 +531,7 @@ def _raise_if_policy_conflicts(
     if requested_grace != workspace.initial_review_grace_period_seconds:
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
-            message=(
-                "Existing adopted PR monitor uses a different initial review "
-                "grace policy."
-            ),
+            message=("Existing adopted PR monitor uses a different initial review grace policy."),
             detail={
                 "workspace_id": workspace.id,
                 "existing_initial_review_grace_period_seconds": (

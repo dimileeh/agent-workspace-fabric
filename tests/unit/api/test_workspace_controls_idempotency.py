@@ -34,9 +34,7 @@ _BODY = {
     "test_commands": ["pytest -q"],
 }
 _ACTIVE_CLAIM_EXPIRES_AT = datetime(2026, 4, 26, 12, 30, tzinfo=UTC)
-_ACTIVE_CLAIM_EXPIRES_AT_JSON = _ACTIVE_CLAIM_EXPIRES_AT.replace(
-    tzinfo=None
-).isoformat()
+_ACTIVE_CLAIM_EXPIRES_AT_JSON = _ACTIVE_CLAIM_EXPIRES_AT.isoformat()
 
 
 @pytest.fixture(autouse=True)
@@ -171,14 +169,16 @@ async def _counts(engine: AsyncEngine, workspace_id: str) -> tuple[int, int]:
     factory = make_session_factory(engine)
     async with factory() as session:
         operation_count = await _count_rows(
-            session, select(func.count()).select_from(Operation).where(
-                Operation.workspace_id == workspace_id
-            )
+            session,
+            select(func.count())
+            .select_from(Operation)
+            .where(Operation.workspace_id == workspace_id),
         )
         event_count = await _count_rows(
-            session, select(func.count()).select_from(WorkspaceEvent).where(
-                WorkspaceEvent.workspace_id == workspace_id
-            )
+            session,
+            select(func.count())
+            .select_from(WorkspaceEvent)
+            .where(WorkspaceEvent.workspace_id == workspace_id),
         )
     return operation_count, event_count
 
@@ -513,12 +513,16 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
         workspace = await session.get(Workspace, workspace_id)
         operation = await session.get(Operation, payload["operation_id"])
         events = (
-            await session.execute(
-                select(WorkspaceEvent)
-                .where(WorkspaceEvent.workspace_id == workspace_id)
-                .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            (
+                await session.execute(
+                    select(WorkspaceEvent)
+                    .where(WorkspaceEvent.workspace_id == workspace_id)
+                    .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
@@ -559,9 +563,7 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
             "execution_claim_expires_at": _ACTIVE_CLAIM_EXPIRES_AT_JSON,
         },
     }
-    remonitor_event = next(
-        event for event in events if event.reason_code == "OPERATOR_REMONITOR"
-    )
+    remonitor_event = next(event for event in events if event.reason_code == "OPERATOR_REMONITOR")
     assert remonitor_event.event_type == "workspace.remonitor_requested"
     assert remonitor_event.old_state == WorkspaceStatus.monitoring_pr.value
     assert remonitor_event.new_state == WorkspaceStatus.monitoring_pr.value
@@ -841,9 +843,7 @@ async def test_recovery_operations_require_authorization(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
-    final_status = (
-        WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
-    )
+    final_status = WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
     workspace_id = await _seed_monitoring_workspace(
         engine,
         final_status=final_status,
@@ -870,9 +870,7 @@ async def test_recovery_operations_require_idempotency_key(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
-    final_status = (
-        WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
-    )
+    final_status = WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
     workspace_id = await _seed_monitoring_workspace(
         engine,
         final_status=final_status,
@@ -1027,10 +1025,10 @@ async def test_refresh_endpoint_returns_operation_response_and_coalesces_active_
     factory = make_session_factory(engine)
     async with factory() as session:
         operations = (
-            await session.execute(
-                select(Operation).where(Operation.workspace_id == workspace_id)
-            )
-        ).scalars().all()
+            (await session.execute(select(Operation).where(Operation.workspace_id == workspace_id)))
+            .scalars()
+            .all()
+        )
         refresh_event = (
             await session.execute(
                 select(WorkspaceEvent).where(
@@ -1099,10 +1097,10 @@ async def test_validate_endpoint_returns_operation_response_and_coalesces_active
     async with factory() as session:
         workspace = await session.get(Workspace, workspace_id)
         operations = (
-            await session.execute(
-                select(Operation).where(Operation.workspace_id == workspace_id)
-            )
-        ).scalars().all()
+            (await session.execute(select(Operation).where(Operation.workspace_id == workspace_id)))
+            .scalars()
+            .all()
+        )
         validate_event = (
             await session.execute(
                 select(WorkspaceEvent).where(
@@ -1188,10 +1186,10 @@ async def test_rebase_endpoint_returns_operation_response_and_replays_exact_key(
     async with factory() as session:
         workspace = await session.get(Workspace, workspace_id)
         operations = (
-            await session.execute(
-                select(Operation).where(Operation.workspace_id == workspace_id)
-            )
-        ).scalars().all()
+            (await session.execute(select(Operation).where(Operation.workspace_id == workspace_id)))
+            .scalars()
+            .all()
+        )
         candidate = (
             await session.execute(
                 select(MergeCandidate).where(MergeCandidate.workspace_id == workspace_id)
@@ -1373,9 +1371,7 @@ async def test_recovery_same_key_with_different_if_match_returns_conflict(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
-    final_status = (
-        WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
-    )
+    final_status = WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
     if_match = "3" if action == "refresh" else "7"
     workspace_id = await _seed_monitoring_workspace(engine, final_status=final_status)
     body = (

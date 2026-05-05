@@ -239,9 +239,7 @@ def _check_failure_metadata(
     )
 
 
-def _missing_check_log_summary(
-    *, repo_slug: str, pr_number: int, failure: CheckFailure
-) -> str:
+def _missing_check_log_summary(*, repo_slug: str, pr_number: int, failure: CheckFailure) -> str:
     lines = [
         "AWF could not retrieve a log excerpt for this failed check.",
         *_clean_metadata_lines(

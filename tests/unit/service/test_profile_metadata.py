@@ -21,7 +21,10 @@ def test_extracts_allowlist_templates_from_profile_snapshot() -> None:
             },
         },
     }
-    assert egress_allowlist_templates_from_profile_snapshot(profile) == ["github", "model_providers"]
+    assert egress_allowlist_templates_from_profile_snapshot(profile) == [
+        "github",
+        "model_providers",
+    ]
 
 
 @pytest.mark.unit
@@ -29,9 +32,7 @@ def test_returns_none_for_missing_templates() -> None:
     assert egress_allowlist_templates_from_profile_snapshot({}) is None
     assert egress_allowlist_templates_from_profile_snapshot({"security": {"egress": {}}}) is None
     assert (
-        egress_allowlist_templates_from_profile_snapshot(
-            {"security": {"egress": {"mode": "open"}}}
-        )
+        egress_allowlist_templates_from_profile_snapshot({"security": {"egress": {"mode": "open"}}})
         is None
     )
 
@@ -64,7 +65,9 @@ def test_returns_none_for_missing_security_or_egress() -> None:
 
 @pytest.mark.unit
 def test_network_posture_backward_compatibility() -> None:
-    assert network_posture_from_profile_snapshot({"security": {"egress": {"mode": "open"}}}) == "open"
+    assert (
+        network_posture_from_profile_snapshot({"security": {"egress": {"mode": "open"}}}) == "open"
+    )
     assert network_posture_from_profile_snapshot(None) is None
     assert network_posture_from_profile_snapshot([]) is None
     assert network_posture_from_profile_snapshot(123) is None

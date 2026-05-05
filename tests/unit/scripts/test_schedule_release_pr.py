@@ -119,7 +119,11 @@ class TestScheduleMain:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         stub_ensure.result = _FakeEnsureResult(pr_number=278, created=True)
-        monkeypatch.setattr(schedule_release_pr, "_monitor_already_running", lambda **_k: False)
+
+        async def _not_running(**_kwargs: object) -> bool:
+            return False
+
+        monkeypatch.setattr(schedule_release_pr, "_monitor_already_running", _not_running)
         rc = await schedule_release_pr._main(
             repo_url="git@github.com:dimileeh/aira-web.git",
             source_branch="development",
@@ -158,7 +162,11 @@ class TestScheduleMain:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         stub_ensure.result = _FakeEnsureResult(pr_number=500)
-        monkeypatch.setattr(schedule_release_pr, "_monitor_already_running", lambda **_k: True)
+
+        async def _already_running(**_kwargs: object) -> bool:
+            return True
+
+        monkeypatch.setattr(schedule_release_pr, "_monitor_already_running", _already_running)
         rc = await schedule_release_pr._main(
             repo_url="git@github.com:x/y.git",
             source_branch="development",
@@ -181,7 +189,11 @@ class TestScheduleMain:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         stub_ensure.result = _FakeEnsureResult(pr_number=100, created=True)
-        monkeypatch.setattr(schedule_release_pr, "_monitor_already_running", lambda **_k: False)
+
+        async def _not_running(**_kwargs: object) -> bool:
+            return False
+
+        monkeypatch.setattr(schedule_release_pr, "_monitor_already_running", _not_running)
         companions_file = tmp_path / "companions.json"
         companions_file.write_text(
             json.dumps(
@@ -212,13 +224,19 @@ class TestScheduleMain:
 
 class TestMonitorAlreadyRunningDbErrors:
     @pytest.mark.unit
-    def test_malformed_db_returns_false(self, tmp_path: Path) -> None:
-        """A corrupt / locked AWF DB must not crash the scheduler —
+    async def test_unavailable_db_returns_false(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """An unavailable AWF DB must not crash the scheduler —
         worst case we spawn a duplicate monitor, which is what we had
         before DB-based idempotency."""
-        bad_db = tmp_path / "awf.db"
-        bad_db.write_bytes(b"not a sqlite database")
-        assert not schedule_release_pr._monitor_already_running(
+        monkeypatch.setenv(
+            "AWF_DATABASE_URL",
+            "postgresql+asyncpg://awf:awf_dev@127.0.0.1:1/awf",
+        )
+        assert not await schedule_release_pr._monitor_already_running(
             work_dir=tmp_path, repo_slug="x/y", pr_number=1
         )
 

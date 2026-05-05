@@ -61,7 +61,6 @@ def upgrade() -> None:
         "task_attempts",
         ["task_id"],
         unique=True,
-        sqlite_where=sa.text("is_canonical_for_merge = 1"),
         postgresql_where=sa.text("is_canonical_for_merge = true"),
     )
 

@@ -69,8 +69,7 @@ class ProfileResolver:
                 )
             except ValidationError as exc:
                 raise ProfileResolutionError(
-                    "invalid inline workspace profile: "
-                    f"{_validation_error_message(exc)}"
+                    f"invalid inline workspace profile: {_validation_error_message(exc)}"
                 ) from exc
             reason = "inline profile supplied by request"
         elif worktree_path is not None:

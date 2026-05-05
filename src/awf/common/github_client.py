@@ -360,10 +360,7 @@ def _parse_pull_request_adoption_metadata(
     if number != pr_number:
         raise PullRequestMetadataError(
             reason_code="PR_METADATA_INVALID",
-            message=(
-                f"gh pr view returned PR #{number}, expected #{pr_number} "
-                f"for {repo.slug()}"
-            ),
+            message=(f"gh pr view returned PR #{number}, expected #{pr_number} for {repo.slug()}"),
             detail={"repo_slug": repo.slug(), "pr_number": pr_number},
         )
     if not head_ref.strip():
@@ -655,10 +652,7 @@ class GitHubClient:
                 raise GitHubClientError(
                     operation="fetch_pr_status",
                     returncode=0,
-                    stderr=(
-                        "GitHub PR files pageInfo.hasNextPage was true "
-                        "without an endCursor"
-                    ),
+                    stderr=("GitHub PR files pageInfo.hasNextPage was true without an endCursor"),
                 )
             payload = await self._graphql(
                 query=_GQL_PR_FILES_PAGE,

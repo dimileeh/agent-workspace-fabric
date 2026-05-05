@@ -48,8 +48,7 @@ via the async worker.
 
 _DX_HELP = "DX smoke proof: validate local service, profile, and PR path."
 _PROVIDER_HELP = (
-    "Repeatable provider strictness check: github, codex, claude_code, "
-    "gemini, opencode, or docker."
+    "Repeatable provider strictness check: github, codex, claude_code, gemini, opencode, or docker."
 )
 _PROVIDER_HELP_PASSTHROUGH = (
     "Repeatable provider strictness check passed through to local "

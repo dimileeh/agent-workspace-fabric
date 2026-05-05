@@ -16,8 +16,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.base import Base
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.service.provider_recovery import (
     FallbackTarget,
     ProviderRecoveryDecision,
@@ -39,17 +38,13 @@ from awf.service.provider_recovery import (
     provider_recovery_metadata_from_failure,
     provider_recovery_metadata_from_workspace,
 )
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def test_fallback_target_to_payload_omits_missing_provider() -> None:
@@ -534,10 +529,7 @@ def test_has_existing_recovery_event_skips_unrelated_events() -> None:
     )
 
     assert (
-        _has_existing_provider_recovery_event(
-            workspace, {"failure_fingerprint": "fp-x"}
-        )
-        is False
+        _has_existing_provider_recovery_event(workspace, {"failure_fingerprint": "fp-x"}) is False
     )
 
 
@@ -555,12 +547,7 @@ def test_has_existing_recovery_event_matches_on_fingerprint() -> None:
         ],
     )
 
-    assert (
-        _has_existing_provider_recovery_event(
-            workspace, {"failure_fingerprint": "fp-x"}
-        )
-        is True
-    )
+    assert _has_existing_provider_recovery_event(workspace, {"failure_fingerprint": "fp-x"}) is True
 
 
 @pytest.mark.unit
@@ -749,8 +736,7 @@ async def test_create_attempt_records_terminal_event_when_attempts_exhausted(
                 await session.execute(
                     select(WorkspaceEvent).where(
                         WorkspaceEvent.workspace_id == response.id,
-                        WorkspaceEvent.event_type
-                        == "workspace.provider_recovery_terminal",
+                        WorkspaceEvent.event_type == "workspace.provider_recovery_terminal",
                     )
                 )
             ).scalars()
@@ -911,8 +897,7 @@ async def test_create_attempt_short_circuits_on_existing_recovery_event(
                 await session.execute(
                     select(WorkspaceEvent).where(
                         WorkspaceEvent.workspace_id == response.id,
-                        WorkspaceEvent.event_type
-                        == "workspace.provider_recovery_requested",
+                        WorkspaceEvent.event_type == "workspace.provider_recovery_requested",
                     )
                 )
             ).scalars()

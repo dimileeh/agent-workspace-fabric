@@ -693,7 +693,12 @@ class TestMergeQueueList:
         assert item["required_next_action"] == "rebase"
         assert item["readiness"]["stale"] is True
         assert {
-            (reason["reason_code"], reason["trigger_ref"], reason["severity"], reason["blocks_merge"])
+            (
+                reason["reason_code"],
+                reason["trigger_ref"],
+                reason["severity"],
+                reason["blocks_merge"],
+            )
             for reason in item["stale_reasons"]
         } == {
             (
@@ -1286,9 +1291,7 @@ class TestMergeQueueList:
 
         assert queue_response.status_code == 200
         item = next(
-            item
-            for item in queue_response.json()["items"]
-            if item["workspace_id"] == workspace_id
+            item for item in queue_response.json()["items"] if item["workspace_id"] == workspace_id
         )
         assert item["readiness"]["ready"] is True
         assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
@@ -1440,8 +1443,7 @@ class TestMergeQueueList:
         assert not [
             statement
             for statement in statements
-            if "from merge_candidates" in statement
-            and "where merge_candidates.id = ?" in statement
+            if "from merge_candidates" in statement and "where merge_candidates.id = ?" in statement
         ]
 
     @pytest.mark.unit
@@ -1754,10 +1756,7 @@ class TestMergeQueueList:
         assert item["latest_validation"]["coverage_percent"] == 98.4
         assert item["latest_validation"]["coverage_minimum_percent"] == 99.0
         assert item["latest_validation"]["coverage_status"] == "failed"
-        assert (
-            item["latest_validation"]["coverage_reason_code"]
-            == "COVERAGE_BELOW_THRESHOLD"
-        )
+        assert item["latest_validation"]["coverage_reason_code"] == "COVERAGE_BELOW_THRESHOLD"
 
 
 class TestMergeQueueHelpers:

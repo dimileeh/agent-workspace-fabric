@@ -309,9 +309,7 @@ def _graph_summary(
     node_items = tuple(nodes)
     edge_items = tuple(edges)
     affected_workspace_ids = {
-        workspace_id
-        for edge in edge_items
-        for workspace_id in edge.affected_workspace_ids
+        workspace_id for edge in edge_items for workspace_id in edge.affected_workspace_ids
     }
     return WorkspaceOverlapGraphSummary(
         node_count=len(node_items),

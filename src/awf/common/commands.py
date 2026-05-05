@@ -171,9 +171,7 @@ class AsyncioSubprocessRunner:
                 return
 
             wall_deadline = (
-                started_at + wall_timeout_seconds
-                if wall_timeout_seconds is not None
-                else None
+                started_at + wall_timeout_seconds if wall_timeout_seconds is not None else None
             )
 
             while not wait_task.done():
@@ -339,8 +337,7 @@ def _timeout_diagnostic(
 ) -> str:
     if reason_code == COMMAND_IDLE_TIMEOUT_REASON:
         return (
-            "command idle timeout after "
-            f"{_format_seconds(idle_timeout_seconds)}s without output\n"
+            f"command idle timeout after {_format_seconds(idle_timeout_seconds)}s without output\n"
         )
     return f"command wall timeout after {_format_seconds(wall_timeout_seconds)}s\n"
 

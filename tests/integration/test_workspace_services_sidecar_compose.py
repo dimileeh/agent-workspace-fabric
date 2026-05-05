@@ -21,7 +21,9 @@ from awf.node.compose_manager import ComposeManager, WorkspaceComposeSpec
 from awf.profiles.compose import profile_services
 from awf.profiles.resolver import ProfileResolver
 
-_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "workspace_services" / "dockerized_app"
+_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "workspace_services" / "dockerized_app"
+)
 _TEMPLATE = Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
 
 

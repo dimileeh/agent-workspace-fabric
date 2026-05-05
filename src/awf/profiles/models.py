@@ -605,9 +605,7 @@ class ProfileSecurity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     egress: ProfileEgress = Field(default_factory=ProfileEgress)
-    host_home_auth_mounts: HostHomeAuthMountPolicy = Field(
-        default_factory=HostHomeAuthMountPolicy
-    )
+    host_home_auth_mounts: HostHomeAuthMountPolicy = Field(default_factory=HostHomeAuthMountPolicy)
 
 
 class ProfilePricing(BaseModel):
@@ -659,9 +657,7 @@ class WorkspaceProfile(BaseModel):
 
             env_name = _normalized_endpoint_env_name(endpoint.name)
             if not env_name:
-                raise ValueError(
-                    f"app endpoint environment name cannot be empty: {endpoint.name}"
-                )
+                raise ValueError(f"app endpoint environment name cannot be empty: {endpoint.name}")
             if env_name in seen_env_names:
                 raise ValueError(f"duplicate app endpoint environment name: {endpoint.name}")
             seen_env_names.add(env_name)

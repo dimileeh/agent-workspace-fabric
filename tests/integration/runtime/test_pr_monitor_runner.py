@@ -1,6 +1,6 @@
 """Integration tests for PullRequestMonitorRunner.
 
-'Integration' here means: real SQLAlchemy (in-memory SQLite), the real
+'Integration' here means: real SQLAlchemy against PostgreSQL, the real
 decision core (``decide``), the real prompt templates, and a real
 ``GitHubClient`` — but backed by ``FakeCommandRunner`` and a tiny fake
 adapter so no subprocesses spawn. Tests drive full loops end-to-end.
@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     TaskAttemptRepository,
@@ -28,7 +27,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorConfig, MonitorState
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
@@ -36,6 +35,7 @@ from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_started_key,
     _parse_verdict,
 )
+from tests.postgres import postgres_test_engine
 
 # ── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -150,13 +150,8 @@ def _pr_payload(
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -684,13 +679,7 @@ class TestAddressComments:
         cmd.queue_result(
             returncode=0,
             stdout=json.dumps(
-                {
-                    "data": {
-                        "resolveReviewThread": {
-                            "thread": {"id": "T_fork", "isResolved": True}
-                        }
-                    }
-                }
+                {"data": {"resolveReviewThread": {"thread": {"id": "T_fork", "isResolved": True}}}}
             ),
         )
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -1919,7 +1908,7 @@ class TestMonitorDbHelpers:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """Some DB backends (SQLite with certain dialect settings) return
+        """Some DB drivers return
         naive datetimes. The loader must treat them as UTC so elapsed
         math doesn't go sideways."""
         from datetime import datetime as _dt

@@ -145,7 +145,9 @@ def scan_test_quality(
     violations: list[TestQualityViolation] = []
     for path in _iter_python_files(paths, exclude_globs, scan_root):
         violations.extend(_scan_file(path))
-    return sorted(violations, key=lambda violation: (str(violation.path), violation.line, violation.code))
+    return sorted(
+        violations, key=lambda violation: (str(violation.path), violation.line, violation.code)
+    )
 
 
 def _iter_python_files(
@@ -246,9 +248,7 @@ def _scan_test_node(
                 test_end=end_line,
             )
         )
-    elif len(effective_body) == 1 and (
-        skip_line := _skip_only_statement_line(effective_body[0])
-    ):
+    elif len(effective_body) == 1 and (skip_line := _skip_only_statement_line(effective_body[0])):
         violations.append(
             _PendingViolation(
                 path=path,
@@ -427,9 +427,7 @@ def _scan_broad_monkeypatches(
         if not matching_calls:
             continue
         other_entrypoints = [
-            call
-            for call in exercised_calls
-            if not _call_matches_target(call, target, test.name)
+            call for call in exercised_calls if not _call_matches_target(call, target, test.name)
         ]
         if other_entrypoints:
             continue

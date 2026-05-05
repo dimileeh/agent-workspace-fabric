@@ -20,12 +20,11 @@ from awf.profiles.compose import (
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import ProfileResolver
 
-_FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "dockerized_app"
+_FIXTURE = (
+    Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "dockerized_app"
+)
 _POSTGRES_FIXTURE = (
-    Path(__file__).resolve().parents[2]
-    / "fixtures"
-    / "workspace_services"
-    / "python_postgres_app"
+    Path(__file__).resolve().parents[2] / "fixtures" / "workspace_services" / "python_postgres_app"
 )
 _NODE_BROWSER_FIXTURE = (
     Path(__file__).resolve().parents[2]
@@ -62,10 +61,14 @@ def _load_postgres_profile() -> WorkspaceProfile:
 
 def _load_node_browser_profile() -> WorkspaceProfile:
     assert _NODE_BROWSER_FIXTURE.is_dir(), "node browser workspace-services fixture is missing"
-    return ProfileResolver().resolve(
-        worktree_path=_NODE_BROWSER_FIXTURE,
-        profile_ref="auto",
-    ).profile
+    return (
+        ProfileResolver()
+        .resolve(
+            worktree_path=_NODE_BROWSER_FIXTURE,
+            profile_ref="auto",
+        )
+        .profile
+    )
 
 
 def _clear_host_auth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,9 +132,7 @@ def test_profile_agent_environment_exposes_only_agent_and_validation_app_endpoin
     env = dict(profile_agent_environment(_load_node_browser_profile()))
 
     assert env["AWF_APP_ENDPOINT_APP_URL"] == "http://app:3000/"
-    assert env["AWF_APP_ENDPOINT_BROWSER_VALIDATION_URL"] == (
-        "http://browser:9323/validate"
-    )
+    assert env["AWF_APP_ENDPOINT_BROWSER_VALIDATION_URL"] == ("http://browser:9323/validate")
     assert "AWF_APP_ENDPOINT_OPERATOR_NOTES_URL" not in env
 
     endpoints = json.loads(env["AWF_APP_ENDPOINTS_JSON"])
@@ -379,7 +380,7 @@ async def test_rendered_python_postgres_compose_expresses_db_backed_service_sema
     assert app["healthcheck"]["test"] == [
         "CMD-SHELL",
         (
-            "python -c \"import urllib.request; "
+            'python -c "import urllib.request; '
             "urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).read()\""
         ),
     ]
@@ -494,8 +495,7 @@ async def test_rendered_node_next_browser_compose_expresses_browser_validation_s
         "http://browser:9323/validate"
     )
     assert [
-        endpoint["name"]
-        for endpoint in json.loads(agent["environment"]["AWF_APP_ENDPOINTS_JSON"])
+        endpoint["name"] for endpoint in json.loads(agent["environment"]["AWF_APP_ENDPOINTS_JSON"])
     ] == ["app", "browser_validation"]
     assert agent["depends_on"] == {
         "app": {"condition": "service_healthy"},

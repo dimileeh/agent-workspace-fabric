@@ -642,7 +642,9 @@ def test_support_bundle_uses_default_failure_analysis_collector(
         calls["session_engine"] = engine
         return fake_session_factory
 
-    async def _summarize_failure_analysis(session_factory: object, *, since_hours: int) -> dict[str, object]:
+    async def _summarize_failure_analysis(
+        session_factory: object, *, since_hours: int
+    ) -> dict[str, object]:
         calls["session_factory"] = session_factory
         calls["since_hours"] = since_hours
         return _mock_failure_summary()

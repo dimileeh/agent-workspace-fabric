@@ -160,9 +160,7 @@ def classify_provider_failure(
 
     if failure_type is None:
         return None
-    if failure_type in {"timeout", "idle_timeout"} and not (
-        inferred_provider or normalized_model
-    ):
+    if failure_type in {"timeout", "idle_timeout"} and not (inferred_provider or normalized_model):
         return None
 
     final_reason_code = _reason_code_for_type(failure_type)

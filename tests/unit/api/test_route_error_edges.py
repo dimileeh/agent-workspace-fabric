@@ -228,15 +228,21 @@ def test_workspace_stored_provider_readiness_override_handles_sparse_snapshots()
     assert workspace_routes._stored_task_provider_readiness_override(  # noqa: SLF001
         no_preflight  # type: ignore[arg-type]
     ) == (False, None)
-    assert workspace_routes._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
-        no_preflight  # type: ignore[arg-type]
-    ) is None
+    assert (
+        workspace_routes._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+            no_preflight  # type: ignore[arg-type]
+        )
+        is None
+    )
     assert workspace_routes._stored_task_provider_readiness_override(  # noqa: SLF001
         legacy_override  # type: ignore[arg-type]
     ) == (True, None)
     assert workspace_routes._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
         redacted_override  # type: ignore[arg-type]
     ) == ["operator checked ", ""]
-    assert workspace_routes._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
-        malformed_parts  # type: ignore[arg-type]
-    ) is None
+    assert (
+        workspace_routes._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+            malformed_parts  # type: ignore[arg-type]
+        )
+        is None
+    )

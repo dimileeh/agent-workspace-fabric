@@ -838,7 +838,7 @@ class TestFetchPrStatus:
                             "in this repo. Reviews are triggered when you\n"
                             "- Open a pull request for review\n"
                             "- Mark a draft as ready\n"
-                            "- Comment \"@codex review\".\n\n"
+                            '- Comment "@codex review".\n\n'
                             "If Codex has suggestions, it will comment; otherwise it will "
                             "react with 👍.\n"
                             "</details>"
@@ -855,9 +855,7 @@ class TestFetchPrStatus:
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
 
-        assert [t.thread_id for t in status.unresolved_inline_threads] == [
-            "PRRT_kwDOSJAM6s5_H5DV"
-        ]
+        assert [t.thread_id for t in status.unresolved_inline_threads] == ["PRRT_kwDOSJAM6s5_H5DV"]
         assert status.unresolved_review_comments == ()
 
     @pytest.mark.unit
@@ -1142,7 +1140,9 @@ class TestFetchPrStatus:
         assert args[0:3] == ["gh", "api", "graphql"]
         # Query passed via -f query=…, numeric number passed via -F
         assert any(a.startswith("query=") and "pullRequest" in a for a in args)
-        assert any(a.startswith("query=") and "pageInfo { hasNextPage endCursor }" in a for a in args)
+        assert any(
+            a.startswith("query=") and "pageInfo { hasNextPage endCursor }" in a for a in args
+        )
         assert "number=123" in args and "-F" in args
         assert "owner=dimileeh" in args and "repo=aira-web" in args
 

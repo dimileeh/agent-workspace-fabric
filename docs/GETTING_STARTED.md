@@ -99,10 +99,10 @@ printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN" > docker/compose/.env
 uv run --python 3.12 --extra dev awf service bootstrap
 ```
 
-For API-only throwaway development, SQLite remains supported:
+For API-only throwaway development, use the local PostgreSQL control-plane DB:
 
 ```bash
-export AWF_DATABASE_URL="sqlite+aiosqlite:///./awf.db"
+export AWF_DATABASE_URL="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
 ```
 
@@ -134,8 +134,8 @@ Agent watchdogs are conservative by default: AWF terminates a coding CLI after
 7200 seconds of wall-clock runtime or 900 seconds without stdout/stderr output.
 Partial stdout/stderr is kept in workspace logs for salvage and diagnosis.
 
-The local dogfood runner uses its own SQLite DB under `--work-dir`, so it does
-not require a separate Postgres control-plane database.
+The local dogfood runner uses the configured PostgreSQL control-plane DB. Set
+`AWF_DATABASE_URL` before launching it when you need an isolated control plane.
 
 ### Agent Credentials in Containers
 
@@ -288,12 +288,12 @@ http://localhost:8000/docs
 ## Local Dogfood Runner
 
 `scripts/run_awf.py` is the compatibility dogfood runner for exercising the same
-building blocks outside the always-on service. It stores its SQLite DB under
-`--work-dir`, does not require the local Postgres control-plane database,
-provisions workspaces, launches Docker Compose, runs the agent, creates a PR,
-and runs the PR monitor. The service worker is the normal always-on executor;
-use the script for isolated experiments, checked-in specs, release/sync
-compatibility runs, and SQLite-backed throwaway runs.
+building blocks outside the always-on service. It stores its PostgreSQL DB under
+the configured `AWF_DATABASE_URL`, provisions workspaces, launches Docker
+Compose, runs the agent, creates a PR, and runs the PR monitor. The service
+worker is the normal always-on executor; use the script for isolated
+experiments, checked-in specs, release/sync compatibility runs, and
+PostgreSQL-backed throwaway runs.
 
 Example config:
 

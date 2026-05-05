@@ -1,7 +1,7 @@
 """MCP server + tool behaviour tests.
 
 We exercise the tools via ``mcp.call_tool(name, args)`` (FastMCP's in-process
-harness) against a throwaway in-memory SQLite. This validates:
+harness) against a throwaway PostgreSQL. This validates:
 - All five tools are registered under the expected names.
 - Each tool's happy path returns the same payload shape as the REST API.
 - wait_for_workspace exits on terminal state without hanging.
@@ -20,16 +20,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.api.schemas import OperationResponse, WorkspaceControlResponse
 from awf.common.config import Settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
-from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.mcp import server as mcp_server
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
 from awf.service.controls import WorkspaceControlError
 from awf.service.workspaces import WorkspaceRetryError
+from tests.postgres import postgres_test_engine
 
 _PROVIDER_AUTH_ENV_KEYS = (
     "OPENAI_API_KEY",
@@ -43,13 +43,8 @@ _PROVIDER_AUTH_ENV_KEYS = (
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -164,7 +159,9 @@ async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
 def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
     any_of = schema.get("anyOf")
     assert isinstance(any_of, list)
-    string_schema = next(item for item in any_of if isinstance(item, dict) and item.get("type") == "string")
+    string_schema = next(
+        item for item in any_of if isinstance(item, dict) and item.get("type") == "string"
+    )
     assert isinstance(string_schema, dict)
     return string_schema
 
@@ -262,13 +259,11 @@ class TestToolRegistration:
             "minLength": 1,
             "type": "string",
         }
-        assert create_v2.inputSchema["properties"]["provider_readiness_override"][
-            "default"
-        ] is False
         assert (
-            create_v2.inputSchema["properties"]["provider_readiness_override_reason"][
-                "default"
-            ]
+            create_v2.inputSchema["properties"]["provider_readiness_override"]["default"] is False
+        )
+        assert (
+            create_v2.inputSchema["properties"]["provider_readiness_override_reason"]["default"]
             is None
         )
 
@@ -443,7 +438,9 @@ class TestToolRegistration:
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
         assert "workspace_id" in validate_props
-        validate_required = tools["awf_request_workspace_validation"].inputSchema.get("required", [])
+        validate_required = tools["awf_request_workspace_validation"].inputSchema.get(
+            "required", []
+        )
         assert "workspace_id" in validate_required
         assert validate_props["reason"]["default"] is None
         assert validate_props["requested_tier"]["default"] is None
@@ -582,7 +579,16 @@ class _RecordingControlService:
         reason: str | None,
         idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
-        self.calls.append(("stop", {"workspace_id": workspace_id, "reason": reason, "idempotency_key": idempotency_key}))
+        self.calls.append(
+            (
+                "stop",
+                {
+                    "workspace_id": workspace_id,
+                    "reason": reason,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
         return WorkspaceControlResponse(
             workspace_id=workspace_id,
             operation_id="op_stop",
@@ -698,7 +704,14 @@ class TestWorkspaceControls:
         )
 
         assert service.calls == [
-            ("stop", {"workspace_id": "ws_control", "reason": "free local resources", "idempotency_key": None})
+            (
+                "stop",
+                {
+                    "workspace_id": "ws_control",
+                    "reason": "free local resources",
+                    "idempotency_key": None,
+                },
+            )
         ]
         assert payload == {
             "workspace_id": "ws_control",
@@ -965,10 +978,7 @@ class TestCreateWorkspaceV2:
         assert isinstance(result, CallToolResult)
         assert result.isError is True
         assert result.structuredContent is not None
-        assert (
-            result.structuredContent["error_code"]
-            == "PROVIDER_READINESS_PRECHECK_FAILED"
-        )
+        assert result.structuredContent["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
         preflight = result.structuredContent["detail"]["provider_readiness_preflight"]
         assert preflight["provider"] == "codex"
         assert preflight["model"] == "gpt-5.5"
@@ -1053,10 +1063,7 @@ class TestCreateWorkspaceV2:
         assert isinstance(blocked, CallToolResult)
         assert blocked.isError is True
         assert blocked.structuredContent is not None
-        assert (
-            blocked.structuredContent["error_code"]
-            == "PROVIDER_READINESS_PRECHECK_FAILED"
-        )
+        assert blocked.structuredContent["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
         blocked_preflight = blocked.structuredContent["detail"]["provider_readiness_preflight"]
         assert blocked_preflight["provider"] == "codex"
         assert blocked_preflight["source_workspace_id"] == workspace_id

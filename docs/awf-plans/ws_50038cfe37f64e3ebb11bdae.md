@@ -77,7 +77,7 @@ uv run --python 3.12 --extra dev pytest --cov=awf --cov-report=term-missing
 - The stale execution claim is treated as irrelevant once a workspace is already `monitoring_pr`; monitor recovery must not transition the row back to `ready` or `running`.
 - The active monitor claim is the duplicate-loop guard. Cleanup code must never clear another worker's unexpired monitor claim or create a second remonitor operation while one worker is actively resuming the monitor.
 - Existing event name `workspace.monitor_recovery_started` and reason code `MONITOR_RECOVERY_AFTER_RESTART` are assumed to remain the durable recovery surface; the change should extend payloads rather than introduce a parallel event unless tests expose a need for a separate cleanup-only event.
-- Time comparisons need to handle naive SQLite datetimes the same way existing `_execution_claim_is_stale()` / `_monitor_claim_is_stale()` helpers do.
+- Time comparisons need to handle naive PostgreSQL datetimes the same way existing `_execution_claim_is_stale()` / `_monitor_claim_is_stale()` helpers do.
 
 ## Explicit Non-Goals
 

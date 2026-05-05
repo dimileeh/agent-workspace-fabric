@@ -483,8 +483,7 @@ def _rebase_recovery_operation_payload_identities(
     if "source" in identity:
         return (identity,)
     return tuple(
-        {**identity, "source": source}
-        for source in sorted(_VALIDATE_ONLY_RECOVERY_SOURCES)
+        {**identity, "source": source} for source in sorted(_VALIDATE_ONLY_RECOVERY_SOURCES)
     )
 
 
@@ -658,9 +657,7 @@ class WorkspaceExecutor:
     ) -> None:
         resolved_branch_name = branch_name or workspace.branch_name
         resolved_remote_branch = (
-            remote_branch
-            or workspace.remote_push_branch
-            or workspace.branch_name
+            remote_branch or workspace.remote_push_branch or workspace.branch_name
         )
         await repo.add_audit_event(
             workspace,
@@ -914,9 +911,7 @@ class WorkspaceExecutor:
                 profile = _profile_for_workspace(
                     workspace,
                     worktree_path=worktree_path,
-                    planning_max_iterations_default=(
-                        self._config.planning_max_iterations_default
-                    ),
+                    planning_max_iterations_default=(self._config.planning_max_iterations_default),
                 )
                 monitor = _call_pr_monitor_factory(
                     self._pr_monitor_factory,
@@ -1159,9 +1154,7 @@ class WorkspaceExecutor:
             profile = _profile_for_workspace(
                 ws,
                 worktree_path=worktree_path,
-                planning_max_iterations_default=(
-                    self._config.planning_max_iterations_default
-                ),
+                planning_max_iterations_default=(self._config.planning_max_iterations_default),
             )
             setup_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
@@ -1231,14 +1224,10 @@ class WorkspaceExecutor:
                         else planning_failure.message
                     )
                     reason_code = (
-                        None
-                        if isinstance(planning_failure, str)
-                        else planning_failure.reason_code
+                        None if isinstance(planning_failure, str) else planning_failure.reason_code
                     )
                     details = (
-                        None
-                        if isinstance(planning_failure, str)
-                        else planning_failure.details
+                        None if isinstance(planning_failure, str) else planning_failure.details
                     )
                     await self._mark_failed(
                         workspace_id=workspace_id,
@@ -1671,7 +1660,9 @@ class WorkspaceExecutor:
                 # Invariant: ``base_commit`` is always populated by
                 # ``_claim_ready`` before this block runs. The ``assert`` both
                 # documents and satisfies mypy.
-                ancestor = await _git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
+                ancestor = await _git_in_worktree(
+                    ["merge-base", "--is-ancestor", base_commit, "HEAD"]
+                )
                 if not ancestor.ok:
                     _log.warning(
                         "executor.orphan_history_detected",
@@ -2714,9 +2705,7 @@ class WorkspaceExecutor:
                 profile = _profile_for_workspace(
                     ws,
                     worktree_path=self._config.worktrees_root / workspace_id,
-                    planning_max_iterations_default=(
-                        self._config.planning_max_iterations_default
-                    ),
+                    planning_max_iterations_default=(self._config.planning_max_iterations_default),
                 )
                 monitor = _call_pr_monitor_factory(
                     self._pr_monitor_factory,
@@ -2881,8 +2870,7 @@ class WorkspaceExecutor:
             from_status=WorkspaceStatus.running,
             failure_reason=FailureReason.infrastructure_failure,
             message=(
-                "agent Git writability preflight failed "
-                f"(exit={result.returncode}): {output}"
+                f"agent Git writability preflight failed (exit={result.returncode}): {output}"
             )[:2000],
             reason_code=GIT_AGENT_WRITABILITY_FAILED_REASON_CODE,
             details={
@@ -3365,8 +3353,7 @@ class WorkspaceExecutor:
                 required_paths=(plan_path,),
                 offending_paths=sorted(after_plan - before_plan),
                 summary=(
-                    "planning phase did not create or modify required plan file "
-                    f"`{plan_path}`"
+                    f"planning phase did not create or modify required plan file `{plan_path}`"
                 ),
             )
         if planning.enforce_plan_only_changes:
@@ -3385,9 +3372,7 @@ class WorkspaceExecutor:
         stall_policy = ConformanceStallPolicy(
             no_output_seconds=planning.conformance_stall.no_output_seconds,
             over_duration_seconds=planning.conformance_stall.over_duration_seconds,
-            repeated_output_threshold=(
-                planning.conformance_stall.repeated_output_threshold
-            ),
+            repeated_output_threshold=(planning.conformance_stall.repeated_output_threshold),
         )
         iteration_history: list[ConformanceIterationRecord] = []
         # Post-planning HEAD. Serves two purposes:
@@ -3434,9 +3419,7 @@ class WorkspaceExecutor:
             # AGENT_IDLE_TIMEOUT/AGENT_TIMEOUT with no evidence the current
             # compare call produced it.
             before_report_text = _read_text_if_present(worktree_path / report_path)
-            before_report_digest = (
-                _digest_text(before_report_text) if before_report_text else None
-            )
+            before_report_digest = _digest_text(before_report_text) if before_report_text else None
             iteration_started_at = time.monotonic()
             compare_error: AgentRunError | None = None
             compare_result = None
@@ -3471,23 +3454,17 @@ class WorkspaceExecutor:
                         scope_phase="conformance",
                         required_paths=(report_path,),
                         offending_paths=extra,
-                        summary=(
-                            f"conformance phase changed files outside `{report_path}`"
-                        ),
+                        summary=(f"conformance phase changed files outside `{report_path}`"),
                     )
             if compare_error is None:
                 stdout = compare_result.stdout if compare_result is not None else ""
                 stderr = compare_result.stderr if compare_result is not None else ""
-                report_text = (
-                    _read_text_if_present(worktree_path / report_path)
-                    or stdout
-                )
+                report_text = _read_text_if_present(worktree_path / report_path) or stdout
                 report = parse_conformance_report(report_text)
                 last_report = report
                 report_digest = _digest_text(report_text) if report_text else None
                 fresh_report_written = (
-                    report_digest is not None
-                    and report_digest != before_report_digest
+                    report_digest is not None and report_digest != before_report_digest
                 )
             else:
                 stdout = compare_error.result.stdout
@@ -3501,9 +3478,7 @@ class WorkspaceExecutor:
                 # absent. A truly fresh write will produce a digest
                 # different from the pre-call snapshot; otherwise the
                 # iteration is treated as no_output by stall classification.
-                current_report_text = _read_text_if_present(
-                    worktree_path / report_path
-                )
+                current_report_text = _read_text_if_present(worktree_path / report_path)
                 if (
                     current_report_text is not None
                     and _digest_text(current_report_text) != before_report_digest
@@ -3518,8 +3493,7 @@ class WorkspaceExecutor:
                     last_report = report
                     report_digest = _digest_text(report_text)
                     fresh_report_written = (
-                        report_digest is not None
-                        and report_digest != before_report_digest
+                        report_digest is not None and report_digest != before_report_digest
                     )
                 else:
                     report = None
@@ -3566,14 +3540,11 @@ class WorkspaceExecutor:
                 report_path=report_path,
                 latest_error=compare_error,
             )
-            if (
-                stall is not None
-                and not (
-                    stall.kind == ConformanceStallKind.over_duration
-                    and compare_error is None
-                    and report is not None
-                    and fresh_report_written
-                )
+            if stall is not None and not (
+                stall.kind == ConformanceStallKind.over_duration
+                and compare_error is None
+                and report is not None
+                and fresh_report_written
             ):
                 return await self._build_conformance_stall_failure(
                     workspace=workspace,
@@ -3914,10 +3885,7 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 from_status=expected_status,
                 failure_reason=FailureReason.infrastructure_failure,
-                message=(
-                    "post-agent missing HEAD recovery verification failed: "
-                    f"{exc!r}"
-                )[:2000],
+                message=(f"post-agent missing HEAD recovery verification failed: {exc!r}")[:2000],
                 reason_code=GIT_OBJECT_MISSING_REASON_CODE,
             )
             return False
@@ -4352,17 +4320,13 @@ class WorkspaceExecutor:
         workspace_id: str,
         recovery_payload: Mapping[str, Any],
     ) -> Operation | None:
-        for payload_identity in _rebase_recovery_operation_payload_identities(
-            recovery_payload
-        ):
+        for payload_identity in _rebase_recovery_operation_payload_identities(recovery_payload):
             operation = await repo.find_active_matching_payload(
                 workspace_id=workspace_id,
                 operation_type=OperationType.rebase,
                 payload_identity=payload_identity,
             )
-            if operation is not None and _is_validate_only_recovery_payload(
-                operation.payload
-            ):
+            if operation is not None and _is_validate_only_recovery_payload(operation.payload):
                 return operation
         return None
 
@@ -4662,8 +4626,7 @@ class WorkspaceExecutor:
                     pr_url=getattr(workspace, "pr_url", None),
                     source_head_sha=head_sha,
                     source_base_sha=base_sha,
-                    remote_branch=remote_branch
-                    or getattr(workspace, "remote_push_branch", None),
+                    remote_branch=remote_branch or getattr(workspace, "remote_push_branch", None),
                     branch_name=getattr(workspace, "branch_name", None),
                     evidence={
                         "previous_source_base_sha": source_base_sha,
@@ -4769,9 +4732,7 @@ class WorkspaceExecutor:
         result: dict[str, Any] = {"reason_code": reason_code}
         if result_extra is not None:
             result.update(result_extra)
-        safe_error_message = (
-            redact_audit_text(error_message) if error_message is not None else None
-        )
+        safe_error_message = redact_audit_text(error_message) if error_message is not None else None
         for operation in [*pending, *running]:
             if not _is_validate_only_recovery_payload(operation.payload):
                 continue
@@ -4877,9 +4838,7 @@ class WorkspaceExecutor:
             result["log_stream_refs"] = dict(validation_run.log_stream_refs)
         if coverage is not None:
             result["coverage"] = coverage
-        safe_error_message = (
-            redact_audit_text(error_message) if error_message is not None else None
-        )
+        safe_error_message = redact_audit_text(error_message) if error_message is not None else None
         for operation in [*pending, *running]:
             payload = dict(operation.payload or {})
             payload.setdefault("requested_tier", requested_tier)
@@ -5042,9 +5001,8 @@ def _missing_sync_feature_pr_adoption_metadata(
 
 
 def _sync_feature_pr_missing_metadata_message(missing: Sequence[str]) -> str:
-    return (
-        "adopted PR workspace is missing required monitor handoff metadata: "
-        + ", ".join(missing)
+    return "adopted PR workspace is missing required monitor handoff metadata: " + ", ".join(
+        missing
     )
 
 
@@ -5119,7 +5077,9 @@ def _build_pr_body(ws: Workspace, *, defaults: AgentDefaults | None = None) -> s
 def _agent_pr_identity(ws: Workspace, *, defaults: AgentDefaults | None = None) -> str:
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
     model = _nonblank_policy_string(policy, "agent_model") or (defaults.model if defaults else None)
-    effort = _nonblank_policy_string(policy, "agent_effort") or (defaults.effort if defaults else None)
+    effort = _nonblank_policy_string(policy, "agent_effort") or (
+        defaults.effort if defaults else None
+    )
 
     parts = [f"agent: `{ws.agent}`"]
     if model is not None:
@@ -5513,9 +5473,7 @@ def _validation_run_coverage_metadata(
     metadata = result.coverage.as_metadata()
     if baseline_coverage is not None:
         metadata["baseline_percent"] = (
-            float(baseline_coverage.percent)
-            if baseline_coverage.percent is not None
-            else None
+            float(baseline_coverage.percent) if baseline_coverage.percent is not None else None
         )
         metadata["baseline_status"] = baseline_coverage.status
         metadata["baseline_reason_code"] = baseline_coverage.reason_code
@@ -5540,18 +5498,10 @@ def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> Validation
         status=str(metadata.get("status") or "passed"),
         reason_code=str(metadata.get("reason_code") or "COVERAGE_OK"),
         gaps=[item for item in gaps if isinstance(item, dict)] if isinstance(gaps, list) else [],
-        failing_test_node_ids=[
-            str(item)
-            for item in failing_node_ids
-            if isinstance(item, str)
-        ]
+        failing_test_node_ids=[str(item) for item in failing_node_ids if isinstance(item, str)]
         if isinstance(failing_node_ids, list)
         else [],
-        failing_test_evidence=[
-            str(item)
-            for item in failing_evidence
-            if isinstance(item, str)
-        ]
+        failing_test_evidence=[str(item) for item in failing_evidence if isinstance(item, str)]
         if isinstance(failing_evidence, list)
         else [],
         parallel_workers_requested=(
@@ -5575,7 +5525,9 @@ def _format_coverage_gaps(gaps: list[dict[str, object]]) -> str:
         file_name = g.get("file", "")
         missing = g.get("missing_lines", [])
         missing_cast = missing if isinstance(missing, list) else []
-        missing_str = ", ".join(str(m) for m in missing_cast) if missing_cast else "(no missing lines)"
+        missing_str = (
+            ", ".join(str(m) for m in missing_cast) if missing_cast else "(no missing lines)"
+        )
         lines.append(f"  {file_name}: {missing_str}")
     return "\n".join(lines)
 
@@ -5644,7 +5596,9 @@ def _validation_failure_message(
         baseline_suffix = (
             f"; pre-agent base coverage was {baseline_coverage.percent:.1f}%"
             f" against the same {coverage.minimum_percent:.1f}% requirement"
-            if baseline_debt and baseline_coverage is not None and baseline_coverage.percent is not None
+            if baseline_debt
+            and baseline_coverage is not None
+            and baseline_coverage.percent is not None
             else ""
         )
         if coverage.reason_code == "COVERAGE_BELOW_THRESHOLD" and coverage.percent is not None:
