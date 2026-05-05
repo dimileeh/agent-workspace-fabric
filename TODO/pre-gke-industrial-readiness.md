@@ -580,7 +580,7 @@ coding agent in any project to use AWF for a feature.
   tools with bounded list inputs; `tests/unit/mcp/test_mcp_operator_surfaces.py`
   covers populated and empty REST-vs-MCP parity, structured error/null states,
   secret redaction, artifact metadata-only behavior, and route-handler bypass.
-- [ ] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics.
+- [x] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics. Evidence: `src/awf/mcp/server.py` now registers `awf_refresh_workspace`, `awf_rebase_workspace`, and adds optional `expected_version` (If-Match parity) to all 7 mutating control tools; `src/awf/service/workspaces.py` exposes `request_refresh_workspace` and `request_rebase_workspace` façade methods; contract tests in `tests/unit/mcp/test_mcp_control_contracts.py` cover success paths, replay/idempotency, version conflict, invalid-state errors, and structured error mapping; `tests/unit/mcp/test_mcp_server.py` covers schema contracts; `docs/MCP_CLIENT_PARITY.md` updated to reflect `MCP partial` with `TODO§P1-if-match-parity` for the remaining If-Match transport parity.
 - [x] Add first-class AWF PR monitor adoption for existing GitHub PRs. Acceptance:
   an operator can provide `repo_url`/repo slug plus PR number or URL, and AWF
   creates or attaches a service-managed workspace/merge candidate in

@@ -399,6 +399,10 @@ def build_mcp_server(
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
+        expected_version: int | None = Field(
+            default=None,
+            description="Optional optimistic concurrency version (maps to If-Match).",
+        ),
     ) -> StructuredToolResult:
         """Operator control: cancel a workspace; this is not shell access."""
         try:
@@ -407,6 +411,7 @@ def build_mcp_server(
                 reason=reason,
                 stop_stack=stop_stack,
                 idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
@@ -425,11 +430,18 @@ def build_mcp_server(
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
+        expected_version: int | None = Field(
+            default=None,
+            description="Optional optimistic concurrency version (maps to If-Match).",
+        ),
     ) -> StructuredToolResult:
         """Operator control: stop a workspace stack; this is not shell access."""
         try:
             result = await service.stop_workspace(
-                workspace_id, reason=reason, idempotency_key=idempotency_key
+                workspace_id,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
@@ -456,6 +468,10 @@ def build_mcp_server(
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
+        expected_version: int | None = Field(
+            default=None,
+            description="Optional optimistic concurrency version (maps to If-Match).",
+        ),
     ) -> StructuredToolResult:
         """Operator control: destroy workspace resources; this is not shell access."""
         try:
@@ -465,6 +481,7 @@ def build_mcp_server(
                 remove_volumes=remove_volumes,
                 remove_worktree=remove_worktree,
                 idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
@@ -1074,6 +1091,10 @@ def build_mcp_server(
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
+        expected_version: int | None = Field(
+            default=None,
+            description="Optional optimistic concurrency version (maps to If-Match).",
+        ),
     ) -> StructuredToolResult:
         """Operator control: re-trigger PR monitor for a workspace; this is not shell access."""
         try:
@@ -1081,6 +1102,7 @@ def build_mcp_server(
                 workspace_id,
                 reason=reason,
                 idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
@@ -1108,6 +1130,10 @@ def build_mcp_server(
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
+        expected_version: int | None = Field(
+            default=None,
+            description="Optional optimistic concurrency version (maps to If-Match).",
+        ),
     ) -> StructuredToolResult:
         """Operator control: request workspace re-validation; this is not shell access."""
         try:
@@ -1116,6 +1142,73 @@ def build_mcp_server(
                 reason=reason,
                 requested_tier=requested_tier,
                 idempotency_key=idempotency_key,
+                expected_version=expected_version,
+            )
+        except WorkspaceControlError as exc:
+            return _tool_error(exc)
+        return _tool_result(OperationResponse.model_validate(result).model_dump(mode="json"))
+
+    @mcp.tool(name="awf_refresh_workspace")
+    async def awf_refresh_workspace(
+        workspace_id: str = Field(
+            ..., min_length=1, max_length=256, description="Workspace ID to refresh."
+        ),
+        reason: str | None = Field(
+            default=None,
+            max_length=1024,
+            description="Optional operator reason for refresh.",
+        ),
+        idempotency_key: str = Field(
+            ...,
+            min_length=1,
+            max_length=128,
+            description="Idempotency key for safe retries after timeout or dropped response.",
+        ),
+        expected_version: int | None = Field(
+            default=None,
+            description="Optional optimistic concurrency version (maps to If-Match).",
+        ),
+    ) -> StructuredToolResult:
+        """Operator control: request workspace refresh; this is not shell access."""
+        try:
+            result = await service.request_refresh_workspace(
+                workspace_id,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                expected_version=expected_version,
+            )
+        except WorkspaceControlError as exc:
+            return _tool_error(exc)
+        return _tool_result(OperationResponse.model_validate(result).model_dump(mode="json"))
+
+    @mcp.tool(name="awf_rebase_workspace")
+    async def awf_rebase_workspace(
+        workspace_id: str = Field(
+            ..., min_length=1, max_length=256, description="Workspace ID to rebase."
+        ),
+        reason: str | None = Field(
+            default=None,
+            max_length=1024,
+            description="Optional operator reason for rebase.",
+        ),
+        idempotency_key: str = Field(
+            ...,
+            min_length=1,
+            max_length=128,
+            description="Idempotency key for safe retries after timeout or dropped response.",
+        ),
+        expected_version: int | None = Field(
+            default=None,
+            description="Optional optimistic concurrency version (maps to If-Match).",
+        ),
+    ) -> StructuredToolResult:
+        """Operator control: request workspace rebase; this is not shell access."""
+        try:
+            result = await service.request_rebase_workspace(
+                workspace_id,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)

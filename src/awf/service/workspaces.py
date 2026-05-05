@@ -456,6 +456,7 @@ class WorkspaceService:
         reason: str | None = None,
         stop_stack: bool = True,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         async with self._factory() as s:
             result = await self._controls(s).cancel_workspace(
@@ -463,6 +464,7 @@ class WorkspaceService:
                 reason=reason,
                 stop_stack=stop_stack,
                 idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
             await s.commit()
             return result
@@ -473,12 +475,14 @@ class WorkspaceService:
         *,
         reason: str | None = None,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         async with self._factory() as s:
             result = await self._controls(s).stop_workspace(
                 workspace_id,
                 reason=reason,
                 idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
             await s.commit()
             return result
@@ -491,6 +495,7 @@ class WorkspaceService:
         remove_volumes: bool = True,
         remove_worktree: bool = True,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         async with self._factory() as s:
             result = await self._controls(s).destroy_workspace(
@@ -499,6 +504,7 @@ class WorkspaceService:
                 remove_volumes=remove_volumes,
                 remove_worktree=remove_worktree,
                 idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
             await s.commit()
             return result
@@ -509,12 +515,14 @@ class WorkspaceService:
         *,
         reason: str | None = None,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         async with self._factory() as s:
             result = await self._controls(s).remonitor_workspace(
                 workspace_id,
                 reason=reason,
                 idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
             await s.commit()
             return result
@@ -526,6 +534,7 @@ class WorkspaceService:
         reason: str | None = None,
         requested_tier: int | None = None,
         idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> Operation:
         async with self._factory() as s:
             result = await self._controls(s).request_validate_workspace(
@@ -533,6 +542,43 @@ class WorkspaceService:
                 reason=reason,
                 requested_tier=requested_tier,
                 idempotency_key=idempotency_key,
+                expected_version=expected_version,
+            )
+            await s.commit()
+            return result
+
+    async def request_refresh_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        async with self._factory() as s:
+            result = await self._controls(s).request_refresh_workspace(
+                workspace_id,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                expected_version=expected_version,
+            )
+            await s.commit()
+            return result
+
+    async def request_rebase_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        async with self._factory() as s:
+            result = await self._controls(s).request_rebase_workspace(
+                workspace_id,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                expected_version=expected_version,
             )
             await s.commit()
             return result
