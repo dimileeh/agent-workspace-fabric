@@ -30,6 +30,16 @@ def _mock_response(*, status_code: int = 202, payload: object = None, text: str 
     return response
 
 
+def _assert_control_headers(
+    headers: dict[str, str],
+    *,
+    idempotency_key: str,
+    if_match: str,
+) -> None:
+    assert headers["Idempotency-Key"] == idempotency_key
+    assert headers["If-Match"] == if_match
+
+
 class TestWorkspaceCreate:
     @pytest.mark.unit
     def test_emits_json_body_to_post(self) -> None:
@@ -511,10 +521,11 @@ class TestWorkspaceCancel:
             "reason": "operator requested",
             "stop_stack": stop_stack == "true",
         }
-        assert mock.call_args.kwargs["headers"] == {
-            "Idempotency-Key": "cancel-key",
-            "If-Match": "7",
-        }
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="cancel-key",
+            if_match="7",
+        )
 
 
 class TestWorkspaceStop:
@@ -553,10 +564,11 @@ class TestWorkspaceStop:
             "http://localhost:8000/v1/workspaces/ws_stop/stop",
         )
         assert mock.call_args.kwargs["json"] == {"reason": "stack unstable"}
-        assert mock.call_args.kwargs["headers"] == {
-            "Idempotency-Key": "stop-key",
-            "If-Match": "13",
-        }
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="stop-key",
+            if_match="13",
+        )
 
 
 class TestWorkspaceDestroy:
@@ -600,10 +612,11 @@ class TestWorkspaceDestroy:
             "remove_volumes": False,
             "remove_worktree": False,
         }
-        assert mock.call_args.kwargs["headers"] == {
-            "Idempotency-Key": "destroy-key",
-            "If-Match": "19",
-        }
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="destroy-key",
+            if_match="19",
+        )
 
 
 class TestWorkspaceRefresh:
@@ -642,10 +655,11 @@ class TestWorkspaceRefresh:
             "http://localhost:8000/v1/workspaces/ws_refresh/refresh",
         )
         assert mock.call_args.kwargs["json"] == {"reason": "stale branch"}
-        assert mock.call_args.kwargs["headers"] == {
-            "Idempotency-Key": "refresh-key",
-            "If-Match": "33",
-        }
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="refresh-key",
+            if_match="33",
+        )
 
 
 class TestWorkspaceValidate:
@@ -689,10 +703,11 @@ class TestWorkspaceValidate:
             "reason": "manual revalidation",
             "requested_tier": 2,
         }
-        assert mock.call_args.kwargs["headers"] == {
-            "Idempotency-Key": "validate-key",
-            "If-Match": "2",
-        }
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="validate-key",
+            if_match="2",
+        )
 
 
 class TestWorkspaceRebase:
@@ -731,10 +746,11 @@ class TestWorkspaceRebase:
             "http://localhost:8000/v1/workspaces/ws_rebase/rebase",
         )
         assert mock.call_args.kwargs["json"] == {"reason": "recover merge conflicts"}
-        assert mock.call_args.kwargs["headers"] == {
-            "Idempotency-Key": "rebase-key",
-            "If-Match": "11",
-        }
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="rebase-key",
+            if_match="11",
+        )
 
 
 class TestWorkspaceAdoptPr:
