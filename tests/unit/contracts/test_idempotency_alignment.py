@@ -1,8 +1,8 @@
 """Idempotency contract: REST + MCP replay/conflict semantics, CLI header forwarding.
 
 REST cancel/stop/destroy/remonitor/validate/refresh/rebase require the
-``Idempotency-Key`` header. MCP variants require the same key as a tool
-arg and replay through the same backend coalescing path. CLI commands that
+``Idempotency-Key`` header. MCP variants require the same key as a tool arg
+and replay through the same backend coalescing path. CLI commands that
 declare ``--idempotency-key`` must forward it as ``Idempotency-Key``.
 """
 
@@ -22,6 +22,7 @@ from awf.cli.main import app as cli_app
 from awf.db.repositories import WorkspaceRepository
 from tests.unit.contracts._capabilities import (
     CAPABILITIES_BY_NAME,
+    control_capabilities,
     normalize_mcp_error_body,
     normalize_rest_error_body,
 )
@@ -263,6 +264,8 @@ async def test_rest_cancel_requires_idempotency_key_with_invalid_request(
         ),
         ("remonitor_workspace", {"reason": "mcp no-key"}),
         ("request_validation", {"reason": "mcp no-key", "requested_tier": 1}),
+        ("refresh_workspace", {"reason": "mcp no-key"}),
+        ("rebase_workspace", {"reason": "mcp no-key"}),
     ],
 )
 async def test_mcp_control_tools_reject_blank_idempotency_key(
@@ -287,3 +290,19 @@ async def test_mcp_control_tools_reject_blank_idempotency_key(
     envelope = normalize_mcp_error_body(result.structuredContent)
     assert envelope["error_code"] == "INVALID_REQUEST"
     assert envelope["message"] == "Idempotency-Key header is required for this endpoint."
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "capability",
+    control_capabilities(),
+    ids=lambda capability: capability.name,
+)
+async def test_mcp_control_tools_require_idempotency_key_in_schema(
+    contract_stack: ContractStack,
+    capability: Any,
+) -> None:
+    """MCP controls mirror REST's required ``Idempotency-Key`` at the tool boundary."""
+    assert capability.requires_idempotency_key is True
+    tools = {tool.name: tool for tool in await contract_stack.mcp.list_tools()}
+    assert "idempotency_key" in tools[capability.mcp_tool or ""].inputSchema.get("required", [])

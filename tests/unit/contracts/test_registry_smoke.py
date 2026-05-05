@@ -19,7 +19,7 @@ from tests.unit.contracts._capabilities import (
     all_capabilities,
     assert_capability_matches_parity_matrix,
     parity_capabilities_with_status,
-    parity_mutating_capabilities_with_status,
+    parity_endpoint_capabilities_with_status,
 )
 from tests.unit.mcp._parity_utils import (
     IMPLEMENTED_STATUS,
@@ -228,12 +228,12 @@ def test_registry_capability_aligns_with_parity_matrix(capability_name: str) -> 
 
 
 @pytest.mark.unit
-def test_every_mutating_capability_with_mcp_tool_is_registered() -> None:
+def test_every_safe_read_or_control_capability_with_mcp_surface_is_registered() -> None:
     """Every parity-matrix row that should be in the harness has an entry.
 
     In-scope rows: ``MCP implemented`` or ``MCP partial`` capabilities whose
-    REST surface includes a POST/DELETE. Out-of-scope rows: read-only,
-    Out of scope, or already-tracked-as-missing/backlog rows.
+    REST surface includes a safe read/control endpoint. Out-of-scope rows:
+    explicit Out of scope or already-tracked-as-missing/backlog rows.
     """
     in_scope = set(
         parity_capabilities_with_status({"MCP implemented", "MCP partial"})
@@ -241,20 +241,17 @@ def test_every_mutating_capability_with_mcp_tool_is_registered() -> None:
     registered_capabilities = {c.parity_capability for c in all_capabilities()}
 
     expected_must_be_registered = set(
-        parity_mutating_capabilities_with_status({"MCP implemented", "MCP partial"})
+        parity_endpoint_capabilities_with_status({"MCP implemented", "MCP partial"})
     )
 
     missing = expected_must_be_registered - registered_capabilities
     assert not missing, (
-        "Contract registry is missing mutating capabilities exposed by REST+MCP "
+        "Contract registry is missing safe read/control capabilities exposed by REST+MCP "
         f"per the parity matrix: {sorted(missing)}. "
         "Add the row to tests/unit/contracts/_capabilities.py before contract tests."
     )
 
-    not_in_matrix = registered_capabilities - in_scope - {
-        "Refresh workspace",
-        "Rebase workspace",
-    }
+    not_in_matrix = registered_capabilities - in_scope - {"Artifact content/download"}
     assert not not_in_matrix, (
         "Contract registry references parity-matrix capabilities that are no "
         f"longer 'MCP implemented'/'MCP partial': {sorted(not_in_matrix)}."

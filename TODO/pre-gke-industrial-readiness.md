@@ -688,7 +688,7 @@ coding agent in any project to use AWF for a feature.
   tools with bounded list inputs; `tests/unit/mcp/test_mcp_operator_surfaces.py`
   covers populated and empty REST-vs-MCP parity, structured error/null states,
   secret redaction, artifact metadata-only behavior, and route-handler bypass.
-- [x] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics. Evidence: `src/awf/mcp/server.py` now registers `awf_refresh_workspace`, `awf_rebase_workspace`, and adds optional `expected_version` (If-Match parity) to all 7 mutating control tools; `src/awf/service/workspaces.py` exposes `request_refresh_workspace` and `request_rebase_workspace` façade methods; contract tests in `tests/unit/mcp/test_mcp_control_contracts.py` cover success paths, replay/idempotency, version conflict, invalid-state errors, and structured error mapping; `tests/unit/mcp/test_mcp_server.py` covers schema contracts; `docs/MCP_CLIENT_PARITY.md` updated to reflect `MCP partial` with `TODO§P1-if-match-parity` for the remaining If-Match transport parity.
+- [x] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics. Evidence: `src/awf/mcp/server.py` registers `awf_refresh_workspace`, `awf_rebase_workspace`, requires `idempotency_key` on all 7 mutating control tools, and exposes optional `expected_version` (If-Match parity); `src/awf/service/workspaces.py` exposes `request_refresh_workspace` and `request_rebase_workspace` façade methods; contract tests in `tests/unit/mcp/test_mcp_control_contracts.py` cover success paths, replay/idempotency, version conflict, invalid-state errors, and structured error mapping; `tests/unit/mcp/test_mcp_server.py` covers schema contracts.
 - [x] Add first-class AWF PR monitor adoption for existing GitHub PRs. Acceptance:
   an operator can provide `repo_url`/repo slug plus PR number or URL, and AWF
   creates or attaches a service-managed workspace/merge candidate in
@@ -714,7 +714,7 @@ coding agent in any project to use AWF for a feature.
   service/api/cli/mcp/control/node/runtime/scripts unit gate all passed. PR
   [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198)
   merged 2026-05-05.
-- [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
+- [x] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
   why that surface is intentionally MCP/API-only.
@@ -727,15 +727,14 @@ coding agent in any project to use AWF for a feature.
   `tests/unit/contracts/test_control_surface_parity_contract.py`; and
   `tests/unit/mcp/test_mcp_client_parity_docs.py` to pin parity documentation
   for intentional control-surface gaps.
-  Iteration 3 status: implementation-backed parity evidence is complete in PR
-  [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206)
-  and remains pending PR #206 merge before this row counts as landed. Focused
-  artifacts are collected with:
+  Iteration 3 landed in PR
+  [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206).
+  Focused artifacts are collected with:
   `tests/unit/cli/test_cli.py`, `tests/unit/contracts/test_control_surface_parity_contract.py`,
   `tests/unit/mcp/test_mcp_client_parity_docs.py`, `tests/unit/mcp/test_mcp_parity_matrix_crossref.py`,
   `tests/unit/mcp/test_mcp_operator_surfaces.py`, `tests/unit/api/test_controls.py`,
   `tests/unit/api/test_workspace_controls_idempotency.py`.
-- [ ] Add contract tests proving REST API, CLI, and MCP stay aligned: request
+- [x] Add contract tests proving REST API, CLI, and MCP stay aligned: request
   payloads, response payloads, reason codes, idempotency keys, `If-Match` /
   workspace-version concurrency, auth failures, and structured error semantics
   must not drift across the three clients.
@@ -747,7 +746,17 @@ coding agent in any project to use AWF for a feature.
   errors. If a surface is intentionally API/MCP-only or still partial, the test
   must require an explicit matrix/backlog status instead of silently skipping
   it. Any real drift discovered by the tests should be fixed in the smallest
-  compatible way.
+  compatible way. Evidence: `tests/unit/contracts/_capabilities.py` now covers
+  implemented safe read/control REST, CLI, and MCP surfaces from
+  `docs/MCP_CLIENT_PARITY.md`; `tests/unit/contracts/_introspection.py` and
+  `test_surface_metadata_alignment.py` introspect real FastAPI routes, Typer
+  commands, and MCP tool schemas; the contract suite covers request/response
+  fields, reason codes, idempotency, If-Match/version behavior, auth failure
+  shape, structured errors, explicit CLI absence, and MCP safety boundaries.
+  The tests exposed MCP control idempotency drift, fixed by requiring
+  `idempotency_key` on all seven MCP mutating control tools. Validation:
+  `pytest tests/unit/contracts -q` passed 189 tests and the focused
+  API/CLI/MCP parity suite passed 343 tests.
 - [ ] TODO§P1-operation-read-auth: Close REST auth parity for workspace and
   global operation read endpoints, or keep the parity matrix operation rows
   explicitly marked `MCP partial` until those REST surfaces require the same

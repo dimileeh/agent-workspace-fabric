@@ -406,7 +406,7 @@ def build_mcp_server(
             description="Also stop the workspace compose stack after requesting cancellation.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -440,7 +440,7 @@ def build_mcp_server(
             description="Optional operator reason to record with the stop request.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -481,7 +481,7 @@ def build_mcp_server(
             description="Remove the workspace git worktree during cleanup.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -1148,7 +1148,7 @@ def build_mcp_server(
             description="Optional operator reason to record with the remonitor request.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -1190,7 +1190,7 @@ def build_mcp_server(
             description="Optional validation tier hint.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -1227,7 +1227,7 @@ def build_mcp_server(
             description="Optional operator reason for refresh.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -1263,7 +1263,7 @@ def build_mcp_server(
             description="Optional operator reason for rebase.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",

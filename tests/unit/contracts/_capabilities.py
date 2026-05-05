@@ -45,6 +45,17 @@ class ContractCapability:
     supports_idempotency_key: bool
     supports_if_match: bool
     error_codes: frozenset[str] = field(default_factory=frozenset)
+    rest_response_model: str | None = None
+    rest_path_fields: frozenset[str] = field(default_factory=frozenset)
+    rest_query_fields: frozenset[str] = field(default_factory=frozenset)
+    rest_header_fields: frozenset[str] = field(default_factory=frozenset)
+    rest_body_fields: frozenset[str] = field(default_factory=frozenset)
+    mcp_request_fields: frozenset[str] = field(default_factory=frozenset)
+    mcp_required_fields: frozenset[str] = field(default_factory=frozenset)
+    cli_options: frozenset[str] = field(default_factory=frozenset)
+    cli_arguments: frozenset[str] = field(default_factory=frozenset)
+    response_fields: frozenset[str] = field(default_factory=frozenset)
+    auth_required: bool = False
 
     @property
     def is_mcp_implemented(self) -> bool:
@@ -57,6 +68,15 @@ class ContractCapability:
     @property
     def is_mcp_missing(self) -> bool:
         return self.parity_status == "MCP missing/backlog"
+
+    @property
+    def requires_idempotency_key(self) -> bool:
+        """Whether this operator action requires an idempotency key at the client boundary."""
+        return self.supports_idempotency_key and self.supports_if_match
+
+    @property
+    def is_safe_read(self) -> bool:
+        return self.rest_method == "GET"
 
 
 _CAPABILITIES: tuple[ContractCapability, ...] = (
@@ -72,6 +92,18 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         supports_idempotency_key=True,
         supports_if_match=True,
         error_codes=frozenset({"NOT_FOUND", "VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT"}),
+        rest_response_model="WorkspaceControlResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
+        rest_body_fields=frozenset({"reason", "stop_stack"}),
+        mcp_request_fields=frozenset(
+            {"workspace_id", "reason", "stop_stack", "idempotency_key", "expected_version"}
+        ),
+        mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        response_fields=frozenset(
+            {"workspace_id", "operation_id", "operation_status", "status", "message"}
+        ),
+        auth_required=True,
     ),
     ContractCapability(
         name="stop_workspace",
@@ -87,6 +119,18 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         error_codes=frozenset(
             {"NOT_FOUND", "VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT", "STACK_STOP_FAILED"}
         ),
+        rest_response_model="WorkspaceControlResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
+        rest_body_fields=frozenset({"reason", "stop_stack"}),
+        mcp_request_fields=frozenset(
+            {"workspace_id", "reason", "idempotency_key", "expected_version"}
+        ),
+        mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        response_fields=frozenset(
+            {"workspace_id", "operation_id", "operation_status", "status", "message"}
+        ),
+        auth_required=True,
     ),
     ContractCapability(
         name="destroy_workspace",
@@ -108,6 +152,25 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "STACK_STOP_FAILED",
             }
         ),
+        rest_response_model="WorkspaceControlResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_query_fields=frozenset({"force", "remove_volumes", "remove_worktree"}),
+        rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
+        mcp_request_fields=frozenset(
+            {
+                "workspace_id",
+                "force",
+                "remove_volumes",
+                "remove_worktree",
+                "idempotency_key",
+                "expected_version",
+            }
+        ),
+        mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        response_fields=frozenset(
+            {"workspace_id", "operation_id", "operation_status", "status", "message"}
+        ),
+        auth_required=True,
     ),
     ContractCapability(
         name="remonitor_workspace",
@@ -129,6 +192,20 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "IDEMPOTENCY_CONFLICT",
             }
         ),
+        rest_response_model="WorkspaceControlResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
+        rest_body_fields=frozenset({"reason", "stop_stack"}),
+        mcp_request_fields=frozenset(
+            {"workspace_id", "reason", "idempotency_key", "expected_version"}
+        ),
+        mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        cli_options=frozenset({"--reason", "--idempotency-key", "--if-match", "--api-token"}),
+        cli_arguments=frozenset({"workspace_id"}),
+        response_fields=frozenset(
+            {"workspace_id", "operation_id", "operation_status", "status", "message"}
+        ),
+        auth_required=True,
     ),
     ContractCapability(
         name="request_validation",
@@ -150,6 +227,16 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "IDEMPOTENCY_CONFLICT",
             }
         ),
+        rest_response_model="OperationResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
+        rest_body_fields=frozenset({"reason", "requested_tier"}),
+        mcp_request_fields=frozenset(
+            {"workspace_id", "reason", "requested_tier", "idempotency_key", "expected_version"}
+        ),
+        mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        response_fields=frozenset({"id", "workspace_id", "type", "status"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="refresh_workspace",
@@ -170,6 +257,16 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "IDEMPOTENCY_CONFLICT",
             }
         ),
+        rest_response_model="OperationResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
+        rest_body_fields=frozenset({"reason", "requested_tier"}),
+        mcp_request_fields=frozenset(
+            {"workspace_id", "reason", "idempotency_key", "expected_version"}
+        ),
+        mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        response_fields=frozenset({"id", "workspace_id", "type", "status"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="rebase_workspace",
@@ -193,6 +290,16 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "IDEMPOTENCY_CONFLICT",
             }
         ),
+        rest_response_model="OperationResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
+        rest_body_fields=frozenset({"reason", "requested_tier"}),
+        mcp_request_fields=frozenset(
+            {"workspace_id", "reason", "idempotency_key", "expected_version"}
+        ),
+        mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        response_fields=frozenset({"id", "workspace_id", "type", "status"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="retry_workspace",
@@ -214,6 +321,26 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "PROVIDER_READINESS_PRECHECK_FAILED",
             }
         ),
+        rest_response_model="WorkspaceRetryResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_query_fields=frozenset(
+            {"provider_readiness_override", "provider_readiness_override_reason"}
+        ),
+        mcp_request_fields=frozenset(
+            {
+                "workspace_id",
+                "provider_readiness_override",
+                "provider_readiness_override_reason",
+            }
+        ),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        cli_options=frozenset(
+            {"--provider-readiness-override", "--provider-readiness-override-reason", "--api-token"}
+        ),
+        cli_arguments=frozenset({"workspace_id"}),
+        response_fields=frozenset(
+            {"source_workspace_id", "new_workspace_id", "operation_id", "status"}
+        ),
     ),
     ContractCapability(
         name="create_workspace_v1",
@@ -227,6 +354,36 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         supports_idempotency_key=True,
         supports_if_match=False,
         error_codes=frozenset({"IDEMPOTENCY_CONFLICT"}),
+        rest_response_model="WorkspaceAcceptedResponse",
+        rest_header_fields=frozenset({"Idempotency-Key"}),
+        rest_body_fields=frozenset(
+            {
+                "repo_url",
+                "branch_base",
+                "task_title",
+                "task_prompt",
+                "agent",
+                "test_commands",
+                "requires_database",
+                "env_profile",
+                "task_external_id",
+            }
+        ),
+        mcp_request_fields=frozenset(
+            {
+                "repo_url",
+                "branch_base",
+                "task_title",
+                "task_prompt",
+                "agent",
+                "test_commands",
+                "requires_database",
+                "env_profile",
+                "task_external_id",
+            }
+        ),
+        mcp_required_fields=frozenset({"repo_url", "task_title", "task_prompt"}),
+        response_fields=frozenset({"workspace_id", "status", "version", "status_url"}),
     ),
     ContractCapability(
         name="create_workspace_v2",
@@ -242,6 +399,52 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         error_codes=frozenset(
             {"IDEMPOTENCY_CONFLICT", "INVALID_PROFILE", "TASK_EXTERNAL_ID_CONFLICT", "INSUFFICIENT_DISK"}
         ),
+        rest_response_model="WorkspaceAcceptedResponse",
+        rest_header_fields=frozenset({"Idempotency-Key"}),
+        rest_body_fields=frozenset(
+            {"repo", "task", "workspace", "validation", "preflight", "resources"}
+        ),
+        mcp_request_fields=frozenset(
+            {
+                "repo_url",
+                "base_branch",
+                "task_title",
+                "task_prompt",
+                "task_kind",
+                "agent",
+                "model",
+                "task_external_id",
+                "task_class",
+                "owned_paths",
+                "profile_ref",
+                "profile",
+                "validation_commands",
+                "requested_tier",
+                "auto_merge",
+                "initial_review_grace_period_seconds",
+                "provider_readiness_override",
+                "provider_readiness_override_reason",
+            }
+        ),
+        mcp_required_fields=frozenset({"repo_url", "task_title", "task_prompt"}),
+        cli_options=frozenset(
+            {
+                "--repo",
+                "--title",
+                "--prompt",
+                "--base",
+                "--agent",
+                "--profile",
+                "--test",
+                "--with-db",
+                "--auto-merge/--no-auto-merge",
+                "--initial-review-grace-period-seconds",
+                "--provider-readiness-override",
+                "--provider-readiness-override-reason",
+                "--idempotency-key",
+            }
+        ),
+        response_fields=frozenset({"workspace_id", "status", "version", "status_url"}),
     ),
     ContractCapability(
         name="adopt_pr_monitor",
@@ -266,6 +469,570 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "PR_ADOPTION_POLICY_CONFLICT",
             }
         ),
+        rest_response_model="PullRequestMonitorAdoptionResponse",
+        rest_body_fields=frozenset(
+            {
+                "repo_url",
+                "repo_slug",
+                "pr_number",
+                "pr_url",
+                "agent",
+                "profile_ref",
+                "profile",
+                "auto_merge",
+                "initial_review_grace_period_seconds",
+                "task_title",
+                "task_prompt",
+                "reason",
+            }
+        ),
+        mcp_request_fields=frozenset(
+            {
+                "repo_url",
+                "repo_slug",
+                "pr_number",
+                "pr_url",
+                "agent",
+                "profile_ref",
+                "profile",
+                "auto_merge",
+                "initial_review_grace_period_seconds",
+                "task_title",
+                "task_prompt",
+                "reason",
+            }
+        ),
+        cli_options=frozenset(
+            {
+                "--repo",
+                "--pr",
+                "--pr-url",
+                "--agent",
+                "--profile",
+                "--auto-merge/--no-auto-merge",
+                "--initial-review-grace-period-seconds",
+                "--title",
+                "--prompt",
+                "--reason",
+                "--api-token",
+            }
+        ),
+        response_fields=frozenset({"workspace_id", "status", "version", "pr_url"}),
+    ),
+)
+
+_CAPABILITIES += (
+    ContractCapability(
+        name="get_workspace",
+        parity_capability="Workspace create, list, and get",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}",
+        mcp_tool="awf_get_workspace",
+        cli_tokens=("workspace", "show"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        mcp_request_fields=frozenset({"workspace_id"}),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        cli_arguments=frozenset({"workspace_id"}),
+        response_fields=frozenset({"id", "status", "version"}),
+    ),
+    ContractCapability(
+        name="list_workspaces",
+        parity_capability="Workspace create, list, and get",
+        rest_method="GET",
+        rest_path="/v1/workspaces",
+        mcp_tool="awf_list_workspaces",
+        cli_tokens=("workspace", "list"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="list[WorkspaceResponse]",
+        rest_query_fields=frozenset({"workspace_status", "agent", "repo_url", "limit"}),
+        mcp_request_fields=frozenset({"limit"}),
+        cli_options=frozenset({"--limit"}),
+    ),
+    ContractCapability(
+        name="wait_for_workspace",
+        parity_capability="Workspace create, list, and get",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}",
+        mcp_tool="awf_wait_for_workspace",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        mcp_request_fields=frozenset(
+            {"workspace_id", "terminal_statuses", "poll_interval_seconds", "timeout_seconds"}
+        ),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        response_fields=frozenset({"id", "status", "version"}),
+    ),
+    ContractCapability(
+        name="workspace_overview",
+        parity_capability="Workspace overview",
+        rest_method="GET",
+        rest_path="/v1/workspaces/overview",
+        mcp_tool="awf_list_workspace_overview",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceOverviewListResponse",
+        rest_query_fields=frozenset({"workspace_status", "agent", "repo_url", "limit", "cursor"}),
+        mcp_request_fields=frozenset({"workspace_status", "agent", "repo_url", "limit", "cursor"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+    ),
+    ContractCapability(
+        name="merge_queue",
+        parity_capability="Merge queue",
+        rest_method="GET",
+        rest_path="/v1/merge-queue",
+        mcp_tool="awf_list_merge_queue",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="MergeQueueListResponse",
+        rest_query_fields=frozenset(
+            {"repo_url", "base_branch", "workspace_status", "limit", "cursor"}
+        ),
+        mcp_request_fields=frozenset(
+            {"repo_url", "base_branch", "workspace_status", "limit", "cursor"}
+        ),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+    ),
+    ContractCapability(
+        name="list_tasks",
+        parity_capability="Task attempts",
+        rest_method="GET",
+        rest_path="/v1/tasks",
+        mcp_tool="awf_list_tasks",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="TaskListResponse",
+        rest_query_fields=frozenset({"workspace_status", "agent", "repo_url", "limit"}),
+        mcp_request_fields=frozenset({"status", "agent", "repo_url", "limit"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+    ),
+    ContractCapability(
+        name="list_task_attempts",
+        parity_capability="Task attempts",
+        rest_method="GET",
+        rest_path="/v1/tasks/{task_ref}/attempts",
+        mcp_tool="awf_list_task_attempts",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="TaskAttemptListResponse",
+        rest_path_fields=frozenset({"task_ref"}),
+        rest_query_fields=frozenset({"limit"}),
+        mcp_request_fields=frozenset({"task_ref", "limit"}),
+        mcp_required_fields=frozenset({"task_ref"}),
+        response_fields=frozenset(
+            {"task_id", "task_ref", "items", "next_cursor", "has_more", "limit", "cursor"}
+        ),
+    ),
+    ContractCapability(
+        name="workspace_validation",
+        parity_capability="Validation provenance",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}/validation",
+        mcp_tool="awf_list_workspace_validation",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="ValidationProvenanceListResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_query_fields=frozenset({"limit", "cursor"}),
+        mcp_request_fields=frozenset({"workspace_id", "limit", "cursor"}),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+    ),
+    ContractCapability(
+        name="workspace_stale_reasons",
+        parity_capability="Stale reasons",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}/stale-reasons",
+        mcp_tool="awf_list_workspace_stale_reasons",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="StaleReasonListResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_query_fields=frozenset({"include_resolved", "limit", "cursor"}),
+        mcp_request_fields=frozenset({"workspace_id", "include_resolved", "limit", "cursor"}),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+    ),
+    ContractCapability(
+        name="workspace_artifacts",
+        parity_capability="Artifact metadata",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}/artifacts",
+        mcp_tool="awf_list_workspace_artifacts",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceArtifactListResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_query_fields=frozenset({"limit", "cursor"}),
+        mcp_request_fields=frozenset({"workspace_id", "limit", "cursor"}),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
+    ),
+    ContractCapability(
+        name="workspace_artifact_download",
+        parity_capability="Artifact content/download",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}/artifacts/download",
+        mcp_tool=None,
+        cli_tokens=None,
+        parity_status="MCP missing/backlog",
+        parity_backlog_slice="TODO§P1-artifact-download",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        error_codes=frozenset({"INVALID_ARTIFACT_PATH", "NOT_FOUND"}),
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_query_fields=frozenset({"path"}),
+        auth_required=True,
+    ),
+    ContractCapability(
+        name="failure_analysis_metrics",
+        parity_capability="Failure analysis metrics",
+        rest_method="GET",
+        rest_path="/v1/metrics/failures/summary",
+        mcp_tool="awf_get_failure_analysis_summary",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="FailureAnalysisSummaryResponse",
+        rest_query_fields=frozenset({"since_hours", "limit"}),
+        mcp_request_fields=frozenset({"since_hours", "limit"}),
+    ),
+    ContractCapability(
+        name="workspace_reliability_metrics",
+        parity_capability="Workspace reliability metrics",
+        rest_method="GET",
+        rest_path="/v1/metrics/workspaces/summary",
+        mcp_tool="awf_get_workspace_reliability_summary",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceReliabilitySummaryResponse",
+        rest_query_fields=frozenset({"since_hours"}),
+        mcp_request_fields=frozenset({"since_hours"}),
+    ),
+    ContractCapability(
+        name="resource_saturation_metrics",
+        parity_capability="Resource saturation metrics",
+        rest_method="GET",
+        rest_path="/v1/metrics/resources/saturation",
+        mcp_tool="awf_get_resource_saturation_summary",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="ResourceSaturationSummaryResponse",
+    ),
+    ContractCapability(
+        name="slo_metrics",
+        parity_capability="SLO metrics",
+        rest_method="GET",
+        rest_path="/v1/metrics/slo",
+        mcp_tool="awf_get_slo_metrics_summary",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="SloMetricsSummaryResponse",
+        rest_query_fields=frozenset({"since_hours"}),
+        mcp_request_fields=frozenset({"since_hours"}),
+    ),
+    ContractCapability(
+        name="locks",
+        parity_capability="Locks and owned-path reservations",
+        rest_method="GET",
+        rest_path="/v1/locks",
+        mcp_tool="awf_list_locks",
+        cli_tokens=("locks", "list"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceLockListResponse",
+        rest_query_fields=frozenset(
+            {"repo_url", "task_class", "workspace_status", "limit", "cursor"}
+        ),
+        mcp_request_fields=frozenset(
+            {"repo_url", "task_class", "workspace_status", "limit", "cursor"}
+        ),
+        cli_options=frozenset({"--repo-url", "--task-class", "--status", "--limit", "--api-token"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+    ),
+    ContractCapability(
+        name="overlap_graph",
+        parity_capability="Advisory overlap graph",
+        rest_method="GET",
+        rest_path="/v1/locks/overlap-graph",
+        mcp_tool="awf_get_overlap_graph",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceOverlapGraphResponse",
+        rest_query_fields=frozenset({"repo_url", "base_branch", "task_class", "queue_state", "limit"}),
+        mcp_request_fields=frozenset({"repo_url", "base_branch", "task_class", "queue_state", "limit"}),
+        response_fields=frozenset({"nodes", "edges", "summary"}),
+    ),
+    ContractCapability(
+        name="service_health",
+        parity_capability="Service health and readiness",
+        rest_method="GET",
+        rest_path="/healthz",
+        mcp_tool="awf_get_service_health",
+        cli_tokens=("service", "status"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="HealthResponse",
+        cli_options=frozenset({"--format", "--provider"}),
+    ),
+    ContractCapability(
+        name="service_readiness",
+        parity_capability="Service health and readiness",
+        rest_method="GET",
+        rest_path="/readyz",
+        mcp_tool="awf_get_service_readiness",
+        cli_tokens=("service", "doctor"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="ReadyResponse",
+        rest_query_fields=frozenset({"provider"}),
+        mcp_request_fields=frozenset({"providers"}),
+        cli_options=frozenset({"--format", "--provider", "--bundle"}),
+    ),
+    ContractCapability(
+        name="core_release_readiness",
+        parity_capability="Core release readiness scorecard",
+        rest_method="GET",
+        rest_path="/release-readiness",
+        mcp_tool="awf_get_core_release_readiness",
+        cli_tokens=("service", "readiness"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="dict[str, object]",
+        rest_query_fields=frozenset(
+            {
+                "provider",
+                "failure_window_hours",
+                "slo_window_hours",
+                "allow_generic_failures",
+                "allow_slo_breach",
+            }
+        ),
+        mcp_request_fields=frozenset(
+            {
+                "providers",
+                "failure_window_hours",
+                "slo_window_hours",
+                "allow_generic_failures",
+                "allow_slo_breach",
+            }
+        ),
+        cli_options=frozenset(
+            {
+                "--format",
+                "--demo-path",
+                "--failure-window-hours",
+                "--slo-window-hours",
+                "--allow-generic-failures/--no-allow-generic-failures",
+                "--allow-slo-breach/--no-allow-slo-breach",
+                "--provider",
+            }
+        ),
+        response_fields=frozenset({"status", "summary", "checks", "next_actions"}),
+    ),
+    ContractCapability(
+        name="workspace_runtime",
+        parity_capability="Workspace runtime snapshot",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}/runtime",
+        mcp_tool="awf_get_workspace_runtime",
+        cli_tokens=("workspace", "runtime"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceRuntimeResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        mcp_request_fields=frozenset({"workspace_id"}),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        cli_arguments=frozenset({"workspace_id"}),
+        cli_options=frozenset({"--api-token"}),
+        response_fields=frozenset({"workspace_id", "stack_state", "services"}),
+    ),
+    ContractCapability(
+        name="workspace_operations",
+        parity_capability="Workspace operations",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}/operations",
+        mcp_tool="awf_list_workspace_operations",
+        cli_tokens=("workspace", "operations"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="OperationListResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_query_fields=frozenset({"status", "operation_type", "limit"}),
+        mcp_request_fields=frozenset({"workspace_id", "limit"}),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        cli_arguments=frozenset({"workspace_id"}),
+        cli_options=frozenset({"--limit", "--status", "--type", "--api-token"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+    ),
+    ContractCapability(
+        name="global_operations",
+        parity_capability="Global operations",
+        rest_method="GET",
+        rest_path="/v1/operations",
+        mcp_tool="awf_list_operations",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="OperationListResponse",
+        rest_query_fields=frozenset({"workspace_id", "status", "operation_type", "limit"}),
+        mcp_request_fields=frozenset({"workspace_id", "status", "operation_type", "limit"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+    ),
+    ContractCapability(
+        name="get_operation",
+        parity_capability="Global operations",
+        rest_method="GET",
+        rest_path="/v1/operations/{operation_id}",
+        mcp_tool="awf_get_operation",
+        cli_tokens=None,
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="OperationResponse",
+        rest_path_fields=frozenset({"operation_id"}),
+        mcp_request_fields=frozenset({"operation_id"}),
+        mcp_required_fields=frozenset({"operation_id"}),
+        response_fields=frozenset({"id", "workspace_id", "type", "status"}),
+    ),
+    ContractCapability(
+        name="workspace_logs",
+        parity_capability="Durable workspace logs",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}/logs",
+        mcp_tool="awf_list_workspace_logs",
+        cli_tokens=("workspace", "logs"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceLogListResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        mcp_request_fields=frozenset({"workspace_id"}),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        cli_arguments=frozenset({"workspace_id"}),
+        cli_options=frozenset({"--api-token"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
+    ),
+    ContractCapability(
+        name="read_workspace_log",
+        parity_capability="Durable workspace logs",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}/logs/{stream_id}",
+        mcp_tool="awf_read_workspace_log",
+        cli_tokens=("workspace", "log"),
+        parity_status="MCP implemented",
+        parity_backlog_slice="—",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceLogReadResponse",
+        rest_path_fields=frozenset({"workspace_id", "stream_id"}),
+        rest_query_fields=frozenset({"offset", "limit_bytes"}),
+        mcp_request_fields=frozenset({"workspace_id", "stream_id", "offset", "limit_bytes"}),
+        mcp_required_fields=frozenset({"workspace_id", "stream_id"}),
+        cli_arguments=frozenset({"workspace_id", "stream_id"}),
+        cli_options=frozenset({"--offset", "--limit-bytes", "--api-token"}),
+        response_fields=frozenset({"stream_id", "offset", "next_offset", "eof", "data"}),
+        auth_required=True,
+    ),
+    ContractCapability(
+        name="global_events",
+        parity_capability="Workspace events",
+        rest_method="GET",
+        rest_path="/v1/events",
+        mcp_tool=None,
+        cli_tokens=None,
+        parity_status="MCP partial",
+        parity_backlog_slice="TODO§P1-mcp-global-events",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceEventListResponse",
+        rest_query_fields=frozenset({"workspace_id", "limit"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+    ),
+    ContractCapability(
+        name="workspace_events",
+        parity_capability="Workspace events",
+        rest_method="GET",
+        rest_path="/v1/workspaces/{workspace_id}/events",
+        mcp_tool="awf_list_workspace_events",
+        cli_tokens=("workspace", "events"),
+        parity_status="MCP partial",
+        parity_backlog_slice="TODO§P1-mcp-global-events",
+        supports_idempotency_key=False,
+        supports_if_match=False,
+        rest_response_model="WorkspaceEventListResponse",
+        rest_path_fields=frozenset({"workspace_id"}),
+        rest_query_fields=frozenset({"event_type", "limit"}),
+        mcp_request_fields=frozenset({"workspace_id", "limit", "event_type"}),
+        mcp_required_fields=frozenset({"workspace_id"}),
+        cli_arguments=frozenset({"workspace_id"}),
+        cli_options=frozenset({"--limit", "--event-type", "--api-token"}),
+        response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
     ),
 )
 
@@ -281,6 +1048,23 @@ def all_capabilities() -> tuple[ContractCapability, ...]:
 def mutating_capabilities() -> tuple[ContractCapability, ...]:
     """Return mutating REST capabilities (POST/DELETE)."""
     return tuple(c for c in _CAPABILITIES if c.rest_method in {"POST", "DELETE"})
+
+
+def implemented_surface_capabilities() -> tuple[ContractCapability, ...]:
+    """Return registry rows whose MCP parity status is implemented or partial."""
+    return tuple(
+        c for c in _CAPABILITIES if c.parity_status in {"MCP implemented", "MCP partial"}
+    )
+
+
+def mcp_capabilities() -> tuple[ContractCapability, ...]:
+    """Return registry rows with a concrete MCP tool."""
+    return tuple(c for c in implemented_surface_capabilities() if c.mcp_tool is not None)
+
+
+def cli_capabilities() -> tuple[ContractCapability, ...]:
+    """Return registry rows with a concrete CLI command."""
+    return tuple(c for c in implemented_surface_capabilities() if c.cli_tokens is not None)
 
 
 def control_capabilities() -> tuple[ContractCapability, ...]:
@@ -327,6 +1111,10 @@ def _row_endpoints(row: Mapping[str, str]) -> list[tuple[str, str]]:
 
 def _row_mcp_tools(row: Mapping[str, str]) -> set[str]:
     return set(_extract_mcp_tool_tokens_from_cell(row.get("MCP tool name", "")))
+
+
+def _row_cli_surface(row: Mapping[str, str]) -> str:
+    return _strip_backticks(row.get("CLI surface", "")).strip()
 
 
 def assert_capability_matches_parity_matrix(capability: ContractCapability) -> None:
@@ -465,3 +1253,26 @@ def parity_mutating_capabilities_with_status(statuses: Iterable[str]) -> list[st
         if any(method in {"POST", "DELETE"} for method, _ in endpoints):
             out.append(row["Capability"].strip())
     return out
+
+
+def parity_endpoint_capabilities_with_status(statuses: Iterable[str]) -> list[str]:
+    """Return parity-matrix capability names with REST endpoints and matching status."""
+    rows = _parity_rows()
+    target = set(statuses)
+    out: list[str] = []
+    for row in rows:
+        if row.get("Status", "").strip() not in target:
+            continue
+        if _row_endpoints(row):
+            out.append(row["Capability"].strip())
+    return out
+
+
+def parity_rows_by_capability() -> dict[str, dict[str, str]]:
+    """Return parity-matrix rows keyed by capability name."""
+    return {row["Capability"].strip(): row for row in _parity_rows()}
+
+
+def parity_capability_cli_surface(parity_capability: str) -> str:
+    """Return the parity-matrix CLI column for a capability."""
+    return _row_cli_surface(_parity_row_for(parity_capability))
