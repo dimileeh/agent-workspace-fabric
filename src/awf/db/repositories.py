@@ -4136,9 +4136,9 @@ class WorkspaceLogStreamRepository:
         byte_delta: int,
         line_delta: int,
     ) -> WorkspaceLogStream | None:
-        from datetime import UTC, datetime
+        from datetime import UTC, datetime, timedelta
 
-        from sqlalchemy import update
+        from sqlalchemy import or_, update
         stream = await self.get(workspace_id=workspace_id, stream_id=stream_id)
         if stream is None:
             return None
@@ -4151,9 +4151,16 @@ class WorkspaceLogStreamRepository:
 
         # Fast path update without locking the Workspace ORM object
         now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=5)
         await self._session.execute(
             update(Workspace)
             .where(Workspace.id == workspace_id)
+            .where(
+                or_(
+                    Workspace.last_log_at.is_(None),
+                    Workspace.last_log_at < cutoff,
+                )
+            )
             .values(last_log_at=now, last_activity_at=now)
         )
 
