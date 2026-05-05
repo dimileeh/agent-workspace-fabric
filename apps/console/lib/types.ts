@@ -461,11 +461,6 @@ export interface Workspace {
   last_log_at: string | null;
   is_stale_running: boolean;
   version: number;
-
-  subphase: string | null;
-  last_activity_at: string | null;
-  last_log_at: string | null;
-  is_stale_running: boolean;
   repo_url: string;
   branch_base: string;
   branch_name: string | null;
