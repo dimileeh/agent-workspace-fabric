@@ -136,18 +136,21 @@ def test_local_service_ignores_project_default_awf_work_dir(
 
 
 @pytest.mark.unit
-def test_explicit_awf_work_dir_takes_precedence_over_host_work_dir(tmp_path: Path) -> None:
-    explicit_work_dir = tmp_path / "explicit"
+def test_compose_host_work_dir_takes_precedence_over_shell_awf_work_dir(
+    tmp_path: Path,
+) -> None:
+    shell_work_dir = tmp_path / "project"
+    host_work_dir = tmp_path / "compose-default"
 
     settings = resolve_service_settings(
-        Settings(_env_file=None, work_dir=str(explicit_work_dir)),
+        Settings(_env_file=None, work_dir=str(shell_work_dir)),
         environ={
-            "AWF_WORK_DIR": str(explicit_work_dir),
-            "AWF_HOST_WORK_DIR": str(tmp_path / "compose-default"),
+            "AWF_WORK_DIR": str(shell_work_dir),
+            "AWF_HOST_WORK_DIR": str(host_work_dir),
         },
     )
 
-    assert settings.work_dir == str(explicit_work_dir)
+    assert settings.work_dir == str(host_work_dir)
 
 
 @pytest.mark.unit

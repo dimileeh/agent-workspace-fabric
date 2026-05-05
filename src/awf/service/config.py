@@ -178,12 +178,12 @@ def _resolve_service_work_dir(settings: Settings, environ: Mapping[str, str]) ->
     reports from the running service.
     """
 
-    awf_work_dir = _env_value(environ, "AWF_WORK_DIR")
-    if awf_work_dir and not _is_project_default_work_dir(awf_work_dir):
-        return awf_work_dir
     host_work_dir = _env_value(environ, "AWF_HOST_WORK_DIR")
     if host_work_dir:
         return host_work_dir
+    awf_work_dir = _env_value(environ, "AWF_WORK_DIR")
+    if awf_work_dir and not _is_project_default_work_dir(awf_work_dir):
+        return awf_work_dir
     if "work_dir" in settings.model_fields_set and not _is_project_default_work_dir(
         settings.work_dir
     ):
