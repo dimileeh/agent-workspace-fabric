@@ -1975,6 +1975,10 @@ class EgressAuditRepository:
                 EgressAuditRecord.policy_posture,
                 func.count(EgressAuditRecord.id),
             )
+            .join(Workspace, EgressAuditRecord.workspace_id == Workspace.id)
+            .where(
+                ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES)
+            )
             .group_by(EgressAuditRecord.policy_posture)
         )
         result = await self._session.execute(stmt)

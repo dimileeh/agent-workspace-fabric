@@ -326,6 +326,45 @@ async def test_get_summary_counts_by_posture(
 
 
 @pytest.mark.unit
+async def test_get_summary_counts_by_posture_excludes_terminal_workspaces(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Summary query must exclude records from terminal-workspace statuses."""
+
+    async with session_factory() as session:
+        r_active = EgressAuditRecord(
+            id=new_egress_audit_record_id(),
+            workspace_id=await _workspace(session_factory, network_posture="open"),
+            policy_posture="open",
+            decision=EgressDecision.allow.value,
+            destination_category="public_internet",
+            reason_code="LOCAL_EGRESS_OPEN_UNRESTRICTED",
+            details={},
+        )
+        session.add(r_active)
+
+        destroyed_wid = await _workspace(session_factory, status=WorkspaceStatus.destroyed)
+        r_destroyed = EgressAuditRecord(
+            id=new_egress_audit_record_id(),
+            workspace_id=destroyed_wid,
+            policy_posture="restricted",
+            decision=EgressDecision.deny.value,
+            destination_category="public_internet",
+            reason_code="LOCAL_EGRESS_DENIED",
+            details={},
+        )
+        session.add(r_destroyed)
+        await session.flush()
+
+        repo = EgressAuditRepository(session)
+        counts = await repo.summary_counts_by_posture()
+
+        assert counts.get("open", 0) == 1
+        assert counts.get("restricted", 0) == 0
+        assert "restricted" not in counts or counts["restricted"] == 0
+
+
+@pytest.mark.unit
 async def test_workspace_response_includes_egress_audit(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
