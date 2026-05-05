@@ -305,7 +305,7 @@ async def test_task_attempt_latest_and_canonical_lookup_filters(
 
 
 @pytest.mark.unit
-async def test_postgres_only_repository_locks_are_skipped_or_executed_intentionally() -> None:
+async def test_postgres_only_repository_locks_execute_advisory_lock_helpers() -> None:
     class RecordingSession:
         info: dict[str, str] = {}
 

@@ -2431,10 +2431,7 @@ class WorkspaceRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:
-        """Serialize workspace idempotency decisions for one key."""
-        if self._dialect_name != "postgresql":
-            return
-
+        """Serialize workspace idempotency decisions with a PostgreSQL advisory lock."""
         lock_key = _workspace_idempotency_advisory_lock_key(key)
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
@@ -3864,10 +3861,7 @@ class OperationRepository:
         self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:
-        """Serialize operation idempotency decisions for one key on Postgres."""
-        if self._dialect_name != "postgresql":
-            return
-
+        """Serialize operation idempotency decisions with a PostgreSQL advisory lock."""
         lock_key = _operation_idempotency_advisory_lock_key(key)
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
