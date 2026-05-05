@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
@@ -23,10 +24,8 @@ _RUNNER = CliRunner()
 
 def _mock_response(
     *, status_code: int = 200, payload: object | None = None, text: str = ""
-) -> Any:
-    from unittest.mock import MagicMock
-
-    response = MagicMock()
+) -> MagicMock:
+    response = MagicMock(spec=httpx.Response)
     response.status_code = status_code
     response.content = b"ok" if payload is not None or text else b""
     response.text = text or (json.dumps(payload) if payload is not None else "")
