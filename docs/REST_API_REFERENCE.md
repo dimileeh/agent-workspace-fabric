@@ -595,21 +595,78 @@ curl "http://localhost:8000/v1/workspaces/ws_123/secret-leases"
 
 ## PR Monitor Adoption
 
-Adopt an already-open GitHub PR into AWF monitoring. Auth required.
-Requires `Idempotency-Key`.
+Adopt an already-open GitHub PR into AWF monitoring without rerunning the
+original coding agent. Auth required. AWF derives deterministic repo/PR idempotency from
+the normalized repository identity and PR number; adoption does not require a
+caller-provided idempotency key.
 
 ```bash
 curl -X POST "http://localhost:8000/v1/workspaces/adopt-pr" \
   -H "Authorization: Bearer $AWF_API_TOKEN" \
-  -H "Idempotency-Key: adopt-pr-42" \
   -H "Content-Type: application/json" \
   -d '{
     "repo_slug": "example/app",
     "pr_number": 42,
     "auto_merge": true,
-    "task_title": "Adopt existing PR #42"
+    "initial_review_grace_period_seconds": 900,
+    "reason": "attach AWF to existing PR"
   }'
 ```
+
+The response is `PullRequestMonitorAdoptionResponse` and includes the adopted
+`workspace_id`, `monitor_policy`, `validation_provenance`, `status_url`,
+`events_url`, `logs_url`, and `attached_existing`. A repeat adoption for the
+same repo/PR and same monitor policy returns the same workspace with
+`attached_existing=true`; policy changes return `PR_ADOPTION_POLICY_CONFLICT`.
+Closed or merged PRs return structured errors such as `PR_ALREADY_CLOSED` or
+`PR_ALREADY_MERGED`.
+
+Inspect the adopted monitor:
+
+```bash
+curl "http://localhost:8000/v1/workspaces/ws_123"
+curl "http://localhost:8000/v1/workspaces/ws_123/events?limit=50"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/operations?limit=25"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/logs"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/validation"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/merge-queue"
+```
+
+Recovery operations:
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/remonitor" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: remonitor-ws-123-001" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "worker restarted"}'
+
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/refresh" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: refresh-ws-123-001" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "refresh GitHub state"}'
+
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/validate" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: validate-ws-123-001" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "prove current head", "requested_tier": 2}'
+
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/rebase" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: rebase-ws-123-001" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "target branch advanced"}'
+```
+
+See [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for the CLI/MCP equivalents,
+GitHub auth readiness, `auto_merge=true` versus manual monitor policy,
+terminal-row current behavior, console inspection, and mocked-local demo path.
 
 ---
 

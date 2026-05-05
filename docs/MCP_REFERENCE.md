@@ -12,6 +12,7 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 | --- | --- |
 | `awf_create_workspace` | Create a legacy v1 workspace request. |
 | `awf_create_workspace_v2` | Create a profile-driven v2 workspace request. |
+| `awf_adopt_pull_request_monitor` | Adopt an already-open GitHub PR into AWF monitoring without rerunning the original coding agent. |
 | `awf_get_workspace` | Fetch one workspace by id. |
 | `awf_list_workspaces` | List recent workspaces newest-first, optionally filtered by status, agent, or repo URL. |
 | `awf_wait_for_workspace` | Poll until a workspace reaches a terminal state or times out. |
@@ -51,8 +52,9 @@ The observability tools return `null` for a missing workspace, log stream, or
 operation rather than surfacing raw storage errors. Operator observability tools
 are read-only and mirror REST response envelopes; the explicit control tools do
 not provide shell access or arbitrary Docker execution. Known MCP parity backlog
-is documented in the matrix, including artifact content/download and global
-workspace event streaming.
+is documented in the matrix, including artifact content/download, global
+workspace event streaming, and surfaces that are intentionally out of scope for
+MCP.
 
 The create tools `awf_create_workspace` and `awf_create_workspace_v2` accept a
 schema-optional `idempotency_key` argument. Reusing the same key with the same
@@ -101,7 +103,26 @@ Example `awf_create_workspace_v2` arguments:
 }
 ```
 
-Example runtime and operation observability calls:
+Example adoption and observability calls:
+
+Example `awf_adopt_pull_request_monitor` arguments:
+
+```json
+{
+  "repo_slug": "owner/repo",
+  "pr_number": 123,
+  "auto_merge": true,
+  "initial_review_grace_period_seconds": 900,
+  "reason": "attach AWF to existing PR"
+}
+```
+
+Adoption maps to `POST /v1/workspaces/adopt-pr` and returns
+`PullRequestMonitorAdoptionResponse`. AWF derives deterministic repo/PR
+idempotency; callers do not provide an `Idempotency-Key`. See
+[PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for GitHub auth readiness,
+monitor policy, terminal-row current behavior, console inspection, and the
+mocked-local demo path.
 
 `awf_get_workspace_runtime` arguments:
 

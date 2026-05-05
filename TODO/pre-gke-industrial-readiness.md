@@ -837,7 +837,7 @@ without reading the whole repo.
   with copy-paste curl examples for all endpoint groups; AGENTS.md updated with
   the spec drift check command; `pyproject.toml` updated with
   `openapi-spec-validator>=0.7.0` dev dependency.
-- [ ] Document and demo PR monitor adoption for an already-open PR. Acceptance:
+- [x] Document and demo PR monitor adoption for an already-open PR. Acceptance:
   the quickstart and API/CLI/MCP docs show the supported command/API call,
   required GitHub auth, idempotency behavior, monitor policy choice, and how to
   inspect adopted monitor logs/events/merge-queue state from the console.
@@ -847,7 +847,20 @@ without reading the whole repo.
   deterministic repo/PR idempotency and terminal-row retry behavior; console
   inspection of logs, events, validation provenance, merge queue, and recovery
   operations; and a mocked-local or docs-tested demo path that can be validated
-  without a live PR.
+  without a live PR. Evidence: added `docs/PR_MONITOR_ADOPTION.md` as the
+  canonical operator runbook; linked it from README, quickstart,
+  getting-started, client-surface, REST, CLI, and MCP docs; expanded
+  `docs/REST_API_REFERENCE.md` to remove the incorrect adoption
+  `Idempotency-Key` requirement and show inspection/recovery API calls; added
+  `awf_adopt_pull_request_monitor` examples to `docs/MCP_REFERENCE.md`; and
+  added `tests/unit/docs/test_pr_monitor_adoption_docs.py` to verify real
+  REST/CLI/MCP names, auth/token guidance, monitor policy, deterministic
+  idempotency, current terminal-row behavior, console/API/CLI/MCP inspection,
+  recovery tools, and mocked-local test references. Validation: docs adoption
+  contract tests passed; focused REST drift/adoption, CLI adoption, MCP parity,
+  MCP adoption, and request-payload alignment tests passed; ruff passed for
+  touched docs tests; `uv run --python 3.12 --extra dev python
+  scripts/generate_openapi.py --check` passed.
 - [x] Decide the SDK stance before open-source Core release: either ship a
   minimal Python client for the stable operator flows or explicitly document
   that REST + CLI + MCP are the supported client surfaces for v0.1. Acceptance:

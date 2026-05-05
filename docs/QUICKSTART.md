@@ -20,3 +20,5 @@
    ```
 
 For repository onboarding, see [Project Onboarding](PROJECT_ONBOARDING.md).
+For attaching AWF to an already-open GitHub PR without rerunning the original
+coding agent, see [PR Monitor Adoption](PR_MONITOR_ADOPTION.md).
