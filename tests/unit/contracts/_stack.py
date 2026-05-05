@@ -9,7 +9,7 @@ in one place.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,7 +55,7 @@ def _ok_disk_check(settings: Settings) -> DiskCheck:
 
 
 @pytest.fixture(autouse=True)
-def _clear_settings_cache() -> AsyncIterator[None]:
+def _clear_settings_cache() -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
