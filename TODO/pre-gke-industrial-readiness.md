@@ -721,9 +721,25 @@ coding agent in any project to use AWF for a feature.
   Evidence: implemented `awf workspace cancel`, `awf workspace stop`,
   `awf workspace destroy`, `awf workspace refresh`, `awf workspace validate`, and
   `awf workspace rebase` in `src/awf/cli/main.py`; added command presence/request
-  shape/output shape/error-shape coverage in `tests/unit/cli/test_cli.py`; and
-  updated `docs/MCP_CLIENT_PARITY.md` to show these CLI surfaces and
-  optimistic-concurrency coverage.
+  shape/output shape/error-shape coverage in `tests/unit/cli/test_cli.py`; added a
+  dedicated control-surface contract matrix and error-shape suite in
+  `tests/unit/contracts/test_control_surface_parity_contract.py`; and
+  `tests/unit/mcp/test_mcp_client_parity_docs.py` to pin parity documentation
+  for intentional control-surface gaps.
+- [x] Add contract tests proving REST API, CLI, and MCP stay aligned: request
+  payloads, response payloads, reason codes, idempotency keys, `If-Match` /
+  workspace-version concurrency, auth failures, and structured error semantics
+  must not drift across the three clients.
+  Evidence: implemented `tests/unit/contracts/test_control_surface_parity_contract.py`
+  with request/response/error parity assertions across cancel/stop/destroy/refresh/validate/rebase.
+- [x] Add a docs/status consistency test for the parity matrix so entries marked
+  implemented must correspond to real REST routes, CLI commands, MCP tools, and
+  contract-test coverage; partial or missing entries must remain visible as
+  unchecked backlog work.
+  Evidence: added
+  `tests/unit/mcp/test_mcp_client_parity_docs.py::test_control_operations_with_mcp_gaps_are_intentionally_documented`
+  to lock in MCP gap entries and backlog markers for refresh/rebase while preserving
+  CLI command parity for safe control operations.
 - [x] Keep MCP read/control scoped: expose AWF-managed runtime snapshots, logs,
   operations, and controls, but do not expose arbitrary shell or unrestricted
   Docker exec. Evidence: MCP operator-surface tests reject shell/exec/Docker
