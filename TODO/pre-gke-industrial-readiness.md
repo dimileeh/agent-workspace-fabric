@@ -674,7 +674,10 @@ coding agent in any project to use AWF for a feature.
   now validates implemented rows against the FastAPI route tree, Typer command
   tree, MCP tool registrations, and active backlog visibility; `tests/unit/contracts/test_registry_smoke.py`
   now requires executable contract/parity coverage references for implemented
-  rows. Validation: `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_parity_matrix_crossref.py tests/unit/contracts/test_registry_smoke.py -q`.
+  rows. Validation: targeted parity/registry pytest, ruff on touched parity and
+  contract helpers, and the full `tests/unit/contracts` suite passed on
+  2026-05-05; evidence attached in
+  `docs/awf-plans/ws_aeec0296eee64c869d328ae2.validation.txt`.
 - [x] Add `docs/PROJECT_ONBOARDING.md` for Codex, Claude Code, Gemini, OpenCode, OpenClaw, and human operators.
 - [x] Add `awf project init` or `awf profile init` to inspect a repository and generate a draft `.awf/workspace.yml`.
 - [x] Add profile templates for common project shapes: generic, Python, Node/Next.js, Docker Compose, Python+Postgres, Node+browser/Playwright, and multi-service app.
