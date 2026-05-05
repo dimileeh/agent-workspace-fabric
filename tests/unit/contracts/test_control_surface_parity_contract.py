@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -16,10 +17,65 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from awf.api.schemas import OperationResponse
 from awf.cli.main import app
 from tests.unit.mcp._parity_utils import _parity_rows, _strip_backticks
 
 _RUNNER = CliRunner()
+_OPERATION_CREATED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+_CONTROL_RESPONSE_FIELDS = (
+    "workspace_id",
+    "operation_id",
+    "operation_status",
+    "status",
+    "message",
+)
+_OPERATION_RESPONSE_FIELDS = (
+    "id",
+    "workspace_id",
+    "type",
+    "status",
+    "payload",
+    "created_at",
+)
+
+
+def _operation_response_payload(
+    *,
+    operation_id: str,
+    workspace_id: str,
+    operation_type: str,
+    status: str = "pending",
+    idempotency_key: str,
+    reason: str,
+    reason_code: str,
+    expected_version: int,
+    extra_payload: dict[str, object | None] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, object | None] = {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": reason,
+        "reason_code": reason_code,
+        "requested_action": operation_type,
+        "expected_version": expected_version,
+    }
+    if extra_payload is not None:
+        payload.update(extra_payload)
+    return OperationResponse(
+        id=operation_id,
+        workspace_id=workspace_id,
+        type=operation_type,
+        status=status,
+        error_code=None,
+        error_message=None,
+        payload=payload,
+        result=None,
+        idempotency_key=idempotency_key,
+        created_at=_OPERATION_CREATED_AT,
+        started_at=None,
+        finished_at=None,
+    ).model_dump(mode="json")
 
 
 def _mock_response(
@@ -66,6 +122,7 @@ class _ControlCase:
     parity_rest_path: str
     parity_cli: str
     missing_mcp_tool: str | None = None
+    response_fields: tuple[str, ...] = _CONTROL_RESPONSE_FIELDS
 
 
 _CONTROL_CASES: tuple[_ControlCase, ...] = (
@@ -93,7 +150,7 @@ _CONTROL_CASES: tuple[_ControlCase, ...] = (
             "message": "workspace cancellation requested",
         },
         mcp_tool="awf_cancel_workspace",
-        matrix_status="MCP partial",
+        matrix_status="MCP implemented",
         forbidden_error_code="VERSION_CONFLICT",
         parity_rest_path="/v1/workspaces/{workspace_id}/cancel",
         parity_cli="awf workspace cancel",
@@ -121,7 +178,7 @@ _CONTROL_CASES: tuple[_ControlCase, ...] = (
             "message": "workspace stop requested",
         },
         mcp_tool="awf_stop_workspace",
-        matrix_status="MCP partial",
+        matrix_status="MCP implemented",
         forbidden_error_code="VERSION_CONFLICT",
         parity_rest_path="/v1/workspaces/{workspace_id}/stop",
         parity_cli="awf workspace stop",
@@ -150,7 +207,7 @@ _CONTROL_CASES: tuple[_ControlCase, ...] = (
             "message": "workspace destruction requested",
         },
         mcp_tool="awf_destroy_workspace",
-        matrix_status="MCP partial",
+        matrix_status="MCP implemented",
         forbidden_error_code="WORKSPACE_ACTIVE",
         parity_rest_path="/v1/workspaces/{workspace_id}",
         parity_cli="awf workspace destroy",
@@ -170,19 +227,21 @@ _CONTROL_CASES: tuple[_ControlCase, ...] = (
         expected_body={"reason": "stale branch"},
         expected_query=None,
         success_status=202,
-        response_payload={
-            "workspace_id": "ws_refresh",
-            "operation_id": "op_refresh",
-            "operation_status": "requested",
-            "status": "requested",
-            "message": "workspace refresh requested",
-        },
-        mcp_tool=None,
-        matrix_status="MCP missing/backlog",
+        response_payload=_operation_response_payload(
+            operation_id="op_refresh",
+            workspace_id="ws_refresh",
+            operation_type="refresh",
+            idempotency_key="refresh-key",
+            reason="stale branch",
+            reason_code="OPERATOR_REFRESH",
+            expected_version=33,
+        ),
+        mcp_tool="awf_refresh_workspace",
+        matrix_status="MCP implemented",
         forbidden_error_code="WORKSPACE_STATE_NOT_REFRESHABLE",
         parity_rest_path="/v1/workspaces/{workspace_id}/refresh",
         parity_cli="awf workspace refresh",
-        missing_mcp_tool="awf_refresh_workspace",
+        response_fields=_OPERATION_RESPONSE_FIELDS,
     ),
     _ControlCase(
         capability="Request validation",
@@ -201,18 +260,22 @@ _CONTROL_CASES: tuple[_ControlCase, ...] = (
         expected_body={"reason": "manual revalidation", "requested_tier": 2},
         expected_query=None,
         success_status=202,
-        response_payload={
-            "workspace_id": "ws_validate",
-            "operation_id": "op_validate",
-            "operation_status": "requested",
-            "status": "requested",
-            "message": "workspace validation requested",
-        },
+        response_payload=_operation_response_payload(
+            operation_id="op_validate",
+            workspace_id="ws_validate",
+            operation_type="validate",
+            idempotency_key="validate-key",
+            reason="manual revalidation",
+            reason_code="OPERATOR_VALIDATE",
+            expected_version=2,
+            extra_payload={"recovery_mode": "validate_only", "requested_tier": 2},
+        ),
         mcp_tool="awf_request_workspace_validation",
-        matrix_status="MCP partial",
+        matrix_status="MCP implemented",
         forbidden_error_code="WORKSPACE_STATE_NOT_VALIDATABLE",
         parity_rest_path="/v1/workspaces/{workspace_id}/validate",
         parity_cli="awf workspace validate",
+        response_fields=_OPERATION_RESPONSE_FIELDS,
     ),
     _ControlCase(
         capability="Rebase workspace",
@@ -229,19 +292,22 @@ _CONTROL_CASES: tuple[_ControlCase, ...] = (
         expected_body={"reason": "recover merge conflicts"},
         expected_query=None,
         success_status=202,
-        response_payload={
-            "workspace_id": "ws_rebase",
-            "operation_id": "op_rebase",
-            "operation_status": "requested",
-            "status": "rebasing",
-            "message": "workspace rebase requested",
-        },
-        mcp_tool=None,
-        matrix_status="MCP missing/backlog",
+        response_payload=_operation_response_payload(
+            operation_id="op_rebase",
+            workspace_id="ws_rebase",
+            operation_type="rebase",
+            idempotency_key="rebase-key",
+            reason="recover merge conflicts",
+            reason_code="OPERATOR_REBASE",
+            expected_version=11,
+            extra_payload={"recovery_mode": "rebase_only"},
+        ),
+        mcp_tool="awf_rebase_workspace",
+        matrix_status="MCP implemented",
         forbidden_error_code="WORKSPACE_STATE_NOT_REBASEABLE",
         parity_rest_path="/v1/workspaces/{workspace_id}/rebase",
         parity_cli="awf workspace rebase",
-        missing_mcp_tool="awf_rebase_workspace",
+        response_fields=_OPERATION_RESPONSE_FIELDS,
     ),
 )
 
@@ -325,7 +391,7 @@ def test_control_commands_emit_expected_request_shape_and_output(case: _ControlC
         assert payload["params"] == case.expected_query
 
     output = json.loads(result.stdout)
-    for field in ("workspace_id", "operation_id", "operation_status", "status", "message"):
+    for field in case.response_fields:
         assert field in output
     assert output == case.response_payload
 
