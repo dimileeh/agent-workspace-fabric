@@ -368,11 +368,6 @@ export interface MergeQueueBlocker {
   pr_url: string;
   pr_number: number | null;
   status: WorkspaceStatus;
-
-  subphase: string | null;
-  last_activity_at: string | null;
-  last_log_at: string | null;
-  is_stale_running: boolean;
   blocker_state: MergeQueueBlockerState;
   reason_code: string;
 }
@@ -390,11 +385,6 @@ export interface MergeQueueItem {
   branch_name: string | null;
   pr_url: string;
   status: WorkspaceStatus;
-
-  subphase: string | null;
-  last_activity_at: string | null;
-  last_log_at: string | null;
-  is_stale_running: boolean;
   auto_merge: boolean;
   task_class: string | null;
   owned_paths: string[];
@@ -582,11 +572,6 @@ export interface WorkspaceControlResponse {
   operation_id: string;
   operation_status: string;
   status: WorkspaceStatus;
-
-  subphase: string | null;
-  last_activity_at: string | null;
-  last_log_at: string | null;
-  is_stale_running: boolean;
   message: string;
 }
 
@@ -602,11 +587,6 @@ export interface WorkspaceRetryResponse {
   new_workspace_id: string;
   operation_id: string;
   status: WorkspaceStatus;
-
-  subphase: string | null;
-  last_activity_at: string | null;
-  last_log_at: string | null;
-  is_stale_running: boolean;
   attempt_number: number;
   status_url: string;
   events_url: string;
