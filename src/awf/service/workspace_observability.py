@@ -51,10 +51,17 @@ STALE_RUNNING_THRESHOLD_SECONDS = 600
 
 def is_workspace_stale_running(workspace: Any) -> bool:
     """Return whether the workspace has been running without activity past the threshold."""
-    last_activity_at = getattr(workspace, "last_activity_at", None)
-    if getattr(workspace, "status", None) != "running" or last_activity_at is None:
+    if getattr(workspace, "status", None) != "running":
         return False
-    delta = datetime.now(UTC) - _ensure_utc(last_activity_at)
+        
+    last_activity = getattr(workspace, "last_activity_at", None)
+    if last_activity is None:
+        last_activity = getattr(workspace, "updated_at", getattr(workspace, "created_at", None))
+        
+    if last_activity is None:
+        return False
+
+    delta = datetime.now(UTC) - _ensure_utc(last_activity)
     return delta.total_seconds() > STALE_RUNNING_THRESHOLD_SECONDS
 
 
