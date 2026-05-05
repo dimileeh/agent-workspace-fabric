@@ -21,6 +21,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OPENAPI_JSON = REPO_ROOT / "openapi.json"
 
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
 
 def get_openapi_spec() -> dict:
     from awf.api.app import create_app
