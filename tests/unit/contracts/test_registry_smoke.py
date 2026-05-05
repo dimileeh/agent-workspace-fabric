@@ -15,6 +15,7 @@ from tests.unit.contracts._capabilities import (
     all_capabilities,
     assert_capability_matches_parity_matrix,
     parity_capabilities_with_status,
+    parity_mutating_capabilities_with_status,
 )
 
 
@@ -41,16 +42,9 @@ def test_every_mutating_capability_with_mcp_tool_is_registered() -> None:
     )
     registered_capabilities = {c.parity_capability for c in all_capabilities()}
 
-    expected_must_be_registered = {
-        "Cancel workspace",
-        "Stop workspace stack",
-        "Destroy workspace resources",
-        "Remonitor workspace",
-        "Request validation",
-        "Retry workspace",
-        "Workspace create, list, and get",
-        "Existing PR monitor adoption",
-    }
+    expected_must_be_registered = set(
+        parity_mutating_capabilities_with_status({"MCP implemented", "MCP partial"})
+    )
 
     missing = expected_must_be_registered - registered_capabilities
     assert not missing, (

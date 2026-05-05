@@ -458,3 +458,17 @@ def parity_capabilities_with_status(statuses: Iterable[str]) -> list[str]:
     rows = _parity_rows()
     target = set(statuses)
     return [row["Capability"].strip() for row in rows if row.get("Status", "").strip() in target]
+
+
+def parity_mutating_capabilities_with_status(statuses: Iterable[str]) -> list[str]:
+    """Return parity-matrix capabilities with a POST/DELETE endpoint and matching status."""
+    rows = _parity_rows()
+    target = set(statuses)
+    out: list[str] = []
+    for row in rows:
+        if row.get("Status", "").strip() not in target:
+            continue
+        endpoints = _row_endpoints(row)
+        if any(method in {"POST", "DELETE"} for method, _ in endpoints):
+            out.append(row["Capability"].strip())
+    return out
