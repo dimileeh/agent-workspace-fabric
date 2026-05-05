@@ -115,6 +115,8 @@ def redact_audit_value(value: Any) -> Any:
         return [redact_audit_value(item) for item in value]
     if isinstance(value, tuple):
         return [redact_audit_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [redact_audit_value(item) for item in sorted(value, key=str)]
     if isinstance(value, str):
         return _redact_string(value)
     return value
