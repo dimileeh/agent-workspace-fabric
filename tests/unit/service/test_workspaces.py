@@ -15,6 +15,9 @@ from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.workspace_runtime_health import RUNTIME_STRANDED_EVENT_TYPE
 from awf.service.workspaces import WorkspaceService
 
+PRESERVED_EXECUTION_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
+PRESERVED_EXECUTION_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
+
 
 @pytest.fixture
 async def session_factory(
@@ -296,6 +299,122 @@ async def test_workspace_detail_exposes_persisted_runtime_health(
     assert detail.runtime_health.services == [
         {"name": "agent", "state": "exited", "container_id": "agent"}
     ]
+
+
+@pytest.mark.unit
+async def test_workspace_detail_exposes_persisted_preserved_runtime_health(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="persisted preserved runtime",
+            task_prompt="show preserved runtime finding",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.running.value
+        await repo.add_event(
+            workspace,
+            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            payload={
+                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "decision": "preserve_runtime",
+                "message": "Live agent runtime was preserved after worker restart.",
+                "runtime": {
+                    "services": [
+                        {
+                            "name": "agent",
+                            "state": "running",
+                            "container_id": "agent",
+                        }
+                    ]
+                },
+            },
+        )
+        await session.commit()
+        workspace_id = workspace.id
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is not None
+    assert detail.runtime_health.status == "ok"
+    assert detail.runtime_health.reason_code == PRESERVED_EXECUTION_REASON_CODE
+    assert detail.runtime_health.decision == "preserve_runtime"
+    assert detail.runtime_health.services == [
+        {"name": "agent", "state": "running", "container_id": "agent"}
+    ]
+
+
+@pytest.mark.unit
+async def test_runtime_detail_uses_preserved_health_when_live_snapshot_is_healthy(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="preserved runtime endpoint",
+            task_prompt="show preserved runtime in runtime endpoint",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.pushing.value
+        workspace.compose_project_name = "awf_preserved_runtime_endpoint"
+        workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
+        await repo.add_event(
+            workspace,
+            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            payload={
+                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "decision": "preserve_runtime",
+                "message": "Live agent runtime was preserved after worker restart.",
+                "runtime": {
+                    "services": [
+                        {
+                            "name": "agent",
+                            "state": "running",
+                            "container_id": "agent",
+                        }
+                    ]
+                },
+            },
+        )
+        await session.commit()
+        workspace_id = workspace.id
+
+    inspector = _RuntimeInspector(
+        {
+            "awf_preserved_runtime_endpoint": RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent:latest",
+                        state="running",
+                    )
+                ],
+            )
+        }
+    )
+
+    runtime = await WorkspaceService(
+        session_factory,
+        runtime_inspector=inspector,
+    ).get_runtime(workspace_id)
+
+    assert runtime is not None
+    assert runtime.runtime_health is not None
+    assert runtime.runtime_health.status == "ok"
+    assert runtime.runtime_health.reason_code == PRESERVED_EXECUTION_REASON_CODE
+    assert runtime.runtime_health.decision == "preserve_runtime"
 
 
 @pytest.mark.unit

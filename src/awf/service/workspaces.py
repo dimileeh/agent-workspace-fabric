@@ -133,6 +133,8 @@ from awf.service.workspace_observability import (
     workspace_pricing_metadata,
 )
 from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
     RUNTIME_STRANDED_EVENT_TYPE,
     classify_runtime_snapshot,
     runtime_workspace_from_workspace,
@@ -639,9 +641,15 @@ class WorkspaceService:
             compose_project_name = workspace.compose_project_name
             runtime_workspace = runtime_workspace_from_workspace(workspace)
             app_endpoints = _workspace_app_endpoint_responses(workspace)
+            persisted_runtime_health = _workspace_runtime_health_from_events(workspace)
 
         snapshot = await self._runtime_inspector.inspect(compose_project_name)
         finding = classify_runtime_snapshot(runtime_workspace, snapshot)
+        runtime_health = (
+            WorkspaceRuntimeHealthResponse(**finding.to_response_dict())
+            if finding is not None
+            else persisted_runtime_health
+        )
         return WorkspaceRuntimeResponse(
             workspace_id=workspace_id,
             compose_project_name=compose_project_name,
@@ -662,11 +670,7 @@ class WorkspaceService:
             logs_available=True,
             control_available=True,
             reason=snapshot.reason,
-            runtime_health=(
-                WorkspaceRuntimeHealthResponse(**finding.to_response_dict())
-                if finding is not None
-                else None
-            ),
+            runtime_health=runtime_health,
             app_endpoints=app_endpoints,
         )
 
@@ -1835,7 +1839,10 @@ def _workspace_runtime_health_from_events(
     workspace: Workspace,
 ) -> WorkspaceRuntimeHealthResponse | None:
     for event in reversed(workspace.events):
-        if event.event_type != RUNTIME_STRANDED_EVENT_TYPE:
+        if event.event_type not in {
+            RUNTIME_STRANDED_EVENT_TYPE,
+            ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+        }:
             continue
         payload = event.payload or {}
         reason_code = payload.get("reason_code") or event.reason_code
@@ -1845,8 +1852,13 @@ def _workspace_runtime_health_from_events(
             return None
         if not isinstance(message, str):
             message = reason_code
+        status = "stranded"
+        if reason_code == "RUNTIME_INSPECTION_UNAVAILABLE":
+            status = "unavailable"
+        if reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE:
+            status = "ok"
         return WorkspaceRuntimeHealthResponse(
-            status="unavailable" if reason_code == "RUNTIME_INSPECTION_UNAVAILABLE" else "stranded",
+            status=cast(Any, status),
             reason_code=reason_code,
             decision=cast(Any, decision),
             message=message,

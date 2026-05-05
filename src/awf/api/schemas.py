@@ -471,6 +471,7 @@ class WorkspaceRuntimeHealthResponse(BaseModel):
         "fail_workspace",
         "remonitor_workspace",
         "defer_retry_policy",
+        "preserve_runtime",
     ]
     message: str
     services: list[dict[str, str]] = Field(default_factory=list)
