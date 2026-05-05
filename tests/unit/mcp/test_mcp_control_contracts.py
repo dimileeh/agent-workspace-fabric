@@ -426,13 +426,13 @@ class TestSuccessPaths:
             ),
             (
                 "awf_refresh_workspace",
-                {"workspace_id": "ws_refresh", "reason": "r", "expected_version": 8},
-                ("refresh", {"workspace_id": "ws_refresh", "reason": "r", "idempotency_key": None, "expected_version": 8}),
+                {"workspace_id": "ws_refresh", "reason": "r", "idempotency_key": "ik-8", "expected_version": 8},
+                ("refresh", {"workspace_id": "ws_refresh", "reason": "r", "idempotency_key": "ik-8", "expected_version": 8}),
             ),
             (
                 "awf_rebase_workspace",
-                {"workspace_id": "ws_rebase", "reason": "r", "expected_version": 9},
-                ("rebase", {"workspace_id": "ws_rebase", "reason": "r", "idempotency_key": None, "expected_version": 9}),
+                {"workspace_id": "ws_rebase", "reason": "r", "idempotency_key": "ik-9", "expected_version": 9},
+                ("rebase", {"workspace_id": "ws_rebase", "reason": "r", "idempotency_key": "ik-9", "expected_version": 9}),
             ),
         ],
     )
@@ -454,8 +454,8 @@ class TestSuccessPaths:
         service = _MockService()
         mcp = build_mcp_server(service=service)
 
-        refresh = await _call(mcp, "awf_refresh_workspace", {"workspace_id": "ws_r"})
-        rebase = await _call(mcp, "awf_rebase_workspace", {"workspace_id": "ws_b"})
+        refresh = await _call(mcp, "awf_refresh_workspace", {"workspace_id": "ws_r", "idempotency_key": "ik-r"})
+        rebase = await _call(mcp, "awf_rebase_workspace", {"workspace_id": "ws_b", "idempotency_key": "ik-b"})
 
         assert isinstance(refresh, dict)
         assert refresh["type"] == "refresh"
@@ -483,7 +483,11 @@ class TestErrorMapping:
         service = _FailingMockService()
         mcp = build_mcp_server(service=service)
 
-        result = await _call_result(mcp, tool_name, {"workspace_id": "ws_x"})
+        args: dict[str, object] = {"workspace_id": "ws_x"}
+        if tool_name in ("awf_refresh_workspace", "awf_rebase_workspace"):
+            args["idempotency_key"] = "ik-x"
+
+        result = await _call_result(mcp, tool_name, args)
 
         assert result.isError is True
         assert result.structuredContent is not None
@@ -499,7 +503,7 @@ class TestErrorMapping:
         service = _VersionConflictService()
         mcp = build_mcp_server(service=service)
 
-        result = await _call_result(mcp, "awf_refresh_workspace", {"workspace_id": "ws_x", "expected_version": 5})
+        result = await _call_result(mcp, "awf_refresh_workspace", {"workspace_id": "ws_x", "idempotency_key": "ik-x", "expected_version": 5})
 
         assert result.isError is True
         assert result.structuredContent["error_code"] == "VERSION_CONFLICT"
@@ -522,7 +526,7 @@ class TestErrorMapping:
             ("awf_refresh_workspace", "WORKSPACE_STATE_NOT_REFRESHABLE"),
             ("awf_rebase_workspace", "WORKSPACE_STATE_NOT_REBASEABLE"),
         ]:
-            result = await _call_result(mcp, tool_name, {"workspace_id": "ws_x"})
+            result = await _call_result(mcp, tool_name, {"workspace_id": "ws_x", "idempotency_key": "ik-x"})
             assert result.isError is True, tool_name
             assert result.structuredContent["error_code"] == expected_code, tool_name
 
@@ -619,6 +623,7 @@ class TestIdempotencyAndReplay:
         result = await _call_result(mcp, "awf_refresh_workspace", {
             "workspace_id": workspace.id,
             "reason": "refresh",
+            "idempotency_key": "ik-vc",
             "expected_version": workspace.version + 1,
         })
 
@@ -651,6 +656,7 @@ class TestRealDbPaths:
         payload = await _call(mcp, "awf_refresh_workspace", {
             "workspace_id": workspace.id,
             "reason": "operator refresh",
+            "idempotency_key": "ik-op-refresh",
         })
 
         assert isinstance(payload, dict)
@@ -706,6 +712,7 @@ class TestRealDbPaths:
         payload = await _call(mcp, "awf_rebase_workspace", {
             "workspace_id": workspace.id,
             "reason": "operator rebase",
+            "idempotency_key": "ik-op-rebase",
         })
 
         assert isinstance(payload, dict)
@@ -766,6 +773,7 @@ class TestRealDbPaths:
         result = await _call_result(mcp, "awf_rebase_workspace", {
             "workspace_id": workspace.id,
             "reason": "rebase",
+            "idempotency_key": "ik-rebase-destroyed",
         })
 
         assert result.isError is True
