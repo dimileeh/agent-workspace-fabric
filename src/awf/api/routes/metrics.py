@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session
 from awf.common.config import Settings, get_settings
+from awf.common.logging import get_logger
 from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.metrics import (
     DEFAULT_FAILURE_EXAMPLE_LIMIT,
@@ -44,6 +45,7 @@ from awf.service.workspace_runtime_health import (
 )
 
 router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
+_log = get_logger(__name__)
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 OrphanResourceSummaryProvider = Callable[
     [Settings, AsyncSession],
@@ -518,7 +520,13 @@ async def get_resource_saturation_summary(
         runtime_health=runtime_health,
     )
     response = ResourceSaturationSummaryResponse.model_validate(summary)
-    response.egress_posture_counts = await _egress_posture_counts(session)
+    try:
+        response.egress_posture_counts = await _egress_posture_counts(session)
+    except Exception:
+        _log.warning(
+            "Failed to fetch egress posture counts",
+            exc_info=True,
+        )
     return response
 
 
