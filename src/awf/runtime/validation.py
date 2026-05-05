@@ -180,7 +180,11 @@ class ValidationCoverageResult:
 
     @property
     def ok(self) -> bool:
-        return self.status != "failed"
+        if self.status == "failed":
+            return False
+        if self.failing_test_node_ids or self.failing_test_evidence:
+            return False
+        return self.command_result is None or self.command_result.ok
 
     def as_metadata(self) -> dict[str, object]:
         metadata: dict[str, object] = {

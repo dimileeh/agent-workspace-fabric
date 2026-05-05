@@ -213,6 +213,78 @@ async def _seed_ready_workspace_with_recovery(
         return ws.id
 
 
+async def _seed_sync_feature_pr_ready_workspace_with_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    pr_url: str = "https://github.com/x/y/pull/206",
+    pr_number: int = 206,
+    source_head_sha: str = "d" * 40,
+    source_base_sha: str = "a" * 40,
+) -> str:
+    """Seed an adopted feature PR workspace after monitor recovery dispatch."""
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        branch_name = "feature/existing-pr"
+        ws = await repo.create(
+            repo_url="git@github.com:dimileeh/aira-agent.git",
+            branch_base="development",
+            task_title="adopted PR recovery test",
+            task_prompt="Monitor and validate the existing PR.",
+            agent="codex",
+            test_commands=["pytest -q"],
+            requires_database=False,
+            task_kind="sync_feature_pr",
+            remote_push_branch=branch_name,
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": pr_number,
+                    "pr_url": pr_url,
+                    "head_ref": branch_name,
+                    "base_ref": "development",
+                    "head_sha": source_head_sha,
+                    "base_sha": source_base_sha,
+                    "source": "existing_github_pr",
+                }
+            },
+        )
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
+        ws.branch_name = f"feature-sync/{ws.id}"
+        ws.base_commit = source_base_sha
+        ws.monitor_last_commit_sha = source_head_sha
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.pr_url = pr_url
+        ws.pr_number = pr_number
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="X")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="X")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="X")
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="PR_ADOPTED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="RECOVERY_DISPATCH")
+        await OperationRepository(s).create(
+            workspace_id=ws.id,
+            operation_type=OperationType.validate,
+            payload={
+                "owner": "pr_monitor",
+                "source": "pr_monitor",
+                "action": "validate_only",
+                "requested_action": "validate",
+                "reason": "validation_insufficient_tier",
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                "recovery_mode": "validate_only",
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+                "source_head_sha": source_head_sha,
+                "source_base_sha": source_base_sha,
+                "target_branch": ws.branch_base,
+                "remote_branch": branch_name,
+            },
+            idempotency_key=f"pr_monitor:validate_only:{ws.id}",
+        )
+        await s.commit()
+        (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
+        return ws.id
+
+
 async def _seed_open_pr_ready_workspace_without_recovery(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -994,6 +1066,72 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
             and event.new_state == WorkspaceStatus.monitoring_pr.value
             for event in events
         )
+
+
+@pytest.mark.unit
+async def test_sync_feature_pr_recovery_runs_validation_before_monitor_handoff(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Adopted PR workspaces must honor monitor recovery operations.
+
+    A ``sync_feature_pr`` workspace re-entering ``ready`` from the PR monitor
+    must run the pending validate-only recovery before it hands the PR back to
+    the monitor. Otherwise the validate operation remains pending forever and
+    the monitor loops on ``RECOVERY_IN_PROGRESS``.
+    """
+    monitor_calls: list[str] = []
+
+    class _FakeMonitor:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+            del compose_project, compose_file
+            monitor_calls.append(workspace_id)
+
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        pr_monitor_factory=lambda *_args, **_kwargs: _FakeMonitor(),
+    )
+    ws_id = await _seed_sync_feature_pr_ready_workspace_with_recovery(factory)
+
+    _queue_validation_head(fake, head="d" * 40)
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert _all_adapter_args(fake) == []
+    assert _all_push_and_pr_create_calls(fake) == []
+    assert monitor_calls == [ws_id]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+        runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.monitoring_pr.value
+    assert ws.monitor_last_commit_sha == "d" * 40
+    assert ws.base_commit == "a" * 40
+    recovery_ops = [
+        op
+        for op in ops
+        if op.type == OperationType.validate.value
+        and isinstance(op.payload, dict)
+        and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(recovery_ops) == 1
+    assert recovery_ops[0].status == OperationStatus.succeeded.value
+    assert len(runs) == 1
+    assert runs[0].workspace_head_sha == "d" * 40
+    assert any(
+        event.event_type == "workspace.state_changed"
+        and event.reason_code == "RECOVERY_VALIDATION_OK"
+        and event.old_state == WorkspaceStatus.validating.value
+        and event.new_state == WorkspaceStatus.monitoring_pr.value
+        for event in events
+    )
 
 
 @pytest.mark.unit

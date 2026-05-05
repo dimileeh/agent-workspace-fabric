@@ -1973,6 +1973,50 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
+    async def test_run_profile_coverage_rejects_pytest_failures_when_percent_passes(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=1,
+            stdout=(
+                "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError\n"
+                "Name        Stmts   Miss  Cover\n"
+                "-------------------------------\n"
+                "TOTAL         100      1    99%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "final-coverage-pytest-failure",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_coverage(
+            workspace_id="ws_final_coverage_pytest_failure",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase="final_coverage",
+        )
+
+        assert result is not None
+        assert result.percent == 99
+        assert result.status == "passed"
+        assert result.reason_code == "COVERAGE_OK"
+        assert result.failing_test_node_ids == ["tests/unit/test_widget.py::test_handles_edges"]
+        assert not result.ok
+        assert result.command_result is not None
+        assert result.command_result.reason_code == "PYTEST_TEST_FAILURE"
+
+    @pytest.mark.unit
     async def test_non_pytest_coverage_command_error_stays_coverage_command_failed(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:
