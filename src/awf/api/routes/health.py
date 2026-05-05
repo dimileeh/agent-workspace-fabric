@@ -456,7 +456,7 @@ async def readyz(
             async with factory() as session:
                 from awf.db.repositories import EgressAuditRepository
                 repo = EgressAuditRepository(session)
-                counts = await repo.summary_counts_by_posture()
+                counts = await asyncio.wait_for(repo.summary_counts_by_posture(), timeout=_CHECK_TIMEOUT_SECONDS)
             total = sum(counts.values())
             return CheckResult(
                 ok=True,
@@ -464,6 +464,13 @@ async def readyz(
                 reason="EGRESS_AUDIT_AVAILABLE",
                 detail="Egress audit evidence is available",
                 resource_count=total,
+            )
+        except TimeoutError:
+            return CheckResult(
+                ok=False,
+                status="unknown",
+                reason="EGRESS_AUDIT_TIMEOUT",
+                detail=f"Egress audit summary_counts exceeded {_CHECK_TIMEOUT_SECONDS}s",
             )
         except Exception as exc:
             return CheckResult(ok=False, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail=str(exc))
