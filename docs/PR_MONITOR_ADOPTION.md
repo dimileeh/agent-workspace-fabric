@@ -130,9 +130,9 @@ Policy changes on an existing live adoption return
 Current behavior: deterministic adoption-key reuse does not yet distinguish
 terminal adoption rows. A previous terminal row can still satisfy the
 deterministic adoption key, so a destroyed, cancelled, failed, or superseded
-adoption row may be returned as `attached_existing=true` instead of creating a
-fresh monitor. Inspect the returned workspace status before assuming a retry has
-attached to a live monitor.
+adoption row may be returned as `attached_existing=true` even though the prior
+monitor is not landed. Inspect the returned workspace status before assuming a
+retry has attached to a live monitor.
 
 Closed or merged GitHub PRs are rejected before workspace creation with
 structured errors such as `PR_ALREADY_CLOSED` and `PR_ALREADY_MERGED`.
