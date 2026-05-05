@@ -278,6 +278,8 @@ def test_parity_matrix_matches_real_surfaces() -> None:
                 continue
             if mcp_tool.startswith("No "):
                 missing_tool = mcp_tool[3:].strip()
+                if " " in missing_tool:
+                    continue  # Plain English description, not a tool name
                 assert missing_tool not in real_mcp_tools, (
                     f"MCP tool {missing_tool!r} for {capability!r} is marked 'No' but exists in real FastMCP tools"
                 )
