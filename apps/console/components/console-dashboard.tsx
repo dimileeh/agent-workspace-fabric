@@ -1573,7 +1573,7 @@ function WorkspaceList({
               <div className="flex shrink-0 flex-col items-end gap-1">
                 <div className="flex items-center gap-1">
                   <Badge value={item.status} />
-                  {item.status === "running" && item.subphase ? (
+                  {item.subphase ? (
                     <span className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-100 px-2 text-[11px] font-medium text-slate-800">
                       ({item.subphase})
                     </span>
@@ -1810,7 +1810,7 @@ function WorkspaceSummary({
           <div className="flex flex-col items-end gap-1">
             <div className="flex items-center gap-1">
               <Badge value={overview.status} />
-              {overview.status === "running" && overview.subphase ? (
+              {overview.subphase ? (
                 <span className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-100 px-2 text-[11px] font-medium text-slate-800">
                   ({overview.subphase})
                 </span>
