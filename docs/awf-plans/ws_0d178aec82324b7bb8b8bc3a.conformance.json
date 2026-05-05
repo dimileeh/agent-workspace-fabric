@@ -1,7 +1,1 @@
-{
-  "status": "needs_iteration",
-  "summary": "The test `test_parity_matrix_matches_real_surfaces` has been implemented in accordance with the plan, the linting issue was fixed, and the untracked files were removed. However, validation evidence is missing.",
-  "gaps": [
-    "Validation evidence is missing. AWF needs to run the validation phase and provide evidence of pytest, ruff, and mypy passing as required by the plan."
-  ]
-}
+{"status":"satisfied","summary":"The conformance check passed successfully. The required test `test_parity_matrix_matches_real_surfaces` was added to `tests/unit/mcp/test_mcp_client_parity_docs.py`. It dynamically checks `docs/MCP_CLIENT_PARITY.md` against real REST endpoints (FastAPI), real CLI commands (Typer), and real MCP tools (FastMCP). It properly verifies implemented surfaces, explicitly handles missing implementations like 'CLI absent' and 'No awf_...', and asserts on descriptive failure messages. Validation artifacts confirm that the new and existing tests, mypy, and ruff all pass without issue. Unrelated files like the pre-gke document were left untouched.","gaps":[]}
