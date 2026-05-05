@@ -461,7 +461,7 @@ async def readyz(
             return CheckResult(
                 ok=True,
                 status="ok",
-                reason=f"EGRESS_AUDIT_RECORDS_{total}",
+                reason="EGRESS_AUDIT_AVAILABLE",
                 detail="Egress audit evidence is available",
                 resource_count=total,
             )
