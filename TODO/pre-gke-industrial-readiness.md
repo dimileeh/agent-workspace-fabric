@@ -714,10 +714,16 @@ coding agent in any project to use AWF for a feature.
   service/api/cli/mcp/control/node/runtime/scripts unit gate all passed. PR
   [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198)
   merged 2026-05-05.
-- [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
+- [x] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
   why that surface is intentionally MCP/API-only.
+  Evidence: implemented `awf workspace cancel`, `awf workspace stop`,
+  `awf workspace destroy`, `awf workspace refresh`, `awf workspace validate`, and
+  `awf workspace rebase` in `src/awf/cli/main.py`; added command presence/request
+  shape/output shape/error-shape coverage in `tests/unit/cli/test_cli.py`; and
+  updated `docs/MCP_CLIENT_PARITY.md` to show these CLI surfaces and
+  optimistic-concurrency coverage.
 - [x] Keep MCP read/control scoped: expose AWF-managed runtime snapshots, logs,
   operations, and controls, but do not expose arbitrary shell or unrestricted
   Docker exec. Evidence: MCP operator-surface tests reject shell/exec/Docker
