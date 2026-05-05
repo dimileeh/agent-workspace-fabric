@@ -321,6 +321,24 @@ def test_pinned_lockfile_aware_and_allowed_registry_cases_are_allowed() -> None:
 
 
 @pytest.mark.unit
+def test_package_install_option_values_are_not_treated_as_package_specs() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ npm install --include dev --omit optional "
+            "--registry https://registry.npmjs.org\n"
+            "$ pip install --progress-bar off --requirement requirements.txt "
+            "--index-url https://pypi.org/simple\n"
+            "$ pip install --upgrade-strategy eager requests==2.32.3\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert findings == []
+
+
+@pytest.mark.unit
 def test_node_dependency_tags_and_wildcards_are_not_treated_as_pins() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
