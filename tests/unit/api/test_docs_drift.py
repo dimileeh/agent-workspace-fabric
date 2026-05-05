@@ -64,8 +64,9 @@ def test_curl_paths_exist_in_openapi_spec(
     docs_content: str,
 ) -> None:
     spec_paths = set(openapi_spec.get("paths", {}).keys())
+    collapsed = re.sub(r"\\\n\s*", " ", docs_content)
     curl_pattern = re.compile(r"curl\s.*?(?:https?://[^/]+)?(/[^\s'\"]+)")
-    matches = curl_pattern.findall(docs_content)
+    matches = curl_pattern.findall(collapsed)
     doc_paths: set[str] = set()
     for match in matches:
         path = match.split("?")[0]
