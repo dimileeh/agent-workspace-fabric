@@ -1,7 +1,7 @@
 """Add egress_audit_records table.
 
 Revision ID: a1e2f3b4c5d6
-Revises: b1c2d3e4f6a7
+Revises: 6747c50621ff
 Create Date: 2026-05-05
 """
 
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a1e2f3b4c5d6"
-down_revision: str | Sequence[str] | None = "b1c2d3e4f6a7"
+down_revision: str | Sequence[str] | None = "6747c50621ff"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
