@@ -166,15 +166,17 @@ class PullRequestMonitorAdoptionService:
         idempotency_key: str,
     ) -> Workspace:
         requested_profile = _requested_inline_profile_policy(request)
+        repo_url = _adoption_repo_url(request=request, repo=repo)
         task_policy = _adoption_task_policy(
             repo=repo,
             metadata=metadata,
             request=request,
+            repo_url=repo_url,
         )
         operator_reason = _redacted_optional_text(request.reason)
         workspace_repo = WorkspaceRepository(self._session)
         workspace = await workspace_repo.create(
-            repo_url=request.repo_url or repo.https_url(),
+            repo_url=repo_url,
             branch_base=metadata.base_ref,
             task_title=(
                 request.task_title
@@ -278,7 +280,7 @@ class PullRequestMonitorAdoptionService:
                 "pr_url": metadata.url,
                 "head_ref": metadata.head_ref,
                 "head_repo_slug": metadata.head_repo_slug,
-                "head_repo_url": _github_repo_https_url(metadata.head_repo_slug),
+                "head_repo_url": _github_repo_url_like(repo_url, metadata.head_repo_slug),
                 "base_ref": metadata.base_ref,
                 "head_sha": metadata.head_sha,
                 "base_sha": metadata.base_sha,
@@ -436,6 +438,7 @@ def _adoption_task_policy(
     repo: RepoRef,
     metadata: PullRequestAdoptionMetadata,
     request: PullRequestMonitorAdoptionRequest,
+    repo_url: str,
 ) -> dict[str, Any]:
     return {
         "task_kind": PR_ADOPTION_TASK_KIND,
@@ -445,7 +448,7 @@ def _adoption_task_policy(
             "pr_url": metadata.url,
             "head_ref": metadata.head_ref,
             "head_repo_slug": metadata.head_repo_slug,
-            "head_repo_url": _github_repo_https_url(metadata.head_repo_slug),
+            "head_repo_url": _github_repo_url_like(repo_url, metadata.head_repo_slug),
             "base_ref": metadata.base_ref,
             "head_sha": metadata.head_sha,
             "base_sha": metadata.base_sha,
@@ -477,8 +480,12 @@ def _adoption_external_id(*, repo_slug: str, pr_number: int) -> str:
     return f"pr-adopt-{digest[:40]}"
 
 
-def _github_repo_https_url(repo_slug: str) -> str:
-    return RepoRef.from_url(repo_slug).https_url()
+def _adoption_repo_url(*, request: PullRequestMonitorAdoptionRequest, repo: RepoRef) -> str:
+    return request.repo_url or repo.ssh_url()
+
+
+def _github_repo_url_like(repo_url: str, repo_slug: str) -> str:
+    return RepoRef.from_url(repo_slug).clone_url_like(repo_url)
 
 
 def _raise_if_policy_conflicts(

@@ -134,6 +134,7 @@ class TestPullRequestMonitorAdoptionService:
 
             workspace = await WorkspaceRepository(session).get(result.workspace_id)
             assert workspace is not None
+            assert workspace.repo_url == "git@github.com:dimileeh/aira-web.git"
             assert workspace.task_title == "feature: ready"
             assert workspace.task_kind == "sync_feature_pr"
             assert workspace.pr_url == "https://github.com/dimileeh/aira-web/pull/277"
@@ -147,7 +148,7 @@ class TestPullRequestMonitorAdoptionService:
                 "pr_url": "https://github.com/dimileeh/aira-web/pull/277",
                 "head_ref": "feature/ready",
                 "head_repo_slug": "dimileeh/aira-web",
-                "head_repo_url": "https://github.com/dimileeh/aira-web.git",
+                "head_repo_url": "git@github.com:dimileeh/aira-web.git",
                 "base_ref": "development",
                 "head_sha": "h" * 40,
                 "base_sha": "b" * 40,
@@ -197,6 +198,59 @@ class TestPullRequestMonitorAdoptionService:
             assert adoption["repo_slug"] == "dimileeh/aira-web"
             assert adoption["head_ref"] == "feature/ready"
             assert adoption["head_repo_slug"] == "contributor/aira-web"
+            assert adoption["head_repo_url"] == "git@github.com:contributor/aira-web.git"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "request_kwargs",
+        [
+            {"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+            {"pr_url": "https://github.com/dimileeh/aira-web/pull/277"},
+        ],
+    )
+    async def test_adoption_without_repo_url_uses_ssh_clone_url(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        request_kwargs: dict[str, object],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(PullRequestMonitorAdoptionRequest(**request_kwargs))
+            await session.commit()
+
+        assert result.repo_url == "git@github.com:dimileeh/aira-web.git"
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            assert workspace.repo_url == "git@github.com:dimileeh/aira-web.git"
+
+    @pytest.mark.unit
+    async def test_explicit_repo_url_preserves_clone_transport(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata(head_repo_slug="contributor/aira-web"))
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_url="https://github.com/dimileeh/aira-web.git",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        assert result.repo_url == "https://github.com/dimileeh/aira-web.git"
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            adoption = workspace.task_policy["pr_adoption"]
+            assert workspace.repo_url == "https://github.com/dimileeh/aira-web.git"
             assert adoption["head_repo_url"] == "https://github.com/contributor/aira-web.git"
 
     @pytest.mark.unit

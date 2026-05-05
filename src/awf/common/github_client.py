@@ -244,6 +244,27 @@ class RepoRef:
     def https_url(self) -> str:
         return f"https://github.com/{self.owner}/{self.name}.git"
 
+    def ssh_url(self) -> str:
+        return f"git@github.com:{self.owner}/{self.name}.git"
+
+    def clone_url_like(self, repo_url: str) -> str:
+        stripped = repo_url.strip()
+        if stripped.startswith("git@github.com:") or stripped.startswith("ssh://git@github.com/"):
+            return self.ssh_url()
+
+        parsed = urlsplit(stripped)
+        if (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname is not None
+            and parsed.hostname.lower() == "github.com"
+        ):
+            userinfo, sep, _host = parsed.netloc.rpartition("@")
+            if sep and userinfo:
+                return f"https://{userinfo}@github.com/{self.owner}/{self.name}.git"
+            return self.https_url()
+
+        return self.https_url()
+
 
 @dataclass(frozen=True)
 class PullRequestAdoptionMetadata:

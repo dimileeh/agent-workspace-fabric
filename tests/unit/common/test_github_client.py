@@ -69,6 +69,41 @@ class TestRepoRef:
         with pytest.raises(ValueError):
             RepoRef.from_url(repo_url)
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "reference_url, expected_url",
+        [
+            (
+                "git@github.com:dimileeh/source.git",
+                "git@github.com:contributor/aira-web.git",
+            ),
+            (
+                "ssh://git@github.com/dimileeh/source.git",
+                "git@github.com:contributor/aira-web.git",
+            ),
+            (
+                "https://github.com/dimileeh/source.git",
+                "https://github.com/contributor/aira-web.git",
+            ),
+            (
+                "https://x-access-token:credential-value@github.com/dimileeh/source.git",
+                "https://x-access-token:credential-value@github.com/contributor/aira-web.git",
+            ),
+            (
+                "file:///tmp/source",
+                "https://github.com/contributor/aira-web.git",
+            ),
+        ],
+    )
+    def test_clone_url_like_matches_github_transport(
+        self,
+        reference_url: str,
+        expected_url: str,
+    ) -> None:
+        ref = RepoRef(owner="contributor", name="aira-web")
+
+        assert ref.clone_url_like(reference_url) == expected_url
+
 
 class TestPullRequestUrlParsing:
     @pytest.mark.unit
