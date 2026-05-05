@@ -118,6 +118,7 @@ from awf.service.validation_observability import (
     validation_provenance_unavailable,
 )
 from awf.service.workspace_observability import (
+    is_workspace_stale_running,
     workspace_observability_payload,
     workspace_pricing_metadata,
 )
@@ -1273,14 +1274,7 @@ def workspace_response(
     validation_provenance: ValidationFreshnessSummaryResponse | None = None,
 ) -> WorkspaceResponse:
     computed_fields = dict(workspace_observability_payload(workspace))
-    from datetime import UTC, datetime
-    last_activity_at = getattr(workspace, "last_activity_at", None)
-    is_stale_running = False
-    if workspace.status == "running" and last_activity_at is not None:
-        delta = datetime.now(UTC) - last_activity_at
-        if delta.total_seconds() > 600:
-            is_stale_running = True
-    computed_fields["is_stale_running"] = is_stale_running
+    computed_fields["is_stale_running"] = is_workspace_stale_running(workspace)
     computed_fields["validation_provenance"] = (
         validation_provenance
         if validation_provenance is not None

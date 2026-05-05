@@ -46,6 +46,18 @@ _log = get_logger(__name__)
 DEFAULT_STALE_REASON_LIMIT = 50
 MAX_STALE_REASON_LIMIT = 500
 
+STALE_RUNNING_THRESHOLD_SECONDS = 600
+
+
+def is_workspace_stale_running(workspace: Any) -> bool:
+    """Return whether the workspace has been running without activity past the threshold."""
+    last_activity_at = getattr(workspace, "last_activity_at", None)
+    if getattr(workspace, "status", None) != "running" or last_activity_at is None:
+        return False
+    delta = datetime.now(UTC) - last_activity_at
+    return delta.total_seconds() > STALE_RUNNING_THRESHOLD_SECONDS
+
+
 LIFECYCLE_STAGES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.requested,
     WorkspaceStatus.provisioning,
@@ -306,13 +318,8 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         None,
     )
-    from datetime import UTC, datetime
     last_activity_at = getattr(ws, "last_activity_at", None)
-    is_stale_running = False
-    if ws.status == "running" and last_activity_at is not None:
-        delta = datetime.now(UTC) - last_activity_at
-        if delta.total_seconds() > 600:
-            is_stale_running = True
+    is_stale_running = is_workspace_stale_running(ws)
 
     return WorkspaceOverviewResponse(
         subphase=getattr(ws, "subphase", None),
