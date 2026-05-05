@@ -255,6 +255,7 @@ async def test_readyz_response_shape_matches_contract(
         "docker_compose",
         "agent_runtime_image",
         "orphan_resources",
+        "egress_audit",
     }
     for name, check in checks.items():
         assert check["ok"] is True, f"{name} should be ok"
@@ -263,6 +264,9 @@ async def test_readyz_response_shape_matches_contract(
             assert check["reason"] == "NO_ORPHANS"
             assert check["orphan_count"] == 0
             assert check["cleanup_readiness"]["ready"] is True
+        elif name == "egress_audit":
+            assert check["status"] == "ok"
+            assert check["reason"] is not None
         else:
             assert check["status"] == "ok"
             assert check.get("reason") is None
