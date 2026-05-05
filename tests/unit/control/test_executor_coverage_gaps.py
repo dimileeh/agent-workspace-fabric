@@ -216,6 +216,31 @@ def test_validation_run_reason_prefers_pytest_failure_when_coverage_met(
 
 
 @pytest.mark.unit
+def test_validation_run_reason_rejects_rehydrated_coverage_with_failing_tests(
+    tmp_path: Path,
+) -> None:
+    result = ValidationResult(
+        coverage=_coverage(
+            tmp_path,
+            percent=99.2,
+            reason_code="COVERAGE_OK",
+            status="passed",
+            command_result=None,
+            failing_test_node_ids=["tests/unit/test_widget.py::test_handles_edges"],
+            failing_test_evidence=[
+                "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
+            ],
+        )
+    )
+
+    assert not result.all_passed
+    assert _validation_run_reason_code(result) == "PYTEST_TEST_FAILURE"
+    message = _validation_failure_message(result)
+    assert "tests/unit/test_widget.py::test_handles_edges" in message
+    assert "coverage met the 99.0% requirement at 99.2%" in message
+
+
+@pytest.mark.unit
 def test_coverage_wrapped_pytest_failure_and_coverage_below_threshold_surfaces_both(
     tmp_path: Path,
 ) -> None:

@@ -40,6 +40,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -365,9 +366,9 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   const [taskDetailsWorkspaceId, setTaskDetailsWorkspaceId] = useState<string | null>(null);
   const [fullscreenTailSignal, setFullscreenTailSignal] = useState(0);
   const [logSortDirection, setLogSortDirection] = useState<SortDirection>("desc");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [agentFilter, setAgentFilter] = useState<string>("all");
-  const [modelFilter, setModelFilter] = useState<string>("all");
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const [agentFilters, setAgentFilters] = useState<string[]>([]);
+  const [modelFilters, setModelFilters] = useState<string[]>([]);
   const [repoFilter, setRepoFilter] = useState("");
 
   const [searchText, setSearchText] = useState("");
@@ -424,17 +425,17 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
 
   const overviewPath = useMemo(() => {
     const params = new URLSearchParams({ limit: "100" });
-    if (statusFilter !== "all") {
-      params.set("status", statusFilter);
+    if (statusFilters.length === 1) {
+      params.set("status", statusFilters[0]);
     }
-    if (agentFilter !== "all") {
-      params.set("agent", agentFilter);
+    if (agentFilters.length === 1) {
+      params.set("agent", agentFilters[0]);
     }
     if (repoFilter.trim()) {
       params.set("repo_url", repoFilter.trim());
     }
     return `/api/awf/workspaces/overview?${params}`;
-  }, [agentFilter, repoFilter, statusFilter]);
+  }, [agentFilters, repoFilter, statusFilters]);
 
   const loadOverview = useCallback(async () => {
     const health = await apiGet<{ status: string }>("/api/awf/health");
@@ -846,8 +847,14 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
   const filteredOverview = useMemo(() => {
     const needle = searchText.trim().toLowerCase();
     let filtered = overview;
-    if (modelFilter !== "all") {
-      filtered = filtered.filter((item) => item.agent_model === modelFilter);
+    if (statusFilters.length > 0) {
+      filtered = filtered.filter((item) => statusFilters.includes(item.status));
+    }
+    if (agentFilters.length > 0) {
+      filtered = filtered.filter((item) => agentFilters.includes(item.agent));
+    }
+    if (modelFilters.length > 0) {
+      filtered = filtered.filter((item) => item.agent_model !== null && modelFilters.includes(item.agent_model));
     }
     if (needle) {
       filtered = filtered.filter((item) =>
@@ -870,7 +877,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
       );
     }
     return [...filtered].sort((left, right) => compareWorkspaceDates(left, right, sortKey, sortDirection));
-  }, [overview, searchText, modelFilter, sortDirection, sortKey]);
+  }, [overview, searchText, agentFilters, modelFilters, sortDirection, sortKey, statusFilters]);
 
   useEffect(() => {
     if (overview.length > 0 && selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
@@ -990,17 +997,17 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
       <div className="grid min-h-[calc(100vh-57px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
         <aside className="min-w-0 border-b border-[var(--border)] bg-white xl:border-r xl:border-b-0">
           <WorkspaceFilters
-            statusFilter={statusFilter}
-            agentFilter={agentFilter}
-            modelFilter={modelFilter}
+            statusFilters={statusFilters}
+            agentFilters={agentFilters}
+            modelFilters={modelFilters}
             availableModels={availableModels}
             repoFilter={repoFilter}
             searchText={searchText}
             sortKey={sortKey}
             sortDirection={sortDirection}
-            onStatusFilter={setStatusFilter}
-            onAgentFilter={setAgentFilter}
-            onModelFilter={setModelFilter}
+            onStatusFilters={setStatusFilters}
+            onAgentFilters={setAgentFilters}
+            onModelFilters={setModelFilters}
             onRepoFilter={setRepoFilter}
             onSearchText={setSearchText}
             onSortKey={setSortKey}
@@ -1058,7 +1065,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
       >
         <PanelContext.Provider value="ghost">
           {selectedId && selectedOverview ? (
-            <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(400px,0.8fr)]">
+            <div className="grid min-w-0 gap-4 min-[1700px]:grid-cols-[minmax(0,1fr)_minmax(400px,0.8fr)]">
               <div className="grid min-w-0 content-start gap-4">
                 <WorkspaceSummary
                   overview={selectedOverview}
@@ -1299,17 +1306,17 @@ function StatePill({
 }
 
 function WorkspaceFilters({
-  statusFilter,
-  agentFilter,
-  modelFilter,
+  statusFilters,
+  agentFilters,
+  modelFilters,
   availableModels,
   repoFilter,
   searchText,
   sortKey,
   sortDirection,
-  onStatusFilter,
-  onAgentFilter,
-  onModelFilter,
+  onStatusFilters,
+  onAgentFilters,
+  onModelFilters,
   onRepoFilter,
   onSearchText,
   onSortKey,
@@ -1317,17 +1324,17 @@ function WorkspaceFilters({
   expanded,
   onToggleExpanded,
 }: {
-  statusFilter: string;
-  agentFilter: string;
-  modelFilter: string;
+  statusFilters: string[];
+  agentFilters: string[];
+  modelFilters: string[];
   availableModels: string[];
   repoFilter: string;
   searchText: string;
   sortKey: WorkspaceSortKey;
   sortDirection: SortDirection;
-  onStatusFilter: (value: string) => void;
-  onAgentFilter: (value: string) => void;
-  onModelFilter: (value: string) => void;
+  onStatusFilters: (value: string[]) => void;
+  onAgentFilters: (value: string[]) => void;
+  onModelFilters: (value: string[]) => void;
   onRepoFilter: (value: string) => void;
   onSearchText: (value: string) => void;
   onSortKey: (value: WorkspaceSortKey) => void;
@@ -1335,14 +1342,19 @@ function WorkspaceFilters({
   expanded: boolean;
   onToggleExpanded: () => void;
 }) {
+  const statusOptions = Array.from(
+    new Set([...lifecycleStages, "failed", "cancelled", "destroying", "destroyed"]),
+  );
+  const agentOptions = ["codex", "claude_code", "gemini", "opencode"];
+  const modelOptions = Array.from(new Set([...modelFilters, ...availableModels])).filter(Boolean);
   const activeFilters = workspaceFilterSummary({
-    agentFilter,
-    modelFilter,
+    agentFilters,
+    modelFilters,
     repoFilter,
     searchText,
     sortDirection,
     sortKey,
-    statusFilter,
+    statusFilters,
   });
 
   return (
@@ -1377,24 +1389,26 @@ function WorkspaceFilters({
             className="h-9 w-full rounded-md border border-slate-300 bg-white pr-3 pl-8 text-sm"
           />
         </label>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          <Select
-            label="Status"
-            value={statusFilter}
-            onChange={onStatusFilter}
-            options={["all", ...lifecycleStages, "failed", "cancelled", "destroying", "destroyed"]}
-          />
-          <Select
-            label="Agent"
-            value={agentFilter}
-            onChange={onAgentFilter}
-            options={["all", "codex", "claude_code", "gemini", "opencode"]}
-          />
-          <Select
+        <div className="grid gap-2">
+          <div className="grid grid-cols-2 gap-2">
+            <MultiChoiceFilter
+              label="Status"
+              values={statusFilters}
+              onChange={onStatusFilters}
+              options={statusOptions}
+            />
+            <MultiChoiceFilter
+              label="Agent"
+              values={agentFilters}
+              onChange={onAgentFilters}
+              options={agentOptions}
+            />
+          </div>
+          <MultiChoiceFilter
             label="Model"
-            value={modelFilter}
-            onChange={onModelFilter}
-            options={Array.from(new Set(["all", modelFilter, ...availableModels]))}
+            values={modelFilters}
+            onChange={onModelFilters}
+            options={modelOptions}
           />
         </div>
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
@@ -1434,33 +1448,121 @@ function WorkspaceFilters({
   );
 }
 
-function Select({
+function MultiChoiceFilter({
   label,
-  value,
+  values,
   options,
   onChange,
 }: {
   label: string;
-  value: string;
+  values: string[];
   options: string[];
-  onChange: (value: string) => void;
+  onChange: (values: string[]) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLFieldSetElement>(null);
+  const labelId = useId();
+  const buttonId = useId();
+  const selected = new Set(values);
+  const summary = formatMultiChoiceSummary(values);
+  const toggle = (option: string) => {
+    if (selected.has(option)) {
+      onChange(values.filter((value) => value !== option));
+      return;
+    }
+    onChange([...values, option]);
+  };
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && rootRef.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
   return (
-    <label className="grid gap-1 text-[11px] font-medium text-slate-600">
-      {label}
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-8 rounded-md border border-slate-300 bg-white px-2 text-sm font-normal text-slate-900"
+    <fieldset
+      ref={rootRef}
+      className="relative grid min-w-0 gap-1 text-[11px] font-medium text-slate-600"
+    >
+      <legend id={labelId}>{label}</legend>
+      <button
+        id={buttonId}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-labelledby={`${labelId} ${buttonId}`}
+        onClick={() => setOpen((value) => !value)}
+        className="inline-flex h-8 min-w-0 items-center justify-between gap-2 rounded-md border border-slate-300 bg-white px-2 text-sm font-normal text-slate-900 transition hover:bg-slate-50"
       >
-        {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
-      </select>
-    </label>
+        <span className="min-w-0 truncate">{summary}</span>
+        <ChevronDown
+          size={13}
+          aria-hidden
+          className={`shrink-0 text-slate-500 transition ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      {open ? (
+        <div
+          role="menu"
+          aria-label={`${label} options`}
+          className="absolute top-full right-0 left-0 z-50 mt-1 grid max-h-64 min-w-48 gap-1 overflow-auto rounded-md border border-slate-200 bg-white p-1.5 text-xs shadow-lg"
+        >
+          <label className="flex h-7 min-w-0 cursor-pointer items-center gap-2 rounded px-2 text-slate-700 hover:bg-slate-50">
+            <input
+              type="checkbox"
+              checked={values.length === 0}
+              onChange={() => onChange([])}
+              className="h-3.5 w-3.5 shrink-0 rounded border-slate-300"
+            />
+            <span className="min-w-0 truncate">all</span>
+          </label>
+          {options.map((option) => (
+            <label
+              key={option}
+              title={option}
+              className="flex h-7 min-w-0 cursor-pointer items-center gap-2 rounded px-2 text-slate-700 hover:bg-slate-50"
+            >
+              <input
+                type="checkbox"
+                checked={selected.has(option)}
+                onChange={() => toggle(option)}
+                className="h-3.5 w-3.5 shrink-0 rounded border-slate-300"
+              />
+              <span className="min-w-0 truncate">{option}</span>
+            </label>
+          ))}
+        </div>
+      ) : null}
+    </fieldset>
   );
+}
+
+function formatMultiChoiceSummary(values: string[]): string {
+  if (values.length === 0) {
+    return "all";
+  }
+  if (values.length <= 2) {
+    return values.join(", ");
+  }
+  return `${values.length} selected`;
 }
 
 function WorkspaceSelectionToolbar({
@@ -1535,12 +1637,13 @@ function WorkspaceList({
         return (
           <div
             key={item.workspace_id}
+            data-testid={`workspace-card-${item.workspace_id}`}
             className={`grid min-w-0 gap-2 border-b border-slate-100 px-3 py-3 transition hover:bg-slate-50 ${
               selectedId === item.workspace_id ? "bg-blue-50" : "bg-white"
             }`}
           >
-            <div className="flex min-w-0 items-start justify-between gap-3">
-              <div className="flex min-w-0 flex-1 items-start gap-2">
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+              <div className="flex min-w-0 items-start gap-2 overflow-hidden">
                 <input
                   type="checkbox"
                   checked={selectedSet.has(item.workspace_id)}
@@ -1551,7 +1654,7 @@ function WorkspaceList({
                 <button
                   type="button"
                   onClick={() => onSelect(item.workspace_id)}
-                  className="grid min-w-0 flex-1 gap-2 text-left"
+                  className="grid min-w-0 flex-1 gap-2 overflow-hidden text-left"
                 >
                   <span className="line-clamp-2 text-sm font-semibold text-slate-950">{item.title}</span>
                   <div className="mono truncate text-[11px] text-[var(--muted)]">{item.workspace_id}</div>
@@ -1570,30 +1673,30 @@ function WorkspaceList({
                   <div className="truncate text-xs text-[var(--muted)]">{item.repo_url}</div>
                 </button>
               </div>
-              <div className="flex shrink-0 flex-col items-end gap-1">
-                <div className="flex items-center gap-1">
+              <div className="flex w-28 shrink-0 flex-col items-end gap-1 sm:w-32">
+                <div className="flex max-w-full items-center gap-1">
                   <Badge value={item.status} />
                   {item.status === "running" && item.subphase ? (
-                    <span className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-100 px-2 text-[11px] font-medium text-slate-800">
-                      ({item.subphase})
+                    <span className="inline-flex h-6 max-w-16 items-center rounded-md border border-slate-200 bg-slate-100 px-2 text-[11px] font-medium text-slate-800 sm:max-w-20">
+                      <span className="truncate">({item.subphase})</span>
                     </span>
                   ) : null}
                 </div>
                 {item.is_stale_running ? (
-                  <span className="inline-flex h-6 max-w-44 items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
+                  <span className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
                     <AlertCircle size={12} aria-hidden />
                     <span className="truncate">Stale running</span>
                   </span>
                 ) : null}
                 {recoveryBadge ? (
-                  <span className="inline-flex h-6 max-w-44 items-center rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
+                  <span className="inline-flex h-6 max-w-full items-center rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
                     <span className="truncate">{recoveryBadge}</span>
                   </span>
                 ) : null}
                 {coordinationSummary.count > 0 ? (
                   <span
                     title={coordinationSummary.detail}
-                    className="inline-flex h-6 max-w-44 items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900"
+                    className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900"
                   >
                     <AlertCircle size={12} aria-hidden />
                     <span className="truncate">{coordinationSummary.label}</span>
@@ -2096,7 +2199,7 @@ function UsageSummaryBlock({
 }) {
   const safeUsage = fallbackLlmUsage(usage);
   const pricingReason = pricingAvailabilityReason(pricing);
-  const showCost = safeUsage.cost_estimate !== null && pricing && pricing.is_current;
+  const showCost = safeUsage.cost_estimate !== null && (!pricing || pricing.is_current);
   
   if (safeUsage.status === "unavailable" || (safeUsage.input_tokens == null && safeUsage.output_tokens == null && safeUsage.total_tokens == null && safeUsage.cost_estimate == null)) {
     return (
@@ -2141,9 +2244,7 @@ function UsageSummaryBlock({
         />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
-        {safeUsage.status === "unavailable"
-          ? (safeUsage.reason ?? "usage unavailable")
-          : `${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
+        {`${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
         {pricingReason ? (
           <>
             <span className="text-slate-300">|</span>
@@ -4010,10 +4111,7 @@ function applyOperatorPreferenceAttributes(
 }
 
 function openExternalHref(href: string) {
-  const opened = window.open(href, "_blank", "noopener,noreferrer");
-  if (!opened) {
-    window.location.assign(href);
-  }
+  window.open(href, "_blank", "noopener,noreferrer");
 }
 
 function ErrorBanner({ message }: { message: string }) {
@@ -4239,31 +4337,31 @@ function mergeEvent(events: WorkspaceEvent[], event: WorkspaceEvent): WorkspaceE
 }
 
 function workspaceFilterSummary({
-  agentFilter,
-  modelFilter,
+  agentFilters,
+  modelFilters,
   repoFilter,
   searchText,
   sortDirection,
   sortKey,
-  statusFilter,
+  statusFilters,
 }: {
-  agentFilter: string;
-  modelFilter: string;
+  agentFilters: string[];
+  modelFilters: string[];
   repoFilter: string;
   searchText: string;
   sortDirection: SortDirection;
   sortKey: WorkspaceSortKey;
-  statusFilter: string;
+  statusFilters: string[];
 }): string {
   const parts = [`${sortKey === "updated_at" ? "updated" : "created"} date ${sortDirection}`];
-  if (statusFilter !== "all") {
-    parts.push(`status ${statusFilter}`);
+  if (statusFilters.length > 0) {
+    parts.push(`status ${formatFilterSelection(statusFilters, "statuses")}`);
   }
-  if (agentFilter !== "all") {
-    parts.push(`agent ${agentFilter}`);
+  if (agentFilters.length > 0) {
+    parts.push(`agent ${formatFilterSelection(agentFilters, "agents")}`);
   }
-  if (modelFilter !== "all") {
-    parts.push(`model ${modelFilter}`);
+  if (modelFilters.length > 0) {
+    parts.push(`model ${formatFilterSelection(modelFilters, "models")}`);
   }
   if (searchText.trim()) {
     parts.push(`search "${searchText.trim()}"`);
@@ -4272,6 +4370,13 @@ function workspaceFilterSummary({
     parts.push("repo filtered");
   }
   return parts.join(" · ");
+}
+
+function formatFilterSelection(values: string[], pluralLabel: string): string {
+  if (values.length <= 2) {
+    return values.join(", ");
+  }
+  return `${values.length} ${pluralLabel}`;
 }
 
 function compareWorkspaceDates(

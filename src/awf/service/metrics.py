@@ -29,6 +29,7 @@ from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_STATE_KEY,
 )
 from awf.service.resource_capacity import (
+    LocalCapacityLimits,
     ReservedResources,
     ResourceCapacitySummary,
     WorkspaceResourceDefaults,
@@ -617,6 +618,7 @@ async def summarize_resource_saturation(
     settings: Settings,
     disk_check: DiskCheck | None = None,
     disk_usage: DiskUsage | None = None,
+    detected_local_capacity: LocalCapacityLimits | None = None,
     orphan_resources: OrphanResourceSummary | None = None,
     runtime_health: WorkspaceRuntimeHealthSummary | None = None,
     now: datetime | None = None,
@@ -629,6 +631,7 @@ async def summarize_resource_saturation(
             settings=settings,
             disk_check=disk_check,
             disk_usage=disk_usage,
+            detected_local_capacity=detected_local_capacity,
             orphan_resources=orphan_resources,
             runtime_health=runtime_health,
             now=now,
@@ -641,6 +644,7 @@ async def summarize_resource_saturation_for_session(
     settings: Settings,
     disk_check: DiskCheck | None = None,
     disk_usage: DiskUsage | None = None,
+    detected_local_capacity: LocalCapacityLimits | None = None,
     orphan_resources: OrphanResourceSummary | None = None,
     runtime_health: WorkspaceRuntimeHealthSummary | None = None,
     now: datetime | None = None,
@@ -679,6 +683,7 @@ async def summarize_resource_saturation_for_session(
         reserved=reserved_resources,
         resource_defaults=resource_defaults,
         disk_check=resolved_disk_check,
+        detected_local_capacity=detected_local_capacity,
     )
     admission = _resource_admission_summary(
         disk_check=resolved_disk_check,

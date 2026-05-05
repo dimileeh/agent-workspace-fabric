@@ -75,12 +75,7 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_068773cee8f34463820c3d7d` | _pending_ | running | OpenCode/Ollama `glm-5.1:cloud` with AWF `xhigh`; retry of reschedule-required `ws_ea414c0722a74815bc474d13`. Implementation complete: openapi.json artifact, generate_openapi.py with --check drift, test_openapi_artifact.py (7 tests), test_docs_drift.py (3 tests), expanded REST_API_REFERENCE.md, openapi-spec-validator dev dep. |
-| P1 Operator Console Completion | Live workspace activity signals | `ws_04048a6809004fa0ab3d8f79` | _pending_ | running | Gemini `gemini-3.1-pro-preview` with AWF `xhigh`; launched with provider-readiness override because agent runtime has Gemini CLI but control-plane probe image lacks it. Retry of `ws_451cc5007fa845ad85a0f7b3`. |
-| P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_02ae413a8c8341e089e0020a` | _pending_ | running | OpenCode/Ollama `deepseek-v4-pro:cloud` with AWF `xhigh`; Ollama cloud model manifest registered before launch. |
-| P1 MCP And Project Onboarding Client Parity | MCP safe operator action tools | `ws_1f89a8c10b1d497d9c912ccb` | _pending_ | running | OpenCode/Ollama `kimi-k2.6:cloud` with AWF `xhigh`; owns safe MCP control tools for existing API operations. |
-| P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_e7365dffc3a243a2b8f7e775` | _pending_ | running | Codex `gpt-5.3-codex-spark` with AWF `xhigh`; owns CLI parity with canonical REST/MCP operations. |
-| P1 MCP And Project Onboarding Client Parity | REST CLI MCP contract alignment tests | `ws_7c04a361c7564bc28163baa0` | _pending_ | running | Claude Code `claude-opus-4-7` with AWF `xhigh` mapped to Claude `max`; launched with provider-readiness override because agent runtime has Claude Code but control-plane probe image lacks it. |
+| _None_ | _All active workspaces were operator-terminated after invalid final-coverage validation evidence allowed failed tests to merge._ | _n/a_ | _n/a_ | cancelled | 2026-05-05 cleanup before rebuilding AWF and rerunning validation after PR #212. |
 
 ### Reschedule Required Slices
 
@@ -97,6 +92,7 @@ not listed here.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Validation Runtime Performance | Safe parallel final coverage support | _local_ | commit `9763bd9` | merged | Reconciled 2026-05-05: `pytest-xdist` is in the dev/test runtime, profiles accept `validation.coverage.parallel_workers`, `.awf/workspace.yml` opts AWF self-dogfood into `parallel_workers: 3`, coverage commands inject bounded `pytest -n <workers> --dist=loadscope`, worker policy is capped by CPU/profile limits, and validation identity includes the parallel-worker policy. |
 | P1 Local Packaging And Upgrade Path | Auto-prune completed and merged workspace worktrees | `ws_e90d1b2cf47a45cf920f01a0` | [#203](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/203) | merged | OpenCode/Ollama `glm-5.1:cloud`; merged 2026-05-04 and adds policy-safe completed/merged workspace worktree pruning with retention safeguards. |
 | P1 Developer Experience And Public Core Surface | Redacted first-time support bundle | `ws_02a6a86cac9a492c8562d164` | [#202](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/202) | merged | OpenCode/Ollama `kimi-k2.6:cloud`; merged 2026-05-04 and adds telemetry-free redacted doctor/support-bundle evidence for first-time evaluator issue reports. |
 | P1 Operator Console Completion | Reliable cost estimate surfacing | `ws_f0c067d4523f480ea6d7c8ec` | [#201](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/201) | merged | OpenCode/Ollama `deepseek-v4-pro:cloud`; merged 2026-05-04 and limits console cost estimates to trusted pricing and usage metadata. |
@@ -324,7 +320,7 @@ not listed here.
 
 ## P1: Validation Runtime Performance
 
-- [ ] Add safe parallel final coverage support for AWF self-dogfood and large
+- [x] Add safe parallel final coverage support for AWF self-dogfood and large
   projects. Acceptance: `pytest-xdist` is available in the dev/test runtime;
   profiles can declare `validation.coverage.parallel_workers`; AWF injects a
   bounded `pytest -n <workers>` only when the profile opts in, never `-n auto`;
@@ -491,6 +487,16 @@ not listed here.
   preserve the active monitor claim, emit an explicit recovery event, and prove
   with regression tests that PR monitoring continues without duplicate monitor
   loops or misleading execution-capacity reservations.
+- [ ] Adopt or safely preserve running agent executions after worker restart.
+  Acceptance: if the control-plane worker restarts while a workspace is in
+  `running`/`validating`/`pushing` and Docker still has a live agent runtime,
+  AWF must not automatically `compose down` that runtime as stale-active. It
+  should either reattach/adopt the running execution with durable ownership and
+  log continuation, or transition to a clear recoverable state that preserves
+  the container, worktree, logs, and implementation diff for explicit retry or
+  operator recovery. Regression coverage must prove a worker restart during an
+  active agent run cannot kill five healthy workspaces merely because the new
+  worker has an empty in-memory execution task map.
 
 ## P1: API Contract Completion
 

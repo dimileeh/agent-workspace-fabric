@@ -53,11 +53,11 @@ def is_workspace_stale_running(workspace: Any) -> bool:
     """Return whether the workspace has been running without activity past the threshold."""
     if getattr(workspace, "status", None) != "running":
         return False
-        
+
     last_activity = getattr(workspace, "last_activity_at", None)
     if last_activity is None:
         last_activity = getattr(workspace, "updated_at", getattr(workspace, "created_at", None))
-        
+
     if last_activity is None:
         return False
 

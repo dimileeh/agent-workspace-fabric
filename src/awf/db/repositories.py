@@ -194,6 +194,12 @@ def _validation_command_identity(command: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _coverage_metadata_has_pytest_failures(coverage: Mapping[str, Any]) -> bool:
+    node_ids = coverage.get("failing_test_node_ids")
+    evidence = coverage.get("failing_test_evidence")
+    return bool(node_ids or evidence)
+
+
 def _resolve_session_dialect_name(
     session: AsyncSession,
     dialect_name: str | None,
@@ -1449,10 +1455,14 @@ class ValidationRunRepository:
         rows = (await self._session.execute(stmt)).scalars().all()
         for row in rows:
             coverage = (row.log_stream_refs or {}).get("coverage")
-            if isinstance(coverage, Mapping) and coverage.get("status") in {
-                "passed",
-                "not_configured",
-            }:
+            if (
+                isinstance(coverage, Mapping)
+                and coverage.get("status") in {
+                    "passed",
+                    "not_configured",
+                }
+                and not _coverage_metadata_has_pytest_failures(coverage)
+            ):
                 return row
         return None
 

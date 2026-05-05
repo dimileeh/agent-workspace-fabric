@@ -1115,17 +1115,6 @@ class WorkspaceExecutor:
         compose_project = ws.compose_project_name or f"awf_{workspace_id}"
         worktree_path = self._config.worktrees_root / workspace_id
 
-        if ws.task_kind == "sync_feature_pr":
-            await self._handoff_sync_feature_pr_monitor(
-                workspace_id=workspace_id,
-                workspace=ws,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                worktree_path=worktree_path,
-            )
-            return
-
-        # ── Step 1: agent CLI runs the task inside the container ────────────
         # When the PR monitor's RECOVERY_DISPATCH path delivered this
         # workspace, the executor must NOT re-run planning, the agent
         # CLI, or any post-agent commit hooks — those would rewrite the
@@ -1139,6 +1128,18 @@ class WorkspaceExecutor:
             if guard_result.blocked:
                 return
             recovery = guard_result.recovery
+
+        if ws.task_kind == "sync_feature_pr" and recovery is None:
+            await self._handoff_sync_feature_pr_monitor(
+                workspace_id=workspace_id,
+                workspace=ws,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+            )
+            return
+
+        # ── Step 1: agent CLI runs the task inside the container ────────────
         if recovery is None:
             salvage_result = await self._prepare_conformance_salvage_for_execution(
                 workspace_id=workspace_id,
@@ -5520,11 +5521,7 @@ def _validation_run_reason_code(result: ValidationResult) -> str:
     if result.all_passed:
         return "VALIDATION_OK"
     first_failure = result.first_failure
-    if (
-        first_failure is not None
-        and first_failure.reason_code == PYTEST_TEST_FAILURE
-        and _coverage_has_failing_tests(result.coverage)
-    ):
+    if _coverage_has_failing_tests(result.coverage):
         return PYTEST_TEST_FAILURE
     if result.coverage is not None and not result.coverage.ok:
         return result.coverage.reason_code
@@ -5717,12 +5714,7 @@ def _validation_failure_message(
 ) -> str:
     coverage = result.coverage
     first_fail = result.first_failure
-    if (
-        first_fail is not None
-        and first_fail.reason_code == PYTEST_TEST_FAILURE
-        and coverage is not None
-        and _coverage_has_failing_tests(coverage)
-    ):
+    if coverage is not None and _coverage_has_failing_tests(coverage):
         return _coverage_wrapped_pytest_failure_message(coverage)
     if coverage is not None and not coverage.ok:
         baseline_debt = (

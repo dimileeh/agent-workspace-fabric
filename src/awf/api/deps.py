@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from fastapi import Header, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.config import get_settings
+from awf.common.config import Settings, get_settings
 
 
 def _get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -50,9 +50,11 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
         await session.close()
 
 
-def require_api_token(authorization: str | None = Header(default=None)) -> None:
+def require_api_token(
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+) -> None:
     """Require the local AWF bearer token for sensitive operator APIs."""
-    settings = get_settings()
     if not settings.api_token:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

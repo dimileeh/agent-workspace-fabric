@@ -31,6 +31,17 @@ class ReservedResources:
 
 
 @dataclass(frozen=True)
+class LocalCapacityLimits:
+    """Local node capacity limits discovered outside operator config."""
+
+    cpu_cores: float | None = None
+    memory_gb: float | None = None
+    source: str | None = None
+    reason_code: str | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
 class CapacityDimension:
     limit: Number | None
     reserved: Number
@@ -76,30 +87,39 @@ def resource_capacity_summary(
     reserved: ReservedResources,
     resource_defaults: WorkspaceResourceDefaults,
     disk_check: DiskCheck | None,
+    detected_local_capacity: LocalCapacityLimits | None = None,
 ) -> ResourceCapacitySummary:
+    cpu_limit = settings.local_capacity_cpu_cores
+    memory_limit = settings.local_capacity_memory_gb
+    if detected_local_capacity is not None:
+        cpu_limit = cpu_limit if cpu_limit is not None else detected_local_capacity.cpu_cores
+        memory_limit = (
+            memory_limit if memory_limit is not None else detected_local_capacity.memory_gb
+        )
+
     steady_cpu = _bounded_dimension(
-        limit=settings.local_capacity_cpu_cores,
+        limit=cpu_limit,
         reserved=reserved.steady_cpu,
         next_default=resource_defaults.steady_cpu,
         unknown_reason="STEADY_CPU_CAPACITY_UNKNOWN",
         saturated_reason="STEADY_CPU_CAPACITY_SATURATED",
     )
     peak_cpu = _bounded_dimension(
-        limit=settings.local_capacity_cpu_cores,
+        limit=cpu_limit,
         reserved=reserved.peak_cpu,
         next_default=resource_defaults.peak_cpu,
         unknown_reason="PEAK_CPU_CAPACITY_UNKNOWN",
         saturated_reason="PEAK_CPU_CAPACITY_SATURATED",
     )
     steady_memory = _bounded_dimension(
-        limit=settings.local_capacity_memory_gb,
+        limit=memory_limit,
         reserved=reserved.steady_memory_gb,
         next_default=resource_defaults.steady_memory_gb,
         unknown_reason="STEADY_MEMORY_CAPACITY_UNKNOWN",
         saturated_reason="STEADY_MEMORY_CAPACITY_SATURATED",
     )
     peak_memory = _bounded_dimension(
-        limit=settings.local_capacity_memory_gb,
+        limit=memory_limit,
         reserved=reserved.peak_memory_gb,
         next_default=resource_defaults.peak_memory_gb,
         unknown_reason="PEAK_MEMORY_CAPACITY_UNKNOWN",

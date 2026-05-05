@@ -394,6 +394,67 @@ class TestValidationRunRepository:
         assert reused.id == run.id
 
     @pytest.mark.unit
+    async def test_find_reusable_coverage_evidence_rejects_pytest_failures(self) -> None:
+        engine = await create_postgres_test_engine()
+
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        commands = [{"phase": "coverage", "command": "pytest --cov=awf"}]
+        async with make_session_factory(engine)() as s:
+            workspace = await WorkspaceRepository(s).create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="main",
+                task_title="coverage",
+                task_prompt="run validation",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            repo = ValidationRunRepository(s)
+            run = await repo.start(
+                workspace_id=workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=commands,
+                base_commit="base",
+                target_branch="main",
+                target_head_sha=None,
+                workspace_head_sha="head",
+                resolved_profile_digest="profile",
+                environment_identity_digest="env",
+                log_stream_refs={},
+                started_at=now,
+            )
+            await repo.finish(
+                run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                coverage={
+                    "status": "passed",
+                    "reason_code": "COVERAGE_OK",
+                    "percent": 99.0,
+                    "failing_test_node_ids": [
+                        "tests/unit/test_widget.py::test_handles_edges"
+                    ],
+                    "failing_test_evidence": [
+                        "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
+                    ],
+                },
+                finished_at=now,
+            )
+
+            reused = await repo.find_reusable_coverage_evidence(
+                workspace_id=workspace.id,
+                tier=1,
+                commands=commands,
+                workspace_head_sha="head",
+                resolved_profile_digest="profile",
+                environment_identity_digest="env",
+                max_age_seconds=3600,
+                now=now,
+            )
+
+        assert reused is None
+
+    @pytest.mark.unit
     async def test_find_reusable_coverage_evidence_rejects_changed_stale_or_failed_identity(
         self,
     ) -> None:

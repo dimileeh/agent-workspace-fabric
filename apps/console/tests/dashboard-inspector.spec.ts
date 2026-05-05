@@ -117,10 +117,48 @@ test.describe("Dashboard Workspace Inspector", () => {
     
     // Wait for inspector to open before asserting layout
     await expect(inspectorDrawer).toHaveClass(/translate-x-0/);
+    await inspectorDrawer.evaluate(async (element) => {
+      await Promise.all(element.getAnimations().map((animation) => animation.finished));
+    });
 
-    // Desktop layout (default is 1280x720)
-    await expect(inspectorDrawer).toHaveClass(/sm:w-\[600px\]/);
-    await expect(inspectorDrawer).toHaveClass(/xl:w-\[800px\]/);
+    // Desktop layout (default is 1280x720): the inspector fills the main
+    // dashboard canvas while preserving the workspace list column.
+    await expect(inspectorDrawer).toHaveClass(/xl:w-\[calc\(100vw-440px\)\]/);
+    const desktopBox = await inspectorDrawer.boundingBox();
+    expect(desktopBox?.x).toBeCloseTo(440, 1);
+    expect(desktopBox?.width).toBeCloseTo(840, 1);
+
+    // Awkward desktop widths keep the inspector content in one column. The
+    // drawer is broad, but not broad enough for dense Workspace + Timeline
+    // panels to sit side by side without colliding.
+    await page.setViewportSize({ width: 1463, height: 900 });
+    const workspacePanel = page
+      .locator("section")
+      .filter({ has: page.getByRole("heading", { name: "Workspace", exact: true }) })
+      .first();
+    const timelinePanel = page
+      .locator("section")
+      .filter({ has: page.getByRole("heading", { name: "Timeline", exact: true }) })
+      .first();
+    const workspaceBox = await workspacePanel.boundingBox();
+    const timelineBox = await timelinePanel.boundingBox();
+    expect(workspaceBox).not.toBeNull();
+    expect(timelineBox).not.toBeNull();
+    expect(workspaceBox!.y + workspaceBox!.height).toBeLessThanOrEqual(timelineBox!.y + 1);
+
+    // Wider desktop keeps the wider workspace list visible and gives the
+    // inspector the rest of the page.
+    await page.setViewportSize({ width: 1600, height: 900 });
+    const wideBox = await inspectorDrawer.boundingBox();
+    expect(wideBox?.x).toBeCloseTo(500, 1);
+    expect(wideBox?.width).toBeCloseTo(1100, 1);
+
+    // Tablet/small desktop layout covers the whole page instead of using a
+    // cramped partial drawer.
+    await page.setViewportSize({ width: 1024, height: 768 });
+    const tabletBox = await inspectorDrawer.boundingBox();
+    expect(tabletBox?.x).toBeCloseTo(0, 1);
+    expect(tabletBox?.width).toBeCloseTo(1024, 1);
 
     // Mobile layout
     await page.setViewportSize({ width: 375, height: 667 });

@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncEngine
 from typer.testing import CliRunner
 
 from awf.api.app import configure_database, create_app
@@ -28,13 +29,8 @@ from awf.cli.main import app as cli_app
 from awf.common.config import Settings, get_settings
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.mcp.server import build_mcp_server
-from awf.service.workspaces import WorkspaceService
-from sqlalchemy.ext.asyncio import AsyncEngine
-
 from tests.unit.contracts._capabilities import mutating_capabilities, normalize_rest_error_body
-from tests.unit.contracts._stack import ContractStack, contract_stack  # noqa: F401
-
+from tests.unit.contracts._stack import ContractStack
 
 _runner = CliRunner()
 
