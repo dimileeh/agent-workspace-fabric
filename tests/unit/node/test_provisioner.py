@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    EgressAuditRepository,
     ResourceReservationRepository,
     SecretLeaseRepository,
     TaskAttemptRepository,
@@ -789,6 +790,59 @@ class TestFailureHandling:
             assert reloaded.failure_message is not None
             assert "docker compose up failed" in reloaded.failure_message
             assert "pull access denied for awf-agent-runtime:test" in reloaded.failure_message
+
+    @pytest.mark.unit
+    async def test_stack_startup_failure_preserves_computed_egress_audit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _FailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                del request
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="pull access denied for awf-agent-runtime:test",
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "restricted-audit",
+                    "security": {"egress": {"mode": "restricted"}},
+                },
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert audit is not None
+            assert audit.policy_posture == "restricted"
+            assert audit.decision == "deferred"
+            assert audit.destination_category == "policy_decision"
+            assert audit.reason_code == "LOCAL_EGRESS_RESTRICTED_LOCAL_ONLY"
 
     @pytest.mark.unit
     async def test_stack_launch_failure_revokes_issued_secret_leases_without_hiding_error(
