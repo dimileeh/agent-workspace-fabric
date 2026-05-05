@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -75,7 +75,12 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| _None_ | _All active workspaces were operator-terminated after invalid final-coverage validation evidence allowed failed tests to merge._ | _n/a_ | _n/a_ | cancelled | 2026-05-05 cleanup before rebuilding AWF and rerunning validation after PR #212. |
+| P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_657b484a622544b6aee70924` | [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing the destroyed monitor `ws_941096a4dc4942dcb877656a`; AWF owns conflict, validation, comment, and merge monitoring. |
+| P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_3b90c8728f0c4862a28d82cc` | [#212](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/212) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing cancelled workspace `ws_7e7f6d54bc924c47a5723621`; AWF owns validation, comment, and merge monitoring. |
+| P1 MCP And Project Onboarding Client Parity | PR adoption terminal idempotency hardening | `ws_e5b86a598da842e0aaf50d1f` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to harden first-class PR adoption after the destroyed-row idempotency edge case found while reattaching PR #206. |
+| P1 Control-Plane Restart Recovery Hardening | Adopt or preserve active executions after worker restart | `ws_13dd6ba7165141c285bd771e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to prevent worker restarts from killing live `running` / `validating` / `pushing` agent runtimes when only the in-memory task map was lost. |
+| P1 API Contract Completion | REST CLI MCP contract parity tests | `ws_3a9bb03983e343e28f462e3e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to make REST, CLI, and MCP request/response/reason/idempotency/auth/error parity executable through contract tests. |
+| P1 Developer Experience And Public Core Surface | Document and demo existing PR monitor adoption | `ws_e332a1d013c54928863320f0` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to document and demo the supported existing-PR adoption path across CLI, REST, MCP, and console inspection surfaces. |
 
 ### Reschedule Required Slices
 
@@ -497,6 +502,13 @@ not listed here.
   operator recovery. Regression coverage must prove a worker restart during an
   active agent run cannot kill five healthy workspaces merely because the new
   worker has an empty in-memory execution task map.
+  Scope: make restart recovery distinguish truly orphaned stale-active
+  resources from live agent/validation/push executions whose durable DB state
+  still says active; persist enough execution/runtime identity to make the
+  decision auditable; surface the recoverable/preserved state in events,
+  operations, status, and runtime health; and add tests for single-workspace and
+  multi-workspace restart scenarios, including no-container, live-container,
+  expired-claim, active-claim, and cleanup-failure paths.
 
 ## P1: API Contract Completion
 
@@ -612,6 +624,19 @@ coding agent in any project to use AWF for a feature.
   service/api/cli/mcp/control/node/runtime/scripts unit gate all passed. PR
   [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198)
   merged 2026-05-05.
+- [ ] Harden PR monitor adoption when a previous repo/PR adoption workspace is
+  terminal. Acceptance: adoption attaches only to live adoption workspaces that
+  can still monitor the PR; terminal rows such as `destroyed`, `cancelled`,
+  `failed`, and `superseded` must not satisfy the deterministic repo/PR
+  idempotency key as a successful monitor attachment. For an open PR with only
+  terminal adoption history, AWF creates a fresh monitor workspace while
+  preserving audit/lineage context and avoiding unique idempotency conflicts.
+  Active monitor policy mismatches must still return
+  `PR_ADOPTION_POLICY_CONFLICT`, and concurrent adoption attempts must create at
+  most one live monitor. Add regression coverage for destroyed, cancelled,
+  failed, and superseded prior adoption rows; active idempotent reattach; active
+  policy conflict; and concurrent adoption races across REST/CLI/MCP-visible
+  behavior.
 - [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
@@ -626,6 +651,15 @@ coding agent in any project to use AWF for a feature.
   payloads, response payloads, reason codes, idempotency keys, `If-Match` /
   workspace-version concurrency, auth failures, and structured error semantics
   must not drift across the three clients.
+  Scope: extend the existing contract capability registry into executable
+  parity checks for every implemented safe read/control surface; compare REST
+  routes, CLI commands, MCP tool schemas, request field names, response envelope
+  fields, public reason codes, idempotency-key requirements, optimistic
+  concurrency/version semantics, auth failure shapes, and terminal structured
+  errors. If a surface is intentionally API/MCP-only or still partial, the test
+  must require an explicit matrix/backlog status instead of silently skipping
+  it. Any real drift discovered by the tests should be fixed in the smallest
+  compatible way.
 - [ ] Add a docs/status consistency test for the parity matrix so entries marked
   implemented must correspond to real REST routes, CLI commands, MCP tools, and
   contract-test coverage; partial or missing entries must remain visible as
@@ -678,6 +712,13 @@ without reading the whole repo.
   the quickstart and API/CLI/MCP docs show the supported command/API call,
   required GitHub auth, idempotency behavior, monitor policy choice, and how to
   inspect adopted monitor logs/events/merge-queue state from the console.
+  Scope: document the operator path for adopting an existing GitHub PR without
+  rerunning the coding agent, including CLI, REST, and MCP examples; required
+  GitHub token/permission checks; `auto_merge` versus manual monitor policy;
+  deterministic repo/PR idempotency and terminal-row retry behavior; console
+  inspection of logs, events, validation provenance, merge queue, and recovery
+  operations; and a mocked-local or docs-tested demo path that can be validated
+  without a live PR.
 - [x] Decide the SDK stance before open-source Core release: either ship a
   minimal Python client for the stable operator flows or explicitly document
   that REST + CLI + MCP are the supported client surfaces for v0.1. Acceptance:
