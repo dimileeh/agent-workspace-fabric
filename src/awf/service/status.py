@@ -16,6 +16,7 @@ import httpx
 from sqlalchemy import select, text
 
 from awf.db.models import Workspace
+from awf.db.repositories import EgressAuditRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.service.config import ServiceSettings
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
@@ -52,6 +53,7 @@ SocketExists = Callable[[Path], bool]
 
 
 WorkspaceIdLookup = Callable[[str], Awaitable[WorkspaceIdView]]
+EgressAuditSummaryLookup = Callable[[str], Awaitable[Mapping[str, int]]]
 
 
 class HttpResponse(Protocol):
@@ -102,6 +104,7 @@ async def collect_service_status(
     strict_providers: Iterable[str] | None = None,
     provider_environ: Mapping[str, str] | None = None,
     provider_http_get: ProviderHttpGet | None = None,
+    egress_audit_summary_lookup: EgressAuditSummaryLookup | None = None,
 ) -> dict[str, object]:
     """Collect service dependency status without requiring Docker in tests."""
 
@@ -161,6 +164,10 @@ async def collect_service_status(
         )
         workspace_view = await workspace_lookup_task
         workspace_cleanup_check = await collect_workspace_cleanup_status(settings)
+        egress_audit_check = await collect_egress_audit_status(
+            settings.database_url,
+            summary_lookup=egress_audit_summary_lookup,
+        )
     finally:
         for pending in (workspace_lookup_task, provider_task):
             if not pending.done():
@@ -199,6 +206,7 @@ async def collect_service_status(
         "agent_runtime_image": image_check,
         "disk": disk_check.to_dict(),
         "network_posture": network_posture_check,
+        "egress_audit": egress_audit_check,
         "stranded_workspaces": stranded_workspaces_check,
         "orphan_resources": orphan_resources_check,
         "orphan_workspaces": orphan_workspaces_check,
@@ -213,6 +221,55 @@ async def collect_service_status(
         "checks": checks,
         "agent_readiness": agent_readiness,
     }
+
+
+async def collect_egress_audit_status(
+    database_url: str,
+    *,
+    summary_lookup: EgressAuditSummaryLookup | None = None,
+) -> CheckPayload:
+    lookup = summary_lookup or _default_egress_audit_summary_counts
+    try:
+        counts = await asyncio.wait_for(lookup(database_url), timeout=_CHECK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        return {
+            "ok": True,
+            "status": "unknown",
+            "reason": "EGRESS_AUDIT_TIMEOUT",
+            "detail": f"Egress audit summary_counts exceeded {_CHECK_TIMEOUT_SECONDS}s",
+            "resource_count": 0,
+            "egress_posture_counts": {},
+        }
+    except Exception as exc:
+        return {
+            "ok": True,
+            "status": "unavailable",
+            "reason": "EGRESS_AUDIT_UNAVAILABLE",
+            "detail": _truncate(f"{type(exc).__name__}: {exc}"),
+            "resource_count": 0,
+            "egress_posture_counts": {},
+        }
+
+    posture_counts = {str(posture): int(count) for posture, count in counts.items()}
+    return {
+        "ok": True,
+        "status": "ok",
+        "reason": "EGRESS_AUDIT_AVAILABLE",
+        "resource_count": sum(posture_counts.values()),
+        "egress_posture_counts": posture_counts,
+    }
+
+
+async def _default_egress_audit_summary_counts(database_url: str) -> dict[str, int]:
+    engine = None
+    try:
+        engine = make_engine(database_url)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            return await EgressAuditRepository(session).summary_counts_by_posture()
+    finally:
+        if engine is not None:
+            await engine.dispose()
 
 
 async def collect_workspace_cleanup_status(settings: ServiceSettings) -> CheckPayload:
