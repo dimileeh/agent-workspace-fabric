@@ -24,8 +24,9 @@ from sqlalchemy import text
 
 from awf import __version__
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
-from awf.common.config import DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS, get_settings
+from awf.common.config import get_settings
 from awf.service.config import resolve_service_settings
+from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.orphan_resources import (
     ResourceScan,
     WorkspaceIdView,
@@ -315,7 +316,7 @@ async def _check_agent_runtime_image(runner: AsyncCommandRunner, image: str) -> 
 async def _workspace_view_for_readyz(
     factory: Any,
     *,
-    min_retention_hours: float = DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS,
+    min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
 ) -> WorkspaceIdView:
     if factory is None:
         return unavailable_workspace_view()
@@ -344,7 +345,7 @@ async def _check_orphan_resources(
     work_dir: str,
     db_check: CheckResult,
     docker_check: CheckResult,
-    min_retention_hours: float = DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS,
+    min_retention_hours: float = DEFAULT_MIN_AGE_HOURS,
 ) -> CheckResult:
     if not db_check.ok:
         workspace_view = unavailable_workspace_view()

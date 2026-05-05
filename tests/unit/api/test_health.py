@@ -464,10 +464,10 @@ def test_readyz_does_not_force_task_scheduling_with_zero_sleep() -> None:
 
 
 @pytest.mark.unit
-def test_readyz_retention_defaults_use_shared_settings_constant() -> None:
+def test_readyz_retention_defaults_use_gc_retention_constant() -> None:
     source = inspect.getsource(health_route)
     tree = ast.parse(source)
-    expected_default_name = "DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS"
+    expected_default_name = "DEFAULT_MIN_AGE_HOURS"
     expected_functions = {
         "_workspace_view_for_readyz",
         "_check_orphan_resources",
