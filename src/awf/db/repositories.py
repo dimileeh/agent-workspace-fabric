@@ -2387,6 +2387,19 @@ class WorkspaceRepository:
         await self._session.flush()
         return workspace
 
+
+    async def update_activity(self, workspace_id: str, *, subphase: str | None = None) -> None:
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update
+        stmt = update(Workspace).where(Workspace.id == workspace_id).values(
+            last_activity_at=datetime.now(UTC),
+        )
+        if subphase is not None:
+            stmt = stmt.values(subphase=subphase)
+        await self._session.execute(stmt)
+        await self._session.flush()
+
     async def get(self, workspace_id: str) -> Workspace | None:
         return await self._session.get(Workspace, workspace_id)
 
@@ -4123,6 +4136,9 @@ class WorkspaceLogStreamRepository:
         byte_delta: int,
         line_delta: int,
     ) -> WorkspaceLogStream | None:
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update
         stream = await self.get(workspace_id=workspace_id, stream_id=stream_id)
         if stream is None:
             return None
@@ -4132,6 +4148,15 @@ class WorkspaceLogStreamRepository:
             stream.closed_at = None
         stream.byte_count += byte_delta
         stream.line_count += line_delta
+
+        # Fast path update without locking the Workspace ORM object
+        now = datetime.now(UTC)
+        await self._session.execute(
+            update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(last_log_at=now, last_activity_at=now)
+        )
+
         await self._session.flush()
         return stream
 

@@ -306,7 +306,19 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         None,
     )
+    from datetime import UTC, datetime
+    last_activity_at = getattr(ws, "last_activity_at", None)
+    is_stale_running = False
+    if ws.status == "running" and last_activity_at is not None:
+        delta = datetime.now(UTC) - last_activity_at
+        if delta.total_seconds() > 600:
+            is_stale_running = True
+
     return WorkspaceOverviewResponse(
+        subphase=getattr(ws, "subphase", None),
+        last_activity_at=last_activity_at,
+        last_log_at=getattr(ws, "last_log_at", None),
+        is_stale_running=is_stale_running,
         workspace_id=ws.id,
         task_id=ws.task_external_id or ws.id,
         title=ws.task_title,

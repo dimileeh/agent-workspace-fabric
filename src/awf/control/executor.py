@@ -1905,6 +1905,7 @@ class WorkspaceExecutor:
                 ),
             )
             try:
+                await self._update_subphase(workspace_id, "validation")
                 val_result = await self._validation.run_profile_phases(
                     workspace_id=workspace_id,
                     compose_project=compose_project,
@@ -3378,6 +3379,7 @@ class WorkspaceExecutor:
             getattr(workspace, "task_policy", None)
         )
         if not planning.required:
+            await self._update_subphase(workspace.id, "agent")
             result = await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -3418,6 +3420,7 @@ class WorkspaceExecutor:
         )
         if rev_r.ok and rev_r.stdout.strip():
             baseline_sha = rev_r.stdout.strip()
+        await self._update_subphase(workspace.id, "planning")
         plan_result = await adapter.run(
             compose_project=compose_project,
             compose_file=compose_file,
@@ -3490,6 +3493,7 @@ class WorkspaceExecutor:
         )
         for iteration in range(planning.max_iterations + 1):
             last_iteration = iteration
+            await self._update_subphase(workspace.id, "agent")
             execute_result = await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -3523,6 +3527,7 @@ class WorkspaceExecutor:
             compare_error: AgentRunError | None = None
             compare_result = None
             try:
+                await self._update_subphase(workspace.id, "conformance")
                 compare_result = await adapter.run(
                     compose_project=compose_project,
                     compose_file=compose_file,
@@ -4087,6 +4092,13 @@ class WorkspaceExecutor:
                 status=current.status,
             )
             return None
+
+
+    async def _update_subphase(self, workspace_id: str, subphase: str) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            await repo.update_activity(workspace_id, subphase=subphase)
+            await session.commit()
 
     async def _recheck_status(
         self,

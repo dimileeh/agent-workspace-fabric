@@ -192,6 +192,11 @@ export interface WorkspaceOverview {
   coordination_warnings: WorkspaceCoordinationWarning[];
   provider_readiness_preflight?: ProviderReadinessPreflight | null;
   status: WorkspaceStatus;
+
+  subphase: string | null;
+  last_activity_at: string | null;
+  last_log_at: string | null;
+  is_stale_running: boolean;
   current_phase: string;
   active_operation: string | null;
   last_event: WorkspaceEvent | null;
@@ -363,6 +368,11 @@ export interface MergeQueueBlocker {
   pr_url: string;
   pr_number: number | null;
   status: WorkspaceStatus;
+
+  subphase: string | null;
+  last_activity_at: string | null;
+  last_log_at: string | null;
+  is_stale_running: boolean;
   blocker_state: MergeQueueBlockerState;
   reason_code: string;
 }
@@ -380,6 +390,11 @@ export interface MergeQueueItem {
   branch_name: string | null;
   pr_url: string;
   status: WorkspaceStatus;
+
+  subphase: string | null;
+  last_activity_at: string | null;
+  last_log_at: string | null;
+  is_stale_running: boolean;
   auto_merge: boolean;
   task_class: string | null;
   owned_paths: string[];
@@ -440,7 +455,17 @@ export interface ProfileSecurity {
 export interface Workspace {
   id: string;
   status: WorkspaceStatus;
+
+  subphase: string | null;
+  last_activity_at: string | null;
+  last_log_at: string | null;
+  is_stale_running: boolean;
   version: number;
+
+  subphase: string | null;
+  last_activity_at: string | null;
+  last_log_at: string | null;
+  is_stale_running: boolean;
   repo_url: string;
   branch_base: string;
   branch_name: string | null;
@@ -562,6 +587,11 @@ export interface WorkspaceControlResponse {
   operation_id: string;
   operation_status: string;
   status: WorkspaceStatus;
+
+  subphase: string | null;
+  last_activity_at: string | null;
+  last_log_at: string | null;
+  is_stale_running: boolean;
   message: string;
 }
 
@@ -577,6 +607,11 @@ export interface WorkspaceRetryResponse {
   new_workspace_id: string;
   operation_id: string;
   status: WorkspaceStatus;
+
+  subphase: string | null;
+  last_activity_at: string | null;
+  last_log_at: string | null;
+  is_stale_running: boolean;
   attempt_number: number;
   status_url: string;
   events_url: string;
