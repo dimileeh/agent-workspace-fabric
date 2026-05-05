@@ -93,6 +93,26 @@ _PIP_EXECUTABLE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^pip(?:\d+(?:\.\d
 _REMOTE_SCRIPT_INTERPRETERS: Final[frozenset[str]] = frozenset(
     {"sh", "bash", "zsh", "dash", "fish", "python", "python3", "ruby", "perl", "node"}
 )
+_REMOTE_SCRIPT_INTERPRETER_ENV_VARS: Final[frozenset[str]] = frozenset(
+    {
+        "BASH",
+        "DASH",
+        "FISH",
+        "NODE",
+        "NODE_BINARY",
+        "NODE_BIN",
+        "PERL",
+        "PYTHON",
+        "PYTHON3",
+        "PYTHON_BINARY",
+        "PYTHON_BIN",
+        "PYTHON_EXECUTABLE",
+        "RUBY",
+        "SHELL",
+        "SH",
+        "ZSH",
+    }
+)
 _SHELL_COMMAND_INTERPRETERS: Final[frozenset[str]] = frozenset(
     {"sh", "bash", "zsh", "dash", "fish"}
 )
@@ -1298,7 +1318,27 @@ def _is_remote_script_interpreter(command: str) -> bool:
     return (
         command in _REMOTE_SCRIPT_INTERPRETERS
         or _PYTHON_EXECUTABLE_PATTERN.fullmatch(command) is not None
+        or _is_remote_script_interpreter_env_var(command)
     )
+
+
+def _is_remote_script_interpreter_env_var(command: str) -> bool:
+    name = _shell_variable_name(command)
+    return name in _REMOTE_SCRIPT_INTERPRETER_ENV_VARS if name is not None else False
+
+
+def _shell_variable_name(value: str) -> str | None:
+    if value.startswith("${"):
+        candidate = value[2:]
+        if candidate.endswith("}"):
+            candidate = candidate[:-1]
+    elif value.startswith("$"):
+        candidate = value[1:]
+    else:
+        return None
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", candidate):
+        return candidate
+    return None
 
 
 def _interpreter_script_target(tokens: Sequence[str]) -> str | None:

