@@ -421,6 +421,14 @@ class TestToolRegistration:
         assert operations_props["limit"]["default"] == 50
         assert operations_props["limit"]["maximum"] == 500
 
+        workspace_operations_props = tools["awf_list_workspace_operations"].inputSchema[
+            "properties"
+        ]
+        assert "status" in workspace_operations_props
+        assert "operation_type" in workspace_operations_props
+        assert workspace_operations_props["limit"]["default"] == 50
+        assert workspace_operations_props["limit"]["maximum"] == 500
+
         overlap_props = tools["awf_get_overlap_graph"].inputSchema["properties"]
         assert overlap_props["limit"]["default"] == 100
         assert overlap_props["limit"]["maximum"] == 500
@@ -1521,6 +1529,58 @@ class TestWorkspaceOperations:
         assert [item["id"] for item in operations] == [stop.id, validate.id]
         assert [item["type"] for item in operations] == ["stop", "validate"]
         assert [item["status"] for item in operations] == ["pending", "running"]
+
+    @pytest.mark.unit
+    async def test_list_workspace_operations_forwards_status_and_type_filters(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Filter workspace operations",
+                task_prompt="List filtered operations.",
+                agent="codex",
+                test_commands=[],
+            )
+            repo = OperationRepository(session)
+            create = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.create,
+                status=OperationStatus.succeeded,
+            )
+            running_validate = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+            )
+            pending_validate = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+            )
+            create.created_at = base
+            running_validate.created_at = base + timedelta(seconds=1)
+            pending_validate.created_at = base + timedelta(seconds=2)
+            await session.commit()
+
+        operations = await _call(
+            mcp,
+            "awf_list_workspace_operations",
+            {
+                "workspace_id": workspace.id,
+                "status": "running",
+                "operation_type": "validate",
+            },
+        )
+
+        assert isinstance(operations, list)
+        assert [item["id"] for item in operations] == [running_validate.id]
+        assert [item["type"] for item in operations] == ["validate"]
+        assert [item["status"] for item in operations] == ["running"]
 
     @pytest.mark.unit
     async def test_list_workspace_operations_missing_workspace_returns_none(

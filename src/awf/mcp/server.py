@@ -538,9 +538,16 @@ def build_mcp_server(
     async def awf_list_workspace_operations(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
         limit: int = Field(default=50, ge=1, le=500),
+        status: OperationStatus | None = Field(default=None),
+        operation_type: OperationType | None = Field(default=None),
     ) -> list[dict[str, Any]] | None:
         """List one workspace's operations newest-first."""
-        rows = await service.list_operations(workspace_id, limit=limit)
+        rows = await service.list_operations(
+            workspace_id,
+            status=status,
+            operation_type=operation_type,
+            limit=limit,
+        )
         return [row.model_dump(mode="json") for row in rows] if rows is not None else None
 
     @mcp.tool(name="awf_list_workspace_logs")
