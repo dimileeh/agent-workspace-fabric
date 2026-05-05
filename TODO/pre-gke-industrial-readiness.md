@@ -92,6 +92,7 @@ not listed here.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Validation Runtime Performance | Safe parallel final coverage support | _local_ | commit `9763bd9` | merged | Reconciled 2026-05-05: `pytest-xdist` is in the dev/test runtime, profiles accept `validation.coverage.parallel_workers`, `.awf/workspace.yml` opts AWF self-dogfood into `parallel_workers: 3`, coverage commands inject bounded `pytest -n <workers> --dist=loadscope`, worker policy is capped by CPU/profile limits, and validation identity includes the parallel-worker policy. |
 | P1 Local Packaging And Upgrade Path | Auto-prune completed and merged workspace worktrees | `ws_e90d1b2cf47a45cf920f01a0` | [#203](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/203) | merged | OpenCode/Ollama `glm-5.1:cloud`; merged 2026-05-04 and adds policy-safe completed/merged workspace worktree pruning with retention safeguards. |
 | P1 Developer Experience And Public Core Surface | Redacted first-time support bundle | `ws_02a6a86cac9a492c8562d164` | [#202](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/202) | merged | OpenCode/Ollama `kimi-k2.6:cloud`; merged 2026-05-04 and adds telemetry-free redacted doctor/support-bundle evidence for first-time evaluator issue reports. |
 | P1 Operator Console Completion | Reliable cost estimate surfacing | `ws_f0c067d4523f480ea6d7c8ec` | [#201](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/201) | merged | OpenCode/Ollama `deepseek-v4-pro:cloud`; merged 2026-05-04 and limits console cost estimates to trusted pricing and usage metadata. |
@@ -319,7 +320,7 @@ not listed here.
 
 ## P1: Validation Runtime Performance
 
-- [ ] Add safe parallel final coverage support for AWF self-dogfood and large
+- [x] Add safe parallel final coverage support for AWF self-dogfood and large
   projects. Acceptance: `pytest-xdist` is available in the dev/test runtime;
   profiles can declare `validation.coverage.parallel_workers`; AWF injects a
   bounded `pytest -n <workers>` only when the profile opts in, never `-n auto`;

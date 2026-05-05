@@ -16,29 +16,119 @@ test("dashboard filters for agents and exact models", async ({ page }) => {
   if (await expandButton.getAttribute("aria-expanded") === "false") {
     await expandButton.click();
   }
-  // Find agent dropdown and select opencode
-  const agentSelect = page.getByLabel("Agent");
-  await agentSelect.selectOption("opencode");
+  // Find agent selector and select opencode
+  const agentGroup = page.getByRole("group", { name: "Agent" });
+  await agentGroup.getByRole("button", { name: /Agent all/ }).click();
+  await agentGroup.getByLabel("opencode").check();
 
   // Validate agent filter
   await expect(page.getByText("agent opencode", { exact: false })).toBeVisible();
 
-  // Switch back to all for models
-  await agentSelect.selectOption("all");
+  // Multi-select keeps Gemini and OpenCode visible together.
+  await agentGroup.getByLabel("gemini").check();
+  await expect(page.getByText("Gemini workspace").first()).toBeVisible();
+  await expect(page.getByText("OpenCode workspace").first()).toBeVisible();
+  await agentGroup.getByLabel("all").check();
 
-  // Find model dropdown and select exact model
-  const modelSelect = page.getByLabel("Model");
-  await expect(modelSelect).toContainText("gemini-3.1-pro-preview");
-  await expect(modelSelect).toContainText("ollama/glm-5.1:cloud");
+  // Find model selector and select exact models
+  const modelGroup = page.getByRole("group", { name: "Model" });
+  await modelGroup.getByRole("button", { name: /Model all/ }).click();
+  await expect(modelGroup.getByLabel("gemini-3.1-pro-preview")).toBeVisible();
+  await expect(modelGroup.getByLabel("ollama/glm-5.1:cloud")).toBeVisible();
 
-  await modelSelect.selectOption("gemini-3.1-pro-preview");
+  const statusBox = await page.getByRole("group", { name: "Status" }).boundingBox();
+  const agentBox = await agentGroup.boundingBox();
+  const modelBox = await modelGroup.boundingBox();
+  expect(statusBox).not.toBeNull();
+  expect(agentBox).not.toBeNull();
+  expect(modelBox).not.toBeNull();
+  expect(modelBox!.y).toBeGreaterThan(statusBox!.y + statusBox!.height - 1);
+  expect(modelBox!.x).toBeCloseTo(statusBox!.x, 1);
+  expect(modelBox!.x + modelBox!.width).toBeLessThanOrEqual(agentBox!.x + agentBox!.width + 1);
+
+  await modelGroup.getByLabel("gemini-3.1-pro-preview").check();
 
   // Validate workspace list limits
   await expect(page.getByText("Gemini workspace").first()).toBeVisible();
   await expect(page.getByText("OpenCode workspace").first()).not.toBeVisible();
 
+  await modelGroup.getByText("ollama/glm-5.1:cloud", { exact: true }).click();
+  await expect(modelGroup.getByRole("checkbox", { name: "ollama/glm-5.1:cloud" })).toBeChecked();
+  await expect(modelGroup.getByRole("menu", { name: "Model options" })).toBeVisible();
+  await expect(page.getByText("Gemini workspace").first()).toBeVisible();
+  await expect(page.getByText("OpenCode workspace").first()).toBeVisible();
+  await expect(page.getByText("model gemini-3.1-pro-preview, ollama/glm-5.1:cloud", { exact: false })).toBeVisible();
+
+  await page.getByPlaceholder("Search workspaces").click();
+  await expect(modelGroup.getByRole("menu", { name: "Model options" })).not.toBeVisible();
+  await modelGroup.getByRole("button", { name: /Model/ }).click();
+  await modelGroup.getByLabel("all").check();
+
+  const statusGroup = page.getByRole("group", { name: "Status" });
+  await statusGroup.getByRole("button", { name: /Status all/ }).click();
+  await statusGroup.getByLabel("completed").check();
+  await expect(page.getByText("Completed workspace").first()).toBeVisible();
+  await expect(page.getByText("Gemini workspace").first()).not.toBeVisible();
+  await statusGroup.getByLabel("running").check();
+  await expect(page.getByText("Gemini workspace").first()).toBeVisible();
+  await expect(page.getByText("OpenCode workspace").first()).toBeVisible();
+  await expect(page.getByText("Completed workspace").first()).toBeVisible();
+
   // Validate filter summary
-  await expect(page.getByText("model gemini-3.1-pro-preview", { exact: false })).toBeVisible();
+  await expect(page.getByText("status completed, running", { exact: false })).toBeVisible();
+});
+
+test("workspace list keeps long titles clear of status badges", async ({ page }) => {
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const card = page.getByTestId("workspace-card-ws_long_title");
+  await expect(card).toBeVisible();
+
+  const titleBox = await card
+    .getByText("test(parity): guard MCP parity matrix status against surface drift", { exact: true })
+    .boundingBox();
+  const statusBox = await card.getByText("monitoring_pr", { exact: true }).boundingBox();
+
+  expect(titleBox).not.toBeNull();
+  expect(statusBox).not.toBeNull();
+  expect(titleBox!.x + titleBox!.width).toBeLessThanOrEqual(statusBox!.x - 4);
+});
+
+test("workspace PR links open externally without navigating the console", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "open", {
+      configurable: true,
+      value: (url: string, target?: string, features?: string) => {
+        (window as typeof window & { __openedUrls?: unknown[] }).__openedUrls = [
+          ...((window as typeof window & { __openedUrls?: unknown[] }).__openedUrls ?? []),
+          { url, target, features },
+        ];
+        return null;
+      },
+    });
+  });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const beforeUrl = page.url();
+  await page
+    .getByTestId("workspace-card-ws_long_title")
+    .getByRole("link", { name: "PR" })
+    .click();
+
+  await expect(page).toHaveURL(beforeUrl);
+  await expect
+    .poll(async () =>
+      page.evaluate(() => (window as typeof window & { __openedUrls?: unknown[] }).__openedUrls ?? []),
+    )
+    .toEqual([
+      {
+        url: "https://github.com/example/awf/pull/123",
+        target: "_blank",
+        features: "noopener,noreferrer",
+      },
+    ]);
 });
 
 async function waitForConsoleReady(page: Page) {
@@ -59,8 +149,16 @@ async function mockAwfApi(page: Page) {
       await fulfillJson(
         route,
         listEnvelope([
-          workspaceOverview("ws_1", "Gemini workspace", "gemini", "gemini-3.1-pro-preview"),
-          workspaceOverview("ws_2", "OpenCode workspace", "opencode", "ollama/glm-5.1:cloud"),
+          workspaceOverview("ws_1", "Gemini workspace", "gemini", "gemini-3.1-pro-preview", "running"),
+          workspaceOverview(
+            "ws_long_title",
+            "test(parity): guard MCP parity matrix status against surface drift",
+            "gemini",
+            "gemini-3.1-pro-preview",
+            "monitoring_pr"
+          ),
+          workspaceOverview("ws_2", "OpenCode workspace", "opencode", "ollama/glm-5.1:cloud", "running"),
+          workspaceOverview("ws_3", "Completed workspace", "codex", "gpt-5.5", "completed"),
         ])
       );
       return;
@@ -112,7 +210,7 @@ function listEnvelope<T>(items: T[]) {
   return { items, next_cursor: null, has_more: false };
 }
 
-function workspaceOverview(id: string, title: string, agent: string, model: string) {
+function workspaceOverview(id: string, title: string, agent: string, model: string, status = "running") {
   return {
     workspace_id: id,
     task_id: `task-${id}`,
@@ -126,12 +224,13 @@ function workspaceOverview(id: string, title: string, agent: string, model: stri
     agent_effort: "low",
     agent_model_source: "mock",
     agent_effort_source: "mock",
-    status: "running",
+    status,
     created_at: now,
     updated_at: now,
     lifecycle: [],
     llm_usage: { status: "unavailable" },
     coordination_warnings: [],
+    pr_url: id === "ws_long_title" ? "https://github.com/example/awf/pull/123" : null,
   };
 }
 

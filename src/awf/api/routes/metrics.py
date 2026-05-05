@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.deps import get_db_session
 from awf.common.config import Settings, get_settings
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.local_capacity import detect_local_capacity
 from awf.service.metrics import (
     DEFAULT_FAILURE_EXAMPLE_LIMIT,
     DEFAULT_SUMMARY_WINDOW_HOURS,
@@ -36,6 +37,7 @@ from awf.service.orphan_resources import (
     unavailable_workspace_view,
     workspace_id_view_from_session,
 )
+from awf.service.resource_capacity import LocalCapacityLimits
 from awf.service.workspace_runtime_health import (
     WorkspaceRuntimeHealthSummary,
     runtime_resource_from_detected,
@@ -53,6 +55,7 @@ RuntimeHealthSummaryProvider = Callable[
     [Settings, AsyncSession, OrphanResourceSummary],
     WorkspaceRuntimeHealthSummary | Awaitable[WorkspaceRuntimeHealthSummary],
 ]
+LocalCapacityProvider = Callable[[Settings], LocalCapacityLimits | Awaitable[LocalCapacityLimits]]
 
 
 class WorkspaceReliabilitySummaryResponse(BaseModel):
@@ -495,6 +498,7 @@ async def get_resource_saturation_summary(
     session: AsyncSession = Depends(get_db_session),
 ) -> ResourceSaturationSummaryResponse:
     disk_check = await _resource_saturation_disk_check(request, settings)
+    local_capacity = await _resource_saturation_local_capacity(request, settings)
     orphan_resources = await _resource_saturation_orphan_resources(
         request,
         settings,
@@ -510,6 +514,7 @@ async def get_resource_saturation_summary(
         session,
         settings=settings,
         disk_check=disk_check,
+        detected_local_capacity=local_capacity,
         orphan_resources=orphan_resources,
         runtime_health=runtime_health,
     )
@@ -551,6 +556,27 @@ async def _resource_saturation_disk_check(request: Request, settings: Settings) 
         settings.work_dir,
         min_free_bytes=settings.min_free_disk_bytes,
     )
+
+
+async def _resource_saturation_local_capacity(
+    request: Request,
+    settings: Settings,
+) -> LocalCapacityLimits:
+    provider = cast(
+        LocalCapacityProvider | None,
+        getattr(request.app.state, "local_capacity_detector", None),
+    )
+    if provider is not None:
+        result = provider(settings)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    if (
+        settings.local_capacity_cpu_cores is not None
+        and settings.local_capacity_memory_gb is not None
+    ):
+        return LocalCapacityLimits()
+    return await asyncio.to_thread(detect_local_capacity, settings)
 
 
 async def _resource_saturation_orphan_resources(

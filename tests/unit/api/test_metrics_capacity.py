@@ -30,6 +30,7 @@ from awf.service.orphan_resources import (
     scan_docker_resources,
     scan_managed_worktrees,
 )
+from awf.service.resource_capacity import LocalCapacityLimits
 
 
 async def _workspace(
@@ -164,8 +165,61 @@ async def metrics_app_and_client(
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
     app.state.orphan_resource_summary_provider = _no_orphan_summary
+    app.state.local_capacity_detector = lambda _settings: LocalCapacityLimits()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield app, c
+
+
+@pytest.mark.unit
+async def test_resource_saturation_endpoint_uses_detected_docker_capacity_when_unset(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = metrics_app_and_client
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-metrics-work",
+        min_free_disk_bytes=700,
+        workspace_peak_cpu=6.0,
+        workspace_peak_memory_gb=16.0,
+        local_capacity_cpu_cores=None,
+        local_capacity_memory_gb=None,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
+        provider_settings,
+        ok=True,
+        free_bytes=16 * 1024 * 1024 * 1024,
+    )
+    app.state.local_capacity_detector = lambda _settings: LocalCapacityLimits(
+        cpu_cores=8.0,
+        memory_gb=24.0,
+        source="docker",
+    )
+    await _workspace(
+        engine,
+        status=WorkspaceStatus.running,
+        updated_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    capacity = response.json()["capacity"]
+    assert capacity["peak_cpu"] == {
+        "limit": 8.0,
+        "reserved": 6.0,
+        "available": 2.0,
+        "available_after_next_default": 0.0,
+        "reason_code": None,
+    }
+    assert capacity["peak_memory_gb"] == {
+        "limit": 24.0,
+        "reserved": 16.0,
+        "available": 8.0,
+        "available_after_next_default": 0.0,
+        "reason_code": None,
+    }
 
 
 @pytest.mark.unit

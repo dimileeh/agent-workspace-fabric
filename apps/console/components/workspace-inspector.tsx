@@ -34,7 +34,7 @@ export function WorkspaceInspector({
         />
       )}
       <div
-        className={`fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-slate-200 bg-slate-50 shadow-2xl transition-transform duration-300 sm:w-[600px] xl:w-[800px] 2xl:w-[900px] ${
+        className={`fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-slate-200 bg-slate-50 shadow-2xl transition-transform duration-300 xl:w-[calc(100vw-440px)] 2xl:w-[calc(100vw-500px)] ${
           isOpen ? "translate-x-0" : "translate-x-full"
         }`}
         inert={!isOpen ? true : undefined}
