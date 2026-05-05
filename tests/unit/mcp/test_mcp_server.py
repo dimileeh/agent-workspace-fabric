@@ -261,12 +261,14 @@ class TestToolRegistration:
         assert "idempotency_key" in refresh_props
         refresh_required = tools["awf_refresh_workspace"].inputSchema.get("required", [])
         assert "idempotency_key" in refresh_required
+        assert refresh_props["idempotency_key"]["pattern"] == r"\S"
         assert refresh_props["expected_version"]["default"] is None
 
         rebase_props = tools["awf_rebase_workspace"].inputSchema["properties"]
         assert "idempotency_key" in rebase_props
         rebase_required = tools["awf_rebase_workspace"].inputSchema.get("required", [])
         assert "idempotency_key" in rebase_required
+        assert rebase_props["idempotency_key"]["pattern"] == r"\S"
         assert rebase_props["expected_version"]["default"] is None
 
     @pytest.mark.unit

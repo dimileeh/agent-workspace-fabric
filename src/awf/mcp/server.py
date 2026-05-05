@@ -1162,6 +1162,7 @@ def build_mcp_server(
             ...,
             min_length=1,
             max_length=128,
+            pattern=r"\S",
             description="Idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
@@ -1195,6 +1196,7 @@ def build_mcp_server(
             ...,
             min_length=1,
             max_length=128,
+            pattern=r"\S",
             description="Idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
