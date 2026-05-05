@@ -1,0 +1,27 @@
+Validation for ws_0bc1d8f718bc480998d0a08d, iteration 1.
+
+Command:
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+
+Result:
+...                                                                      [100%]
+3 passed in 0.67s
+
+Command:
+uv run --python 3.12 --extra dev pytest tests/unit/api/test_docs_drift.py tests/unit/docs/test_public_docs_status.py -q
+
+Result:
+......                                                                   [100%]
+6 passed in 0.96s
+
+Command:
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/api/test_docs_drift.py
+
+Result:
+All checks passed!
+
+Strict-TDD evidence note:
+No pre-implementation failing-first run artifact was available in this workspace
+or the saved plan/conformance artifacts. The focused docs-status tests are now
+present and passing, but the failing-first evidence gap is explicitly recorded
+here rather than reconstructed after implementation.
