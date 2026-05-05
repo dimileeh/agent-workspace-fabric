@@ -8,6 +8,9 @@ test points at the inconsistency.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from tests.unit.contracts._capabilities import (
@@ -17,6 +20,103 @@ from tests.unit.contracts._capabilities import (
     parity_capabilities_with_status,
     parity_mutating_capabilities_with_status,
 )
+from tests.unit.mcp._parity_utils import (
+    IMPLEMENTED_STATUS,
+    MISSING_STATUS,
+    TODO_DOC,
+    _extract_mcp_tool_tokens_from_cell,
+    _is_partial_or_missing_row,
+    _parity_backlog_slice,
+    _parity_rows,
+    _parity_status,
+    _unchecked_todo_markers,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
+    "Workspace create, list, and get": (
+        "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_create_v2_hydrates_canonical_request_model",
+        "tests/unit/mcp/test_mcp_server.py::TestGetAndList::test_get_returns_the_workspace_just_created",
+        "tests/unit/mcp/test_mcp_server.py::TestWaitForWorkspace::test_exits_immediately_when_already_terminal",
+    ),
+    "Workspace overview": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_workspace_overview_tool_matches_rest_payload",
+    ),
+    "Merge queue": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_merge_queue_tool_matches_rest_payload_and_reason_codes",
+    ),
+    "Task attempts": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_task_listing_tool_matches_rest_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_task_attempts_tool_matches_rest_payload",
+    ),
+    "Validation provenance": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_validation_provenance_tool_matches_rest_payload",
+    ),
+    "Stale reasons": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_stale_reasons_tool_matches_rest_active_and_resolved_payloads",
+    ),
+    "Artifact metadata": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_artifacts_tool_matches_rest_metadata_payload",
+    ),
+    "Failure analysis metrics": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_failure_analysis_metrics_tool_matches_rest_payload",
+    ),
+    "Workspace reliability metrics": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_workspace_reliability_and_slo_tools_match_rest_payloads",
+    ),
+    "Resource saturation metrics": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_resource_saturation_tool_matches_rest_payload_with_fake_providers",
+    ),
+    "SLO metrics": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_workspace_reliability_and_slo_tools_match_rest_payloads",
+    ),
+    "Locks and owned-path reservations": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_locks_tool_matches_rest_payload",
+    ),
+    "Advisory overlap graph": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_overlap_graph_tool_matches_rest_payload",
+    ),
+    "Service health and readiness": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_service_health_tool_returns_healthz_payload",
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_service_readiness_tool_matches_rest_payload",
+    ),
+    "Core release readiness scorecard": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_core_release_readiness_tool_matches_rest_payload",
+    ),
+    "Workspace runtime snapshot": (
+        "tests/unit/mcp/test_mcp_server.py::TestWorkspaceRuntime::test_get_workspace_runtime_returns_container_snapshot",
+    ),
+    "Workspace operations": (
+        "tests/unit/mcp/test_mcp_server.py::TestWorkspaceOperations::test_list_workspace_operations_respects_limit",
+    ),
+    "Global operations": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_operations_tool_matches_rest_filters_and_detail",
+    ),
+    "Durable workspace logs": (
+        "tests/unit/mcp/test_mcp_server.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams",
+    ),
+    "Optimistic concurrency on controls": (
+        "tests/unit/contracts/test_if_match_alignment.py::test_mcp_control_tools_expose_optional_expected_version",
+        "tests/unit/contracts/test_if_match_alignment.py::test_rest_stale_if_match_returns_version_conflict_envelope",
+    ),
+}
+
+
+def _assert_test_reference_exists(reference: str) -> None:
+    path_text, _, node_id = reference.partition("::")
+    path = REPO_ROOT / path_text
+    assert path.is_file(), f"Coverage reference {reference!r} points at a missing file"
+    source = path.read_text(encoding="utf-8")
+    for node in node_id.split("::"):
+        if node.startswith("Test"):
+            assert re.search(rf"^class\s+{re.escape(node)}\b", source, re.MULTILINE), (
+                f"Coverage reference {reference!r} points at a missing test class {node!r}"
+            )
+        elif node.startswith("test_"):
+            assert re.search(rf"^\s*(async\s+def|def)\s+{re.escape(node)}\b", source, re.MULTILINE), (
+                f"Coverage reference {reference!r} points at a missing test {node!r}"
+            )
 
 
 @pytest.mark.unit
@@ -60,6 +160,70 @@ def test_every_mutating_capability_with_mcp_tool_is_registered() -> None:
     assert not not_in_matrix, (
         "Contract registry references parity-matrix capabilities that are no "
         f"longer 'MCP implemented'/'MCP partial': {sorted(not_in_matrix)}."
+    )
+
+
+@pytest.mark.unit
+def test_mcp_implemented_matrix_rows_have_executable_coverage_reference() -> None:
+    rows = _parity_rows()
+    implemented_capabilities = {
+        row["Capability"].strip()
+        for row in rows
+        if _parity_status(row) == IMPLEMENTED_STATUS
+        and _extract_mcp_tool_tokens_from_cell(row.get("MCP tool name", ""))
+    }
+    registered_capabilities = {
+        capability.parity_capability
+        for capability in all_capabilities()
+        if capability.parity_status == IMPLEMENTED_STATUS
+    }
+
+    stale_references = set(IMPLEMENTED_PARITY_COVERAGE_REFERENCES) - implemented_capabilities
+    assert not stale_references, (
+        "Coverage map references parity rows that are no longer MCP implemented: "
+        f"{sorted(stale_references)}."
+    )
+
+    missing = sorted(
+        capability
+        for capability in implemented_capabilities
+        if capability not in registered_capabilities
+        and capability not in IMPLEMENTED_PARITY_COVERAGE_REFERENCES
+    )
+    assert not missing, (
+        "MCP implemented parity rows lack executable contract/parity coverage: "
+        f"{missing}. Add a ContractCapability or an explicit test reference."
+    )
+
+    for references in IMPLEMENTED_PARITY_COVERAGE_REFERENCES.values():
+        for reference in references:
+            _assert_test_reference_exists(reference)
+
+
+@pytest.mark.unit
+def test_non_implemented_matrix_rows_track_unchecked_backlog_slice() -> None:
+    active_todo_markers = _unchecked_todo_markers(TODO_DOC.read_text(encoding="utf-8"))
+    failures: list[str] = []
+
+    for row in _parity_rows():
+        if not _is_partial_or_missing_row(row):
+            continue
+        capability = row.get("Capability", "?")
+        status = _parity_status(row)
+        backlog = _parity_backlog_slice(row)
+        if not backlog.startswith("TODO§"):
+            failures.append(f"{capability}: {status} row has no TODO§ backlog slice")
+            continue
+        if backlog not in active_todo_markers:
+            failures.append(f"{capability}: {backlog} is not listed in an unchecked TODO item")
+        if status == MISSING_STATUS and _extract_mcp_tool_tokens_from_cell(
+            row.get("MCP tool name", "")
+        ):
+            failures.append(f"{capability}: missing/backlog row declares a live MCP tool")
+
+    assert not failures, (
+        "Partial or missing parity rows must keep active backlog visibility:\n"
+        + "\n".join(failures)
     )
 
 

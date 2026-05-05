@@ -660,10 +660,21 @@ coding agent in any project to use AWF for a feature.
   must require an explicit matrix/backlog status instead of silently skipping
   it. Any real drift discovered by the tests should be fixed in the smallest
   compatible way.
-- [ ] Add a docs/status consistency test for the parity matrix so entries marked
+- [ ] TODO§P1-artifact-download: Add a bounded MCP artifact content/download
+  tool, or keep the matrix entry explicitly marked `MCP missing/backlog` until
+  REST-compatible path validation, authorization, size limits, and error
+  envelopes are covered.
+- [ ] TODO§P1-mcp-global-events: Add MCP parity for the global
+  `GET /v1/events` surface, or keep the workspace-events row explicitly
+  marked `MCP partial` until global events have a real MCP tool and coverage.
+- [x] Add a docs/status consistency test for the parity matrix so entries marked
   implemented must correspond to real REST routes, CLI commands, MCP tools, and
   contract-test coverage; partial or missing entries must remain visible as
-  unchecked backlog work.
+  unchecked backlog work. Evidence: `tests/unit/mcp/test_mcp_parity_matrix_crossref.py`
+  now validates implemented rows against the FastAPI route tree, Typer command
+  tree, MCP tool registrations, and active backlog visibility; `tests/unit/contracts/test_registry_smoke.py`
+  now requires executable contract/parity coverage references for implemented
+  rows. Validation: `uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_parity_matrix_crossref.py tests/unit/contracts/test_registry_smoke.py -q`.
 - [x] Add `docs/PROJECT_ONBOARDING.md` for Codex, Claude Code, Gemini, OpenCode, OpenClaw, and human operators.
 - [x] Add `awf project init` or `awf profile init` to inspect a repository and generate a draft `.awf/workspace.yml`.
 - [x] Add profile templates for common project shapes: generic, Python, Node/Next.js, Docker Compose, Python+Postgres, Node+browser/Playwright, and multi-service app.
