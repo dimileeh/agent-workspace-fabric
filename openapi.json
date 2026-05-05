@@ -8367,6 +8367,23 @@
             ],
             "title": "Failure Reason"
           },
+          "is_stale_running": {
+            "default": false,
+            "title": "Is Stale Running",
+            "type": "boolean"
+          },
+          "last_activity_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity At"
+          },
           "last_event": {
             "anyOf": [
               {
@@ -8376,6 +8393,18 @@
                 "type": "null"
               }
             ]
+          },
+          "last_log_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Log At"
           },
           "lifecycle": {
             "items": {
@@ -8457,6 +8486,17 @@
           },
           "status": {
             "$ref": "#/components/schemas/WorkspaceStatus"
+          },
+          "subphase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subphase"
           },
           "task_class": {
             "anyOf": [
@@ -9289,6 +9329,35 @@
             ],
             "title": "Initial Review Grace Period Seconds"
           },
+          "is_stale_running": {
+            "default": false,
+            "title": "Is Stale Running",
+            "type": "boolean"
+          },
+          "last_activity_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity At"
+          },
+          "last_log_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Log At"
+          },
           "latest_queue_decision": {
             "anyOf": [
               {
@@ -9463,6 +9532,17 @@
           },
           "status": {
             "$ref": "#/components/schemas/WorkspaceStatus"
+          },
+          "subphase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subphase"
           },
           "task_class": {
             "anyOf": [

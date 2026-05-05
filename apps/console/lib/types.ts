@@ -192,6 +192,11 @@ export interface WorkspaceOverview {
   coordination_warnings: WorkspaceCoordinationWarning[];
   provider_readiness_preflight?: ProviderReadinessPreflight | null;
   status: WorkspaceStatus;
+
+  subphase: string | null;
+  last_activity_at: string | null;
+  last_log_at: string | null;
+  is_stale_running: boolean;
   current_phase: string;
   active_operation: string | null;
   last_event: WorkspaceEvent | null;
@@ -440,6 +445,11 @@ export interface ProfileSecurity {
 export interface Workspace {
   id: string;
   status: WorkspaceStatus;
+
+  subphase: string | null;
+  last_activity_at: string | null;
+  last_log_at: string | null;
+  is_stale_running: boolean;
   version: number;
   repo_url: string;
   branch_base: string;
