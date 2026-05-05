@@ -124,6 +124,20 @@ _NODE_GIT_COMMIT_FRAGMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 _NODE_SCP_GIT_SPEC_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^:\s]+:.+")
 _PIP_REGISTRY_ENV_VARS: Final[frozenset[str]] = frozenset({"PIP_EXTRA_INDEX_URL", "PIP_INDEX_URL"})
+_NODE_REGISTRY_ENV_VARS: Final[frozenset[str]] = frozenset(
+    {
+        "BUN_CONFIG_REGISTRY",
+        "COREPACK_NPM_REGISTRY",
+        "NPM_CONFIG_REGISTRY",
+        "PNPM_CONFIG_REGISTRY",
+        "YARN_NPM_REGISTRY_SERVER",
+        "bun_config_registry",
+        "corepack_npm_registry",
+        "npm_config_registry",
+        "pnpm_config_registry",
+        "yarn_npm_registry_server",
+    }
+)
 _PIP_GLOBAL_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
     {
         "--cache-dir",
@@ -141,6 +155,10 @@ _PIP_GLOBAL_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
         "--use-feature",
     }
 )
+_PYTHON_INTERPRETER_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
+    {"--check-hash-based-pycs", "-W", "-X"}
+)
+_PYTHON_INTERPRETER_ATTACHED_VALUE_PREFIXES: Final[tuple[str, ...]] = ("-W", "-X")
 _SHELL_CONTROL_OPERATORS: Final[frozenset[str]] = frozenset({";", "&&", "||"})
 _SHELL_PIPE_OPERATORS: Final[frozenset[str]] = frozenset({"|", "|&"})
 _SHELL_PACKAGE_BOUNDARIES: Final[frozenset[str]] = _SHELL_CONTROL_OPERATORS | _SHELL_PIPE_OPERATORS
@@ -452,6 +470,7 @@ def _remote_script_execution(
         _has_piped_remote_script_execution(tokens)
         or _has_chained_remote_script_execution(tokens)
         or _has_process_substitution_remote_script_execution(tokens)
+        or _has_command_substitution_remote_script_execution(tokens)
     ):
         return None
     severity = _severity(policy.remote_script_execution.mode.value)
@@ -487,15 +506,16 @@ def _has_piped_remote_script_execution(tokens: Sequence[str]) -> bool:
 
 def _has_chained_remote_script_execution(tokens: Sequence[str]) -> bool:
     segments = _command_token_segments(tokens, _SHELL_CONTROL_OPERATORS)
-    for fetch_tokens, interpreter_tokens in zip(segments, segments[1:], strict=False):
+    for index, fetch_tokens in enumerate(segments[:-1]):
         artifact_names = _remote_fetch_artifact_names(fetch_tokens)
         if not artifact_names:
             continue
-        target = _interpreter_script_target(interpreter_tokens)
-        if target is None:
-            continue
-        if PurePosixPath(target).name in artifact_names:
-            return True
+        for interpreter_tokens in segments[index + 1 :]:
+            target = _interpreter_script_target(interpreter_tokens)
+            if target is None:
+                continue
+            if PurePosixPath(target).name in artifact_names:
+                return True
     return False
 
 
@@ -519,6 +539,17 @@ def _has_process_substitution_remote_script_execution(tokens: Sequence[str]) -> 
             for arg in _process_substitution_args(fetch_tokens[1:]):
                 if _is_remote_url_token(arg):
                     return True
+    return False
+
+
+def _has_command_substitution_remote_script_execution(tokens: Sequence[str]) -> bool:
+    for segment in _command_token_segments(tokens, _SHELL_CONTROL_OPERATORS):
+        if not segment[0].strip().startswith("$("):
+            continue
+        if not any(token.rstrip().endswith(")") for token in segment):
+            continue
+        if _is_remote_fetch(segment):
+            return True
     return False
 
 
@@ -610,13 +641,12 @@ def _package_command(
     if not prefixes.tokens:
         return None
     first = PurePosixPath(_shell_token_word(prefixes.tokens[0])).name
-    if (
-        len(prefixes.tokens) >= 3
-        and _is_python_executable(first)
-        and prefixes.tokens[1:3] == ["-m", "pip"]
-    ):
+    if _is_python_executable(first):
+        pip_args = _python_m_pip_args(prefixes.tokens)
+        if pip_args is None:
+            return None
         return _pip_command(
-            prefixes.tokens[3:],
+            pip_args,
             manager="pip",
             env_assignments=prefix_env_assignments,
         )
@@ -633,7 +663,42 @@ def _package_command(
             env_assignments=prefix_env_assignments,
         )
     if first in {"npm", "pnpm", "yarn", "bun"}:
-        return _node_package_command(prefixes.tokens[1:], manager=first)
+        return _node_package_command(
+            prefixes.tokens[1:],
+            manager=first,
+            env_assignments=prefix_env_assignments,
+        )
+    return None
+
+
+def _python_m_pip_args(tokens: list[str]) -> list[str] | None:
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return None
+        if token == "-m":
+            if index + 1 < len(tokens) and _shell_token_word(tokens[index + 1]) == "pip":
+                return tokens[index + 2 :]
+            return None
+        if token.startswith("-m") and token != "-m":
+            return tokens[index + 1 :] if token[2:] == "pip" else None
+        if token in _PYTHON_INTERPRETER_VALUE_FLAGS:
+            index += 2
+            continue
+        if any(token.startswith(f"{flag}=") for flag in _PYTHON_INTERPRETER_VALUE_FLAGS):
+            index += 1
+            continue
+        if any(
+            token.startswith(prefix) and token != prefix
+            for prefix in _PYTHON_INTERPRETER_ATTACHED_VALUE_PREFIXES
+        ):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return None
     return None
 
 
@@ -816,7 +881,12 @@ def _pip_install_index(tokens: list[str]) -> int | None:
     return skipped.index
 
 
-def _node_package_command(tokens: list[str], *, manager: str) -> _PackageCommand | None:
+def _node_package_command(
+    tokens: list[str],
+    *,
+    manager: str,
+    env_assignments: Sequence[str] = (),
+) -> _PackageCommand | None:
     if not tokens:
         return None
     operation = tokens[0]
@@ -846,7 +916,9 @@ def _node_package_command(tokens: list[str], *, manager: str) -> _PackageCommand
         manager=manager,
         operation=operation,
         package_specs=packages,
-        registry_hosts=tuple(_registry_hosts(args, manager=manager)),
+        registry_hosts=tuple(
+            _registry_hosts(args, manager=manager, env_assignments=env_assignments)
+        ),
     )
 
 
@@ -894,6 +966,10 @@ def _registry_hosts(
         for env_host in _pip_env_registry_hosts(env_assignments):
             if env_host not in hosts:
                 hosts.append(env_host)
+    elif manager in {"npm", "pnpm", "yarn", "bun"}:
+        for env_host in _node_env_registry_hosts(env_assignments):
+            if env_host not in hosts:
+                hosts.append(env_host)
     flags = (
         {"--registry"}
         if manager in {"npm", "pnpm", "yarn", "bun"}
@@ -926,6 +1002,20 @@ def _pip_env_registry_hosts(env_assignments: Sequence[str]) -> list[str]:
     for assignment in env_assignments:
         name, separator, value = assignment.partition("=")
         if separator != "=" or name not in _PIP_REGISTRY_ENV_VARS:
+            continue
+        values = _shell_tokens(value) or [value]
+        for item in values:
+            host = _host_from_url(item)
+            if host is not None and host not in hosts:
+                hosts.append(host)
+    return hosts
+
+
+def _node_env_registry_hosts(env_assignments: Sequence[str]) -> list[str]:
+    hosts: list[str] = []
+    for assignment in env_assignments:
+        name, separator, value = assignment.partition("=")
+        if separator != "=" or name not in _NODE_REGISTRY_ENV_VARS:
             continue
         values = _shell_tokens(value) or [value]
         for item in values:
@@ -1208,7 +1298,10 @@ def _remote_url_value(token: str) -> str | None:
 
 
 def _shell_token_word(token: str) -> str:
-    return token.strip().strip("()[]{};,")
+    word = token.strip()
+    while word.startswith("$("):
+        word = word[2:]
+    return word.strip().strip("()[]{};,")
 
 
 def _command_lines(command_evidence: str | Sequence[str]) -> list[str]:
@@ -1280,11 +1373,9 @@ def _command_from_line(line: str) -> str | None:
         if stripped.startswith(prefix):
             return stripped[len(prefix) :].strip()
     lower = stripped.lower()
-    for label in ("command:", "executed:", "shell:"):
+    for label in ("command:", "executed:", "shell:", "run:"):
         if lower.startswith(label):
             return stripped[len(label) :].strip()
-    if lower.startswith("run "):
-        return stripped[4:].strip()
     first = stripped.split(maxsplit=1)[0]
     command = PurePosixPath(first).name
     if _is_known_evidence_command(command):
