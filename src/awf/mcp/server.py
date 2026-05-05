@@ -1158,12 +1158,11 @@ def build_mcp_server(
             max_length=1024,
             description="Optional operator reason for refresh.",
         ),
-        idempotency_key: str = Field(
-            ...,
+        idempotency_key: str | None = Field(
+            default=None,
             min_length=1,
             max_length=128,
-            pattern=r"\S",
-            description="Idempotency key for safe retries after timeout or dropped response.",
+            description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
             default=None,
@@ -1192,12 +1191,11 @@ def build_mcp_server(
             max_length=1024,
             description="Optional operator reason for rebase.",
         ),
-        idempotency_key: str = Field(
-            ...,
+        idempotency_key: str | None = Field(
+            default=None,
             min_length=1,
             max_length=128,
-            pattern=r"\S",
-            description="Idempotency key for safe retries after timeout or dropped response.",
+            description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
             default=None,
