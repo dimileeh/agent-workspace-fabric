@@ -1571,7 +1571,20 @@ function WorkspaceList({
                 </button>
               </div>
               <div className="flex shrink-0 flex-col items-end gap-1">
-                <Badge value={item.status} />
+                <div className="flex items-center gap-1">
+                  <Badge value={item.status} />
+                  {item.status === "running" && item.subphase ? (
+                    <span className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-100 px-2 text-[11px] font-medium text-slate-800">
+                      ({item.subphase})
+                    </span>
+                  ) : null}
+                </div>
+                {item.is_stale_running ? (
+                  <span className="inline-flex h-6 max-w-44 items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
+                    <AlertCircle size={12} aria-hidden />
+                    <span className="truncate">Stale running</span>
+                  </span>
+                ) : null}
                 {recoveryBadge ? (
                   <span className="inline-flex h-6 max-w-44 items-center rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
                     <span className="truncate">{recoveryBadge}</span>
@@ -1794,7 +1807,22 @@ function WorkspaceSummary({
             <h2 className="truncate text-lg font-semibold">{overview.title}</h2>
             <p className="mt-1 truncate text-sm text-[var(--muted)]">{overview.repo_url}</p>
           </div>
-          <Badge value={overview.status} />
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-1">
+              <Badge value={overview.status} />
+              {overview.status === "running" && overview.subphase ? (
+                <span className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-100 px-2 text-[11px] font-medium text-slate-800">
+                  ({overview.subphase})
+                </span>
+              ) : null}
+            </div>
+            {overview.is_stale_running ? (
+              <span className="inline-flex h-6 items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
+                <AlertCircle size={12} aria-hidden />
+                <span>Stale execution (check logs)</span>
+              </span>
+            ) : null}
+          </div>
         </div>
         <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <Fact label="Workspace" value={overview.workspace_id} mono />

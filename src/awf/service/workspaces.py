@@ -118,6 +118,7 @@ from awf.service.validation_observability import (
     validation_provenance_unavailable,
 )
 from awf.service.workspace_observability import (
+    is_workspace_stale_running,
     workspace_observability_payload,
     workspace_pricing_metadata,
 )
@@ -1319,6 +1320,7 @@ def workspace_response(
     validation_provenance: ValidationFreshnessSummaryResponse | None = None,
 ) -> WorkspaceResponse:
     computed_fields = dict(workspace_observability_payload(workspace))
+    computed_fields["is_stale_running"] = is_workspace_stale_running(workspace)
     computed_fields["validation_provenance"] = (
         validation_provenance
         if validation_provenance is not None

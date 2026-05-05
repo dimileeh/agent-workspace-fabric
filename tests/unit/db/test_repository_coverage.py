@@ -1072,7 +1072,11 @@ async def test_workspace_log_streams_are_idempotent_filterable_and_close_once(
     assert missing_close is None
     assert closed is not None
     assert closed_again is not None
+
     assert closed_again.closed_at == first_closed_at
+    await session.refresh(workspace)
+    assert workspace.last_log_at is not None
+    assert workspace.last_activity_at is not None
     assert {stream.id for stream in all_streams} == {validation.id, setup.id, runtime.id}
     assert {stream.id for stream in validation_streams} == {validation.id, setup.id}
 
