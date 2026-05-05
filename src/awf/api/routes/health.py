@@ -449,6 +449,25 @@ async def readyz(
     runner = _get_command_runner_for_request(request)
     factory = getattr(request.app.state, "db_session_factory", None)
 
+    async def _check_egress_audit() -> CheckResult:
+        if factory is None:
+            return CheckResult(ok=True, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail="No session factory available")
+        try:
+            async with factory() as session:
+                from awf.db.repositories import EgressAuditRepository
+                repo = EgressAuditRepository(session)
+                counts = await repo.summary_counts_by_posture()
+            total = sum(counts.values())
+            return CheckResult(
+                ok=True,
+                status="ok",
+                reason=f"EGRESS_AUDIT_RECORDS_{total}",
+                detail="Egress audit evidence is available",
+                resource_count=total,
+            )
+        except Exception as exc:
+            return CheckResult(ok=True, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail=str(exc))
+
     # Run checks concurrently so the worst-case latency stays bounded by the
     # single _CHECK_TIMEOUT_SECONDS rather than summing across dependencies (a
     # k8s/uptime probe with multiple slow deps would otherwise time out at the
@@ -491,6 +510,7 @@ async def readyz(
             validated_strict_providers=strict_providers,
         )
     )
+    egress_audit_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_egress_audit())
     await asyncio.gather(
         db_check_task,
         cli_check_task,
@@ -499,6 +519,7 @@ async def readyz(
         image_check_task,
         agent_readiness_task,
         orphan_check_task,
+        egress_audit_task,
     )
     db_check = db_check_task.result()
     cli_check = cli_check_task.result()
@@ -507,6 +528,7 @@ async def readyz(
     image_check = image_check_task.result()
     agent_readiness = agent_readiness_task.result()
     orphan_check = orphan_check_task.result()
+    egress_audit = egress_audit_task.result()
     checks = {
         "db": db_check,
         "docker_cli": cli_check,
@@ -514,6 +536,7 @@ async def readyz(
         "docker_compose": compose_check,
         "agent_runtime_image": image_check,
         "orphan_resources": orphan_check,
+        "egress_audit": egress_audit,
     }
 
     overall_ok = all(check.ok for check in checks.values()) and agent_readiness["status"] == "ok"

@@ -1121,6 +1121,27 @@ def build_mcp_server(
             return _tool_error(exc)
         return _tool_result(OperationResponse.model_validate(result).model_dump(mode="json"))
 
+    @mcp.tool(name="awf_get_egress_audit_evidence")
+    async def awf_get_egress_audit_evidence(
+        workspace_id: str = Field(
+            ..., min_length=1, max_length=256, description="Workspace ID for egress audit evidence."
+        ),
+    ) -> StructuredToolResult:
+        """Read-only: return the latest outbound egress audit evidence for a workspace."""
+        try:
+            response = await service.get(workspace_id)
+            if response is None:
+                return _safe_result({"workspace_id": workspace_id, "evidence": None})
+            egress = response.egress_audit
+            if egress is None:
+                return _safe_result({"workspace_id": workspace_id, "evidence": None})
+            return _safe_result(egress.model_dump(mode="json"))
+        except Exception as exc:
+            return _tool_result(
+                {"error_code": "MCP_EGRESS_AUDIT_ERROR", "message": str(exc)},
+                is_error=True,
+            )
+
     return mcp
 
 

@@ -23,14 +23,15 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
-from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
+from awf.db.repositories import EgressAuditRepository, ResourceReservationRepository, WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
-from awf.node.egress_policy import LocalEgressPolicyError
+from awf.node.egress_policy import LocalEgressPolicyError, local_egress_plan
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import EgressMode as ProfileEgressMode
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 from awf.service.secret_leases import (
     PROVISIONING_FAILED_REVOKE_REASON,
@@ -148,6 +149,9 @@ class Provisioner:
                 profile = profile_resolution.profile
             else:
                 profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+            egress_plan = local_egress_plan(profile.security.egress)
+            egress_decision = _egress_plan_decision(egress_plan.mode)
+            destination_category = _egress_plan_destination_category(egress_plan.mode)
             stack_paths: ComposeProjectPaths | None = None
             if self._stack_launcher is not None:
                 await self._issue_secret_leases(workspace_id, profile)
@@ -279,6 +283,16 @@ class Provisioner:
                 workspace_id=workspace_id,
                 node_id=self._config.node_id,
                 profile=profile,
+            )
+
+            await EgressAuditRepository(session).create(
+                workspace_id=workspace_id,
+                attempt_id=None,
+                policy_posture=egress_plan.mode.value,
+                decision=egress_decision.value,
+                destination_category=destination_category,
+                reason_code=egress_plan.reason_code,
+                details=dict(egress_plan.details),
             )
 
             await repo.transition(
@@ -573,3 +587,17 @@ def _positive_int(value: object) -> int | None:
             parsed = int(stripped)
             return parsed if parsed > 0 else None
     return None
+
+
+def _egress_plan_decision(mode: ProfileEgressMode) -> EgressDecision:
+    if mode == ProfileEgressMode.open:
+        return EgressDecision.allow
+    if mode == ProfileEgressMode.offline:
+        return EgressDecision.deny
+    return EgressDecision.deferred
+
+
+def _egress_plan_destination_category(mode: ProfileEgressMode) -> str:
+    if mode == ProfileEgressMode.open:
+        return "public_internet"
+    return "internal_only"

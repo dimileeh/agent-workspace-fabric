@@ -35,6 +35,7 @@ from awf.common.callback_events import (
 from awf.common.ids import (
     new_callback_delivery_id,
     new_callback_subscription_id,
+    new_egress_audit_record_id,
     new_event_id,
     new_log_stream_id,
     new_merge_candidate_id,
@@ -64,6 +65,7 @@ from awf.db.enums import (
 from awf.db.models import (
     CallbackDelivery,
     CallbackSubscription,
+    EgressAuditRecord,
     MergeCandidate,
     Operation,
     PolicyFinding,
@@ -1924,6 +1926,59 @@ class SecretLeaseIssue:
     expires_at: datetime | None
     issue_metadata: dict[str, Any]
     attempt_id: str | None = None
+
+
+class EgressAuditRepository:
+    """CRUD helpers for outbound egress audit evidence."""
+
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
+        self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+
+    async def create(
+        self,
+        *,
+        workspace_id: str,
+        attempt_id: str | None,
+        policy_posture: str,
+        decision: str,
+        destination_category: str,
+        reason_code: str,
+        details: dict[str, Any],
+    ) -> EgressAuditRecord:
+        record = EgressAuditRecord(
+            id=new_egress_audit_record_id(),
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            policy_posture=policy_posture,
+            decision=decision,
+            destination_category=destination_category,
+            reason_code=reason_code,
+            details=redact_audit_value(details),
+        )
+        self._session.add(record)
+        return record
+
+    async def get_latest_for_workspace(self, workspace_id: str) -> EgressAuditRecord | None:
+        stmt = (
+            select(EgressAuditRecord)
+            .where(EgressAuditRecord.workspace_id == workspace_id)
+            .order_by(EgressAuditRecord.enforced_at.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def summary_counts_by_posture(self) -> dict[str, int]:
+        stmt = (
+            select(
+                EgressAuditRecord.policy_posture,
+                func.count(EgressAuditRecord.id),
+            )
+            .group_by(EgressAuditRecord.policy_posture)
+        )
+        result = await self._session.execute(stmt)
+        return {str(row[0]): row[1] for row in result.fetchall()}
 
 
 class SecretLeaseRepository:

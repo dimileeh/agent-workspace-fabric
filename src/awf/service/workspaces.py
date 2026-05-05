@@ -17,6 +17,7 @@ from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import (
+    EgressAuditRecordResponse,
     FallbackTargetResponse,
     OperationResponse,
     OwnedPathOverlapResponse,
@@ -41,8 +42,9 @@ from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceSecretLease
+from awf.db.models import EgressAuditRecord, Operation, Task, TaskAttempt, Workspace, WorkspaceSecretLease
 from awf.db.repositories import (
+    EgressAuditRepository,
     OperationRepository,
     OwnedPathOverlap,
     QueueDecisionRepository,
@@ -441,7 +443,13 @@ class WorkspaceService:
                 validation_runs,
                 candidate=latest_merge_candidate(ws),
             )
-            return workspace_response(ws, validation_provenance=validation_provenance)
+            audit_record = await EgressAuditRepository(s).get_latest_for_workspace(workspace_id)
+            egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
+            return workspace_response(
+                ws,
+                validation_provenance=validation_provenance,
+                egress_audit=egress_audit,
+            )
 
     async def list(self, *, limit: int = 50) -> list[WorkspaceResponse]:
         async with self._factory() as s:
@@ -1271,6 +1279,7 @@ def workspace_response(
     workspace: Workspace,
     *,
     validation_provenance: ValidationFreshnessSummaryResponse | None = None,
+    egress_audit: dict[str, Any] | None = None,
 ) -> WorkspaceResponse:
     computed_fields = dict(workspace_observability_payload(workspace))
     computed_fields["validation_provenance"] = (
@@ -1301,6 +1310,8 @@ def workspace_response(
         workspace
     )
     computed_fields["pricing"] = _pricing_metadata_response(workspace)
+    if egress_audit is not None:
+        computed_fields["egress_audit"] = egress_audit
     return WorkspaceResponse.model_validate(_WorkspaceResponseSource(workspace, computed_fields))
 
 
@@ -1330,6 +1341,21 @@ def _console_safe_profile_snapshot(raw_profile: object) -> dict[str, Any] | None
         return None
     sanitized = _sanitize_profile_value(raw_profile, path=())
     return cast(dict[str, Any], sanitized)
+
+
+def _egress_audit_response(record: EgressAuditRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "workspace_id": record.workspace_id,
+        "attempt_id": record.attempt_id,
+        "policy_posture": record.policy_posture,
+        "decision": record.decision,
+        "destination_category": record.destination_category,
+        "reason_code": record.reason_code,
+        "details": record.details,
+        "enforced_at": record.enforced_at,
+        "created_at": record.created_at,
+    }
 
 
 def _pricing_metadata_response(workspace: Workspace) -> dict[str, Any] | None:

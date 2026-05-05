@@ -430,6 +430,10 @@ class ResourceSaturationSummaryResponse(BaseModel):
         default=None,
         description="Provider recovery state counts by phase.",
     )
+    egress_posture_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Counts of egress audit records by policy posture.",
+    )
 
 
 @router.get(
@@ -513,7 +517,9 @@ async def get_resource_saturation_summary(
         orphan_resources=orphan_resources,
         runtime_health=runtime_health,
     )
-    return ResourceSaturationSummaryResponse.model_validate(summary)
+    response = ResourceSaturationSummaryResponse.model_validate(summary)
+    response.egress_posture_counts = await _egress_posture_counts(session)
+    return response
 
 
 @router.get(
@@ -642,3 +648,8 @@ def _run_subprocess(
         timeout=timeout,
         env=env,
     )
+
+
+async def _egress_posture_counts(session: AsyncSession) -> dict[str, int]:
+    from awf.db.repositories import EgressAuditRepository
+    return await EgressAuditRepository(session).summary_counts_by_posture()

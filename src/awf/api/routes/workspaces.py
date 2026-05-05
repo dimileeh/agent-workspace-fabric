@@ -41,6 +41,7 @@ from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    EgressAuditRepository,
     TaskExternalIdConflictError,
     ValidationRunRepository,
     WorkspaceEventRepository,
@@ -469,7 +470,13 @@ async def get_workspace(
         validation_runs,
         candidate=latest_merge_candidate(ws),
     )
-    return workspace_response(ws, validation_provenance=validation_provenance)
+    audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
+    egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
+    return workspace_response(
+        ws,
+        validation_provenance=validation_provenance,
+        egress_audit=egress_audit,
+    )
 
 
 @router.get("/{workspace_id}/secret-leases", response_model=WorkspaceSecretLeaseListResponse)
