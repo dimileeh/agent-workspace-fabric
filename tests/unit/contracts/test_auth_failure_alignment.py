@@ -187,10 +187,10 @@ async def test_mcp_does_not_expose_authorization_arg_on_control_tools(
 
 
 @pytest.mark.unit
-async def test_rest_create_workspace_rejects_wrong_bearer_after_token_required(
+async def test_rest_cancel_workspace_rejects_wrong_bearer_after_token_required(
     contract_stack: ContractStack,
 ) -> None:
-    """``POST /v1/workspaces/{id}/retry`` requires a bearer when token is configured.
+    """``POST /v1/workspaces/{id}/cancel`` requires a bearer when token is configured.
 
     Sanity-check that the auth-protected control routes (cancel/stop/destroy/
     remonitor/refresh/validate/rebase) refuse cross-tenant or stale tokens.
