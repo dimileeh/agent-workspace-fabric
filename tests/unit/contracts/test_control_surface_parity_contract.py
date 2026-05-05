@@ -33,6 +33,19 @@ def _mock_response(
     return response
 
 
+def _assert_control_headers(
+    headers: dict[str, str],
+    *,
+    idempotency_key: str,
+    if_match: str | None,
+) -> None:
+    assert headers["Idempotency-Key"] == idempotency_key
+    if if_match is None:
+        assert "If-Match" not in headers
+    else:
+        assert headers["If-Match"] == if_match
+
+
 @dataclass(frozen=True)
 class _ControlCase:
     capability: str
@@ -297,13 +310,11 @@ def test_control_commands_emit_expected_request_shape_and_output(case: _ControlC
     assert result.exit_code == 0, result.output
     assert mock.call_args[0] == (case.method, f"http://localhost:8000{_expected_rest_path(case)}")
     payload = mock.call_args.kwargs
-    if case.if_match is None:
-        assert payload["headers"] == {"Idempotency-Key": case.idempotency_key}
-    else:
-        assert payload["headers"] == {
-            "Idempotency-Key": case.idempotency_key,
-            "If-Match": case.if_match,
-        }
+    _assert_control_headers(
+        payload["headers"],
+        idempotency_key=case.idempotency_key,
+        if_match=case.if_match,
+    )
     if case.expected_body is None:
         assert "json" not in payload
     else:
