@@ -32,7 +32,7 @@ from awf.mcp.server import build_mcp_server
 from awf.service.workspaces import WorkspaceService
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from tests.unit.contracts._capabilities import normalize_rest_error_body
+from tests.unit.contracts._capabilities import mutating_capabilities, normalize_rest_error_body
 from tests.unit.contracts._stack import ContractStack, contract_stack  # noqa: F401
 
 
@@ -162,28 +162,25 @@ async def test_mcp_redacts_configured_api_token_in_responses(
 
 
 @pytest.mark.unit
-async def test_mcp_does_not_expose_authorization_arg_on_control_tools(
+async def test_mcp_does_not_expose_authorization_arg_on_mutating_tools(
     contract_stack: ContractStack,
 ) -> None:
-    """MCP control tools don't take an authorization arg.
+    """MCP mutating tools don't take an authorization arg.
 
     MCP runs in-process with the parent operator's trust. Tools must not let an
     agent pass an arbitrary ``authorization`` / ``api_token`` field that could
-    silently bypass any future auth boundary.
+    silently bypass any future auth boundary. The covered tools are derived from
+    the contract registry so any newly added mutating tool is automatically
+    swept up by this security check.
     """
     tools = {tool.name: tool for tool in await contract_stack.mcp.list_tools()}
     forbidden_keys = {"authorization", "api_token", "bearer", "token"}
-    for name in (
-        "awf_cancel_workspace",
-        "awf_stop_workspace",
-        "awf_destroy_workspace",
-        "awf_remonitor_workspace",
-        "awf_request_workspace_validation",
-        "awf_retry_workspace",
-    ):
+    mutating_tool_names = [c.mcp_tool for c in mutating_capabilities() if c.mcp_tool]
+    assert mutating_tool_names, "registry yielded no mutating MCP tools"
+    for name in mutating_tool_names:
         properties = tools[name].inputSchema.get("properties", {})
         leak = forbidden_keys & set(properties)
-        assert not leak, f"{name}: control tool exposes auth arg(s) {sorted(leak)}"
+        assert not leak, f"{name}: mutating tool exposes auth arg(s) {sorted(leak)}"
 
 
 @pytest.mark.unit
