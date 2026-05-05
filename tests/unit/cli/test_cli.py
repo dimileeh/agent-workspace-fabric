@@ -1129,6 +1129,61 @@ class TestWorkspaceObservability:
         assert "upstream failed" in result.stderr
 
 
+class TestOperationCommands:
+    @pytest.mark.unit
+    def test_list_fetches_global_operations_with_filters(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=200,
+            payload={"items": [{"id": "op_1", "type": "validate", "status": "succeeded"}]},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "operations",
+                    "list",
+                    "--workspace-id",
+                    "ws_obs",
+                    "--status",
+                    "succeeded",
+                    "--type",
+                    "validate",
+                    "--limit",
+                    "5",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "validate" in result.stdout
+        assert "env-secret" not in result.stdout
+        assert "env-secret" not in result.stderr
+        assert mock.call_args[0] == ("GET", "http://localhost:8000/v1/operations")
+        assert mock.call_args.kwargs["params"] == {
+            "limit": 5,
+            "workspace_id": "ws_obs",
+            "status": "succeeded",
+            "type": "validate",
+        }
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
+
+    @pytest.mark.unit
+    def test_show_fetches_operation_detail(self) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={"id": "op_1", "workspace_id": "ws_obs", "type": "validate"},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["operations", "show", "op_1"])
+
+        assert result.exit_code == 0, result.output
+        assert "op_1" in result.stdout
+        assert mock.call_args[0] == ("GET", "http://localhost:8000/v1/operations/op_1")
+
+
 class TestBaseUrlResolution:
     @pytest.mark.unit
     def test_cli_flag_overrides_env(self, monkeypatch: pytest.MonkeyPatch) -> None:

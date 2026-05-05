@@ -70,11 +70,13 @@ workspace_app = typer.Typer(
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
 locks_app = typer.Typer(help="Owned-path reservation and overlap-risk visibility.")
+operations_app = typer.Typer(help="Global operation history inspection.")
 smoke_app = typer.Typer(help=_DX_HELP)
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
 app.add_typer(service_app, name="service")
 app.add_typer(locks_app, name="locks")
+app.add_typer(operations_app, name="operations")
 app.add_typer(smoke_app, name="smoke")
 
 
@@ -1747,6 +1749,52 @@ def workspace_operations(
         f"/v1/workspaces/{workspace_id}/operations",
         base_url=_base_url(base_url),
         params=params,
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@operations_app.command("list")
+def operations_list(
+    workspace_id: str | None = typer.Option(None, "--workspace-id"),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    status: OperationStatus | None = typer.Option(None, "--status"),
+    operation_type: OperationType | None = typer.Option(None, "--type"),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """List global operations, optionally filtered by workspace."""
+    params: dict[str, Any] = {"limit": limit}
+    if workspace_id is not None:
+        params["workspace_id"] = workspace_id
+    if status is not None:
+        params["status"] = status.value
+    if operation_type is not None:
+        params["type"] = operation_type.value
+    response = _call(
+        "GET",
+        "/v1/operations",
+        base_url=_base_url(base_url),
+        params=params,
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@operations_app.command("show")
+def operations_show(
+    operation_id: str = typer.Argument(...),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Fetch one operation by id."""
+    operation_ref = urllib.parse.quote(operation_id, safe="")
+    response = _call(
+        "GET",
+        f"/v1/operations/{operation_ref}",
+        base_url=_base_url(base_url),
         headers=_api_token_headers(api_token),
     )
     _handle_response(response, fmt)

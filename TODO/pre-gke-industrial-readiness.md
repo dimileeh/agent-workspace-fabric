@@ -720,7 +720,8 @@ coding agent in any project to use AWF for a feature.
   why that surface is intentionally MCP/API-only.
   Evidence: implemented `awf workspace cancel`, `awf workspace stop`,
   `awf workspace destroy`, `awf workspace refresh`, `awf workspace validate`, and
-  `awf workspace rebase` in `src/awf/cli/main.py`; added command presence/request
+  `awf workspace rebase`, plus global safe-read `awf operations list` and
+  `awf operations show`, in `src/awf/cli/main.py`; added command presence/request
   shape/output shape/error-shape coverage in `tests/unit/cli/test_cli.py`; added a
   dedicated control-surface contract matrix and error-shape suite in
   `tests/unit/contracts/test_control_surface_parity_contract.py`; and

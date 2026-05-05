@@ -135,6 +135,20 @@ def test_control_operations_with_mcp_gaps_are_intentionally_documented() -> None
 
 
 @pytest.mark.unit
+def test_global_operations_safe_read_has_cli_parity() -> None:
+    rows = _parity_rows()
+    row = _row_for_capability(rows, "Global operations")
+    cli_cell = _strip_backticks(row.get("CLI surface", "")).strip()
+    backlog_cell = _strip_backticks(row.get("Backlog Slice", "")).strip()
+
+    assert "CLI absent" not in cli_cell
+    assert "awf operations list" in cli_cell
+    assert "awf operations show" in cli_cell
+    assert row.get("Status", "").strip() == "MCP implemented"
+    assert backlog_cell == "—"
+
+
+@pytest.mark.unit
 def test_retry_workspace_row_reflects_registered_mcp_tool() -> None:
     rows = _parity_rows()
     row = _row_for_capability(rows, "Retry workspace")
