@@ -8,13 +8,73 @@ Run the API locally:
 uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
 ```
 
-Health check:
+The OpenAPI spec is served at `/openapi.json` and browsable at `/docs`.
+A checked-in stable copy is available as `openapi.json` in the repository root.
+
+All endpoints return JSON. Endpoints requiring authentication use the
+`Authorization: Bearer $AWF_API_TOKEN` header. Workspaces and most read
+endpoints are unauthenticated when `AWF_API_TOKEN` is not configured.
+
+Common response patterns:
+
+- `404` with `{"error_code": "NOT_FOUND", "message": "..."}` for missing resources
+- `409` with `{"error_code": "...", "message": "..."}` for idempotency conflicts
+- `422` for validation errors
+- `503` when a dependency (DB, Docker) is unavailable
+
+---
+
+## Health and Readiness
+
+### Liveness check
+
+No auth required. Dependency-free probe that confirms the HTTP stack is up.
 
 ```bash
 curl http://localhost:8000/healthz
 ```
 
-Create a v2 workspace:
+Response shape:
+
+```json
+{"status": "ok", "service": "awf", "version": "0.1.0"}
+```
+
+### Readiness check
+
+No auth required. Reports per-dependency health (DB, Docker CLI/daemon/Compose,
+agent runtime image, orphan resources).
+
+```bash
+curl http://localhost:8000/readyz
+```
+
+Returns `200` when all checks pass, `503` when one or more fail.
+Each sub-check includes a stable `reason` code for alert routing.
+
+### Release readiness
+
+No auth required. Returns the AWF Core local release scorecard.
+
+```bash
+curl http://localhost:8000/release-readiness
+```
+
+Returns `200` when the release is ready, `503` otherwise. Supports query params
+`provider`, `failure_window_hours`, `slo_window_hours`.
+
+```bash
+curl "http://localhost:8000/release-readiness?provider=codex&provider=claude_code"
+```
+
+---
+
+## Create Workspace
+
+### Create a v2 workspace (recommended)
+
+Uses the structured v2 request body. Supports idempotency via `Idempotency-Key`
+header and provider readiness preflight.
 
 ```bash
 curl -X POST http://localhost:8000/v2/workspaces \
@@ -51,49 +111,69 @@ curl -X POST http://localhost:8000/v2/workspaces \
   }'
 ```
 
-Current local-service behavior: the REST API persists workspace requests and
-exposes state, and the always-on worker drives feature PR workspaces through the
-full lifecycle: `requested -> provisioning -> ready -> running -> validating ->
-pushing -> monitoring_pr -> completed/failed`. Feature PR workspaces created
-through the service use the resolved profile's monitor grace window
-(`monitor.initial_review_grace_period_seconds`, default `900`) unless the task
-sets `initial_review_grace_period_seconds`. `auto_merge: true` routes to the
-feature monitor, which may merge after the gates pass. `auto_merge: false`
-routes to the manual/release monitor behavior: AWF posts the ready-for-human
-comment and keeps polling until a human merge is observed. Release/sync flows
-remain available through the compatibility dogfood scripts.
+Returns `202 Accepted` with workspace ID, status URL, and events URL.
 
-The v2 task object also accepts policy metadata for future deterministic
-scheduling:
+The v2 task object accepts policy metadata:
 
-- `task_class`: optional; one of `docs_task`, `test_task`, `refactor_task`,
+- `task_class`: one of `docs_task`, `test_task`, `refactor_task`,
   `migration_task`, `dependency_task`, or `build_config_task`.
-- `owned_paths`: optional list of path globs/strings the task expects to own;
-  omitted values default to `[]`.
+- `owned_paths`: path globs the task expects to own; defaults to `[]`.
 
-AWF persists and returns these fields on workspace, task, overview, and MCP
-workspace create/get/list responses. This slice does not enforce locks or
-change scheduling behavior yet.
-
-Get one workspace:
+### Create a v1 workspace (legacy)
 
 ```bash
-curl http://localhost:8000/v1/workspaces/ws_123
+curl -X POST http://localhost:8000/v1/workspaces \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: example-legacy-001" \
+  -d '{
+    "repo_url": "git@github.com:example/app.git",
+    "branch_base": "main",
+    "task_title": "Fix login bug",
+    "task_prompt": "Fix the login validation error.",
+    "agent": "codex",
+    "test_commands": ["pytest -q"],
+    "requires_database": false
+  }'
 ```
 
-List workspaces:
+---
+
+## List and Filter Workspaces
+
+### Dashboard-friendly workspace overview
+
+```bash
+curl "http://localhost:8000/v1/workspaces/overview?status=monitoring_pr&agent=codex&limit=25"
+```
+
+### List workspaces (full detail)
 
 ```bash
 curl "http://localhost:8000/v1/workspaces?limit=50"
 ```
 
-List workspaces with dashboard-friendly filters:
+Filter by status, agent, or repo URL:
 
 ```bash
 curl "http://localhost:8000/v1/workspaces?status=monitoring_pr&agent=codex&repo_url=git@github.com:example/app.git&limit=25"
 ```
 
-Poll immutable events:
+---
+
+## Get Workspace Status
+
+```bash
+curl http://localhost:8000/v1/workspaces/ws_123
+```
+
+Returns the full workspace response including status, task policy, validation
+provenance, lifecycle stages, LLM usage, and provider recovery state.
+
+---
+
+## Read Logs and Events
+
+### List workspace events
 
 ```bash
 curl "http://localhost:8000/v1/events?workspace_id=ws_123&limit=50"
@@ -109,12 +189,284 @@ Events response shape:
 }
 ```
 
-List and download workspace artifacts through the protected observability API:
+### List workspace events (per-workspace)
+
+```bash
+curl "http://localhost:8000/v1/workspaces/ws_123/events?limit=50"
+```
+
+### List workspace log streams
+
+Auth required (`Authorization: Bearer $AWF_API_TOKEN`).
+
+```bash
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/logs"
+```
+
+### Read a log stream
+
+Auth required.
+
+```bash
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/logs/ls_abc?offset=0&limit_bytes=65536"
+```
+
+---
+
+## Request Validation
+
+Request a validation run for a workspace. Auth required.
+Supports idempotency via `Idempotency-Key` and optimistic concurrency via
+`If-Match` (workspace version).
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/validate" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: validate-ws-123-tier2" \
+  -H "If-Match: 3" \
+  -H "Content-Type: application/json" \
+  -d '{"requested_tier": 2}'
+```
+
+Returns `202 Accepted` with an operation response.
+
+---
+
+## Remonitor
+
+Re-enter PR monitoring for a workspace that had its monitor fall off.
+Auth required. Requires `Idempotency-Key` and supports `If-Match`.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/remonitor" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: remonitor-ws-123" \
+  -H "If-Match: 7" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Monitor exited unexpectedly"}'
+```
+
+---
+
+## Retry
+
+Retry a terminal (failed/cancelled) workspace by creating a new workspace
+that inherits repo, branch, and task configuration. No auth required.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/retry"
+```
+
+Optional query params: `provider_readiness_override`, `provider_readiness_override_reason`.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/retry?provider_readiness_override=true&provider_readiness_override_reason=Capacity+recovered"
+```
+
+---
+
+## Release Readiness
+
+See Health and Readiness above. Evaluates SLO metrics, validation, and
+dependency health to produce a local release scorecard.
+
+```bash
+curl http://localhost:8000/release-readiness
+```
+
+---
+
+## Refresh and Rebase
+
+### Refresh workspace
+
+Pull the target branch into the workspace branch without replaying the agent.
+Auth required. Requires `Idempotency-Key` and supports `If-Match`.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/refresh" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: refresh-ws-123" \
+  -H "If-Match: 5" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Target branch advanced"}'
+```
+
+### Rebase workspace
+
+Rebase the workspace branch onto the current target branch tip.
+Auth required. Requires `Idempotency-Key` and supports `If-Match`.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/rebase" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: rebase-ws-123" \
+  -H "If-Match: 8" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Stale after target merge", "requested_tier": 2}'
+```
+
+---
+
+## Cancel and Stop
+
+### Cancel workspace
+
+Mark a running workspace as cancelled and clean up resources.
+Auth required. Requires `Idempotency-Key` and supports `If-Match`.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/cancel" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: cancel-ws-123" \
+  -H "If-Match: 2" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "No longer needed", "stop_stack": true}'
+```
+
+### Stop workspace
+
+Stop the workspace container stack without marking the workspace as cancelled.
+Auth required. Requires `Idempotency-Key` and supports `If-Match`.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/stop" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: stop-ws-123" \
+  -H "If-Match: 3" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Agent stuck", "stop_stack": true}'
+```
+
+---
+
+## Destroy
+
+Permanently delete a workspace and its resources. Auth required.
+Supports `Idempotency-Key` and `If-Match`.
+
+```bash
+curl -X DELETE "http://localhost:8000/v1/workspaces/ws_123" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: destroy-ws-123" \
+  -H "If-Match: 5"
+```
+
+Query params: `force` (boolean), `remove_volumes` (boolean, default true),
+`remove_worktree` (boolean, default true).
+
+---
+
+## Merge Queue
+
+List merge candidates with their merge readiness, blockers, and stale reasons.
+
+```bash
+curl "http://localhost:8000/v1/merge-queue?limit=50"
+```
+
+Filter by repo, base branch, or workspace status:
+
+```bash
+curl "http://localhost:8000/v1/merge-queue?repo_url=git@github.com:example/app.git&base_branch=main&status=monitoring_pr"
+```
+
+---
+
+## Validation Provenance
+
+List validation run provenance for a workspace, including tier, freshness,
+command set hash, and coverage status.
+
+```bash
+curl "http://localhost:8000/v1/workspaces/ws_123/validation?limit=20"
+```
+
+---
+
+## Stale Reasons
+
+List structured stale reasons for a workspace's merge candidate.
+
+```bash
+curl "http://localhost:8000/v1/workspaces/ws_123/stale-reasons?include_resolved=false&limit=20"
+```
+
+---
+
+## Operations
+
+### List all operations
+
+```bash
+curl "http://localhost:8000/v1/operations?limit=50"
+```
+
+Filter by workspace ID, status, or operation type:
+
+```bash
+curl "http://localhost:8000/v1/operations?workspace_id=ws_123&type=rebase&status=succeeded"
+```
+
+### List workspace operations
+
+```bash
+curl "http://localhost:8000/v1/workspaces/ws_123/operations?limit=50"
+```
+
+### Get a single operation
+
+```bash
+curl "http://localhost:8000/v1/operations/op_abc"
+```
+
+---
+
+## Tasks
+
+### List tasks
+
+Workspace-backed task views with attempt and merge candidate status for operator
+consoles.
+
+```bash
+curl "http://localhost:8000/v1/tasks?limit=50"
+```
+
+Filter by status and agent:
+
+```bash
+curl "http://localhost:8000/v1/tasks?status=monitoring_pr&agent=codex"
+```
+
+### List task attempts
+
+```bash
+curl "http://localhost:8000/v1/tasks/task_abc/attempts?limit=100"
+```
+
+---
+
+## Artifacts
+
+List and download workspace artifacts through the protected observability API.
+
+### List artifacts
+
+Auth required.
 
 ```bash
 curl -H "Authorization: Bearer $AWF_API_TOKEN" \
   "http://localhost:8000/v1/workspaces/ws_123/artifacts"
+```
 
+### Download an artifact
+
+Auth required. Supports `?path=` to download a specific file.
+
+```bash
 curl -OJ -H "Authorization: Bearer $AWF_API_TOKEN" \
   "http://localhost:8000/v1/workspaces/ws_123/artifacts/download?path=logs/stdout.txt"
 ```
@@ -124,3 +476,154 @@ Artifact downloads are limited to regular files under
 Absolute paths, traversal segments, backslashes, symlinks, and missing files are
 rejected without reading arbitrary host paths.
 
+---
+
+## Callbacks
+
+Register external HTTP callback targets for sanitized AWF event envelopes.
+
+### Create a callback subscription
+
+Auth required. Requires `Idempotency-Key`.
+
+```bash
+curl -X POST http://localhost:8000/v1/callbacks \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: callback-myapp-001" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "MyApp deploy notifier",
+    "target_url": "https://myapp.example.com/awf/events",
+    "event_types": ["workspace.completed", "workspace.failed"],
+    "enabled": true,
+    "timeout_seconds": 10,
+    "max_attempts": 3,
+    "initial_backoff_seconds": 5
+  }'
+```
+
+### List callback subscriptions
+
+Auth required.
+
+```bash
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/callbacks?enabled=true&limit=50"
+```
+
+---
+
+## Locks and Overlap
+
+### List owned-path locks
+
+```bash
+curl "http://localhost:8000/v1/locks?limit=50"
+```
+
+Filter by repo, task class, or workspace status:
+
+```bash
+curl "http://localhost:8000/v1/locks?repo_url=git@github.com:example/app.git&task_class=refactor_task"
+```
+
+### Overlap graph
+
+Visualize advisory path overlap between active workspaces.
+
+```bash
+curl "http://localhost:8000/v1/locks/overlap-graph?limit=100"
+```
+
+---
+
+## Runtime
+
+Inspect a workspace's Docker Compose stack and runtime health.
+
+Auth required.
+
+```bash
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/runtime"
+```
+
+---
+
+## Metrics
+
+### Workspace reliability summary
+
+```bash
+curl "http://localhost:8000/v1/metrics/workspaces/summary?since_hours=168"
+```
+
+### Failure analysis summary
+
+```bash
+curl "http://localhost:8000/v1/metrics/failures/summary?since_hours=24&limit=10"
+```
+
+### Resource saturation
+
+```bash
+curl "http://localhost:8000/v1/metrics/resources/saturation"
+```
+
+### SLO metrics
+
+```bash
+curl "http://localhost:8000/v1/metrics/slo?since_hours=168"
+```
+
+---
+
+## Secret Leases
+
+List declared secret lease status for a workspace. No auth required.
+
+```bash
+curl "http://localhost:8000/v1/workspaces/ws_123/secret-leases"
+```
+
+---
+
+## PR Monitor Adoption
+
+Adopt an already-open GitHub PR into AWF monitoring. Auth required.
+Requires `Idempotency-Key`.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/adopt-pr" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: adopt-pr-42" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo_slug": "example/app",
+    "pr_number": 42,
+    "auto_merge": true,
+    "task_title": "Adopt existing PR #42"
+  }'
+```
+
+---
+
+## OpenAPI Spec
+
+The full OpenAPI specification is available at:
+
+- Live: `GET /openapi.json` on the running service
+- Stable artifact: `openapi.json` in the repository root
+- Interactive docs: `/docs` (Swagger UI) on the running service
+
+To regenerate the checked-in artifact:
+
+```bash
+python scripts/generate_openapi.py
+```
+
+To verify the checked-in artifact has not drifted:
+
+```bash
+python scripts/generate_openapi.py --check
+```
