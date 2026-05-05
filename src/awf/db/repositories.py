@@ -1990,7 +1990,10 @@ class EgressAuditRepository:
                     order_by=EgressAuditRecord.enforced_at.desc(),
                 )
                 .label("rn"),
-            ).subquery("latest_ranked")
+            )
+            .join(Workspace, EgressAuditRecord.workspace_id == Workspace.id)
+            .where(~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES))
+            .subquery("latest_ranked")
         )
         stmt = (
             select(
@@ -1998,11 +2001,7 @@ class EgressAuditRepository:
                 func.count(),
             )
             .select_from(latest_ranked)
-            .join(Workspace, latest_ranked.c.workspace_id == Workspace.id)
-            .where(
-                latest_ranked.c.rn == 1,
-                ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES),
-            )
+            .where(latest_ranked.c.rn == 1)
             .group_by(latest_ranked.c.policy_posture)
         )
         result = await self._session.execute(stmt)

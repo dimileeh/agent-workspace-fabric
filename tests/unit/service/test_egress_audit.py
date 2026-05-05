@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.common.audit import REDACTION_MARKER
@@ -362,6 +363,63 @@ async def test_get_summary_counts_by_posture_excludes_terminal_workspaces(
         assert counts.get("open", 0) == 1
         assert counts.get("restricted", 0) == 0
         assert "restricted" not in counts or counts["restricted"] == 0
+
+
+@pytest.mark.unit
+async def test_summary_counts_by_posture_filters_active_workspaces_before_ranking(
+    session_factory: async_sessionmaker[AsyncSession],
+    engine: AsyncEngine,
+) -> None:
+    """The latest-audit ranking should only scan current workspaces."""
+
+    async with session_factory() as session:
+        active = EgressAuditRecord(
+            id=new_egress_audit_record_id(),
+            workspace_id=await _workspace(session_factory, network_posture="open"),
+            policy_posture="open",
+            decision=EgressDecision.allow.value,
+            destination_category="public_internet",
+            reason_code="LOCAL_EGRESS_OPEN_UNRESTRICTED",
+            details={},
+        )
+        session.add(active)
+
+        destroyed = EgressAuditRecord(
+            id=new_egress_audit_record_id(),
+            workspace_id=await _workspace(session_factory, status=WorkspaceStatus.destroyed),
+            policy_posture="restricted",
+            decision=EgressDecision.deny.value,
+            destination_category="public_internet",
+            reason_code="LOCAL_EGRESS_DENIED",
+            details={},
+        )
+        session.add(destroyed)
+        await session.flush()
+
+        captured_sql: list[str] = []
+
+        def _capture_statement(
+            _conn: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            if "latest_ranked" in statement:
+                captured_sql.append(" ".join(statement.lower().split()))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_statement)
+        try:
+            counts = await EgressAuditRepository(session).summary_counts_by_posture()
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _capture_statement)
+
+    assert counts == {"open": 1}
+    assert captured_sql
+    ranked_subquery_sql = captured_sql[-1].split(") as latest_ranked", 1)[0]
+    assert "join workspaces" in ranked_subquery_sql
+    assert "workspaces.status not in" in ranked_subquery_sql
 
 
 @pytest.mark.unit
