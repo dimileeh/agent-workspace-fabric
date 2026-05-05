@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -75,7 +75,8 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| _None_ | _All active workspaces were operator-terminated after invalid final-coverage validation evidence allowed failed tests to merge._ | _n/a_ | _n/a_ | cancelled | 2026-05-05 cleanup before rebuilding AWF and rerunning validation after PR #212. |
+| P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_657b484a622544b6aee70924` | [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing the destroyed monitor `ws_941096a4dc4942dcb877656a`; AWF owns conflict, validation, comment, and merge monitoring. |
+| P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_3b90c8728f0c4862a28d82cc` | [#212](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/212) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing cancelled workspace `ws_7e7f6d54bc924c47a5723621`; AWF owns validation, comment, and merge monitoring. |
 
 ### Reschedule Required Slices
 
