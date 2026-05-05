@@ -330,13 +330,32 @@ def test_control_commands_require_idempotency_key(case: _ControlCase) -> None:
 
 
 @pytest.mark.parametrize("case", _CONTROL_CASES)
-def test_control_commands_reject_bad_if_match_before_http_call(case: _ControlCase) -> None:
+def test_control_commands_surface_invalid_if_match_api_error(case: _ControlCase) -> None:
     args = _build_case_args(case, if_match="bad")
-    with patch("awf.cli.main.httpx.request") as mock:
+    response = _mock_response(
+        status_code=400,
+        payload={
+            "error_code": "INVALID_REQUEST",
+            "message": "If-Match must be a workspace version integer.",
+        },
+    )
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
         result = _RUNNER.invoke(app, args)
 
-    assert result.exit_code != 0, result.output
-    mock.assert_not_called()
+    assert result.exit_code == 1, result.output
+    assert "INVALID_REQUEST" in result.stderr
+    assert mock.call_args.kwargs["headers"]["If-Match"] == "bad"
+
+
+@pytest.mark.parametrize("case", _CONTROL_CASES)
+@pytest.mark.parametrize("if_match", ['"7"', 'W/"7"'])
+def test_control_commands_forward_etag_if_match_syntax(case: _ControlCase, if_match: str) -> None:
+    response = _mock_response(status_code=case.success_status, payload=case.response_payload)
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+        result = _RUNNER.invoke(app, _build_case_args(case, if_match=if_match))
+
+    assert result.exit_code == 0, result.output
+    assert mock.call_args.kwargs["headers"]["If-Match"] == if_match
 
 
 @pytest.mark.parametrize("case", _CONTROL_CASES)

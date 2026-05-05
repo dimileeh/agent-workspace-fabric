@@ -1312,10 +1312,10 @@ def workspace_remonitor(
         "--idempotency-key",
         help="Required idempotency key for this mutating control.",
     ),
-    if_match: int | None = typer.Option(
+    if_match: str | None = typer.Option(
         None,
         "--if-match",
-        help="Optional expected workspace version.",
+        help="Optional expected workspace version or ETag.",
     ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -1327,7 +1327,7 @@ def workspace_remonitor(
         "Idempotency-Key": idempotency_key,
     }
     if if_match is not None:
-        headers["If-Match"] = str(if_match)
+        headers["If-Match"] = if_match
     response = _call(
         "POST",
         f"/v1/workspaces/{workspace_id}/remonitor",
@@ -1352,10 +1352,10 @@ def workspace_cancel(
         "--idempotency-key",
         help="Required idempotency key for this mutating control.",
     ),
-    if_match: int | None = typer.Option(
+    if_match: str | None = typer.Option(
         None,
         "--if-match",
-        help="Optional expected workspace version.",
+        help="Optional expected workspace version or ETag.",
     ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -1367,7 +1367,7 @@ def workspace_cancel(
         "Idempotency-Key": idempotency_key,
     }
     if if_match is not None:
-        headers["If-Match"] = str(if_match)
+        headers["If-Match"] = if_match
     response = _call(
         "POST",
         f"/v1/workspaces/{workspace_id}/cancel",
@@ -1387,10 +1387,10 @@ def workspace_stop(
         "--idempotency-key",
         help="Required idempotency key for this mutating control.",
     ),
-    if_match: int | None = typer.Option(
+    if_match: str | None = typer.Option(
         None,
         "--if-match",
-        help="Optional expected workspace version.",
+        help="Optional expected workspace version or ETag.",
     ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -1402,7 +1402,7 @@ def workspace_stop(
         "Idempotency-Key": idempotency_key,
     }
     if if_match is not None:
-        headers["If-Match"] = str(if_match)
+        headers["If-Match"] = if_match
     response = _call(
         "POST",
         f"/v1/workspaces/{workspace_id}/stop",
@@ -1436,10 +1436,10 @@ def workspace_destroy(
         "--idempotency-key",
         help="Required idempotency key for this mutating control.",
     ),
-    if_match: int | None = typer.Option(
+    if_match: str | None = typer.Option(
         None,
         "--if-match",
-        help="Optional expected workspace version.",
+        help="Optional expected workspace version or ETag.",
     ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -1451,7 +1451,7 @@ def workspace_destroy(
         "Idempotency-Key": idempotency_key,
     }
     if if_match is not None:
-        headers["If-Match"] = str(if_match)
+        headers["If-Match"] = if_match
     response = _call(
         "DELETE",
         f"/v1/workspaces/{workspace_id}",
@@ -1475,10 +1475,10 @@ def workspace_refresh(
         "--idempotency-key",
         help="Required idempotency key for this mutating control.",
     ),
-    if_match: int | None = typer.Option(
+    if_match: str | None = typer.Option(
         None,
         "--if-match",
-        help="Optional expected workspace version.",
+        help="Optional expected workspace version or ETag.",
     ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -1490,7 +1490,7 @@ def workspace_refresh(
         "Idempotency-Key": idempotency_key,
     }
     if if_match is not None:
-        headers["If-Match"] = str(if_match)
+        headers["If-Match"] = if_match
     response = _call(
         "POST",
         f"/v1/workspaces/{workspace_id}/refresh",
@@ -1517,10 +1517,10 @@ def workspace_validate(
         "--idempotency-key",
         help="Required idempotency key for this mutating control.",
     ),
-    if_match: int | None = typer.Option(
+    if_match: str | None = typer.Option(
         None,
         "--if-match",
-        help="Optional expected workspace version.",
+        help="Optional expected workspace version or ETag.",
     ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -1532,7 +1532,7 @@ def workspace_validate(
         "Idempotency-Key": idempotency_key,
     }
     if if_match is not None:
-        headers["If-Match"] = str(if_match)
+        headers["If-Match"] = if_match
     response = _call(
         "POST",
         f"/v1/workspaces/{workspace_id}/validate",
@@ -1552,10 +1552,10 @@ def workspace_rebase(
         "--idempotency-key",
         help="Required idempotency key for this mutating control.",
     ),
-    if_match: int | None = typer.Option(
+    if_match: str | None = typer.Option(
         None,
         "--if-match",
-        help="Optional expected workspace version.",
+        help="Optional expected workspace version or ETag.",
     ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -1567,7 +1567,7 @@ def workspace_rebase(
         "Idempotency-Key": idempotency_key,
     }
     if if_match is not None:
-        headers["If-Match"] = str(if_match)
+        headers["If-Match"] = if_match
     response = _call(
         "POST",
         f"/v1/workspaces/{workspace_id}/rebase",

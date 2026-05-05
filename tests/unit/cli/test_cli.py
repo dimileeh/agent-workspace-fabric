@@ -466,15 +466,65 @@ def test_workspace_control_commands_emit_structured_api_error(
         ("rebase", ["ws_rebase", "--reason", "recover merge conflicts", "--idempotency-key", "rebase-key", "--if-match", "bad"]),
     ],
 )
-def test_workspace_control_commands_reject_invalid_if_match_before_http_call(
+def test_workspace_control_commands_surface_invalid_if_match_api_error(
     command: str,
     args: list[str],
 ) -> None:
-    with patch("awf.cli.main.httpx.request") as mock:
+    response = _mock_response(
+        status_code=400,
+        payload={
+            "error_code": "INVALID_REQUEST",
+            "message": "If-Match must be a workspace version integer.",
+        },
+    )
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
         result = _runner.invoke(app, ["workspace", command, *args])
 
-    assert result.exit_code != 0
-    mock.assert_not_called()
+    assert result.exit_code == 1
+    assert "INVALID_REQUEST" in result.stderr
+    assert mock.call_args.kwargs["headers"]["If-Match"] == "bad"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        (
+            "remonitor",
+            ["ws_monitor", "--reason", "operator recovery", "--idempotency-key", "remonitor-key"],
+        ),
+        (
+            "cancel",
+            ["ws_cancel", "--reason", "operator requested", "--idempotency-key", "cancel-key"],
+        ),
+        ("stop", ["ws_stop", "--reason", "stack unstable", "--idempotency-key", "stop-key"]),
+        ("destroy", ["ws_destroy", "--idempotency-key", "destroy-key"]),
+        (
+            "refresh",
+            ["ws_refresh", "--reason", "stale branch", "--idempotency-key", "refresh-key"],
+        ),
+        (
+            "validate",
+            ["ws_validate", "--requested-tier", "2", "--idempotency-key", "validate-key"],
+        ),
+        (
+            "rebase",
+            ["ws_rebase", "--reason", "recover merge conflicts", "--idempotency-key", "rebase-key"],
+        ),
+    ],
+)
+@pytest.mark.parametrize("if_match", ['"7"', 'W/"7"'])
+def test_workspace_control_commands_forward_etag_if_match_syntax(
+    command: str,
+    args: list[str],
+    if_match: str,
+) -> None:
+    response = _mock_response(status_code=202, payload={"ok": True})
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(app, ["workspace", command, *args, "--if-match", if_match])
+
+    assert result.exit_code == 0, result.output
+    assert mock.call_args.kwargs["headers"]["If-Match"] == if_match
 
 
 class TestWorkspaceCancel:
