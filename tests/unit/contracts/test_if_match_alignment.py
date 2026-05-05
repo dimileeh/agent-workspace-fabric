@@ -199,7 +199,7 @@ async def test_rest_stale_if_match_does_not_mutate(
 ) -> None:
     workspace_id, version = await _seed_workspace(contract_stack.factory)
     capability = CAPABILITIES_BY_NAME["cancel_workspace"]
-    stale = version - 1 if version > 1 else 0
+    stale = version + 1
     headers = {
         **contract_stack.auth_headers,
         "Idempotency-Key": "cancel-no-mutate",
