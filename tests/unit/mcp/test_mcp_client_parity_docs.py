@@ -54,6 +54,8 @@ READ_ONLY_OPERATOR_ROWS = {
 
 def _split_cell(cell: str) -> list[str]:
     cell = _strip_backticks(cell)
+    # Support both comma and semicolon separation
+    cell = cell.replace(";", ",")
     parts = [p.strip() for p in cell.split(",")]
     return [p for p in parts if p]
 
@@ -269,8 +271,8 @@ def test_parity_matrix_matches_real_surfaces() -> None:
             for cli_path in cli_paths:
                 if not cli_path:
                     continue
-                # The real CLI command must be a prefix of the documented CLI usage
-                assert any(cli_path.startswith(c) for c in real_cli_commands), (
+                # The real CLI command must be an exact match or a prefix followed by a space
+                assert any(cli_path == c or cli_path.startswith(c + " ") for c in real_cli_commands), (
                     f"CLI usage {cli_path!r} for {capability!r} does not match any real Typer command prefix"
                 )
 
