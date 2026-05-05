@@ -279,7 +279,7 @@ def test_safe_control_matrix_rows_cover_cli_and_api_contracts(case: _ControlCase
     status = row.get("Status", "").strip()
     assert status == case.matrix_status, case
     if case.mcp_tool is None:
-        expected = f"No `{case.missing_mcp_tool}`"
+        expected = f"No {case.missing_mcp_tool}"
         assert expected == mcp_cell, case
     else:
         assert case.mcp_tool in mcp_cell, case

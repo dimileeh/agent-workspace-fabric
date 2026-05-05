@@ -113,8 +113,8 @@ def test_read_only_operator_rows_are_implementation_backed() -> None:
 
 
 CONTROL_GAP_ROWS = {
-    "Refresh workspace": ("awf workspace refresh", "No `awf_refresh_workspace`", "TODO§P1-mcp-refresh"),
-    "Rebase workspace": ("awf workspace rebase", "No `awf_rebase_workspace`", "TODO§P1-mcp-rebase"),
+    "Refresh workspace": ("awf workspace refresh", "No awf_refresh_workspace", "TODO§P1-mcp-refresh"),
+    "Rebase workspace": ("awf workspace rebase", "No awf_rebase_workspace", "TODO§P1-mcp-rebase"),
 }
 
 

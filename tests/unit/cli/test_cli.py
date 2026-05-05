@@ -471,7 +471,7 @@ class TestWorkspaceCancel:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         ("stop_stack",),
-        [("true", "--no-stop-stack"), ("false",)],
+        [("true",), ("false",)],
     )
     def test_posts_cancel_request_with_control_shape(self, stop_stack: str) -> None:
         response = _mock_response(
@@ -509,7 +509,7 @@ class TestWorkspaceCancel:
         )
         assert mock.call_args.kwargs["json"] == {
             "reason": "operator requested",
-            "stop_stack": stop_stack == "false",
+            "stop_stack": stop_stack == "true",
         }
         assert mock.call_args.kwargs["headers"] == {
             "Idempotency-Key": "cancel-key",
