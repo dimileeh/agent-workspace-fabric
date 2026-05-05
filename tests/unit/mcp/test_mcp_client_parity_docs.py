@@ -200,3 +200,86 @@ def test_schema_contract_column_non_empty_for_control_rows() -> None:
                 f"Row '{row.get('Capability', '?')}' has REST with POST/DELETE "
                 f"but empty Schema / Error-Code Contract"
             )
+
+
+@pytest.mark.unit
+def test_parity_matrix_matches_real_surfaces() -> None:
+    from unittest.mock import MagicMock
+
+    import typer
+
+    from awf.api.app import create_app
+    from awf.cli.main import app as cli_app
+    from awf.mcp.server import build_mcp_server
+
+    # 1. Load real REST routes
+    rest_app = create_app(use_lifespan=False)
+    real_rest_routes = set()
+    for route in rest_app.routes:
+        if hasattr(route, "methods") and hasattr(route, "path"):
+            for method in route.methods:
+                real_rest_routes.add(f"{method} {route.path}")
+
+    # 2. Load real CLI commands
+    def get_cli_commands(app: typer.Typer, prefix: str = "awf") -> list[str]:
+        commands = []
+        if app.registered_commands:
+            for cmd in app.registered_commands:
+                if cmd.name:
+                    commands.append(f"{prefix} {cmd.name}".strip())
+        if app.registered_groups:
+            for grp in app.registered_groups:
+                if grp.name and grp.typer_instance:
+                    commands.extend(get_cli_commands(grp.typer_instance, f"{prefix} {grp.name}"))
+        return commands
+
+    real_cli_commands = set(get_cli_commands(cli_app))
+
+    # 3. Load real MCP tools
+    mcp = build_mcp_server(service=MagicMock(), settings=MagicMock())
+    real_mcp_tools = {t.name for t in mcp._tool_manager.list_tools()}
+
+    # 4. Iterate over rows
+    rows = _parity_rows()
+    for row in rows:
+        capability = row.get("Capability", "").strip()
+
+        # Check REST
+        rest_cell = row.get("Canonical REST surface", "").strip()
+        rest_paths = _split_cell(rest_cell)
+        for rest_path in rest_paths:
+            if not rest_path:
+                continue
+            verb = rest_path.split()[0]
+            if verb in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
+                assert rest_path in real_rest_routes, (
+                    f"REST path {rest_path!r} for {capability!r} not in real FastAPI routes"
+                )
+
+        # Check CLI
+        cli_cell = row.get("CLI surface", "").strip()
+        if "CLI absent" not in cli_cell:
+            cli_paths = _split_cell(cli_cell)
+            for cli_path in cli_paths:
+                if not cli_path:
+                    continue
+                # The real CLI command must be a prefix of the documented CLI usage
+                assert any(cli_path.startswith(c) for c in real_cli_commands), (
+                    f"CLI usage {cli_path!r} for {capability!r} does not match any real Typer command prefix"
+                )
+
+        # Check MCP
+        mcp_cell = row.get("MCP tool name", "").strip()
+        mcp_tools = _split_cell(mcp_cell)
+        for mcp_tool in mcp_tools:
+            if not mcp_tool or "No MCP tool" in mcp_tool or mcp_tool == "No streaming MCP tool":
+                continue
+            if mcp_tool.startswith("No "):
+                missing_tool = mcp_tool[3:].strip()
+                assert missing_tool not in real_mcp_tools, (
+                    f"MCP tool {missing_tool!r} for {capability!r} is marked 'No' but exists in real FastMCP tools"
+                )
+            else:
+                assert mcp_tool in real_mcp_tools, (
+                    f"MCP tool {mcp_tool!r} for {capability!r} not in real FastMCP tools"
+                )
