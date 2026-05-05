@@ -410,6 +410,121 @@ class TestToolRegistration:
         assert payload["auto_merge"] is False
 
     @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_ignores_destroyed_prior_adoption(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            assert repo.slug() == "dimileeh/aira-web"
+            assert pr_number == 277
+            return PullRequestAdoptionMetadata(
+                number=277,
+                head_ref="feature/ready",
+                head_repo_slug="dimileeh/aira-web",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="OPEN",
+                is_draft=False,
+                closed=False,
+                merged=False,
+                author="octocat",
+                url="https://github.com/dimileeh/aira-web/pull/277",
+                title="feature: ready",
+            )
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, pr_adoption_metadata_fetcher=_fetcher)
+        )
+        first = await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+        )
+        assert isinstance(first, dict)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(str(first["workspace_id"]))
+            assert workspace is not None
+            workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        second = await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+        )
+
+        assert isinstance(second, dict)
+        assert second["attached_existing"] is False
+        assert second["workspace_id"] != first["workspace_id"]
+        assert second["status"] == "requested"
+
+    @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_returns_policy_conflict_error_result(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            assert repo.slug() == "dimileeh/aira-web"
+            assert pr_number == 277
+            return PullRequestAdoptionMetadata(
+                number=277,
+                head_ref="feature/ready",
+                head_repo_slug="dimileeh/aira-web",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="OPEN",
+                is_draft=False,
+                closed=False,
+                merged=False,
+                author="octocat",
+                url="https://github.com/dimileeh/aira-web/pull/277",
+                title="feature: ready",
+            )
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, pr_adoption_metadata_fetcher=_fetcher)
+        )
+        first = await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": False,
+            },
+        )
+        assert isinstance(first, dict)
+
+        result = await mcp.call_tool(
+            "awf_adopt_pull_request_monitor",
+            {
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": True,
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "PR_ADOPTION_POLICY_CONFLICT"
+        assert result.structuredContent["detail"] == {
+            "workspace_id": first["workspace_id"],
+            "existing_auto_merge": False,
+            "requested_auto_merge": True,
+        }
+
+    @pytest.mark.unit
     async def test_adopt_pull_request_monitor_tool_returns_terminal_pr_error_result(
         self,
         factory: async_sessionmaker[AsyncSession],

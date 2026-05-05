@@ -45,6 +45,17 @@ PR_ADOPTION_SUPERSEDED_REASON = "PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
+_LIVE_ADOPTION_STATUSES = frozenset(
+    {
+        WorkspaceStatus.requested.value,
+        WorkspaceStatus.provisioning.value,
+        WorkspaceStatus.ready.value,
+        WorkspaceStatus.running.value,
+        WorkspaceStatus.validating.value,
+        WorkspaceStatus.pushing.value,
+        WorkspaceStatus.monitoring_pr.value,
+    }
+)
 # Keep the public adoption error-code contract present in service source so
 # docs parity tests can cross-reference the matrix against implementation.
 _PR_ADOPTION_ERROR_CODE_CONTRACT = (
@@ -115,10 +126,23 @@ class PullRequestMonitorAdoptionService:
             repo_slug=repo.slug(),
             pr_number=pr_number,
         )
+        task_external_id = _adoption_external_id(repo_slug=repo.slug(), pr_number=pr_number)
         workspace_repo = WorkspaceRepository(self._session)
         await workspace_repo.acquire_idempotency_key_lock(idempotency_key)
         # Re-read under the transaction lock so a concurrent adopter that won
         # the race attaches here instead of surfacing the unique constraint.
+        adoption_history = await workspace_repo.list_pr_adoption_history(
+            task_external_id=task_external_id,
+            idempotency_key=idempotency_key,
+            task_kind=PR_ADOPTION_TASK_KIND,
+            repo_slug=repo.slug(),
+            pr_number=pr_number,
+        )
+        live_adoption = _select_live_adoption_workspace(adoption_history)
+        if live_adoption is not None:
+            _raise_if_policy_conflicts(live_adoption, request, repo=repo)
+            return await self._response(live_adoption, attached_existing=True)
+
         existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             _raise_if_existing_workspace_is_not_requested_adoption(
@@ -130,29 +154,30 @@ class PullRequestMonitorAdoptionService:
                 _raise_if_policy_conflicts(existing, request, repo=repo)
                 return await self._response(existing, attached_existing=True)
 
-            metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+        metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+        previous_terminal_adoptions = await _terminal_adoption_lineage(
+            self._session,
+            adoption_history,
+        )
+        superseded_adoption: dict[str, Any] | None = None
+        superseded_workspace: Workspace | None = None
+        if existing is not None:
             superseded_adoption = await self._supersede_previous_adoption(
                 workspace=existing,
                 idempotency_key=idempotency_key,
                 repo=repo,
                 pr_number=pr_number,
             )
-            workspace = await self._create_adoption_workspace(
-                request=request,
-                repo=repo,
-                metadata=metadata,
-                idempotency_key=idempotency_key,
-                superseded_adoption=superseded_adoption,
-                superseded_workspace=existing,
-            )
-            return await self._response(workspace, attached_existing=False)
-
-        metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+            superseded_workspace = existing
         workspace = await self._create_adoption_workspace(
             request=request,
             repo=repo,
             metadata=metadata,
             idempotency_key=idempotency_key,
+            logical_idempotency_key=idempotency_key,
+            previous_terminal_adoptions=previous_terminal_adoptions,
+            superseded_adoption=superseded_adoption,
+            superseded_workspace=superseded_workspace,
         )
         return await self._response(workspace, attached_existing=False)
 
@@ -245,6 +270,8 @@ class PullRequestMonitorAdoptionService:
         repo: RepoRef,
         metadata: PullRequestAdoptionMetadata,
         idempotency_key: str,
+        logical_idempotency_key: str,
+        previous_terminal_adoptions: list[dict[str, str | None]],
         superseded_adoption: dict[str, Any] | None = None,
         superseded_workspace: Workspace | None = None,
     ) -> Workspace:
@@ -255,6 +282,10 @@ class PullRequestMonitorAdoptionService:
             metadata=metadata,
             request=request,
             repo_url=repo_url,
+            lineage=_adoption_lineage_payload(
+                logical_idempotency_key=logical_idempotency_key,
+                previous_terminal_adoptions=previous_terminal_adoptions,
+            ),
         )
         operator_reason = _redacted_optional_text(request.reason)
         workspace_repo = WorkspaceRepository(self._session)
@@ -353,6 +384,9 @@ class PullRequestMonitorAdoptionService:
             "pr_url": metadata.url,
             "auto_merge": request.auto_merge,
             "reason": operator_reason,
+            "logical_idempotency_key": logical_idempotency_key,
+            "workspace_idempotency_key": idempotency_key,
+            "previous_terminal_adoptions": previous_terminal_adoptions,
         }
         if superseded_payload is not None:
             operation_payload["superseded_adoption"] = superseded_payload
@@ -376,6 +410,9 @@ class PullRequestMonitorAdoptionService:
             "base_sha": metadata.base_sha,
             "auto_merge": request.auto_merge,
             "reason": operator_reason,
+            "logical_idempotency_key": logical_idempotency_key,
+            "workspace_idempotency_key": idempotency_key,
+            "previous_terminal_adoptions": previous_terminal_adoptions,
         }
         if superseded_payload is not None:
             event_payload["superseded_adoption"] = superseded_payload
@@ -460,6 +497,68 @@ async def _default_metadata_fetcher(
         repo=repo,
         pr_number=pr_number,
     )
+
+
+def _select_live_adoption_workspace(workspaces: list[Workspace]) -> Workspace | None:
+    live_workspaces = [
+        workspace for workspace in workspaces if _is_live_adoption_status(workspace.status)
+    ]
+    if not live_workspaces:
+        return None
+    return max(live_workspaces, key=lambda workspace: (workspace.created_at, workspace.id))
+
+
+def _is_live_adoption_status(status: str) -> bool:
+    return status in _LIVE_ADOPTION_STATUSES
+
+
+async def _next_adoption_workspace_idempotency_key(
+    workspace_repo: WorkspaceRepository,
+    *,
+    logical_idempotency_key: str,
+) -> str:
+    if await workspace_repo.get_by_idempotency_key(logical_idempotency_key) is None:
+        return logical_idempotency_key
+
+    for generation in range(1, 1000):
+        candidate = f"{logical_idempotency_key}:g{generation}"
+        if await workspace_repo.get_by_idempotency_key(candidate) is None:
+            return candidate
+    raise RuntimeError("Could not allocate a fresh PR adoption workspace idempotency key.")
+
+
+async def _terminal_adoption_lineage(
+    session: AsyncSession,
+    workspaces: list[Workspace],
+) -> list[dict[str, str | None]]:
+    attempt_repo = TaskAttemptRepository(session)
+    lineage: list[dict[str, str | None]] = []
+    for workspace in workspaces:
+        if _is_live_adoption_status(workspace.status):
+            continue
+        attempt = await attempt_repo.get_by_workspace_id(workspace.id)
+        lineage.append(
+            {
+                "workspace_id": workspace.id,
+                "status": workspace.status,
+                "task_id": attempt.task_id if attempt is not None else None,
+                "attempt_id": attempt.id if attempt is not None else None,
+            }
+        )
+    return lineage
+
+
+def _adoption_lineage_payload(
+    *,
+    logical_idempotency_key: str,
+    previous_terminal_adoptions: list[dict[str, str | None]],
+) -> dict[str, object] | None:
+    if not previous_terminal_adoptions:
+        return None
+    return {
+        "logical_idempotency_key": logical_idempotency_key,
+        "previous_terminal_adoptions": previous_terminal_adoptions,
+    }
 
 
 def pr_adoption_idempotency_key(*, repo_slug: str, pr_number: int) -> str:
@@ -547,8 +646,9 @@ def _adoption_task_policy(
     metadata: PullRequestAdoptionMetadata,
     request: PullRequestMonitorAdoptionRequest,
     repo_url: str,
+    lineage: dict[str, object] | None = None,
 ) -> dict[str, Any]:
-    return {
+    policy: dict[str, Any] = {
         "task_kind": PR_ADOPTION_TASK_KIND,
         "pr_adoption": {
             "repo_slug": repo.slug(),
@@ -568,6 +668,9 @@ def _adoption_task_policy(
             "source": "existing_github_pr",
         },
     }
+    if lineage is not None:
+        policy["pr_adoption"]["lineage"] = lineage
+    return policy
 
 
 def _adoption_task_prompt(
@@ -605,6 +708,8 @@ def _github_repo_url_like(repo_url: str, repo_slug: str) -> str:
 
 
 def _adoption_workspace_is_resumable(workspace: Workspace) -> bool:
+    if workspace.status == "superseded":
+        return False
     try:
         status = WorkspaceStatus(workspace.status)
     except ValueError:

@@ -2674,6 +2674,44 @@ class WorkspaceRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_pr_adoption_history(
+        self,
+        *,
+        task_external_id: str,
+        idempotency_key: str,
+        task_kind: str,
+        repo_slug: str,
+        pr_number: int,
+    ) -> builtins.list[Workspace]:
+        """List workspaces that represent adoption history for one repo/PR."""
+        stmt = (
+            select(Workspace)
+            .where(
+                or_(
+                    Workspace.task_external_id == task_external_id,
+                    Workspace.idempotency_key == idempotency_key,
+                    and_(
+                        Workspace.task_kind == task_kind,
+                        Workspace.pr_number == pr_number,
+                    ),
+                )
+            )
+            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+        )
+        candidates = list((await self._session.execute(stmt)).scalars())
+        return [
+            workspace
+            for workspace in candidates
+            if _matches_pr_adoption_identity(
+                workspace,
+                task_external_id=task_external_id,
+                idempotency_key=idempotency_key,
+                task_kind=task_kind,
+                repo_slug=repo_slug,
+                pr_number=pr_number,
+            )
+        ]
+
     async def acquire_idempotency_key_lock(self, key: str) -> None:
         """Serialize workspace idempotency decisions with a PostgreSQL advisory lock."""
         lock_key = _workspace_idempotency_advisory_lock_key(key)
@@ -3397,6 +3435,45 @@ class WorkspaceRepository:
         workspace.events.extend(created)
         await self._session.flush()
         return created
+
+
+def _matches_pr_adoption_identity(
+    workspace: Workspace,
+    *,
+    task_external_id: str,
+    idempotency_key: str,
+    task_kind: str,
+    repo_slug: str,
+    pr_number: int,
+) -> bool:
+    if workspace.task_kind == task_kind and workspace.task_external_id == task_external_id:
+        return True
+
+    adoption = _workspace_pr_adoption_policy(workspace)
+    if not adoption:
+        return False
+    if workspace.task_kind != task_kind and workspace.idempotency_key != idempotency_key:
+        return False
+
+    adoption_repo = adoption.get("repo_slug")
+    adoption_pr_number = adoption.get("pr_number")
+    if not isinstance(adoption_pr_number, str | int):
+        return False
+    try:
+        normalized_pr_number = int(adoption_pr_number)
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(adoption_repo, str)
+        and adoption_repo.lower() == repo_slug.lower()
+        and normalized_pr_number == pr_number
+    )
+
+
+def _workspace_pr_adoption_policy(workspace: Workspace) -> Mapping[str, Any]:
+    policy = workspace.task_policy
+    adoption = policy.get("pr_adoption") if isinstance(policy, dict) else None
+    return adoption if isinstance(adoption, Mapping) else {}
 
 
 def _candidate_terminal_close_reason(status: WorkspaceStatus) -> str:

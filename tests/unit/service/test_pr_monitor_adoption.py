@@ -16,6 +16,7 @@ from awf.common.github_client import (
     PullRequestMetadataError,
     RepoRef,
 )
+from awf.db import repositories as repository_module
 from awf.db.enums import OperationType, WorkspaceStatus
 from awf.db.models import (
     Operation,
@@ -34,6 +35,16 @@ from awf.service.pr_monitor_adoption import (
     PullRequestMonitorAdoptionService,
 )
 from tests.postgres import postgres_test_engine
+
+_LIVE_ADOPTION_STATUSES = {
+    WorkspaceStatus.requested.value,
+    WorkspaceStatus.provisioning.value,
+    WorkspaceStatus.ready.value,
+    WorkspaceStatus.running.value,
+    WorkspaceStatus.validating.value,
+    WorkspaceStatus.pushing.value,
+    WorkspaceStatus.monitoring_pr.value,
+}
 
 
 @pytest.fixture
@@ -126,6 +137,29 @@ def _canonical_key() -> str:
     return adoption_module.pr_adoption_idempotency_key(
         repo_slug="dimileeh/aira-web",
         pr_number=277,
+    )
+
+
+async def _adoption_workspaces(
+    session: AsyncSession,
+    *,
+    repo_slug: str = "dimileeh/aira-web",
+    pr_number: int = 277,
+) -> list[Workspace]:
+    task_external_id = adoption_module._adoption_external_id(
+        repo_slug=repo_slug,
+        pr_number=pr_number,
+    )
+    idempotency_key = adoption_module.pr_adoption_idempotency_key(
+        repo_slug=repo_slug,
+        pr_number=pr_number,
+    )
+    return await WorkspaceRepository(session).list_pr_adoption_history(
+        task_external_id=task_external_id,
+        idempotency_key=idempotency_key,
+        task_kind=adoption_module.PR_ADOPTION_TASK_KIND,
+        repo_slug=repo_slug,
+        pr_number=pr_number,
     )
 
 
@@ -522,6 +556,240 @@ class TestPullRequestMonitorAdoptionService:
             assert await _count(session, TaskAttempt) == 0
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "live_status",
+        [
+            WorkspaceStatus.requested.value,
+            WorkspaceStatus.monitoring_pr.value,
+        ],
+    )
+    async def test_replay_attaches_to_live_adoption_without_refetching_metadata(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        live_status: str,
+    ) -> None:
+        metadata = _metadata()
+        fetcher = _MetadataFetcher(metadata)
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert workspace is not None
+            workspace.status = live_status
+
+            result = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                )
+            )
+            await session.commit()
+
+        assert result.attached_existing is True
+        assert result.workspace_id == first.workspace_id
+        assert result.status == WorkspaceStatus(live_status)
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+        async with factory() as session:
+            assert await _count(session, Workspace) == 1
+            assert await _count(session, TaskAttempt) == 1
+            assert await _count(session, Operation) == 1
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "terminal_status",
+        [
+            WorkspaceStatus.destroyed.value,
+            WorkspaceStatus.cancelled.value,
+            WorkspaceStatus.failed.value,
+            "superseded",
+        ],
+    )
+    async def test_terminal_prior_adoption_creates_fresh_monitor_workspace(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        terminal_status: str,
+    ) -> None:
+        metadata = _metadata()
+        logical_key = adoption_module.pr_adoption_idempotency_key(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+        )
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(metadata),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            assert old_workspace.idempotency_key == logical_key
+            old_workspace.status = terminal_status
+            await session.commit()
+
+        fetcher = _MetadataFetcher(metadata)
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        assert result.attached_existing is False
+        assert result.workspace_id != first.workspace_id
+        assert result.status == WorkspaceStatus.requested
+        assert result.task_id != first.task_id
+        assert result.attempt_id != first.attempt_id
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+        async with factory() as session:
+            workspaces = await _adoption_workspaces(session)
+            assert len(workspaces) == 2
+            old = next(workspace for workspace in workspaces if workspace.id == first.workspace_id)
+            fresh = next(workspace for workspace in workspaces if workspace.id == result.workspace_id)
+            live_workspaces = [
+                workspace for workspace in workspaces if workspace.status in _LIVE_ADOPTION_STATUSES
+            ]
+            assert [workspace.id for workspace in live_workspaces] == [result.workspace_id]
+            assert old.status == terminal_status
+            assert old.idempotency_key is not None
+            assert old.idempotency_key.startswith(f"{logical_key}:superseded:")
+            assert fresh.status == WorkspaceStatus.requested.value
+            assert fresh.idempotency_key == logical_key
+            lineage = fresh.task_policy["pr_adoption"]["lineage"]
+            assert lineage["logical_idempotency_key"] == logical_key
+            assert lineage["previous_terminal_adoptions"] == [
+                {
+                    "workspace_id": first.workspace_id,
+                    "status": terminal_status,
+                    "task_id": first.task_id,
+                    "attempt_id": first.attempt_id,
+                }
+            ]
+            adoption_event = next(
+                event
+                for event in fresh.events
+                if event.event_type == "workspace.pr_monitor_adoption_requested"
+            )
+            assert adoption_event.payload["logical_idempotency_key"] == logical_key
+            assert adoption_event.payload["workspace_idempotency_key"] == fresh.idempotency_key
+            assert adoption_event.payload["previous_terminal_adoptions"] == [
+                {
+                    "workspace_id": first.workspace_id,
+                    "status": terminal_status,
+                    "task_id": first.task_id,
+                    "attempt_id": first.attempt_id,
+                }
+            ]
+
+    @pytest.mark.unit
+    async def test_terminal_prior_policy_mismatch_does_not_block_fresh_adoption(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    auto_merge=False,
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    auto_merge=True,
+                )
+            )
+            await session.commit()
+
+        assert result.attached_existing is False
+        assert result.workspace_id != first.workspace_id
+        assert result.auto_merge is True
+
+    @pytest.mark.unit
+    async def test_concurrent_terminal_history_adoptions_create_one_live_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        fetcher = _MetadataFetcher(_metadata())
+
+        async def _adopt_once() -> Any:
+            async with factory() as session:
+                result = await PullRequestMonitorAdoptionService(
+                    session,
+                    metadata_fetcher=fetcher,
+                ).adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                    )
+                )
+                await session.commit()
+                return result
+
+        first_result, second_result = await asyncio.gather(_adopt_once(), _adopt_once())
+
+        assert {first_result.workspace_id, second_result.workspace_id} != {first.workspace_id}
+        assert first_result.workspace_id == second_result.workspace_id
+        assert sorted(
+            [first_result.attached_existing, second_result.attached_existing],
+        ) == [False, True]
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+        async with factory() as session:
+            workspaces = await _adoption_workspaces(session)
+            live_workspaces = [
+                workspace for workspace in workspaces if workspace.status in _LIVE_ADOPTION_STATUSES
+            ]
+            assert len(workspaces) == 2
+            assert [workspace.id for workspace in live_workspaces] == [
+                first_result.workspace_id
+            ]
+
+    @pytest.mark.unit
     async def test_replay_with_changed_monitor_policy_conflicts(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -547,6 +815,11 @@ class TestPullRequestMonitorAdoptionService:
                 )
 
         assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": excinfo.value.detail["workspace_id"],
+            "existing_auto_merge": False,
+            "requested_auto_merge": True,
+        }
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -1361,6 +1634,32 @@ class TestPullRequestMonitorAdoptionService:
         assert fetcher.calls == []
 
     @pytest.mark.unit
+    async def test_pr_url_rejects_unparseable_secondary_repo_identity_before_metadata_fetch(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                        repo_url="https://example.com/not/github",
+                    )
+                )
+
+            assert await _count(session, Workspace) == 0
+
+        assert excinfo.value.error_code == "INVALID_GITHUB_REPO"
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail == {
+            "repo": "https://example.com/not/github",
+            "field": "repo_url",
+        }
+        assert fetcher.calls == []
+
+    @pytest.mark.unit
     async def test_invalid_repo_identity_raises_structured_input_error(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -1501,3 +1800,167 @@ class TestPullRequestMonitorAdoptionService:
         }
 
         assert {"PR_METADATA_FETCH_FAILED", "PR_METADATA_INVALID"} <= contract_codes
+
+    @pytest.mark.unit
+    def test_inline_profile_name_handles_missing_profile(self) -> None:
+        assert adoption_module._inline_profile_name(None) is None
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("workspace", "expected"),
+        [
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id="pr-adopt-external",
+                    idempotency_key=None,
+                    task_policy={},
+                ),
+                True,
+            ),
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id=None,
+                    idempotency_key="logical-key",
+                    task_policy={
+                        "pr_adoption": {
+                            "repo_slug": "DIMILEEH/AIRA-WEB",
+                            "pr_number": "277",
+                        }
+                    },
+                ),
+                True,
+            ),
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id=None,
+                    idempotency_key="logical-key",
+                    task_policy={},
+                ),
+                False,
+            ),
+            (
+                Workspace(
+                    task_kind="feature_branch_pr",
+                    task_external_id=None,
+                    idempotency_key="other-key",
+                    task_policy={
+                        "pr_adoption": {
+                            "repo_slug": "dimileeh/aira-web",
+                            "pr_number": 277,
+                        }
+                    },
+                ),
+                False,
+            ),
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id=None,
+                    idempotency_key="logical-key",
+                    task_policy={
+                        "pr_adoption": {
+                            "repo_slug": "dimileeh/aira-web",
+                            "pr_number": ["277"],
+                        }
+                    },
+                ),
+                False,
+            ),
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id=None,
+                    idempotency_key="logical-key",
+                    task_policy={
+                        "pr_adoption": {
+                            "repo_slug": "dimileeh/aira-web",
+                            "pr_number": "not-a-number",
+                        }
+                    },
+                ),
+                False,
+            ),
+            (
+                Workspace(
+                    task_kind="sync_feature_pr",
+                    task_external_id=None,
+                    idempotency_key="logical-key",
+                    task_policy={"pr_adoption": "legacy-bad-payload"},
+                ),
+                False,
+            ),
+        ],
+    )
+    def test_pr_adoption_history_identity_matches_external_id_and_policy_fallback(
+        self,
+        workspace: Workspace,
+        expected: bool,
+    ) -> None:
+        assert (
+            repository_module._matches_pr_adoption_identity(
+                workspace,
+                task_external_id="pr-adopt-external",
+                idempotency_key="logical-key",
+                task_kind="sync_feature_pr",
+                repo_slug="dimileeh/aira-web",
+                pr_number=277,
+            )
+            is expected
+        )
+
+    @pytest.mark.unit
+    async def test_terminal_lineage_skips_live_adoption_candidates(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            fresh = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            fresh_workspace = await WorkspaceRepository(session).get(fresh.workspace_id)
+            assert fresh_workspace is not None
+
+            lineage = await adoption_module._terminal_adoption_lineage(
+                session,
+                [old_workspace, fresh_workspace],
+            )
+
+        assert lineage == [
+            {
+                "workspace_id": first.workspace_id,
+                "status": WorkspaceStatus.destroyed.value,
+                "task_id": first.task_id,
+                "attempt_id": first.attempt_id,
+            }
+        ]
+
+    @pytest.mark.unit
+    async def test_adoption_workspace_idempotency_key_exhaustion_is_explicit(self) -> None:
+        class _ExhaustedWorkspaceRepo:
+            async def get_by_idempotency_key(self, key: str) -> object:
+                return object()
+
+        with pytest.raises(RuntimeError, match="fresh PR adoption workspace idempotency key"):
+            await adoption_module._next_adoption_workspace_idempotency_key(
+                _ExhaustedWorkspaceRepo(),  # type: ignore[arg-type]
+                logical_idempotency_key="pr-adopt:exhausted",
+            )
