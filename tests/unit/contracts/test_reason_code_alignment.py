@@ -97,13 +97,6 @@ async def test_known_error_codes_appear_in_parity_matrix() -> None:
             continue
         seen.add(capability.parity_capability)
         matrix_codes |= parity_matrix_error_codes(capability.parity_capability)
-    matrix_codes |= {
-        "WORKSPACE_NOT_FOUND",
-        "WORKSPACE_NOT_RETRYABLE",
-        "WORKSPACE_RETRY_EXHAUSTED",
-        "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE",
-        "PROVIDER_READINESS_PRECHECK_FAILED",
-    }
     missing = declared - matrix_codes
     assert not missing, (
         "Contract registry references error codes not in the parity matrix "
