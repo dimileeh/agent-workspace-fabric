@@ -8,7 +8,17 @@ import pytest
 import typer
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RUNBOOK = REPO_ROOT / "docs" / "PR_MONITOR_ADOPTION.md"
+ADOPTION_DOC_PATHS = (
+    "README.md",
+    "docs/QUICKSTART.md",
+    "docs/GETTING_STARTED.md",
+    "docs/PR_MONITOR_ADOPTION.md",
+    "docs/REST_API_REFERENCE.md",
+    "docs/CLI_REFERENCE.md",
+    "docs/MCP_REFERENCE.md",
+    "docs/MCP_CLIENT_PARITY.md",
+    "docs/CLIENT_SURFACES.md",
+)
 
 
 def _read(relative_path: str) -> str:
@@ -18,18 +28,7 @@ def _read(relative_path: str) -> str:
 
 
 def _adoption_docs() -> str:
-    docs = [
-        "README.md",
-        "docs/QUICKSTART.md",
-        "docs/GETTING_STARTED.md",
-        "docs/PR_MONITOR_ADOPTION.md",
-        "docs/REST_API_REFERENCE.md",
-        "docs/CLI_REFERENCE.md",
-        "docs/MCP_REFERENCE.md",
-        "docs/MCP_CLIENT_PARITY.md",
-        "docs/CLIENT_SURFACES.md",
-    ]
-    return "\n\n".join(_read(path) for path in docs)
+    return "\n\n".join(_read(path) for path in ADOPTION_DOC_PATHS)
 
 
 def _real_rest_routes() -> set[str]:
@@ -207,7 +206,6 @@ def test_runbook_provides_mocked_local_docs_tested_demo_path() -> None:
 
 @pytest.mark.unit
 def test_docs_do_not_require_caller_idempotency_key_or_expose_secret_literals() -> None:
-    runbook = _read("docs/PR_MONITOR_ADOPTION.md")
     rest = _read("docs/REST_API_REFERENCE.md")
     adoption_section = rest.split("## PR Monitor Adoption", 1)[1]
     adoption_request_section = adoption_section.split("Inspect the adopted monitor:", 1)[0]
@@ -217,14 +215,16 @@ def test_docs_do_not_require_caller_idempotency_key_or_expose_secret_literals() 
     assert "caller-supplied `Idempotency-Key`" not in adoption_request_section
     assert "AWF derives deterministic repo/PR idempotency" in adoption_request_section
 
-    checked = "\n".join((runbook, adoption_request_section))
     secret_patterns = (
         r"\bghp_[A-Za-z0-9_]{8,}\b",
         r"\bgithub_pat_[A-Za-z0-9_]{8,}\b",
         r"\bgh[osru]_[A-Za-z0-9_]{8,}\b",
     )
     for pattern in secret_patterns:
-        assert not re.search(pattern, checked), f"Docs contain token-like literal: {pattern}"
+        for doc_path in ADOPTION_DOC_PATHS:
+            assert not re.search(pattern, _read(doc_path)), (
+                f"{doc_path} contains token-like literal: {pattern}"
+            )
 
 
 @pytest.mark.unit
