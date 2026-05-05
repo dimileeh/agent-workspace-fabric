@@ -107,9 +107,14 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
-def _monitor_runner(tmp_path: Path, fake: FakeCommandRunner) -> PullRequestMonitorRunner:
+def _monitor_runner(
+    tmp_path: Path,
+    fake: FakeCommandRunner,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> PullRequestMonitorRunner:
     return PullRequestMonitorRunner(
-        session_factory=object(),  # type: ignore[arg-type]
+        session_factory=session_factory or object(),  # type: ignore[arg-type]
         runner=fake,
         adapter=object(),  # type: ignore[arg-type]
         gh=object(),  # type: ignore[arg-type]
@@ -2385,6 +2390,7 @@ class TestMiscMonitorHelpers:
     @pytest.mark.unit
     async def test_commit_dirty_worktree_branches(
         self,
+        factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
         async def run_case(
@@ -2396,7 +2402,7 @@ class TestMiscMonitorHelpers:
             fake = FakeCommandRunner()
             for result in queued:
                 fake.queue_result(**result)
-            runner = _monitor_runner(tmp_path, fake)
+            runner = _monitor_runner(tmp_path, fake, session_factory=factory)
             worktree = runner._worktrees_root / workspace_id
             if make_worktree:
                 worktree.mkdir(parents=True, exist_ok=True)

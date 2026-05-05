@@ -333,7 +333,13 @@ class ResourceReservationSummaryResponse(BaseModel):
 
 PolicyFindingSeverity = Literal["warning", "blocking"]
 PolicyFindingStatus = Literal["active", "resolved"]
-PolicyFindingReasonCode = Literal["OUT_OF_SCOPE_CHANGE"]
+PolicyFindingReasonCode = Literal[
+    "OUT_OF_SCOPE_CHANGE",
+    "SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL",
+    "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION",
+    "SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST",
+    "SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS",
+]
 
 
 class PolicyFindingResponse(BaseModel):

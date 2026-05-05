@@ -139,6 +139,15 @@ REST, CLI, and MCP surfaces. Adoption creates a monitor-owned workspace for the
 open PR without re-running the coding agent, then lets AWF apply the normal PR
 monitor loop for comments, checks, freshness, and merge policy.
 
+## Supply-Chain Guardrails
+
+Workspace profiles can declare `security.supply_chain` to warn or block on
+conservative evidence of risky agent-authored install behavior, including
+unpinned dependency installs, remote script execution, unexpected package
+registry hosts, and lockfile edits outside owned paths. Findings are recorded
+with recovery guidance so operators and PR monitors can distinguish policy
+blocks from ordinary test failures.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

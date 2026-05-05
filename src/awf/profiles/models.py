@@ -599,6 +599,85 @@ class HostHomeAuthMountPolicy(BaseModel):
     mode: HostHomeAuthMountMode = HostHomeAuthMountMode.block
 
 
+class SupplyChainGuardrailMode(StrEnum):
+    """How a supply-chain guardrail finding affects workspace progress."""
+
+    warn = "warn"
+    block = "block"
+
+
+class SupplyChainGuardrailPolicy(BaseModel):
+    """Warn/block mode for one supply-chain guardrail."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: SupplyChainGuardrailMode = SupplyChainGuardrailMode.warn
+
+
+class SupplyChainRegistryPolicy(SupplyChainGuardrailPolicy):
+    """Registry-host allowlist for package-manager commands."""
+
+    allowed_hosts: list[str] = Field(default_factory=list, max_length=128)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _normalize_allowed_hosts(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            host = _normalize_registry_host(item)
+            if host in seen:
+                continue
+            normalized.append(host)
+            seen.add(host)
+        return normalized
+
+
+class ProfileSupplyChainPolicy(BaseModel):
+    """Profile-selectable supply-chain guardrails for agent-authored work."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    unpinned_dependency_installs: SupplyChainGuardrailPolicy = Field(
+        default_factory=SupplyChainGuardrailPolicy
+    )
+    remote_script_execution: SupplyChainGuardrailPolicy = Field(
+        default_factory=SupplyChainGuardrailPolicy
+    )
+    unexpected_registry_hosts: SupplyChainRegistryPolicy = Field(
+        default_factory=SupplyChainRegistryPolicy
+    )
+    lockfile_changes_outside_owned_paths: SupplyChainGuardrailPolicy = Field(
+        default_factory=SupplyChainGuardrailPolicy
+    )
+
+
+def _normalize_registry_host(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        raise ValueError("registry host must not be empty")
+    if "://" in raw:
+        parsed = urlsplit(raw)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("registry host URL must be absolute http or https")
+        if parsed.username or parsed.password:
+            raise ValueError("registry host URL must not include credentials")
+        host = parsed.hostname
+    else:
+        if any(char in raw for char in "/?#@"):
+            raise ValueError("registry host must be a hostname or URL without credentials")
+        host = raw.rsplit(":", 1)[0] if ":" in raw else raw
+    if host is None:
+        raise ValueError("registry host must include a hostname")
+    normalized = host.lower().rstrip(".")
+    if normalized == "localhost":
+        return normalized
+    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    if not re.fullmatch(rf"(?=^.{{1,253}}$){label}(?:\.{label})*", normalized):
+        raise ValueError("registry host must be a valid hostname")
+    return normalized
+
+
 class ProfileSecurity(BaseModel):
     """Security policy settings for a workspace."""
 
@@ -606,6 +685,7 @@ class ProfileSecurity(BaseModel):
 
     egress: ProfileEgress = Field(default_factory=ProfileEgress)
     host_home_auth_mounts: HostHomeAuthMountPolicy = Field(default_factory=HostHomeAuthMountPolicy)
+    supply_chain: ProfileSupplyChainPolicy = Field(default_factory=ProfileSupplyChainPolicy)
 
 
 class ProfilePricing(BaseModel):

@@ -233,10 +233,52 @@ class TestArtifactService:
 
         def iterdir_candidate(self: Path) -> Any:
             if self == artifact_dir:
-                raise OSError("walk failed")
+                raise OSError("iterdir failed")
             return original_iterdir(self)
 
         monkeypatch.setattr(Path, "iterdir", iterdir_candidate)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_listing_skips_directory_that_resolves_to_outside_file(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        nested = artifact_dir / "nested"
+        nested.mkdir(parents=True)
+        outside_file = tmp_path / "outside"
+        outside_file.write_text("not a directory\n", encoding="utf-8")
+        original_resolve = Path.resolve
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == nested:
+                return outside_file
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_listing_skips_directory_that_disappears_during_scan(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        nested = artifact_dir / "nested"
+        nested.mkdir(parents=True)
+        original_resolve = Path.resolve
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == nested:
+                raise FileNotFoundError(str(self))
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
 
         assert list_artifacts("ws_artifacts", artifact_dir) == []
 

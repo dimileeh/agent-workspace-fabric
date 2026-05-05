@@ -170,7 +170,8 @@ class ScopePolicyRefreshService:
             ],
         )
 
-        policy_blocked = any(f.severity == "blocking" for f in findings)
+        active_findings = await repo.list_active_for_candidate(candidate.id)
+        policy_blocked = any(f.severity == "blocking" for f in active_findings)
         if candidate.policy_blocked != policy_blocked:
             candidate.policy_blocked = policy_blocked
         sync_candidate_readiness(
