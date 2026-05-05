@@ -89,6 +89,7 @@ _KNOWN_COMMANDS: Final[frozenset[str]] = frozenset(
     }
 )
 _PYTHON_EXECUTABLE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
+_PIP_EXECUTABLE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^pip(?:\d+(?:\.\d+)*)?$")
 _REMOTE_SCRIPT_INTERPRETERS: Final[frozenset[str]] = frozenset(
     {"sh", "bash", "zsh", "dash", "fish", "python", "python3", "ruby", "perl", "node"}
 )
@@ -656,7 +657,7 @@ def _package_command(
             manager="uv pip",
             env_assignments=prefix_env_assignments,
         )
-    if first in {"pip", "pip3"}:
+    if _is_pip_executable(first):
         return _pip_command(
             prefixes.tokens[1:],
             manager="pip",
@@ -891,13 +892,18 @@ def _node_package_command(
         return None
     operation = tokens[0]
     install_ops = {"install", "i", "add"}
+    args = tokens[1:]
     if manager == "npm" and operation == "ci":
         return _PackageCommand(
-            manager=manager, operation=operation, package_specs=(), registry_hosts=()
+            manager=manager,
+            operation=operation,
+            package_specs=(),
+            registry_hosts=tuple(
+                _registry_hosts(args, manager=manager, env_assignments=env_assignments)
+            ),
         )
     if operation not in install_ops:
         return None
-    args = tokens[1:]
     packages: tuple[str, ...]
     if operation in {"install", "i"} and _has_any_flag(
         args,
@@ -1391,11 +1397,17 @@ def _command_from_line(line: str) -> str | None:
 
 
 def _is_known_evidence_command(command: str) -> bool:
-    return command in _KNOWN_COMMANDS or _is_python_executable(command)
+    return (
+        command in _KNOWN_COMMANDS or _is_python_executable(command) or _is_pip_executable(command)
+    )
 
 
 def _is_python_executable(command: str) -> bool:
     return _PYTHON_EXECUTABLE_PATTERN.fullmatch(command) is not None
+
+
+def _is_pip_executable(command: str) -> bool:
+    return _PIP_EXECUTABLE_PATTERN.fullmatch(command) is not None
 
 
 def _shell_tokens(command: str) -> list[str]:
