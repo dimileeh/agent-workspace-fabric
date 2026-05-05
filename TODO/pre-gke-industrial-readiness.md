@@ -499,6 +499,13 @@ not listed here.
   operator recovery. Regression coverage must prove a worker restart during an
   active agent run cannot kill five healthy workspaces merely because the new
   worker has an empty in-memory execution task map.
+  Scope: make restart recovery distinguish truly orphaned stale-active
+  resources from live agent/validation/push executions whose durable DB state
+  still says active; persist enough execution/runtime identity to make the
+  decision auditable; surface the recoverable/preserved state in events,
+  operations, status, and runtime health; and add tests for single-workspace and
+  multi-workspace restart scenarios, including no-container, live-container,
+  expired-claim, active-claim, and cleanup-failure paths.
 
 ## P1: API Contract Completion
 
@@ -641,6 +648,15 @@ coding agent in any project to use AWF for a feature.
   payloads, response payloads, reason codes, idempotency keys, `If-Match` /
   workspace-version concurrency, auth failures, and structured error semantics
   must not drift across the three clients.
+  Scope: extend the existing contract capability registry into executable
+  parity checks for every implemented safe read/control surface; compare REST
+  routes, CLI commands, MCP tool schemas, request field names, response envelope
+  fields, public reason codes, idempotency-key requirements, optimistic
+  concurrency/version semantics, auth failure shapes, and terminal structured
+  errors. If a surface is intentionally API/MCP-only or still partial, the test
+  must require an explicit matrix/backlog status instead of silently skipping
+  it. Any real drift discovered by the tests should be fixed in the smallest
+  compatible way.
 - [ ] Add a docs/status consistency test for the parity matrix so entries marked
   implemented must correspond to real REST routes, CLI commands, MCP tools, and
   contract-test coverage; partial or missing entries must remain visible as
@@ -693,6 +709,13 @@ without reading the whole repo.
   the quickstart and API/CLI/MCP docs show the supported command/API call,
   required GitHub auth, idempotency behavior, monitor policy choice, and how to
   inspect adopted monitor logs/events/merge-queue state from the console.
+  Scope: document the operator path for adopting an existing GitHub PR without
+  rerunning the coding agent, including CLI, REST, and MCP examples; required
+  GitHub token/permission checks; `auto_merge` versus manual monitor policy;
+  deterministic repo/PR idempotency and terminal-row retry behavior; console
+  inspection of logs, events, validation provenance, merge queue, and recovery
+  operations; and a mocked-local or docs-tested demo path that can be validated
+  without a live PR.
 - [x] Decide the SDK stance before open-source Core release: either ship a
   minimal Python client for the stable operator flows or explicitly document
   that REST + CLI + MCP are the supported client surfaces for v0.1. Acceptance:
