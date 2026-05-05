@@ -163,8 +163,10 @@ Route equivalents for automation include `GET /v1/workspaces/{workspace_id}`,
 and `GET /v1/merge-queue`.
 
 ```bash
-curl "http://localhost:8000/v1/workspaces/ws_123"
-curl "http://localhost:8000/v1/workspaces/ws_123/events?limit=50"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/events?limit=50"
 curl -H "Authorization: Bearer $AWF_API_TOKEN" \
   "http://localhost:8000/v1/workspaces/ws_123/operations?limit=25"
 curl -H "Authorization: Bearer $AWF_API_TOKEN" \

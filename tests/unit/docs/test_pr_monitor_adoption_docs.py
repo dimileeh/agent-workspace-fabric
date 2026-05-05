@@ -170,6 +170,27 @@ def test_runbook_covers_observability_and_recovery_surfaces() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("doc_path", "heading"),
+    (
+        ("docs/PR_MONITOR_ADOPTION.md", "REST inspection:"),
+        ("docs/REST_API_REFERENCE.md", "Inspect the adopted monitor:"),
+    ),
+)
+def test_adoption_rest_inspection_examples_include_auth_header(
+    doc_path: str, heading: str
+) -> None:
+    doc = _read(doc_path)
+    pattern = rf"{re.escape(heading)}\n\n.*?```bash\n(?P<block>.*?)\n```"
+    match = re.search(pattern, doc, re.DOTALL)
+    assert match is not None
+
+    for line in match.group("block").splitlines():
+        if line.startswith("curl "):
+            assert '-H "Authorization: Bearer $AWF_API_TOKEN"' in line
+
+
+@pytest.mark.unit
 def test_runbook_provides_mocked_local_docs_tested_demo_path() -> None:
     doc = _read("docs/PR_MONITOR_ADOPTION.md")
 

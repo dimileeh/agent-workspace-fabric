@@ -624,8 +624,10 @@ Closed or merged PRs return structured errors such as `PR_ALREADY_CLOSED` or
 Inspect the adopted monitor:
 
 ```bash
-curl "http://localhost:8000/v1/workspaces/ws_123"
-curl "http://localhost:8000/v1/workspaces/ws_123/events?limit=50"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/events?limit=50"
 curl -H "Authorization: Bearer $AWF_API_TOKEN" \
   "http://localhost:8000/v1/workspaces/ws_123/operations?limit=25"
 curl -H "Authorization: Bearer $AWF_API_TOKEN" \
