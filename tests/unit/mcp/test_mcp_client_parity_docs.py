@@ -262,6 +262,10 @@ def test_parity_matrix_matches_real_surfaces() -> None:
         cli_cell = row.get("CLI surface", "").strip()
         if "CLI absent" not in cli_cell:
             cli_paths = _split_cell(cli_cell)
+            if row.get("Status", "").strip() == "MCP implemented":
+                assert cli_paths, (
+                    f"CLI surface must be documented for {capability!r} (or explicitly marked 'CLI absent')"
+                )
             for cli_path in cli_paths:
                 if not cli_path:
                     continue
