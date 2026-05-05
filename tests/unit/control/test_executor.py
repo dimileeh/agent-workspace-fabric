@@ -310,6 +310,8 @@ class TestHappyPath:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+            assert ws.subphase == "validation"
+            assert ws.last_activity_at is not None
             assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/123"
             events = WorkspaceEventRepository(s)
             push_events = await events.list(
@@ -577,6 +579,8 @@ class TestHappyPath:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+            assert ws.subphase == "validation"
+            assert ws.last_activity_at is not None
 
     @pytest.mark.unit
     async def test_planning_profile_iterates_when_conformance_reports_gaps(
@@ -1174,6 +1178,8 @@ class TestHappyPath:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+            assert ws.subphase == "validation"
+            assert ws.last_activity_at is not None
             failed_events = [
                 event for event in ws.events if event.reason_code == AGENT_STALLED_IN_CONFORMANCE
             ]
@@ -1261,6 +1267,8 @@ class TestHappyPath:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+            assert ws.subphase == "validation"
+            assert ws.last_activity_at is not None
             assert [
                 event for event in ws.events if event.reason_code == AGENT_STALLED_IN_CONFORMANCE
             ] == []
@@ -1454,6 +1462,8 @@ class TestHappyPath:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+            assert ws.subphase == "validation"
+            assert ws.last_activity_at is not None
             stall_events = [
                 event
                 for event in ws.events
@@ -1543,6 +1553,8 @@ class TestHappyPath:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+            assert ws.subphase == "validation"
+            assert ws.last_activity_at is not None
             stall_events = [
                 event
                 for event in ws.events
@@ -1876,6 +1888,8 @@ class TestFailurePaths:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+            assert ws.subphase == "validation"
+            assert ws.last_activity_at is not None
             assert ws.pr_url == "https://github.com/dimileeh/aira-web/pull/999"
 
     @pytest.mark.unit
@@ -2372,6 +2386,8 @@ class TestFailurePaths:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+            assert ws.subphase == "validation"
+            assert ws.last_activity_at is not None
             assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/456"
         # reset + commit + verify show up in the call sequence in order.
         reset_call = next(c for c in fake.calls if "reset" in c.args and "--soft" in c.args)

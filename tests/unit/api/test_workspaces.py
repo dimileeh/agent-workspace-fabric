@@ -2364,6 +2364,40 @@ class TestIdempotency:
 
 
 class TestGetWorkspace:
+
+    @pytest.mark.unit
+    async def test_stale_running_flag(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+
+        # update DB directly to running and last_activity_at old
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from awf.db.models import Workspace
+        async with AsyncSession(engine) as session:
+            from datetime import UTC, datetime, timedelta
+
+            from sqlalchemy import update
+            await session.execute(
+                update(Workspace).where(Workspace.id == ws_id).values(
+                    status="running",
+                    subphase="agent",
+                    last_activity_at=datetime.now(UTC) - timedelta(minutes=15)
+                )
+            )
+            await session.commit()
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "running"
+        assert body["subphase"] == "agent"
+        assert body["is_stale_running"] is True
+
     @pytest.mark.unit
     async def test_returns_workspace_shape(self, client: AsyncClient) -> None:
         create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)

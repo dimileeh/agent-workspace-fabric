@@ -653,6 +653,11 @@ class WorkspaceResponse(BaseModel):
     status: WorkspaceStatus
     version: int
 
+    subphase: str | None = None
+    last_activity_at: datetime | None = None
+    last_log_at: datetime | None = None
+    is_stale_running: bool = False
+
     repo_url: str
     branch_base: str
     branch_name: str | None
@@ -907,6 +912,11 @@ class WorkspaceOverviewResponse(BaseModel):
     coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(default_factory=list)
     provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
     status: WorkspaceStatus
+
+    subphase: str | None = None
+    last_activity_at: datetime | None = None
+    last_log_at: datetime | None = None
+    is_stale_running: bool = False
     current_phase: str
     active_operation: str | None
     last_event: WorkspaceEventResponse | None
