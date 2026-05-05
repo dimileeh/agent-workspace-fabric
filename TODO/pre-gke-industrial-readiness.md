@@ -78,9 +78,7 @@ Status values:
 | P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_068773cee8f34463820c3d7d` | _pending_ | running | OpenCode/Ollama `glm-5.1:cloud` with AWF `xhigh`; retry of reschedule-required `ws_ea414c0722a74815bc474d13`. |
 | P1 Operator Console Completion | Live workspace activity signals | `ws_04048a6809004fa0ab3d8f79` | _pending_ | running | Gemini `gemini-3.1-pro-preview` with AWF `xhigh`; launched with provider-readiness override because agent runtime has Gemini CLI but control-plane probe image lacks it. Retry of `ws_451cc5007fa845ad85a0f7b3`. |
 | P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_02ae413a8c8341e089e0020a` | _pending_ | running | OpenCode/Ollama `deepseek-v4-pro:cloud` with AWF `xhigh`; Ollama cloud model manifest registered before launch. |
-| P1 Security, Secrets, And Egress Policy | Supply-chain guardrails for agent package installs | `ws_a1357eb1d1db498a9ed499ed` | [#197](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/197) | monitoring_pr | Codex `gpt-5.5` with AWF `xhigh`; owns profile-selectable warn/block supply-chain policy. |
 | P1 MCP And Project Onboarding Client Parity | MCP safe operator action tools | `ws_1f89a8c10b1d497d9c912ccb` | _pending_ | running | OpenCode/Ollama `kimi-k2.6:cloud` with AWF `xhigh`; owns safe MCP control tools for existing API operations. |
-| P1 MCP And Project Onboarding Client Parity | PR monitor adoption for existing GitHub PRs | `ws_23dd9badf9fe4290a51113e7` | [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198) | monitoring_pr | Codex `gpt-5.5` with AWF `xhigh`; owns first-class service-managed adoption flow for existing PRs. |
 | P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_e7365dffc3a243a2b8f7e775` | _pending_ | running | Codex `gpt-5.3-codex-spark` with AWF `xhigh`; owns CLI parity with canonical REST/MCP operations. |
 | P1 MCP And Project Onboarding Client Parity | REST CLI MCP contract alignment tests | `ws_7c04a361c7564bc28163baa0` | _pending_ | running | Claude Code `claude-opus-4-7` with AWF `xhigh` mapped to Claude `max`; launched with provider-readiness override because agent runtime has Claude Code but control-plane probe image lacks it. |
 
@@ -104,6 +102,8 @@ not listed here.
 | P1 Operator Console Completion | Reliable cost estimate surfacing | `ws_f0c067d4523f480ea6d7c8ec` | [#201](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/201) | merged | OpenCode/Ollama `deepseek-v4-pro:cloud`; merged 2026-05-04 and limits console cost estimates to trusted pricing and usage metadata. |
 | P1 Operator Console Completion | Token usage surfacing | `ws_61dcb9386b83477a9a6efbce` | [#200](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/200) | merged | Gemini `gemini-3.1-pro-preview`; retry of `ws_68935277abb74e619a06b232`, merged 2026-05-04 and surfaces nullable provider token usage without inventing values. |
 | P1 Operator Console Completion | Stable wide-screen embedded inspector | `ws_f33b10c9e5f8445aaaaced7d` | [#199](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/199) | merged | Gemini `gemini-3.1-pro-preview`; merged 2026-05-04 and keeps global dashboard panes stable while the embedded workspace inspector opens and closes. |
+| P1 MCP And Project Onboarding Client Parity | PR monitor adoption for existing GitHub PRs | `ws_23dd9badf9fe4290a51113e7` | [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198) | merged | Codex `gpt-5.5` with AWF `xhigh`; merged 2026-05-05 and adds first-class REST/CLI/MCP service-managed monitor adoption for existing PRs. |
+| P1 Security, Secrets, And Egress Policy | Supply-chain guardrails for agent package installs | `ws_a1357eb1d1db498a9ed499ed` | [#197](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/197) | merged | Codex `gpt-5.5` with AWF `xhigh`; merged 2026-05-05 after parser hardening and adds profile-selectable warn/block supply-chain policy. |
 | P1 Developer Experience And Public Core Surface | Searchable reason-code catalog | `ws_46678fbed83645709bfa6771` | [#196](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/196) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
 | P1 Developer Experience And Public Core Surface | README split into focused public Core docs | `ws_f598e969bed54d17be999e62` | [#195](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/195) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
 | P1 Developer Experience And Public Core Surface | First-time CLI help text | `ws_a062174bfc9948e480d05c2b` | [#194](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/194) | merged | Gemini `gemini-3.1-pro-preview`; MacBook validation-runtime dogfood batch completed successfully and merged after AWF PR monitoring. |
@@ -382,7 +382,8 @@ not listed here.
   `ws_a1357eb1d1db498a9ed499ed`: `security.supply_chain` profile policy,
   structured `PolicyFinding` reason codes, executor and PR-monitor pre-commit /
   pre-push blocking, and focused regressions for warn, block, allowed, and
-  false-positive-safe cases. Evidence:
+  false-positive-safe cases. PR [#197](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/197)
+  merged 2026-05-05. Evidence:
   `uv run --python 3.12 --extra dev pytest tests/unit/service/test_supply_chain_policy.py tests/unit/profiles/test_security_policy.py tests/unit/api/test_workspaces.py::TestCreateWorkspaceV2PolicyMetadata::test_inline_profile_accepts_and_returns_supply_chain_policy tests/unit/control/test_executor_validation_fix_cycle.py::TestSupplyChainPolicy tests/unit/runtime/test_pr_monitor_runner_coverage_edges.py::test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed -q`;
   `uv run --python 3.12 --extra dev mypy src/awf`.
 
@@ -602,7 +603,9 @@ coding agent in any project to use AWF for a feature.
   error-result coverage, and direct attach-script service-adoption HTTP mapping
   coverage; on 2026-05-03, `ruff check src/awf tests/unit scripts`, `mypy
   src/awf`, the 351-test focused adoption/touched-file suite, and the 3,461-test
-  service/api/cli/mcp/control/node/runtime/scripts unit gate all passed.
+  service/api/cli/mcp/control/node/runtime/scripts unit gate all passed. PR
+  [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198)
+  merged 2026-05-05.
 - [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
