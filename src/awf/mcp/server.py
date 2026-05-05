@@ -1135,7 +1135,7 @@ def build_mcp_server(
             egress = response.egress_audit
             if egress is None:
                 return _safe_result({"workspace_id": workspace_id, "evidence": None})
-            return _safe_result(egress.model_dump(mode="json"))
+            return _safe_result({"workspace_id": workspace_id, "evidence": egress.model_dump(mode="json")})
         except Exception as exc:
             return _tool_result(
                 {"error_code": "MCP_EGRESS_AUDIT_ERROR", "message": str(exc)},
