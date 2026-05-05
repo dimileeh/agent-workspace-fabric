@@ -1,5 +1,5 @@
 {
   "status": "satisfied",
-  "summary": "The committed implementation adds the focused public-docs status tests, README discoverability links, narrow docs fixes for stale CLI command mentions, and checks off the exact TODO item. Iteration 1 includes passing evidence for the required docs-status pytest run, the combined docs-drift/docs-status pytest run, and ruff over both touched test modules. Iteration 2 replayed the focused docs-status test against the pre-implementation base in a temporary archive copy, demonstrating the expected initial failures without switching branches.",
+  "summary": "The implementation satisfies the saved plan: it adds the focused public-docs status tests for index discoverability, AWF CLI command mentions, and copy-paste snippet syntax; keeps docs changes narrow to README links and stale service command mentions; recognizes the troubleshooting guide; and checks off only the matching TODO item. Existing validation evidence shows the required docs-status pytest run, combined docs-drift/docs-status pytest run, and ruff check passing, plus iteration-2 failing-first evidence from a temporary pre-implementation archive.",
   "gaps": []
 }
