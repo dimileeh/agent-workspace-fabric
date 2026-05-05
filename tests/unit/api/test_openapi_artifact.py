@@ -36,12 +36,10 @@ def test_spec_generation_succeeds(openapi_spec: dict) -> None:
 
 @pytest.mark.unit
 def test_spec_is_valid_openapi_3x(openapi_spec: dict) -> None:
-    try:
-        from openapi_spec_validator import validate_spec
+    from openapi_spec_validator import validate_spec
 
+    try:
         validate_spec(openapi_spec)
-    except ImportError:
-        pytest.skip("openapi-spec-validator not installed; skipping structural validation")
     except Exception as exc:
         pytest.fail(f"OpenAPI spec validation failed: {exc}")
 
