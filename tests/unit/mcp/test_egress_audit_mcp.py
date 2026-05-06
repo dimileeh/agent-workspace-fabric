@@ -167,7 +167,11 @@ async def test_mcp_get_egress_audit_evidence_unknown_workspace_returns_null(
 
 class _FailingWorkspaceService:
     async def get(self, _workspace_id: str) -> None:
-        raise RuntimeError("database unavailable")
+        raise RuntimeError(
+            "database unavailable at "
+            "postgresql+asyncpg://awf:supersecret@db.internal:5432/awf "
+            "Authorization: Bearer ghp_sensitiveToken123456"
+        )
 
 
 @pytest.mark.unit
@@ -184,3 +188,8 @@ async def test_mcp_get_egress_audit_evidence_service_error_returns_error() -> No
     assert result.isError is True
     assert result.structuredContent is not None
     assert result.structuredContent["error_code"] == "MCP_EGRESS_AUDIT_ERROR"
+    message = result.structuredContent["message"]
+    assert "supersecret" not in message
+    assert "ghp_sensitiveToken123456" not in message
+    assert "postgresql+asyncpg://[redacted]@db.internal:5432/awf" in message
+    assert "Authorization: Bearer [redacted]" in message

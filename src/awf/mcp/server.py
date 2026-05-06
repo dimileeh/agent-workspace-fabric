@@ -36,6 +36,7 @@ from awf.api.schemas import (
     WorkspaceLockResponse,
     WorkspaceOverlapGraphResponse,
 )
+from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.profiles.resolver import ProfileResolutionError
@@ -1251,7 +1252,7 @@ def build_mcp_server(
             return _safe_result({"workspace_id": workspace_id, "evidence": egress.model_dump(mode="json")})
         except Exception as exc:
             return _safe_result(
-                {"error_code": "MCP_EGRESS_AUDIT_ERROR", "message": str(exc)},
+                {"error_code": "MCP_EGRESS_AUDIT_ERROR", "message": redact_audit_text(str(exc))},
                 is_error=True,
             )
 
