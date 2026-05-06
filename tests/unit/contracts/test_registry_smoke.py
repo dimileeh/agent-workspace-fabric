@@ -97,6 +97,33 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
     "Durable workspace logs": (
         "tests/unit/mcp/test_mcp_server.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams",
     ),
+    "Cancel workspace": (
+        "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_cancel_invokes_service_with_canonical_kwargs",
+    ),
+    "Stop workspace stack": (
+        "tests/unit/contracts/test_response_payload_alignment.py::test_stop_rest_matches_mcp_structured_content",
+    ),
+    "Destroy workspace resources": (
+        "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_destroy_invokes_service_with_canonical_kwargs",
+    ),
+    "Remonitor workspace": (
+        "tests/unit/contracts/test_reason_code_alignment.py::test_rest_and_mcp_agree_on_remonitor_pr_required",
+    ),
+    "Request validation": (
+        "tests/unit/contracts/test_reason_code_alignment.py::test_rest_and_mcp_agree_on_validate_state_not_validatable",
+    ),
+    "Refresh workspace": (
+        "tests/unit/mcp/test_mcp_control_contracts.py::TestRealDbPaths::test_refresh_creates_operation_row",
+    ),
+    "Rebase workspace": (
+        "tests/unit/mcp/test_mcp_control_contracts.py::TestRealDbPaths::test_rebase_creates_operation_row",
+    ),
+    "Retry workspace": (
+        "tests/unit/mcp/test_mcp_server.py::TestCreateWorkspaceV2::test_retry_workspace_provider_preflight_error_and_override",
+    ),
+    "Existing PR monitor adoption": (
+        "tests/unit/mcp/test_mcp_server.py::TestToolRegistration::test_adopt_pull_request_monitor_tool_creates_adoption",
+    ),
     "Optimistic concurrency on controls": (
         "tests/unit/contracts/test_if_match_alignment.py::test_mcp_control_tools_expose_optional_expected_version",
         "tests/unit/contracts/test_if_match_alignment.py::test_rest_stale_if_match_returns_version_conflict_envelope",
@@ -249,12 +276,6 @@ def test_mcp_implemented_matrix_rows_have_executable_coverage_reference() -> Non
         if _parity_status(row) == IMPLEMENTED_STATUS
         and _extract_mcp_tool_tokens_from_cell(row.get("MCP tool name", ""))
     }
-    registered_capabilities = {
-        capability.parity_capability
-        for capability in all_capabilities()
-        if capability.parity_status == IMPLEMENTED_STATUS
-    }
-
     stale_references = set(IMPLEMENTED_PARITY_COVERAGE_REFERENCES) - implemented_capabilities
     assert not stale_references, (
         "Coverage map references parity rows that are no longer MCP implemented: "
@@ -264,12 +285,11 @@ def test_mcp_implemented_matrix_rows_have_executable_coverage_reference() -> Non
     missing = sorted(
         capability
         for capability in implemented_capabilities
-        if capability not in registered_capabilities
-        and capability not in IMPLEMENTED_PARITY_COVERAGE_REFERENCES
+        if capability not in IMPLEMENTED_PARITY_COVERAGE_REFERENCES
     )
     assert not missing, (
         "MCP implemented parity rows lack executable contract/parity coverage: "
-        f"{missing}. Add a ContractCapability or an explicit test reference."
+        f"{missing}. Add an explicit test reference."
     )
 
     for references in IMPLEMENTED_PARITY_COVERAGE_REFERENCES.values():
