@@ -231,21 +231,15 @@ def cleanup_stale_postgres_test_schemas() -> None:
     lock_path = Path(tempfile.gettempdir()) / (
         f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.lock"
     )
-    marker_path = Path(tempfile.gettempdir()) / (
-        f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.done"
-    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Serialize concurrent workers, but keep "done" state process-local so a
+    # reused namespace still cleans leftovers from a later pytest invocation.
     with lock_path.open("w", encoding="utf-8") as lock_file:
         if fcntl is not None:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            if marker_path.exists():
-                _ensure_postgres_test_run_active(database_url)
-                _STALE_SCHEMA_CLEANUP_DONE_KEYS.add(cleanup_key)
-                return
             asyncio.run(_drop_stale_postgres_test_schemas(database_url))
-            marker_path.touch()
             _ensure_postgres_test_run_active(database_url)
             _STALE_SCHEMA_CLEANUP_DONE_KEYS.add(cleanup_key)
         finally:

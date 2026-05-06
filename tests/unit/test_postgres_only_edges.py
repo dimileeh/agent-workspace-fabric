@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -194,6 +195,44 @@ async def test_stale_postgres_schema_listing_scans_all_test_namespaces(
     assert engine.parameters == [
         {"pattern": "awf\\_test\\_%"},
     ]
+
+
+@pytest.mark.unit
+def test_stale_postgres_cleanup_ignores_persistent_done_marker_for_reused_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "cleanup-reused-run")
+    namespace = postgres_mod._postgres_test_schema_namespace()
+    database_key = postgres_mod._postgres_database_key(database_url)
+    marker_path = tmp_path / (
+        f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.done"
+    )
+    marker_path.touch()
+    dropped_urls: list[str] = []
+    active_urls: list[str] = []
+
+    async def _drop_stale(url: str) -> None:
+        dropped_urls.append(url)
+
+    monkeypatch.setattr(postgres_mod, "postgres_test_database_url", lambda: database_url)
+    monkeypatch.setattr(postgres_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(postgres_mod, "_drop_stale_postgres_test_schemas", _drop_stale)
+    monkeypatch.setattr(
+        postgres_mod,
+        "_ensure_postgres_test_run_active",
+        lambda url: active_urls.append(url),
+    )
+    postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+    try:
+        postgres_mod.cleanup_stale_postgres_test_schemas()
+        postgres_mod.cleanup_stale_postgres_test_schemas()
+    finally:
+        postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+
+    assert dropped_urls == [database_url]
+    assert active_urls == [database_url, database_url]
 
 
 @pytest.mark.unit
