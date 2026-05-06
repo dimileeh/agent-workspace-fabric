@@ -2699,6 +2699,7 @@ class WorkspaceRepository:
         pr_number: int,
     ) -> builtins.list[Workspace]:
         """List workspaces that represent adoption history for one repo/PR."""
+        adoption_repo_slug = Workspace.task_policy["pr_adoption"]["repo_slug"].as_string()
         stmt = (
             select(Workspace)
             .options(selectinload(Workspace.task_attempt))
@@ -2709,6 +2710,7 @@ class WorkspaceRepository:
                     and_(
                         Workspace.task_kind == task_kind,
                         Workspace.pr_number == pr_number,
+                        func.lower(adoption_repo_slug) == repo_slug.lower(),
                     ),
                 )
             )
