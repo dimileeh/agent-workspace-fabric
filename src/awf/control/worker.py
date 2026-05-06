@@ -95,9 +95,6 @@ _ACTIVE_EXECUTION_PRESERVED_CLAIM_CLEARED_REASON_CODE = (
 _ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE = (
     "NO_EXECUTION_CLAIM_DURING_ACTIVE_EXECUTION_PRESERVATION"
 )
-_ACTIVE_EXECUTION_PRESERVED_UNEXPIRED_CLAIM_REASON_CODE = (
-    "UNEXPIRED_EXECUTION_CLAIM_PRESERVED_DURING_ACTIVE_EXECUTION_PRESERVATION"
-)
 _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
@@ -1765,17 +1762,13 @@ def _active_execution_preservation_claim_cleanup_payload(
     if previous_claimed_by is None and workspace.execution_claim_expires_at is None:
         return payload
 
-    if _execution_claim_is_stale(workspace, claim_cutoff):
-        return {
-            **payload,
-            "action": "cleared_stale",
-            "reason_code": _ACTIVE_EXECUTION_PRESERVED_CLAIM_CLEARED_REASON_CODE,
-        }
+    if not _execution_claim_is_stale(workspace, claim_cutoff):
+        raise ValueError("active execution preservation cleanup requires a stale execution claim")
 
     return {
         **payload,
-        "action": "preserved_unexpired",
-        "reason_code": _ACTIVE_EXECUTION_PRESERVED_UNEXPIRED_CLAIM_REASON_CODE,
+        "action": "cleared_stale",
+        "reason_code": _ACTIVE_EXECUTION_PRESERVED_CLAIM_CLEARED_REASON_CODE,
     }
 
 

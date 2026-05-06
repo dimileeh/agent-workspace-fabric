@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
+    _active_execution_preservation_claim_cleanup_payload,
     _ActiveExecutionCandidate,
     _execution_claim_is_stale,
     _json_datetime,
@@ -554,6 +555,21 @@ def test_execution_claim_is_stale_handles_missing_and_naive_datetimes() -> None:
         ),
         cutoff,
     )
+
+
+@pytest.mark.unit
+def test_active_execution_preservation_claim_cleanup_rejects_unexpired_claim() -> None:
+    cutoff = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        execution_claimed_by="live-worker",
+        execution_claim_expires_at=cutoff + timedelta(minutes=5),
+    )
+
+    with pytest.raises(ValueError, match="requires a stale execution claim"):
+        _active_execution_preservation_claim_cleanup_payload(
+            workspace,
+            claim_cutoff=cutoff,
+        )
 
 
 @pytest.mark.unit
