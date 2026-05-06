@@ -86,6 +86,7 @@ x-awf-service: &awf-service
 services:
   postgres:
     image: postgres:16-alpine
+    shm_size: ${AWF_POSTGRES_SHM_SIZE:-1g}
     environment:
       POSTGRES_USER: awf
       POSTGRES_PASSWORD: awf_dev

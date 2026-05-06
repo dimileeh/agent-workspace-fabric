@@ -82,6 +82,7 @@ from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_wall_started_value_from_datetime,
     _is_pending_check,
     _merge_rejection_reason,
+    _MergeGateResult,
     _non_check_reviewer_settle_started_key,
     _notify_human_reason,
     _parse_verdict,
@@ -530,6 +531,69 @@ async def test_auto_merge_dispatches_validation_recovery_before_merge(
     assert operations[0].payload["action"] == "validate_only"
     assert operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
     assert operations[0].payload["source_head_sha"] == head_sha
+
+
+@pytest.mark.unit
+async def test_auto_merge_waits_for_reviewer_settle_before_validation_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 811
+    head_sha = "8" * 40
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    await _mark_refactor_task(factory, workspace_id)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=900,
+    )
+    state = MonitorState(started_at=1000.0)
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=pr_number,
+        status=_green_status(pr_number=pr_number, head_sha=head_sha),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert not [op for op in operations if op.type == OperationType.validate.value]
+    settle_operations = [
+        op
+        for op in operations
+        if op.type == OperationType.monitor_state.value
+        and op.payload.get("reason_code") == "NON_CHECK_REVIEWER_SETTLE"
+    ]
+    assert len(settle_operations) == 1
+    assert (
+        _non_check_reviewer_settle_started_key(pr_number=pr_number, head_sha=head_sha)
+        in state.threads_addressed_ids
+    )
 
 
 @pytest.mark.unit
@@ -2668,6 +2732,79 @@ async def test_validation_recovery_dispatch_is_idempotent_for_duplicate_tick_rep
         "slept_seconds": 60,
     }
     assert len(recovery_events) == 1
+
+
+@pytest.mark.unit
+async def test_late_validation_recovery_callback_records_stale_ready_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 79
+    head_sha = "f" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    await _mark_refactor_task(factory, workspace_id)
+    async with factory() as session:
+        workspace_repo = WorkspaceRepository(session)
+        workspace = await workspace_repo.get(workspace_id)
+        assert workspace is not None
+        await workspace_repo.transition(
+            workspace,
+            to=WorkspaceStatus.ready,
+            reason_code="TEST_READY_AFTER_RECOVERY_DISPATCH",
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+    terminal = await runner._handle_merge_gate_blocker(
+        gate=_MergeGateResult(
+            workspace=workspace,
+            stale_reason="validation_insufficient_tier",
+            req_action="validate",
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=pr_number,
+        status=_green_status(pr_number=pr_number, head_sha=head_sha),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        stale_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert len(stale_events) == 1
+    assert stale_events[0].reason_code == "STALE_CALLBACK_IGNORED"
+    assert stale_events[0].payload["callback_action"] == "recovery_dispatch"
+    assert stale_events[0].payload["actual_status"] == WorkspaceStatus.ready.value
+    assert [op for op in operations if op.type == OperationType.validate.value] == []
 
 
 @pytest.mark.unit

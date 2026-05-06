@@ -1891,6 +1891,11 @@ class WorkspaceExecutor:
                 profile.validation.strategy.edit_gate == "targeted"
                 and profile.validation.strategy.final_gate == "coverage"
             )
+            defer_final_coverage_to_pr_monitor = _defer_final_coverage_to_pr_monitor(
+                recovery=recovery,
+                has_pr_monitor=self._pr_monitor is not None or self._pr_monitor_factory is not None,
+                profile=profile,
+            )
             coverage_evidence = _CoverageEvidenceResult(
                 coverage=None,
                 evidence_status=(
@@ -1928,6 +1933,7 @@ class WorkspaceExecutor:
                     not run_coverage_during_edit_gate
                     and val_result.all_passed
                     and profile.validation.strategy.final_gate == "coverage"
+                    and not defer_final_coverage_to_pr_monitor
                 ):
                     coverage_evidence = await self._run_final_coverage_gate(
                         workspace_id=workspace_id,
@@ -5516,6 +5522,21 @@ def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfi
     }:
         task_class_tier = 2
     return max(profile_tier, task_class_tier)
+
+
+def _defer_final_coverage_to_pr_monitor(
+    *,
+    recovery: Mapping[str, Any] | None,
+    has_pr_monitor: bool,
+    profile: WorkspaceProfile,
+) -> bool:
+    return (
+        recovery is None
+        and has_pr_monitor
+        and profile.validation.strategy.edit_gate == "targeted"
+        and profile.validation.strategy.final_gate == "coverage"
+        and profile.validation.coverage.command is not None
+    )
 
 
 def _validation_run_log_stream_refs(

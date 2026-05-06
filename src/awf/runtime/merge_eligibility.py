@@ -150,4 +150,26 @@ def compute_stale_reason_for_attempt(
 def _successful_validation_run_tier(run: ValidationRun) -> int | None:
     if run.status != "succeeded":
         return None
+    if _validation_run_deferred_required_coverage(run):
+        return None
     return run.tier
+
+
+def _validation_run_deferred_required_coverage(run: ValidationRun) -> bool:
+    """Return True when a successful run only satisfied the targeted edit gate.
+
+    PR-bound workspaces may intentionally skip the expensive final coverage
+    command before opening/updating a PR. That targeted-only run is useful
+    evidence for the edit, but it must not clear merge eligibility for a
+    profile whose final gate is coverage.
+    """
+
+    for command in run.commands or []:
+        if command.get("phase") != "coverage":
+            continue
+        if (
+            command.get("evidence_status") == "skipped_by_policy"
+            and command.get("evidence_reason_code") == "TARGETED_EDIT_GATE"
+        ):
+            return True
+    return False

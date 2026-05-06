@@ -29,7 +29,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -196,6 +196,7 @@ _GIT_BASE_BEHIND_FAILED_REASON = "GIT_BASE_BEHIND_FAILED"
 _GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
+_VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
 _AUDIT_MERGE_RESULT_EVENT = "workspace.audit.merge_result"
@@ -1590,22 +1591,28 @@ class PullRequestMonitorRunner:
                 workspace_id,
                 current_head_sha=status.head_sha,
             )
-            handled = await self._handle_merge_gate_blocker(
-                gate=merge_gate,
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                monitor_log=monitor_log,
+            pending_validation_gate = (
+                merge_gate if _gate_requires_validation_recovery(merge_gate) else None
             )
-            if handled is not None:
-                return handled
+            if pending_validation_gate is None:
+                handled = await self._handle_merge_gate_blocker(
+                    gate=merge_gate,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                )
+                if handled is not None:
+                    return handled
+            elif await self._recovery_dispatch_status_is_stale(workspace_id):
+                return True
 
             policy_blocked = await self._refresh_scope_policy_for_merge(
                 workspace_id=workspace_id,
@@ -1637,22 +1644,26 @@ class PullRequestMonitorRunner:
                 check_policy=True,
                 current_head_sha=status.head_sha,
             )
-            handled = await self._handle_merge_gate_blocker(
-                gate=merge_gate,
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                monitor_log=monitor_log,
+            pending_validation_gate = (
+                merge_gate if _gate_requires_validation_recovery(merge_gate) else None
             )
-            if handled is not None:
-                return handled
+            if pending_validation_gate is None:
+                handled = await self._handle_merge_gate_blocker(
+                    gate=merge_gate,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                )
+                if handled is not None:
+                    return handled
 
             queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
             if queue_blockers:
@@ -1683,11 +1694,17 @@ class PullRequestMonitorRunner:
                 monitor_log=monitor_log,
             )
             if settle_decision.wait_seconds > 0:
+                requested_action = "validate" if pending_validation_gate is not None else "merge"
                 await self._sleep_with_monitor_state_operation(
                     workspace_id=workspace_id,
                     action="reviewer_settle_wait",
-                    requested_action="merge",
-                    reason="Waiting for configured non-check reviewers to settle.",
+                    requested_action=requested_action,
+                    reason=(
+                        "Waiting for configured non-check reviewers to settle "
+                        "before final validation."
+                        if pending_validation_gate is not None
+                        else "Waiting for configured non-check reviewers to settle."
+                    ),
                     reason_code="NON_CHECK_REVIEWER_SETTLE",
                     pr_number=pr_number,
                     status=status,
@@ -1709,6 +1726,27 @@ class PullRequestMonitorRunner:
                     ),
                 )
                 return False
+
+            if pending_validation_gate is not None:
+                handled = await self._handle_merge_gate_blocker(
+                    gate=pending_validation_gate,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                    skip_initial_review_grace=(
+                        self._config.non_check_reviewer_settle_seconds > 0
+                    ),
+                )
+                if handled is not None:
+                    return handled
 
             await self._record_monitor_state_operation(
                 workspace_id=workspace_id,
@@ -2073,6 +2111,109 @@ class PullRequestMonitorRunner:
             return True
 
         if isinstance(action, NotifyHuman):
+            if _is_manual_ready_handoff(action, status, state, self._config):
+                policy_blocked = await self._refresh_scope_policy_for_merge(
+                    workspace_id=workspace_id,
+                    changed_paths=status.changed_paths,
+                )
+                if policy_blocked:
+                    action = NotifyHuman(
+                        message=(
+                            "OUT_OF_SCOPE_CHANGE: changed files outside declared "
+                            "owned_paths require an operator scope decision."
+                        )
+                    )
+                else:
+                    queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
+                    if queue_blockers:
+                        await self._wait_for_merge_queue(
+                            blockers=queue_blockers,
+                            workspace_id=workspace_id,
+                            repo_url=repo_url,
+                            base_branch=base_branch,
+                            pr_number=pr_number,
+                            status=status,
+                            state=state,
+                            monitor_log=monitor_log,
+                        )
+                        return False
+
+                    merge_gate = await self._merge_gate_with_legacy_head_support(
+                        workspace_id,
+                        check_policy=True,
+                        current_head_sha=status.head_sha,
+                    )
+                    if _gate_requires_validation_recovery(merge_gate):
+                        settle_config = replace(self._config, auto_merge=True)
+                        settle_decision = _non_check_reviewer_settle_decision(
+                            status,
+                            state,
+                            settle_config,
+                            pr_number=pr_number,
+                            now=time.monotonic(),
+                        )
+                        await self._record_non_check_reviewer_settle_decision(
+                            decision=settle_decision,
+                            workspace_id=workspace_id,
+                            pr_number=pr_number,
+                            status=status,
+                            monitor_log=monitor_log,
+                        )
+                        if settle_decision.wait_seconds > 0:
+                            await self._sleep_with_monitor_state_operation(
+                                workspace_id=workspace_id,
+                                action="reviewer_settle_wait",
+                                requested_action="validate",
+                                reason=(
+                                    "Waiting for configured non-check reviewers to settle "
+                                    "before final validation."
+                                ),
+                                reason_code="NON_CHECK_REVIEWER_SETTLE",
+                                pr_number=pr_number,
+                                status=status,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                wait_seconds=settle_decision.wait_seconds,
+                                monitor_log=monitor_log,
+                                extra_payload={
+                                    "settle_seconds": (
+                                        self._config.non_check_reviewer_settle_seconds
+                                    ),
+                                    "configured_reviewers": list(
+                                        settle_decision.configured_reviewers
+                                    ),
+                                    "missing_reviewers": list(settle_decision.missing_reviewers),
+                                    "visible_reviewers": list(settle_decision.visible_reviewers),
+                                    "elapsed_seconds": settle_decision.elapsed_seconds,
+                                },
+                                extra_identity=(
+                                    *settle_decision.configured_reviewers,
+                                    *settle_decision.missing_reviewers,
+                                    settle_decision.started_at,
+                                ),
+                            )
+                            return False
+
+                        handled = await self._handle_merge_gate_blocker(
+                            gate=merge_gate,
+                            workspace_id=workspace_id,
+                            repo_url=repo_url,
+                            repo=repo,
+                            pr_number=pr_number,
+                            status=status,
+                            state=state,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            monitor_log=monitor_log,
+                            skip_initial_review_grace=(
+                                self._config.non_check_reviewer_settle_seconds > 0
+                            ),
+                        )
+                        if handled is not None:
+                            return handled
+
             operation = await self._begin_monitor_operation(
                 workspace_id=workspace_id,
                 operation_type=OperationType.human_wait,
@@ -2208,6 +2349,40 @@ class PullRequestMonitorRunner:
         if not blocking_codes:
             return None
         return _supply_chain_policy_blocked_message(blocking_codes)
+
+    async def _recovery_dispatch_status_is_stale(self, workspace_id: str) -> bool:
+        from awf.db.repositories import WorkspaceRepository
+
+        async with self._deps.session_factory() as s:
+            workspace_repo = WorkspaceRepository(s)
+            ws = await workspace_repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - destroyed mid-monitor
+                return True
+            if ws.status == WorkspaceStatus.monitoring_pr.value:
+                return False
+            active_recovery = any(
+                op.status
+                in (
+                    OperationStatus.pending.value,
+                    OperationStatus.running.value,
+                )
+                and op.type != OperationType.monitor_state.value
+                and isinstance(op.payload, dict)
+                and op.payload.get("source") == "pr_monitor"
+                for op in ws.operations
+            )
+            if active_recovery:
+                return False
+            await workspace_repo.record_ignored_stale_callback(
+                ws,
+                callback_source="pr_monitor",
+                callback_action="recovery_dispatch",
+                expected_status=WorkspaceStatus.monitoring_pr,
+                requested_status=WorkspaceStatus.ready,
+                reason_code="STALE_CALLBACK_IGNORED",
+            )
+            await s.commit()
+            return True
 
     async def _merge_gate_for_workspace(
         self,
@@ -2408,6 +2583,7 @@ class PullRequestMonitorRunner:
         compose_project: str,
         compose_file: Path,
         monitor_log: WorkspaceLogSink | None,
+        skip_initial_review_grace: bool = False,
     ) -> bool | None:
         stale_reason = gate.stale_reason
         req_action = gate.req_action
@@ -2416,7 +2592,11 @@ class PullRequestMonitorRunner:
         # Manual-merge mode short-circuits to Abort regardless of grace
         # state — operator-driven workspaces never dispatch automated
         # recovery.
-        if stale_reason is not None and not ws.auto_merge:
+        if (
+            stale_reason is not None
+            and not ws.auto_merge
+            and not _gate_requires_validation_recovery(gate)
+        ):
             return await self._execute(
                 action=Abort(AbortReason.stale),
                 workspace_id=workspace_id,
@@ -2476,12 +2656,16 @@ class PullRequestMonitorRunner:
         # workspace would leave ``monitoring_pr`` and re-enter the executor
         # pipeline before slow first-pass reviewers had any chance to
         # comment.
-        grace_wait_seconds = _initial_review_grace_wait_seconds(
-            state,
-            pr_number=pr_number,
-            now=time.monotonic(),
-            grace_seconds=self._config.initial_review_grace_period_seconds,
-            poll_interval_seconds=self._config.poll_interval_seconds,
+        grace_wait_seconds = (
+            0.0
+            if skip_initial_review_grace
+            else _initial_review_grace_wait_seconds(
+                state,
+                pr_number=pr_number,
+                now=time.monotonic(),
+                grace_seconds=self._config.initial_review_grace_period_seconds,
+                poll_interval_seconds=self._config.poll_interval_seconds,
+            )
         )
         if grace_wait_seconds > 0:
             if stale_reason is not None:
@@ -4945,6 +5129,23 @@ def _normalize_non_check_reviewer_identity(value: object) -> str:
 
 def _merge_gate_blocks(gate: _MergeGateResult) -> bool:
     return gate.stale_reason is not None or gate.notify_message is not None
+
+
+def _gate_requires_validation_recovery(gate: _MergeGateResult) -> bool:
+    return gate.stale_reason == _VALIDATION_INSUFFICIENT_STALE_REASON and (
+        gate.req_action in (None, "validate")
+    )
+
+
+def _is_manual_ready_handoff(
+    action: NotifyHuman,
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+) -> bool:
+    if config.auto_merge or action.message is not None:
+        return False
+    return isinstance(decide(status, state, replace(config, auto_merge=True)), Merge)
 
 
 def _has_successful_validation_for_pr_head(

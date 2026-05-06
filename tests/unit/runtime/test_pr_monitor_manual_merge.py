@@ -18,9 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, RepoRef
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import MergeCandidate, Workspace, WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -229,6 +229,217 @@ async def test_manual_merge_green_open_pr_notifies_and_stays_monitoring(
     assert not _has_call(cmd, _is_pr_merge)
     assert not _has_call(cmd, _is_docker_down)
     assert sleep_fn.calls == [60]
+
+
+@pytest.mark.unit
+async def test_manual_merge_green_pr_dispatches_validation_before_handoff(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        ws.task_class = TaskClass.refactor_task.value
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+        initial_review_grace_period_seconds=0,
+    )
+    status = _green_status()
+    state = MonitorState()
+    action = decide(
+        status,
+        state,
+        MonitorConfig(
+            auto_merge=False,
+            poll_interval_seconds=60,
+            settle_interval_seconds=30,
+            initial_review_grace_period_seconds=0,
+            pre_merge_settle_seconds=0,
+            non_check_reviewer_settle_seconds=0,
+            non_check_reviewer_logins=("greptile-apps",),
+            stale_pending_check_warning_seconds=900,
+        ),
+    )
+
+    terminal = await runner._execute(
+        action=action,
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert isinstance(action, NotifyHuman)
+    assert terminal is True
+    assert not _has_call(cmd, _is_pr_comment)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.ready.value
+        operations = await OperationRepository(session).list_all(workspace_id=ws_id)
+    validate_operations = [op for op in operations if op.type == OperationType.validate.value]
+    assert len(validate_operations) == 1
+    assert validate_operations[0].payload["recovery_mode"] == "validate_only"
+    assert validate_operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
+
+
+@pytest.mark.unit
+async def test_manual_ready_handoff_reports_policy_block_before_human_handoff(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+    )
+
+    async def _policy_blocked(**_kwargs: object) -> bool:
+        return True
+
+    runner._refresh_scope_policy_for_merge = _policy_blocked  # type: ignore[method-assign]
+    cmd.queue_result(returncode=0)  # gh pr comment
+
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert len(_calls(cmd, _is_pr_comment)) == 1
+    assert sleep_fn.calls == [60]
+
+
+@pytest.mark.unit
+async def test_manual_ready_handoff_waits_for_merge_queue_before_handoff(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+    )
+    waited: list[str] = []
+
+    async def _queue_blockers(_workspace_id: str) -> list[object]:
+        return [object()]
+
+    async def _wait_for_queue(**_kwargs: object) -> None:
+        waited.append("queue")
+
+    runner._merge_queue_blockers_for_workspace = _queue_blockers  # type: ignore[method-assign]
+    runner._wait_for_merge_queue = _wait_for_queue  # type: ignore[method-assign]
+
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert waited == ["queue"]
+    assert not _calls(cmd, _is_pr_comment)
+
+
+@pytest.mark.unit
+async def test_manual_ready_handoff_waits_for_review_settle_before_validation(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        ws.task_class = TaskClass.refactor_task.value
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=900,
+    )
+
+    terminal = await runner._execute(
+        action=NotifyHuman(),
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=ws_id)
+    validate_operations = [op for op in operations if op.type == OperationType.validate.value]
+    assert validate_operations == []
 
 
 @pytest.mark.unit

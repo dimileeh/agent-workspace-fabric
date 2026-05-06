@@ -27,7 +27,6 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_monitor import (
-    AbortReason,
     CheckState,
     Merge,
     MergeableState,
@@ -279,13 +278,11 @@ async def test_grace_elapsed_then_stale_recovery_dispatches_with_event(
 
 
 @pytest.mark.unit
-async def test_manual_merge_mode_aborts_stale_regardless_of_grace(
+async def test_manual_merge_mode_dispatches_validation_before_handoff(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """auto_merge=False must take the Abort(stale) path — grace is
-    irrelevant for manual-merge mode (the existing dogfood semantics
-    must remain intact)."""
+    """auto_merge=False still needs final validation before human handoff."""
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
@@ -298,11 +295,10 @@ async def test_manual_merge_mode_aborts_stale_regardless_of_grace(
         adapter=adapter,
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        initial_review_grace_period_seconds=900,
+        initial_review_grace_period_seconds=0,
     )
 
-    # Grace would still be active (started_at ~now), but manual merge
-    # mode must abort instead of waiting.
+    # Manual merge mode must dispatch validation instead of handing off stale evidence.
     state = MonitorState(started_at=time.monotonic())
 
     terminal = await runner._execute(
@@ -325,12 +321,14 @@ async def test_manual_merge_mode_aborts_stale_regardless_of_grace(
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
-        assert ws.status == WorkspaceStatus.failed.value
-        assert ws.failure_message == f"monitor: abort ({AbortReason.stale.value})"
-        # No recovery operation was created.
+        assert ws.status == WorkspaceStatus.ready.value
+        assert ws.failure_reason is None
+        assert ws.failure_message is None
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
-        assert operations == []
-        # No grace-defer event fired in manual merge.
+        validate_operations = [op for op in operations if op.type == OperationType.validate.value]
+        assert len(validate_operations) == 1
+        assert validate_operations[0].payload["recovery_mode"] == "validate_only"
+        assert validate_operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
         events = [e for e in ws.events if e.event_type == "monitor.grace_defers_recovery"]
         assert events == []
 

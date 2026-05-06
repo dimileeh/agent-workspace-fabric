@@ -560,7 +560,7 @@ async def test_transient_retry_event_payload_is_structured_and_redacted(
 
 
 @pytest.mark.unit
-async def test_stale_merge_without_auto_merge_aborts_workspace(
+async def test_stale_manual_merge_dispatches_validation_before_handoff(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -589,8 +589,14 @@ async def test_stale_merge_without_auto_merge_aborts_workspace(
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
-        assert ws.status == WorkspaceStatus.failed.value
-        assert ws.failure_message == "monitor: abort (stale)"
+        assert ws.status == WorkspaceStatus.ready.value
+        assert ws.failure_reason is None
+        assert ws.failure_message is None
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+    validate_operations = [op for op in operations if op.type == OperationType.validate.value]
+    assert len(validate_operations) == 1
+    assert validate_operations[0].payload["recovery_mode"] == "validate_only"
+    assert validate_operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
 
 
 @pytest.mark.unit

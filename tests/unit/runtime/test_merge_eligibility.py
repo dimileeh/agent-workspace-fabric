@@ -121,6 +121,7 @@ def _validation_run(
     status: str = "succeeded",
     started_at: datetime,
     finished_at: datetime | None = None,
+    commands: list[dict[str, object]] | None = None,
 ) -> ValidationRun:
     return ValidationRun(
         id=f"vr_{tier}_{started_at.timestamp()}",
@@ -128,7 +129,7 @@ def _validation_run(
         attempt_id="att_1",
         tier=tier,
         command_set_hash="hash",
-        commands=[],
+        commands=commands or [],
         base_commit="base",
         target_branch="awf/ws_tier",
         target_head_sha="head",
@@ -154,6 +155,34 @@ def test_compute_stale_reason_uses_persisted_validation_run_tier() -> None:
     ]
 
     assert compute_stale_reason(workspace) == (None, None)
+
+
+@pytest.mark.unit
+def test_compute_stale_reason_rejects_targeted_only_validation_when_coverage_was_deferred() -> None:
+    workspace = _workspace_with_operations(
+        task_class=TaskClass.refactor_task.value,
+        operations=[],
+    )
+    workspace.validation_runs = [
+        _validation_run(
+            tier=2,
+            started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+            commands=[
+                {"phase": "validate", "command": "pytest tests/unit/cli -q"},
+                {
+                    "phase": "coverage",
+                    "command": "pytest --cov=awf",
+                    "evidence_status": "skipped_by_policy",
+                    "evidence_reason_code": "TARGETED_EDIT_GATE",
+                },
+            ],
+        )
+    ]
+
+    assert compute_stale_reason(workspace) == (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        "validate",
+    )
 
 
 @pytest.mark.unit
