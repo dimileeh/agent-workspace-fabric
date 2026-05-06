@@ -53,3 +53,31 @@ def test_collection_finish_runs_cleanup_for_managed_db_fixtures(
     )
 
     assert cleanup_calls == ["cleanup"]
+
+
+def test_collection_finish_runs_cleanup_for_direct_postgres_helper_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_direct_db_helper.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "from tests.postgres import create_postgres_test_engine",
+                "",
+                "async def test_uses_direct_helper():",
+                "    engine = await create_postgres_test_engine()",
+                "    await engine.dispose()",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    postgres_mod = pytest.importorskip("tests." + "postgres")
+    cleanup_name = "cleanup_stale_" + "postgres_" + "test_" + "schemas"
+    cleanup_calls: list[str] = []
+
+    monkeypatch.setattr(postgres_mod, cleanup_name, lambda: cleanup_calls.append("cleanup"))
+
+    root_conftest.pytest_collection_finish(_FakeSession([_FakeItem(test_file)]))  # type: ignore[arg-type]
+
+    assert cleanup_calls == ["cleanup"]

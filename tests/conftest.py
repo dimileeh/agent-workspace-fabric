@@ -7,6 +7,7 @@ inspect the DB directly can use the ``engine`` fixture with the same pattern.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
 import subprocess
@@ -45,6 +46,14 @@ _POSTGRES_SOURCE_SENTINELS = (
     "postgres_test_",
     "create_postgres_test_engine",
 )
+_POSTGRES_SCHEMA_HELPER_CALLS = frozenset(
+    {
+        "create_postgres_test_engine",
+        "postgres_test_engine",
+        "postgres_test_url",
+        "postgres_test_url_sync",
+    }
+)
 
 
 def _uses_postgres_test_fixture(item: pytest.Item) -> bool:
@@ -66,10 +75,48 @@ def _test_source_uses_postgres(path: Path, cache: dict[Path, bool]) -> bool:
     return uses_postgres
 
 
+def _postgres_call_helper_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _test_source_calls_postgres_schema_helper(path: Path, cache: dict[Path, bool]) -> bool:
+    cached = cache.get(path)
+    if cached is not None:
+        return cached
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        cache[path] = False
+        return False
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError:
+        cache[path] = False
+        return False
+
+    calls_helper = any(
+        _postgres_call_helper_name(node.func) in _POSTGRES_SCHEMA_HELPER_CALLS
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    )
+    cache[path] = calls_helper
+    return calls_helper
+
+
 def _uses_postgres_test_database(item: pytest.Item, cache: dict[Path, bool]) -> bool:
     if _uses_postgres_test_fixture(item):
         return True
     return _test_source_uses_postgres(item.path, cache)
+
+
+def _uses_postgres_schema_allocator(item: pytest.Item, cache: dict[Path, bool]) -> bool:
+    if _uses_postgres_test_fixture(item):
+        return True
+    return _test_source_calls_postgres_schema_helper(item.path, cache)
 
 
 def pytest_collection_modifyitems(
@@ -106,7 +153,8 @@ def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
 def pytest_collection_finish(session: pytest.Session) -> None:
     """Clear stale Postgres schemas before DB-backed test selections start."""
 
-    if any(_uses_postgres_test_fixture(item) for item in session.items):
+    source_cache: dict[Path, bool] = {}
+    if any(_uses_postgres_schema_allocator(item, source_cache) for item in session.items):
         from tests.postgres import cleanup_stale_postgres_test_schemas
 
         cleanup_stale_postgres_test_schemas()
