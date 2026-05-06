@@ -11,7 +11,6 @@ from awf.api.schemas import (
     WorkspaceControlRequest,
     WorkspaceControlResponse,
     WorkspaceOperationRequest,
-    WorkspaceReasonRequest,
 )
 from awf.service.controls import (
     ActiveWorkspaceDestroyError,
@@ -63,7 +62,7 @@ async def cancel_workspace(
 @router.post("/stop", response_model=WorkspaceControlResponse)
 async def stop_workspace(
     workspace_id: str,
-    payload: WorkspaceReasonRequest,
+    payload: WorkspaceControlRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
@@ -82,7 +81,7 @@ async def stop_workspace(
 @router.post("/remonitor", response_model=WorkspaceControlResponse)
 async def remonitor_workspace(
     workspace_id: str,
-    payload: WorkspaceReasonRequest,
+    payload: WorkspaceControlRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
@@ -105,7 +104,7 @@ async def remonitor_workspace(
 )
 async def refresh_workspace(
     workspace_id: str,
-    payload: WorkspaceReasonRequest,
+    payload: WorkspaceOperationRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
@@ -154,7 +153,7 @@ async def validate_workspace(
 )
 async def rebase_workspace(
     workspace_id: str,
-    payload: WorkspaceReasonRequest,
+    payload: WorkspaceOperationRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
