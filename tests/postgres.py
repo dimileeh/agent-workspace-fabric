@@ -61,16 +61,6 @@ def _postgres_database_key(database_url: str) -> str:
     return hashlib.sha256(database_url.encode("utf-8")).hexdigest()[:16]
 
 
-def _postgres_lock_owner_key() -> str:
-    getuid = getattr(os, "getuid", None)
-    if callable(getuid):
-        return f"uid-{getuid()}"
-
-    username = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
-    safe_username = re.sub(r"[^0-9A-Za-z_.-]", "_", username).strip("._-")
-    return f"user-{safe_username or 'unknown'}"
-
-
 def _postgres_test_run_uid() -> str:
     return (
         os.environ.get("PYTEST_XDIST_TESTRUNUID")
@@ -134,26 +124,6 @@ def _is_retryable_connect_error(exc: Exception) -> bool:
     if isinstance(exc.orig, TimeoutError | OSError | ConnectionError):
         return True
     return exc.orig.__class__.__name__ in RETRYABLE_POSTGRES_ERROR_NAMES
-
-
-@contextmanager
-def _postgres_ddl_lock(database_url: str) -> Iterator[None]:
-    if fcntl is None:
-        yield
-        return
-
-    lock_key = _postgres_database_key(database_url)
-    owner_key = _postgres_lock_owner_key()
-    lock_path = Path(tempfile.gettempdir()) / (
-        f"awf-pytest-postgres-ddl-{owner_key}-{lock_key}.lock"
-    )
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _postgres_test_run_lock_path(database_url: str, namespace: str) -> Path:
@@ -314,15 +284,13 @@ async def postgres_test_engine() -> AsyncIterator[AsyncEngine]:
     schema_database_url = _schema_url(database_url, quoted_schema)
     engine = _make_test_engine(schema_database_url)
     try:
-        with _postgres_ddl_lock(database_url):
-            await _with_postgres_connection_retry(
-                lambda: _create_schema_and_metadata(engine, quoted_schema)
-            )
+        await _with_postgres_connection_retry(
+            lambda: _create_schema_and_metadata(engine, quoted_schema)
+        )
         yield engine
     finally:
         try:
-            with _postgres_ddl_lock(database_url):
-                await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
+            await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
         finally:
             await engine.dispose()
 
@@ -356,10 +324,9 @@ async def create_postgres_test_engine() -> AsyncEngine:
     schema = _new_postgres_test_schema()
     quoted_schema = _quote_identifier(schema)
     engine = _make_test_engine(_schema_url(database_url, quoted_schema, null_pool=True))
-    with _postgres_ddl_lock(database_url):
-        await _with_postgres_connection_retry(
-            lambda: _create_schema_and_metadata(engine, quoted_schema)
-        )
+    await _with_postgres_connection_retry(
+        lambda: _create_schema_and_metadata(engine, quoted_schema)
+    )
     return engine
 
 
@@ -374,15 +341,13 @@ async def postgres_test_url() -> AsyncIterator[str]:
     schema_database_url = _schema_url(database_url, quoted_schema)
     engine = _make_test_engine(schema_database_url)
     try:
-        with _postgres_ddl_lock(database_url):
-            await _with_postgres_connection_retry(
-                lambda: _create_schema_and_metadata(engine, quoted_schema)
-            )
+        await _with_postgres_connection_retry(
+            lambda: _create_schema_and_metadata(engine, quoted_schema)
+        )
         yield schema_database_url
     finally:
         try:
-            with _postgres_ddl_lock(database_url):
-                await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
+            await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
         finally:
             await engine.dispose()
 
@@ -400,10 +365,9 @@ def postgres_test_url_sync() -> Iterator[str]:
         schema_database_url = _schema_url(database_url, quoted_schema, null_pool=True)
         engine = _make_test_engine(schema_database_url)
         try:
-            with _postgres_ddl_lock(database_url):
-                await _with_postgres_connection_retry(
-                    lambda: _create_schema_and_metadata(engine, quoted_schema)
-                )
+            await _with_postgres_connection_retry(
+                lambda: _create_schema_and_metadata(engine, quoted_schema)
+            )
         finally:
             await engine.dispose()
         return schema_database_url
@@ -411,8 +375,7 @@ def postgres_test_url_sync() -> Iterator[str]:
     async def _cleanup() -> None:
         engine = _make_test_engine(_schema_url(database_url, quoted_schema, null_pool=True))
         try:
-            with _postgres_ddl_lock(database_url):
-                await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
+            await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
         finally:
             await engine.dispose()
 
@@ -433,13 +396,11 @@ async def postgres_empty_test_url() -> AsyncIterator[str]:
     quoted_schema = _quote_identifier(schema)
     engine = _make_test_engine(_schema_url(database_url, quoted_schema, null_pool=True))
     try:
-        with _postgres_ddl_lock(database_url):
-            await _with_postgres_connection_retry(lambda: _create_schema(engine, quoted_schema))
+        await _with_postgres_connection_retry(lambda: _create_schema(engine, quoted_schema))
         try:
             yield _schema_url(database_url, quoted_schema)
         finally:
-            with _postgres_ddl_lock(database_url):
-                await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
+            await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
     finally:
         await engine.dispose()
 

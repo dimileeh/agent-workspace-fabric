@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -153,27 +153,6 @@ def test_postgres_test_schema_name_is_scoped_to_current_run(
 
 
 @pytest.mark.unit
-def test_postgres_ddl_lock_path_is_scoped_to_current_uid(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    if postgres_mod.fcntl is None:
-        pytest.skip("fcntl-based lock files are not used on this platform")
-
-    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
-    database_key = postgres_mod._postgres_database_key(database_url)
-    monkeypatch.setattr(postgres_mod.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(postgres_mod.os, "getuid", lambda: 4242)
-
-    with postgres_mod._postgres_ddl_lock(database_url):
-        pass
-
-    assert (
-        tmp_path / f"awf-pytest-postgres-ddl-uid-4242-{database_key}.lock"
-    ).is_file()
-
-
-@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_stale_postgres_schema_listing_scans_only_current_namespace(
     monkeypatch: pytest.MonkeyPatch,
@@ -249,7 +228,7 @@ async def test_stale_postgres_cleanup_reuses_one_engine_for_all_drops(
 @pytest.mark.unit
 @pytest.mark.asyncio
 @pytest.mark.parametrize("helper_name", ["postgres_test_engine", "postgres_test_url"])
-async def test_postgres_context_helpers_drop_schema_before_disposing_engine(
+async def test_postgres_context_helpers_do_not_lock_and_drop_before_dispose(
     monkeypatch: pytest.MonkeyPatch,
     helper_name: str,
 ) -> None:
@@ -257,13 +236,23 @@ async def test_postgres_context_helpers_drop_schema_before_disposing_engine(
     schema = f"awf_test_{'1' * 16}_{'a' * 32}"
     quoted_schema = postgres_mod._quote_identifier(schema)
     engine = _FakeDisposableEngine()
-    events: list[tuple[str, bool]] = []
+    events: list[tuple[str, bool, int]] = []
+    lock_depth = 0
+
+    @contextmanager
+    def _recording_ddl_lock(_url: str) -> Iterator[None]:
+        nonlocal lock_depth
+        lock_depth += 1
+        try:
+            yield
+        finally:
+            lock_depth -= 1
 
     monkeypatch.setattr(postgres_mod, "postgres_test_database_url", lambda: database_url)
     monkeypatch.setattr(postgres_mod, "_ensure_postgres_test_run_active", lambda _url: None)
     monkeypatch.setattr(postgres_mod, "_new_postgres_test_schema", lambda: schema)
     monkeypatch.setattr(postgres_mod, "_make_test_engine", lambda _url: engine)
-    monkeypatch.setattr(postgres_mod, "_postgres_ddl_lock", lambda _url: nullcontext())
+    monkeypatch.setattr(postgres_mod, "_postgres_ddl_lock", _recording_ddl_lock, raising=False)
 
     async def _create_schema_and_metadata(
         engine_arg: _FakeDisposableEngine,
@@ -271,13 +260,15 @@ async def test_postgres_context_helpers_drop_schema_before_disposing_engine(
     ) -> None:
         assert engine_arg is engine
         assert schema_arg == quoted_schema
-        events.append(("create", engine_arg.disposed))
+        events.append(("create", engine_arg.disposed, lock_depth))
+        assert lock_depth == 0
 
     async def _drop_schema(engine_arg: _FakeDisposableEngine, schema_arg: str) -> None:
         assert engine_arg is engine
         assert schema_arg == quoted_schema
-        events.append(("drop", engine_arg.disposed))
+        events.append(("drop", engine_arg.disposed, lock_depth))
         assert engine_arg.disposed is False
+        assert lock_depth == 0
 
     monkeypatch.setattr(postgres_mod, "_create_schema_and_metadata", _create_schema_and_metadata)
     monkeypatch.setattr(postgres_mod, "_drop_schema", _drop_schema)
@@ -292,7 +283,7 @@ async def test_postgres_context_helpers_drop_schema_before_disposing_engine(
 
     assert engine.disposed is True
     assert engine.dispose_count == 1
-    assert events == [("create", False), ("drop", False)]
+    assert events == [("create", False, 0), ("drop", False, 0)]
 
 
 @pytest.mark.unit
