@@ -48,6 +48,7 @@ from awf.db.enums import AgentRuntime, OperationStatus, OperationType, Workspace
 from awf.db.models import (
     EgressAuditRecord,
     Operation,
+    ResourceReservation,
     Task,
     TaskAttempt,
     Workspace,
@@ -461,7 +462,11 @@ class WorkspaceService:
                 await repo.acquire_idempotency_key_lock(idempotency_key)
                 existing = await repo.get_by_idempotency_key(idempotency_key)
                 if existing is not None:
-                    if not workspace_create_v2_payload_matches(existing, req):
+                    if not workspace_create_v2_payload_matches(
+                        existing,
+                        req,
+                        settings=self._settings,
+                    ):
                         raise WorkspaceCreateIdempotencyConflictError()
                     return workspace_response(existing)
 
@@ -1040,6 +1045,8 @@ def workspace_create_payload_matches(
 def workspace_create_v2_payload_matches(
     existing: Workspace,
     payload: WorkspaceCreateV2Request,
+    *,
+    settings: Settings | None = None,
 ) -> bool:
     """Compare user-authored v2 create fields for idempotent replay."""
     requested_profile = (
@@ -1072,8 +1079,49 @@ def workspace_create_v2_payload_matches(
         and existing.requested_profile == requested_profile
         and _stored_validation_requested_tier(existing) == payload.validation.requested_tier
         and list(existing.test_commands) == list(payload.validation.commands)
+        and _stored_resource_reservation_matches(existing, payload, settings=settings)
         and _task_provider_readiness_override_matches(existing, payload)
     )
+
+
+def _stored_resource_reservation_matches(
+    existing: Workspace,
+    payload: WorkspaceCreateV2Request,
+    *,
+    settings: Settings | None,
+) -> bool:
+    reservation = _latest_workspace_resource_reservation(existing)
+    if reservation is None:
+        return True
+    plan = resource_reservation_plan(payload, settings=settings or get_settings())
+    return (
+        reservation.steady_cpu == plan.steady_cpu
+        and reservation.steady_memory_gb == plan.steady_memory_gb
+        and reservation.peak_cpu == plan.peak_cpu
+        and reservation.peak_memory_gb == plan.peak_memory_gb
+        and reservation.disk_mb == plan.disk_mb
+        and reservation.dind_slots == plan.dind_slots
+    )
+
+
+def _latest_workspace_resource_reservation(existing: Workspace) -> ResourceReservation | None:
+    try:
+        state = sa_inspect(existing)
+    except NoInspectionAvailable:
+        reservations = cast(
+            Sequence[ResourceReservation],
+            getattr(existing, "resource_reservations", []),
+        )
+    else:
+        if "resource_reservations" in state.unloaded:
+            return None
+        reservations = cast(
+            Sequence[ResourceReservation],
+            getattr(existing, "resource_reservations", []),
+        )
+    if not reservations:
+        return None
+    return max(reservations, key=lambda item: (item.reserved_at, item.id))
 
 
 def _stored_validation_requested_tier(existing: Workspace) -> int:

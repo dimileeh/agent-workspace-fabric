@@ -174,7 +174,7 @@ async def create_workspace_v2(
     if idempotency_key is not None:
         existing = await repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
-            if not _payloads_match_v2(existing, payload):
+            if not _payloads_match_v2(existing, payload, settings=settings):
                 return JSONResponse(
                     status_code=status.HTTP_409_CONFLICT,
                     content=ErrorResponse(
@@ -559,8 +559,10 @@ def _payloads_match(existing: Workspace, payload: WorkspaceCreateRequest) -> boo
 def _payloads_match_v2(
     existing: Workspace,
     payload: WorkspaceCreateV2Request,
+    *,
+    settings: Settings | None = None,
 ) -> bool:
-    return workspace_create_v2_payload_matches(existing, payload)
+    return workspace_create_v2_payload_matches(existing, payload, settings=settings)
 
 
 def _resolved_profile_requested_tier(existing: Workspace) -> int | None:

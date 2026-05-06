@@ -34,7 +34,11 @@ def _v1_request() -> WorkspaceCreateRequest:
     )
 
 
-def _v2_request(*, requested_tier: int = 1) -> WorkspaceCreateV2Request:
+def _v2_request(
+    *,
+    requested_tier: int = 1,
+    resources: dict[str, object] | None = None,
+) -> WorkspaceCreateV2Request:
     return WorkspaceCreateV2Request(
         repo={"url": "git@github.com:example/idempotency.git", "base_branch": "main"},
         task={
@@ -46,7 +50,7 @@ def _v2_request(*, requested_tier: int = 1) -> WorkspaceCreateV2Request:
         },
         workspace={"profile_ref": "auto", "profile": None},
         validation={"commands": ["pytest -q"], "requested_tier": requested_tier},
-        resources={},
+        resources=resources or {},
         preflight={
             "provider_readiness_override": True,
             "provider_readiness_override_reason": "idempotency serialization test fixture",
@@ -131,4 +135,39 @@ async def test_create_v2_auto_profile_replay_conflicts_when_requested_tier_chang
         await service.create_v2(
             _v2_request(requested_tier=2),
             idempotency_key="service-create-v2-tier",
+        )
+
+
+@pytest.mark.unit
+async def test_create_v2_replay_conflicts_when_resources_change(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        _v2_request(
+            resources={
+                "steady_state_cpu_cores": 2.0,
+                "steady_state_memory_gb": 6.0,
+                "peak_cpu_cores": 4.0,
+                "peak_memory_gb": 12.0,
+                "disk_mb": 2048,
+            }
+        ),
+        idempotency_key="service-create-v2-resources",
+    )
+
+    assert created.id.startswith("ws_")
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create_v2(
+            _v2_request(
+                resources={
+                    "steady_state_cpu_cores": 3.0,
+                    "steady_state_memory_gb": 6.0,
+                    "peak_cpu_cores": 4.0,
+                    "peak_memory_gb": 12.0,
+                    "disk_mb": 2048,
+                }
+            ),
+            idempotency_key="service-create-v2-resources",
         )
