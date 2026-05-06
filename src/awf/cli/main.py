@@ -625,7 +625,7 @@ def _run_init_service_bootstrap(
         if docker_unknown or docker_status == "fail":
             if docker_unknown:
                 message = "Docker availability could not be determined from the doctor report."
-                action = "Run `awf doctor` to investigate the local environment."
+                action = "Run `awf service doctor` to investigate the local environment."
                 reason = "DOCKER_DIAGNOSTIC_MISSING"
             else:
                 message = getattr(docker_diag, "message", "Docker is not available.")

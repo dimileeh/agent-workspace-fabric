@@ -5,6 +5,7 @@ import json
 import re
 import shlex
 import subprocess
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,18 +99,43 @@ def test_copy_paste_marked_snippets_are_syntactically_valid() -> None:
     assert checked, "Expected at least one copy-paste-marked snippet to validate."
 
 
-def _public_docs() -> set[str]:
-    seeds = _readme_public_doc_links()
-    seeds.update(_present_docs(OPTIONAL_PUBLIC_GUIDES))
+def test_public_docs_are_discovered_from_docs_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (tmp_path / "README.md").write_text("# Docs\n", encoding="utf-8")
+    (docs_dir / "NEW_GUIDE.md").write_text("# New Guide\n", encoding="utf-8")
+    (docs_dir / "PLAN_MVP.md").write_text("# Internal plan\n", encoding="utf-8")
+    internal_dir = docs_dir / "awf-plans"
+    internal_dir.mkdir()
+    (internal_dir / "ws_private.md").write_text("# Private plan\n", encoding="utf-8")
 
-    public_docs = set(seeds)
-    for rel_path in sorted(seeds):
-        public_docs.update(
-            link
-            for link in _markdown_doc_links(REPO_ROOT / rel_path)
-            if _is_public_doc_path(link)
-        )
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(module, "README_PATH", tmp_path / "README.md")
+
+    assert _public_docs() == {"docs/NEW_GUIDE.md"}
+
+
+def _public_docs() -> set[str]:
+    public_docs = _all_public_markdown_docs()
+    public_docs.update(_readme_public_doc_links())
+    public_docs.update(_present_docs(OPTIONAL_PUBLIC_GUIDES))
     return {doc for doc in public_docs if _is_public_doc_path(doc)}
+
+
+def _all_public_markdown_docs() -> set[str]:
+    docs_dir = REPO_ROOT / "docs"
+    if not docs_dir.exists():
+        return set()
+
+    return {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in docs_dir.rglob("*.md")
+        if _is_public_doc_path(path.relative_to(REPO_ROOT).as_posix())
+    }
 
 
 def _docs_index_links() -> set[str]:

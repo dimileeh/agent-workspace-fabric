@@ -13,14 +13,14 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Problem:** No Claude Code auth signal was visible.
 **Likely Cause:** Missing Claude API credentials.
 **Operator Fix:** Mount ~/.claude or set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#claude_auth_missing](#claude_auth_missing)
 
 ### CODEX_AUTH_MISSING
 **Problem:** No Codex auth signal was visible.
 **Likely Cause:** Missing Codex API credentials.
 **Operator Fix:** Mount ~/.codex or set OPENAI_API_KEY, OPENAI_API_TOKEN, CODEX_API_KEY, or CODEX_AUTH_TOKEN.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#codex_auth_missing](#codex_auth_missing)
 
 ### COMPLETED_PR_NOT_MERGED
@@ -41,35 +41,35 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Problem:** Free disk could not be inspected for the AWF work directory.
 **Likely Cause:** Permission denied or path does not exist.
 **Operator Fix:** Verify AWF_WORK_DIR is accessible and re-run doctor.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#disk_usage_unavailable](#disk_usage_unavailable)
 
 ### DOCKER_CLI_NOT_FOUND
 **Problem:** Docker CLI is not installed or is not on PATH.
 **Likely Cause:** The docker CLI is missing from the host environment or not accessible to the AWF process.
 **Operator Fix:** Install Docker Desktop or make the docker CLI available to the AWF service environment.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.docker.com/get-docker/](https://docs.docker.com/get-docker/)
 
 ### DOCKER_DAEMON_UNREACHABLE
 **Problem:** Docker is installed but the daemon is not reachable.
 **Likely Cause:** The Docker daemon is stopped, crashing, or blocking connections.
 **Operator Fix:** Start Docker Desktop or verify AWF_DOCKER_HOST.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.docker.com/config/daemon/](https://docs.docker.com/config/daemon/)
 
 ### DOCKER_SOCKET_UNREACHABLE
 **Problem:** Docker socket is not reachable.
 **Likely Cause:** The Docker daemon is not running or the socket permissions are incorrect.
 **Operator Fix:** Start Docker Desktop or verify AWF_DOCKER_HOST.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [https://docs.docker.com/config/daemon/](https://docs.docker.com/config/daemon/)
 
 ### GEMINI_AUTH_MISSING
 **Problem:** No Gemini auth signal was visible.
 **Likely Cause:** Missing Gemini API credentials.
 **Operator Fix:** Mount ~/.gemini or set GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_APPLICATION_CREDENTIALS.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#gemini_auth_missing](#gemini_auth_missing)
 
 ### GITHUB_AUTH_UNUSABLE
@@ -111,14 +111,14 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Problem:** A GitHub repository identifier or URL could not be parsed.
 **Likely Cause:** The PR adoption request used an unsupported repository format.
 **Operator Fix:** Use an `owner/repo` slug or a valid GitHub repository URL.
-**Related Command:** `awf workspace adopt-pr-monitor`
+**Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#invalid_github_repo](#invalid_github_repo)
 
 ### LOCAL_CONFIG_INVALID
 **Problem:** Local AWF configuration has issues that block reliable service use.
 **Likely Cause:** Invalid values in .env or missing required paths.
 **Operator Fix:** Fix the listed environment or path settings and re-run doctor.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#local_config_invalid](#local_config_invalid)
 
 ### MCP_EGRESS_AUDIT_ERROR
@@ -139,21 +139,21 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Problem:** Workspace network posture could not be inspected.
 **Likely Cause:** Cannot query the local database to check workspace posture.
 **Operator Fix:** Restore control-plane database access and re-run doctor.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#network_posture_unavailable](#network_posture_unavailable)
 
 ### OPENCODE_OLLAMA_AUTH_MISSING
 **Problem:** No OpenCode/Ollama auth signal was visible.
 **Likely Cause:** Missing OpenCode/Ollama credentials.
 **Operator Fix:** Mount ~/.config/opencode, mount ~/.ollama auth files, or set OLLAMA_API_KEY.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#opencode_ollama_auth_missing](#opencode_ollama_auth_missing)
 
 ### ORPHAN_RESOURCES_PRESENT
 **Problem:** Orphan AWF Docker resources were detected.
 **Likely Cause:** Networks or volumes left behind by deleted workspaces.
 **Operator Fix:** Review the listed resources before running cleanup.
-**Related Command:** `awf service cleanup`
+**Related Command:** `awf service gc`
 **Docs Link:** [docs/REASON_CATALOG.md#orphan_resources_present](#orphan_resources_present)
 
 ### PORT_CLOSED
@@ -167,35 +167,35 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Problem:** Required local port could not be derived from configuration.
 **Likely Cause:** Invalid AWF_API_URL or AWF_FRONTEND_URL.
 **Operator Fix:** Fix the local AWF URL configuration and re-run doctor.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#port_config_invalid](#port_config_invalid)
 
 ### PR_ADOPTION_INPUT_REQUIRED
 **Problem:** A PR monitor adoption request omitted required input.
 **Likely Cause:** The request did not include enough repository or PR information to identify the PR.
 **Operator Fix:** Provide the repository and PR number, or use a complete GitHub PR URL.
-**Related Command:** `awf workspace adopt-pr-monitor`
+**Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_adoption_input_required](#pr_adoption_input_required)
 
 ### PR_ADOPTION_POLICY_CONFLICT
 **Problem:** The requested PR cannot be adopted under the current workspace policy.
 **Likely Cause:** The PR targets an unsupported branch, conflicts with requested metadata, or violates adoption policy.
 **Operator Fix:** Review the PR target and adoption options, then retry with policy-compatible input.
-**Related Command:** `awf workspace adopt-pr-monitor`
+**Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_adoption_policy_conflict](#pr_adoption_policy_conflict)
 
 ### PR_ALREADY_CLOSED
 **Problem:** The PR selected for monitor adoption is already closed.
 **Likely Cause:** The PR was closed before AWF could adopt monitoring.
 **Operator Fix:** Reopen the PR or adopt an active replacement PR.
-**Related Command:** `awf workspace adopt-pr-monitor`
+**Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_closed](#pr_already_closed)
 
 ### PR_ALREADY_MERGED
 **Problem:** The PR selected for monitor adoption is already merged.
 **Likely Cause:** There is no open PR monitor work left for AWF to own.
 **Operator Fix:** No monitor adoption is needed; use workspace cleanup or status commands instead.
-**Related Command:** `awf workspace adopt-pr-monitor`
+**Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_merged](#pr_already_merged)
 
 ### PR_METADATA_FETCH_FAILED
@@ -223,7 +223,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Problem:** AWF service status checks could not be collected.
 **Likely Cause:** Service discovery or database connection failed.
 **Operator Fix:** Fix the reported local configuration error and re-run doctor.
-**Related Command:** `awf doctor`
+**Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#service_status_collection_failed](#service_status_collection_failed)
 
 ### STRANDED_WORKSPACES_PRESENT
