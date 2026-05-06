@@ -715,6 +715,93 @@ def test_service_gc_cli_defaults_to_json_dry_run(
 
 
 @pytest.mark.unit
+def test_service_gc_cli_uses_compose_host_work_dir_when_awf_work_dir_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_work_dir = (tmp_path / "service-state").resolve()
+    calls: list[dict[str, object]] = []
+
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    async def _fake_gc(_session_factory: object, **kwargs: object) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "dry_run": True,
+                "status": "dry_run",
+                "reason_code": "CLEANUP_DRY_RUN",
+                "candidate_count": 0,
+                "preserved_count": 0,
+                "deleted_paths": [],
+                "candidates": [],
+                "preserved": [],
+            }
+        )
+
+    import awf.db.session as db_session
+    import awf.service.gc as gc_mod
+
+    monkeypatch.delenv("AWF_WORK_DIR", raising=False)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(host_work_dir))
+    monkeypatch.setenv("AWF_DATABASE_URL", _POSTGRES_TEST_URL)
+    monkeypatch.setattr(db_session, "make_engine", lambda _url: _Engine())
+    monkeypatch.setattr(db_session, "make_session_factory", lambda _engine: object())
+    monkeypatch.setattr(gc_mod, "run_terminal_workspace_gc", _fake_gc)
+
+    result = _runner.invoke(app, ["service", "gc"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["work_dir"] == host_work_dir
+
+
+@pytest.mark.unit
+def test_service_gc_cli_ignores_project_default_awf_work_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_default_work_dir = (tmp_path / ".awf" / "service").resolve()
+    calls: list[dict[str, object]] = []
+
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    async def _fake_gc(_session_factory: object, **kwargs: object) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "dry_run": True,
+                "status": "dry_run",
+                "reason_code": "CLEANUP_DRY_RUN",
+                "candidate_count": 0,
+                "preserved_count": 0,
+                "deleted_paths": [],
+                "candidates": [],
+                "preserved": [],
+            }
+        )
+
+    import awf.db.session as db_session
+    import awf.service.gc as gc_mod
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AWF_WORK_DIR", ".awf")
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+    monkeypatch.setenv("AWF_DATABASE_URL", _POSTGRES_TEST_URL)
+    monkeypatch.setattr(db_session, "make_engine", lambda _url: _Engine())
+    monkeypatch.setattr(db_session, "make_session_factory", lambda _engine: object())
+    monkeypatch.setattr(gc_mod, "run_terminal_workspace_gc", _fake_gc)
+
+    result = _runner.invoke(app, ["service", "gc"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["work_dir"] == host_default_work_dir
+
+
+@pytest.mark.unit
 def test_service_gc_cli_execute_deletes_and_supports_pretty_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

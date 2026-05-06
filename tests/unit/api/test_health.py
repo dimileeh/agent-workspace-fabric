@@ -17,7 +17,7 @@ import asyncio
 import inspect
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -204,7 +204,11 @@ async def ready_app_and_client(
         monkeypatch.delenv(key, raising=False)
     original_get_settings = health_route.get_settings
     original_get_settings.cache_clear()
-    test_settings = Settings(_env_file=None, host_home=str(tmp_path / "home"))
+    test_settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        work_dir=str(tmp_path / "work"),
+    )
     monkeypatch.setattr(health_route, "get_settings", lambda: test_settings)
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
@@ -587,6 +591,35 @@ def test_readyz_does_not_force_task_scheduling_with_zero_sleep() -> None:
 
 
 @pytest.mark.unit
+def test_readyz_retention_defaults_use_gc_retention_constant() -> None:
+    source = inspect.getsource(health_route)
+    tree = ast.parse(source)
+    expected_default_name = "DEFAULT_MIN_AGE_HOURS"
+    expected_functions = {
+        "_workspace_view_for_readyz",
+        "_check_orphan_resources",
+    }
+
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in expected_functions
+    }
+
+    assert set(functions) == expected_functions
+    for function in functions.values():
+        defaults_by_name = dict(
+            zip(
+                [arg.arg for arg in function.args.kwonlyargs],
+                function.args.kw_defaults,
+                strict=True,
+            )
+        )
+        assert isinstance(defaults_by_name["min_retention_hours"], ast.Name)
+        assert defaults_by_name["min_retention_hours"].id == expected_default_name
+
+
+@pytest.mark.unit
 async def test_readyz_invalid_provider_returns_422(
     ready_app_and_client: tuple[Any, AsyncClient],
 ) -> None:
@@ -941,7 +974,7 @@ async def test_readyz_orphan_resources_present_returns_503(
     workspace_id = await create_workspace(
         engine,
         status=WorkspaceStatus.completed,
-        updated_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC) - timedelta(hours=200),
     )
     runner = FakeCommandRunner()
     _queue_all_ok(runner)
@@ -973,6 +1006,37 @@ async def test_readyz_orphan_resources_present_returns_503(
     assert orphan_check["orphan_count"] == 1
     assert orphan_check["cleanup_readiness"]["dry_run_only"] is True
     assert orphan_check["examples"][0]["workspace_id"] == workspace_id
+
+
+@pytest.mark.unit
+async def test_readyz_retains_recent_terminal_worktree_without_failing(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = ready_app_and_client
+    workspace_id = await create_workspace(
+        engine,
+        status=WorkspaceStatus.completed,
+        updated_at=datetime.now(UTC),
+    )
+    settings = health_route.get_settings()
+    worktree = Path(settings.work_dir) / "git" / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    orphan_check = body["checks"]["orphan_resources"]
+    assert orphan_check["ok"] is True
+    assert orphan_check["reason"] == "NO_ORPHANS"
+    assert orphan_check["orphan_count"] == 0
+    assert orphan_check["expected_count"] == 1
 
 
 @pytest.mark.unit
