@@ -358,6 +358,20 @@
             ],
             "title": "Detail"
           },
+          "egress_posture_counts": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Egress Posture Counts"
+          },
           "examples": {
             "anyOf": [
               {

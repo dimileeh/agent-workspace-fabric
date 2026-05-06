@@ -33,6 +33,7 @@ from awf.api.app import configure_database, create_app
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import EgressAuditRepository
 from awf.db.session import make_session_factory
 from awf.service.readiness import CoreReadinessCheck, CoreReadinessReport
 from tests.unit.helpers import create_workspace
@@ -282,6 +283,54 @@ async def test_readyz_response_shape_matches_contract(
     assert body["agent_readiness"]["security"]["status"] == "warning"
     assert "DOCKER_HOST_BROAD_CONTROL" in body["agent_readiness"]["security"]["reason_codes"]
     assert body["agent_readiness"]["providers"]["github"]["reason"] == ("GITHUB_TOKEN_ENV_MISSING")
+
+
+@pytest.mark.unit
+async def test_readyz_egress_audit_returns_posture_counts(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    now = datetime.now(UTC)
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        for posture, decision, destination in (
+            ("open", "allow", "public_internet"),
+            ("restricted", "deferred", "allowlisted_public"),
+            ("offline", "deny", "internal_only"),
+        ):
+            workspace_id = await create_workspace(
+                factory,
+                status=WorkspaceStatus.running,
+                updated_at=now,
+                task_title=f"{posture} egress audited",
+            )
+            await EgressAuditRepository(session).create(
+                workspace_id=workspace_id,
+                attempt_id=None,
+                policy_posture=posture,
+                decision=decision,
+                destination_category=destination,
+                reason_code=f"LOCAL_EGRESS_{posture.upper()}_TEST",
+                details={},
+            )
+        await session.commit()
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    egress_audit = body["checks"]["egress_audit"]
+    assert egress_audit["resource_count"] == 3
+    assert egress_audit["egress_posture_counts"] == {
+        "offline": 1,
+        "open": 1,
+        "restricted": 1,
+    }
 
 
 @pytest.mark.unit

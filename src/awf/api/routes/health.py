@@ -80,6 +80,7 @@ class CheckResult(BaseModel):
     expected_counts_by_kind: dict[str, int] | None = None
     unknown_counts_by_kind: dict[str, int] | None = None
     orphan_classification_counts: dict[str, int] | None = None
+    egress_posture_counts: dict[str, int] | None = None
     cleanup_readiness: dict[str, Any] | None = None
     scanners: dict[str, dict[str, Any]] | None = None
     examples: list[dict[str, Any]] | None = None
@@ -457,13 +458,15 @@ async def readyz(
                 from awf.db.repositories import EgressAuditRepository
                 repo = EgressAuditRepository(session)
                 counts = await asyncio.wait_for(repo.summary_counts_by_posture(), timeout=_CHECK_TIMEOUT_SECONDS)
-            total = sum(counts.values())
+            posture_counts = {str(posture): int(count) for posture, count in counts.items()}
+            total = sum(posture_counts.values())
             return CheckResult(
                 ok=True,
                 status="ok",
                 reason="EGRESS_AUDIT_AVAILABLE",
                 detail="Egress audit evidence is available",
                 resource_count=total,
+                egress_posture_counts=posture_counts,
             )
         except TimeoutError:
             return CheckResult(
@@ -472,9 +475,17 @@ async def readyz(
                 reason="EGRESS_AUDIT_TIMEOUT",
                 detail=f"Egress audit summary_counts exceeded {_CHECK_TIMEOUT_SECONDS}s",
                 resource_count=0,
+                egress_posture_counts={},
             )
         except Exception as exc:
-            return CheckResult(ok=True, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail=str(exc))
+            return CheckResult(
+                ok=True,
+                status="unknown",
+                reason="EGRESS_AUDIT_UNAVAILABLE",
+                detail=str(exc),
+                resource_count=0,
+                egress_posture_counts={},
+            )
 
     # Run checks concurrently so the worst-case latency stays bounded by the
     # single _CHECK_TIMEOUT_SECONDS rather than summing across dependencies (a
