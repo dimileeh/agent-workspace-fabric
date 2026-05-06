@@ -203,6 +203,25 @@ def test_copy_paste_docs_ignore_missing_readme_linked_docs(
     assert _copy_paste_docs() == set()
 
 
+def test_awf_command_mentions_ignore_missing_readme_linked_docs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "README.md").write_text(
+        "See [missing guide](docs/MISSING.md).\n",
+        encoding="utf-8",
+    )
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(module, "README_PATH", tmp_path / "README.md")
+
+    paths = [Path("README.md"), *map(Path, sorted(_public_docs()))]
+
+    assert _public_docs() == {"docs/MISSING.md"}
+    assert _awf_command_mentions(paths) == []
+
+
 def _public_docs() -> set[str]:
     public_docs = _all_public_markdown_docs()
     public_docs.update(_readme_public_doc_links())
@@ -299,7 +318,10 @@ def _awf_command_mentions(paths: Iterable[Path]) -> list[AwfCommandMention]:
     root_groups = {path[0] for path in _typer_command_tree(app) if len(path) == 2}
     mentions: list[AwfCommandMention] = []
     for rel_path in paths:
-        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        doc_path = REPO_ROOT / rel_path
+        if not doc_path.exists():
+            continue
+        text = doc_path.read_text(encoding="utf-8")
         collapsed = re.sub(r"\\\n\s*", " ", text)
         for line in collapsed.splitlines():
             if _ignore_awf_command_line(line):
