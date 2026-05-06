@@ -95,9 +95,7 @@ def _quote_identifier(value: str) -> str:
 
 
 def _asyncpg_url(url: URL) -> str:
-    query = dict(url.query)
-    query.pop("awf_search_path", None)
-    query.pop("awf_null_pool", None)
+    query = {key: value for key, value in url.query.items() if not key.startswith("awf_")}
     return url.set(drivername="postgresql", query=query).render_as_string(hide_password=False)
 
 
