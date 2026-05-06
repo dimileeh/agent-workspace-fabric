@@ -36,9 +36,12 @@ from tests.unit.mcp._parity_utils import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
-    "Workspace create, list, and get": (
-        "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_create_v2_hydrates_canonical_request_model",
+    "Workspace create v1": (
+        "tests/unit/mcp/test_mcp_server.py::TestCreateWorkspace::test_happy_path_returns_workspace_payload",
+    ),
+    "Workspace list and get": (
         "tests/unit/mcp/test_mcp_server.py::TestGetAndList::test_get_returns_the_workspace_just_created",
+        "tests/unit/mcp/test_mcp_server.py::TestGetAndList::test_list_returns_newest_first",
         "tests/unit/mcp/test_mcp_server.py::TestWaitForWorkspace::test_exits_immediately_when_already_terminal",
     ),
     "Workspace overview": (

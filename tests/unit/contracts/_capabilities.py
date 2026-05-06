@@ -381,7 +381,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
     ),
     ContractCapability(
         name="create_workspace_v1",
-        parity_capability="Workspace create, list, and get",
+        parity_capability="Workspace create v1",
         rest_method="POST",
         rest_path="/v1/workspaces",
         mcp_tool="awf_create_workspace",
@@ -425,13 +425,13 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
     ),
     ContractCapability(
         name="create_workspace_v2",
-        parity_capability="Workspace create, list, and get",
+        parity_capability="Workspace create v2",
         rest_method="POST",
         rest_path="/v2/workspaces",
         mcp_tool="awf_create_workspace_v2",
         cli_tokens=("workspace", "create"),
-        parity_status="MCP implemented",
-        parity_backlog_slice="—",
+        parity_status="MCP partial",
+        parity_backlog_slice="TODO§P1-mcp-create-v2-full-parity",
         supports_idempotency_key=True,
         supports_if_match=False,
         error_codes=frozenset(
@@ -564,7 +564,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
 _CAPABILITIES += (
     ContractCapability(
         name="get_workspace",
-        parity_capability="Workspace create, list, and get",
+        parity_capability="Workspace list and get",
         rest_method="GET",
         rest_path="/v1/workspaces/{workspace_id}",
         mcp_tool="awf_get_workspace",
@@ -582,7 +582,7 @@ _CAPABILITIES += (
     ),
     ContractCapability(
         name="list_workspaces",
-        parity_capability="Workspace create, list, and get",
+        parity_capability="Workspace list and get",
         rest_method="GET",
         rest_path="/v1/workspaces",
         mcp_tool="awf_list_workspaces",
@@ -598,7 +598,7 @@ _CAPABILITIES += (
     ),
     ContractCapability(
         name="wait_for_workspace",
-        parity_capability="Workspace create, list, and get",
+        parity_capability="Workspace list and get",
         rest_method="GET",
         rest_path="/v1/workspaces/{workspace_id}",
         mcp_tool="awf_wait_for_workspace",

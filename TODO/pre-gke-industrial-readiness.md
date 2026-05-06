@@ -768,6 +768,10 @@ coding agent in any project to use AWF for a feature.
 - [ ] TODO§P1-mcp-global-events: Add MCP parity for the global
   `GET /v1/events` surface, or keep the workspace-events row explicitly
   marked `MCP partial` until global events have a real MCP tool and coverage.
+- [ ] TODO§P1-mcp-create-v2-full-parity: Add full MCP parity for
+  `awf_create_workspace_v2` so MCP callers can request REST v2 `resources`
+  and task scheduler knobs (`priority`, `human_boost`), or keep the create row
+  explicitly marked `MCP partial`.
 - [x] Add a docs/status consistency test for the parity matrix so entries marked
   implemented must correspond to real REST routes, CLI commands, MCP tools, and
   contract-test coverage; partial or missing entries must remain visible as
