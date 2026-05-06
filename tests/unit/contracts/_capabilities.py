@@ -377,6 +377,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         response_fields=frozenset(
             {"source_workspace_id", "new_workspace_id", "operation_id", "status"}
         ),
+        auth_required=True,
     ),
     ContractCapability(
         name="create_workspace_v1",

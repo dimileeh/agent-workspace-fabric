@@ -1680,7 +1680,7 @@ class TestWorkspaceOperations:
             {
                 "workspace_id": workspace.id,
                 "status": "running",
-                "type": "validate",
+                "operation_type": "validate",
             },
         )
 
