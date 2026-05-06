@@ -1585,12 +1585,31 @@ class TestMcpOperatorSurfaceParity:
             },
         )
         detail_response = await operator_stack.client.get(f"/v1/operations/{operation_id}")
+        workspace_response = await operator_stack.client.get(
+            f"/v1/workspaces/{workspace_id}/operations",
+            params={
+                "type": "validate",
+                "status": "succeeded",
+                "limit": 10,
+            },
+        )
         assert list_response.status_code == 200
         assert detail_response.status_code == 200
+        assert workspace_response.status_code == 200
 
         list_mcp = await _call(
             operator_stack.mcp,
             "awf_list_operations",
+            {
+                "workspace_id": workspace_id,
+                "operation_type": "validate",
+                "status": "succeeded",
+                "limit": 10,
+            },
+        )
+        workspace_mcp = await _call(
+            operator_stack.mcp,
+            "awf_list_workspace_operations",
             {
                 "workspace_id": workspace_id,
                 "operation_type": "validate",
@@ -1605,6 +1624,7 @@ class TestMcpOperatorSurfaceParity:
         )
 
         assert list_mcp == list_response.json()
+        assert workspace_mcp == workspace_response.json()
         assert detail_mcp == detail_response.json()
         assert detail_response.json()["reason_code"] == "OPERATOR_VALIDATE"
         assert detail_response.json()["log_stream_ids"] == [

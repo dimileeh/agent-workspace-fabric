@@ -540,15 +540,18 @@ def build_mcp_server(
         limit: int = Field(default=50, ge=1, le=500),
         status: OperationStatus | None = Field(default=None),
         operation_type: OperationType | None = Field(default=None),
-    ) -> list[dict[str, Any]] | None:
-        """List one workspace's operations newest-first."""
+    ) -> CallToolResult:
+        """List one workspace's operations using the REST envelope."""
         rows = await service.list_operations(
             workspace_id,
             status=status,
             operation_type=operation_type,
-            limit=limit,
+            limit=limit + 1,
         )
-        return [row.model_dump(mode="json") for row in rows] if rows is not None else None
+        if rows is None:
+            return _null_tool_result()
+        response = _operation_list_response(rows, limit=limit)
+        return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_list_workspace_logs")
     async def awf_list_workspace_logs(

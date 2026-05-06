@@ -1519,16 +1519,20 @@ class TestWorkspaceOperations:
             stop.created_at = base + timedelta(seconds=2)
             await session.commit()
 
-        operations = await _call(
+        payload = await _call(
             mcp,
             "awf_list_workspace_operations",
             {"workspace_id": workspace.id, "limit": 2},
         )
 
-        assert isinstance(operations, list)
-        assert [item["id"] for item in operations] == [stop.id, validate.id]
-        assert [item["type"] for item in operations] == ["stop", "validate"]
-        assert [item["status"] for item in operations] == ["pending", "running"]
+        assert isinstance(payload, dict)
+        assert [item["id"] for item in payload["items"]] == [stop.id, validate.id]
+        assert [item["type"] for item in payload["items"]] == ["stop", "validate"]
+        assert [item["status"] for item in payload["items"]] == ["pending", "running"]
+        assert payload["has_more"] is True
+        assert payload["next_cursor"] is None
+        assert payload["limit"] == 2
+        assert payload["cursor"] is None
 
     @pytest.mark.unit
     async def test_list_workspace_operations_forwards_status_and_type_filters(
@@ -1567,7 +1571,7 @@ class TestWorkspaceOperations:
             pending_validate.created_at = base + timedelta(seconds=2)
             await session.commit()
 
-        operations = await _call(
+        payload = await _call(
             mcp,
             "awf_list_workspace_operations",
             {
@@ -1577,10 +1581,12 @@ class TestWorkspaceOperations:
             },
         )
 
-        assert isinstance(operations, list)
-        assert [item["id"] for item in operations] == [running_validate.id]
-        assert [item["type"] for item in operations] == ["validate"]
-        assert [item["status"] for item in operations] == ["running"]
+        assert isinstance(payload, dict)
+        assert [item["id"] for item in payload["items"]] == [running_validate.id]
+        assert [item["type"] for item in payload["items"]] == ["validate"]
+        assert [item["status"] for item in payload["items"]] == ["running"]
+        assert payload["has_more"] is False
+        assert payload["limit"] == 50
 
     @pytest.mark.unit
     async def test_list_workspace_operations_missing_workspace_returns_none(
