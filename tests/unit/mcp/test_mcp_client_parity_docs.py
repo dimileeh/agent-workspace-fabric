@@ -51,6 +51,16 @@ READ_ONLY_OPERATOR_ROWS = {
     },
 }
 
+IDEMPOTENT_MCP_CONTROL_TOOLS = {
+    "awf_cancel_workspace",
+    "awf_stop_workspace",
+    "awf_destroy_workspace",
+    "awf_remonitor_workspace",
+    "awf_request_workspace_validation",
+    "awf_refresh_workspace",
+    "awf_rebase_workspace",
+}
+
 
 def _split_cell(cell: str) -> list[str]:
     cell = _strip_backticks(cell)
@@ -175,6 +185,23 @@ def test_retry_workspace_row_reflects_registered_mcp_tool() -> None:
     assert not any(tool.startswith("No ") for tool in tools)
     assert row.get("Status", "").strip() in {"MCP implemented", "MCP partial"}
     assert backlog != "TODO§P1-mcp-retry"
+
+
+@pytest.mark.unit
+def test_mcp_control_idempotency_migration_note_is_published() -> None:
+    parity_doc = PARITY_DOC.read_text(encoding="utf-8")
+    mcp_ref = MCP_REFERENCE.read_text(encoding="utf-8")
+    combined = f"{parity_doc}\n{mcp_ref}"
+
+    assert "MCP control migration note" in parity_doc
+    assert "MCP control migration note" in mcp_ref
+    assert "required `idempotency_key`" in combined
+    assert "Existing MCP clients" in combined
+    assert "REST `Idempotency-Key`" in combined
+
+    for tool_name in IDEMPOTENT_MCP_CONTROL_TOOLS:
+        assert tool_name in parity_doc
+        assert tool_name in mcp_ref
 
 
 @pytest.mark.unit

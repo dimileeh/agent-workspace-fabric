@@ -43,13 +43,24 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 | `awf_destroy_workspace` | Operator control: destroy AWF-managed workspace resources. |
 | `awf_remonitor_workspace` | Operator control: request PR monitor recovery. |
 | `awf_request_workspace_validation` | Operator control: request workspace re-validation. |
+| `awf_refresh_workspace` | Operator control: refresh workspace state after upstream changes. |
+| `awf_rebase_workspace` | Operator control: rebase workspace work onto the current base. |
+| `awf_retry_workspace` | Retry a failed or cancelled workspace as a fresh attempt. |
 
 The observability tools return `null` for a missing workspace, log stream, or
 operation rather than surfacing raw storage errors. Operator observability tools
 are read-only and mirror REST response envelopes; the explicit control tools do
 not provide shell access or arbitrary Docker execution. Known MCP parity backlog
-is documented in the matrix, including refresh, rebase, retry, artifact
-content/download, and `If-Match` concurrency coverage.
+is documented in the matrix, including artifact content/download and global
+workspace event streaming.
+
+**MCP control migration note:** The control tools `awf_cancel_workspace`,
+`awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`,
+`awf_request_workspace_validation`, `awf_refresh_workspace`, and
+`awf_rebase_workspace` have a required `idempotency_key` argument. Existing MCP clients that
+omitted this argument or sent `null` must pass a stable non-empty key for each
+operator action. This mirrors the REST `Idempotency-Key` requirement for the
+same control routes; `expected_version` remains optional and maps to `If-Match`.
 
 Example `awf_create_workspace_v2` arguments:
 

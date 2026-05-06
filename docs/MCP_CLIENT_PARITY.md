@@ -14,6 +14,14 @@ surfaces and a backlog index for explicit parity gaps.
 
 **Note on SDKs (v0.1):** REST, CLI, and MCP are the supported client surfaces for v0.1. AWF does not ship with a supported Python SDK. Integrators must use one of the supported surfaces. Do not import internal AWF modules to build custom API clients.
 
+**MCP control migration note:** The MCP control tools `awf_cancel_workspace`,
+`awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`,
+`awf_request_workspace_validation`, `awf_refresh_workspace`, and
+`awf_rebase_workspace` have a required `idempotency_key` argument. Existing MCP clients that
+omitted this argument or sent `null` must pass a stable non-empty key for each
+operator action. This mirrors the REST `Idempotency-Key` requirement for the
+same control routes; `expected_version` remains optional and maps to `If-Match`.
+
 ## Status Vocabulary
 
 - `MCP implemented`: MCP exposes the same operator data or control intent as
