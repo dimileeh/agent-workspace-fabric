@@ -21,7 +21,10 @@ _TOKEN_USAGE_METADATA_KEY_RE = re.compile(
     r"|(?:^|[_-])tokens?[_-](?:count|used|usage)$",
     re.IGNORECASE,
 )
-_URL_CREDENTIAL_RE = re.compile(r"(\bhttps?://)([^/\s:@]+(?::[^/\s@]+)?@)", re.IGNORECASE)
+_URL_CREDENTIAL_RE = re.compile(
+    r"(\b[a-z][a-z0-9+.-]*://)([^/\s:@]+(?::[^/\s@]+)?@)",
+    re.IGNORECASE,
+)
 _AUTHORIZATION_RE = re.compile(
     r"(\bAuthorization\s*:\s*(?:Bearer|Basic)\s+)([A-Za-z0-9._~+/=\-]{8,})",
     re.IGNORECASE,
@@ -115,6 +118,8 @@ def redact_audit_value(value: Any) -> Any:
         return [redact_audit_value(item) for item in value]
     if isinstance(value, tuple):
         return [redact_audit_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [redact_audit_value(item) for item in sorted(value, key=str)]
     if isinstance(value, str):
         return _redact_string(value)
     return value

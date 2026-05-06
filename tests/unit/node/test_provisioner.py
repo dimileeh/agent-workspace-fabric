@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    EgressAuditRepository,
     ResourceReservationRepository,
     SecretLeaseRepository,
     TaskAttemptRepository,
@@ -31,6 +32,7 @@ from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import (
     Provisioner,
     ProvisionerConfig,
+    _egress_plan_destination_category,
     _provision_checkout_base_branch,
     _provision_remote_push_branch,
 )
@@ -106,6 +108,22 @@ def _secret_profile() -> WorkspaceProfile:
             )
         ],
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("mode", "expected_category"),
+    [
+        (EgressMode.open, "public_internet"),
+        (EgressMode.offline, "internal_only"),
+        (EgressMode.restricted, "policy_decision"),
+    ],
+)
+def test_egress_plan_destination_category_keeps_restricted_distinct_from_offline(
+    mode: EgressMode,
+    expected_category: str,
+) -> None:
+    assert _egress_plan_destination_category(mode) == expected_category
 
 
 class TestSuccess:
@@ -603,6 +621,47 @@ class TestSuccess:
             assert reloaded.compose_project_name == f"awf_{ws_id}"
 
     @pytest.mark.unit
+    async def test_egress_audit_records_workspace_task_attempt(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=f"provisioner-audit:{ws.id}",
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            attempt = await TaskAttemptRepository(s).create_for_workspace(
+                task=task,
+                workspace=ws,
+            )
+            await s.commit()
+            ws_id = ws.id
+            attempt_id = attempt.id
+
+        await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
+            assert audit is not None
+            assert audit.attempt_id == attempt_id
+
+    @pytest.mark.unit
     async def test_records_state_transition_events(
         self,
         provisioner: Provisioner,
@@ -772,6 +831,123 @@ class TestFailureHandling:
             assert reloaded.failure_message is not None
             assert "docker compose up failed" in reloaded.failure_message
             assert "pull access denied for awf-agent-runtime:test" in reloaded.failure_message
+
+    @pytest.mark.unit
+    async def test_stack_startup_failure_records_computed_egress_audit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _FailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                del request
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="pull access denied for awf-agent-runtime:test",
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "restricted-audit",
+                    "security": {"egress": {"mode": "restricted"}},
+                },
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert audit is not None
+            assert audit.policy_posture == "restricted"
+            assert audit.decision == "deferred"
+            assert audit.destination_category == "policy_decision"
+            assert audit.reason_code == "LOCAL_EGRESS_RESTRICTED_LOCAL_ONLY"
+            assert audit.details["destination_filtering"] == "deferred"
+
+    @pytest.mark.unit
+    async def test_stack_startup_failure_marks_failed_when_egress_audit_write_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _FailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                del request
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="pull access denied for awf-agent-runtime:test",
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+
+        async def _raise_audit_write(**kwargs: Any) -> bool:
+            del kwargs
+            raise RuntimeError("egress_audit_records missing")
+
+        monkeypatch.setattr(
+            provisioner,
+            "_record_egress_audit_if_current",
+            _raise_audit_write,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "restricted-audit",
+                    "security": {"egress": {"mode": "restricted"}},
+                },
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "service_startup_failure"
+            assert reloaded.failure_message is not None
+            assert "docker compose up failed" in reloaded.failure_message
+            assert audit is None
 
     @pytest.mark.unit
     async def test_stack_launch_failure_revokes_issued_secret_leases_without_hiding_error(
@@ -953,11 +1129,13 @@ class TestFailureHandling:
 
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
+            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.failed.value
             assert reloaded.failure_reason == "policy_failure"
             assert reloaded.failure_message is not None
             assert "LOCAL_EGRESS_MODE_UNSUPPORTED" in reloaded.failure_message
+            assert audit is None
             failed_events = [
                 event
                 for event in reloaded.events

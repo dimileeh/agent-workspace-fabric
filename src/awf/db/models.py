@@ -256,6 +256,12 @@ class Workspace(Base):
         lazy="selectin",
         order_by="WorkspaceLogStream.opened_at",
     )
+    egress_audit_records: Mapped[list[EgressAuditRecord]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="select",
+        order_by="EgressAuditRecord.enforced_at",
+    )
     task_attempt: Mapped[TaskAttempt | None] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
@@ -1110,6 +1116,42 @@ class WorkspaceLogStream(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     workspace: Mapped[Workspace] = relationship(back_populates="log_streams")
+
+
+class EgressAuditRecord(Base):
+    """Immutable evidence of a workspace egress policy enforcement decision."""
+
+    __tablename__ = "egress_audit_records"
+    __table_args__ = (
+        Index("ix_egress_audit_records_workspace", "workspace_id"),
+        Index("ix_egress_audit_records_attempt", "attempt_id"),
+        Index("ix_egress_audit_records_enforced_at", "enforced_at"),
+        Index("ix_egress_audit_records_posture", "policy_posture"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    attempt_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=True
+    )
+
+    policy_posture: Mapped[str] = mapped_column(String(16), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    destination_category: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    details: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
+    enforced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="egress_audit_records")
 
 
 def _queue_decision_summary(decision: QueueDecision) -> dict[str, Any]:

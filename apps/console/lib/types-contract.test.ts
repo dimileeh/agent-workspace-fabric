@@ -13,6 +13,7 @@ import type {
   WorkspaceAppEndpointHealth,
   WorkspaceCoordinationWarning,
   WorkspaceControlResponse,
+  WorkspaceEgressAudit,
   WorkspaceOperatorAction,
   WorkspaceOperatorRequest,
   WorkspaceOverview,
@@ -308,6 +309,31 @@ type WorkspaceIncludesPolicyFindings = Expect<
   >
 >;
 
+type WorkspaceEgressAuditShape = Expect<
+  Equal<
+    WorkspaceEgressAudit,
+    {
+      id: string;
+      workspace_id: string;
+      attempt_id: string | null;
+      policy_posture: string;
+      decision: string;
+      destination_category: string;
+      reason_code: string;
+      details: Record<string, unknown>;
+      enforced_at: string;
+      created_at: string;
+    }
+  >
+>;
+
+type WorkspaceIncludesEgressAudit = Expect<
+  Equal<
+    Pick<Workspace, "egress_audit">,
+    { egress_audit: WorkspaceEgressAudit | null }
+  >
+>;
+
 export const workspaceSecretLeaseShape: WorkspaceSecretLeaseShape = true;
 export const profileSecretShape: ProfileSecretShape = true;
 export const profileEgressShape: ProfileEgressShape = true;
@@ -315,3 +341,5 @@ export const hostHomeAuthMountPolicyShape: HostHomeAuthMountPolicyShape = true;
 export const profileSecurityShape: ProfileSecurityShape = true;
 export const workspaceIncludesSecretLeases: WorkspaceIncludesSecretLeases = true;
 export const workspaceIncludesPolicyFindings: WorkspaceIncludesPolicyFindings = true;
+export const workspaceEgressAuditShape: WorkspaceEgressAuditShape = true;
+export const workspaceIncludesEgressAudit: WorkspaceIncludesEgressAudit = true;
