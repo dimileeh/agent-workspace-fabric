@@ -946,7 +946,7 @@ class PullRequestMonitorRunner:
                         message=f"monitor: github error: {exc}"[:2000],
                     )
                     return
-                if _clear_transient_base_fetch_retry_state(state):
+                if _clear_transient_base_fetch_retry_state(state, context="fetch_pr_status"):
                     await self._persist_state(workspace_id, state)
                 feedback_state_changed = await self._apply_pr_feedback_resolution_state(
                     workspace_id=workspace_id,
@@ -1244,6 +1244,7 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                 )
+                _clear_transient_base_fetch_retry_state(state, context="sync_base")
             except ProviderRecoveryRetryError:
                 await self._finish_monitor_operation(
                     operation,
@@ -1880,6 +1881,10 @@ class PullRequestMonitorRunner:
                     except BaseBehindCountError as exc:
                         recheck_behind_error = exc
                     else:
+                        _clear_transient_base_fetch_retry_state(
+                            state,
+                            context="pre_merge_recheck",
+                        )
                         checked_action = decide(checked_status, state, self._config)
                         if not isinstance(checked_action, Merge):
                             fresh_action = checked_action
@@ -5377,15 +5382,9 @@ def _increment_base_fetch_retry_count(state: MonitorState, context: str) -> int:
     return retry_number
 
 
-def _clear_transient_base_fetch_retry_state(state: MonitorState) -> bool:
-    keys = [
-        key
-        for key in state.threads_addressed_ids
-        if key.startswith(_BASE_FETCH_RETRY_COUNT_KEY_PREFIX)
-    ]
-    for key in keys:
-        state.threads_addressed_ids.pop(key, None)
-    return bool(keys)
+def _clear_transient_base_fetch_retry_state(state: MonitorState, *, context: str) -> bool:
+    key = _base_fetch_retry_count_key(context)
+    return state.threads_addressed_ids.pop(key, None) is not None
 
 
 def _base_fetch_retry_wait_seconds(

@@ -960,7 +960,10 @@ async def test_clean_pr_merges_only_after_pre_merge_recheck_passes(
     )
     state = MonitorState(
         started_at=0.0,
-        threads_addressed_ids={_initial_review_grace_done_key(42): "elapsed"},
+        threads_addressed_ids={
+            _initial_review_grace_done_key(42): "elapsed",
+            "__awf_base_fetch_retry_count:pre_merge_recheck": "2",
+        },
     )
     status = replace(
         _green_status(),
@@ -1002,6 +1005,7 @@ async def test_clean_pr_merges_only_after_pre_merge_recheck_passes(
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.completed.value
     assert workspace.pr_merge_sha == "MERGESHA"
+    assert "__awf_base_fetch_retry_count:pre_merge_recheck" not in state.threads_addressed_ids
     assert candidate is not None
     assert candidate.status == "merged"
     monitor_operations = [op for op in operations if op.type == "monitor_state"]
@@ -2019,6 +2023,66 @@ async def test_run_fails_after_transient_base_fetch_retry_budget_is_exhausted(
 
 
 @pytest.mark.unit
+async def test_sync_base_transient_base_fetch_retry_budget_survives_status_refresh(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    transient_stderr = (
+        "remote: Internal Server Error\n"
+        "fatal: unable to access 'https://github.com/example/repo.git/': "
+        "The requested URL returned error: 500"
+    )
+    for _ in range(3):
+        cmd.queue_result(returncode=0)  # top-of-loop git fetch origin development
+        cmd.queue_result(returncode=0, stdout="1\n")  # base branch is still ahead
+        cmd.queue_result(returncode=0)  # sync_base merge --abort
+        cmd.queue_result(returncode=128, stderr=transient_stderr)  # sync_base fetch
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        max_outer_iterations=3,
+    )
+    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 2)
+    object.__setattr__(
+        runner._runner_config,
+        "transient_base_fetch_initial_backoff_seconds",
+        5.0,
+    )
+    object.__setattr__(
+        runner._runner_config,
+        "transient_base_fetch_max_backoff_seconds",
+        30.0,
+    )
+    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [5.0, 10.0]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == "infrastructure_failure"
+        assert workspace.failure_message is not None
+        assert "could not refresh base branch" in workspace.failure_message
+        assert any(
+            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+            and event.payload.get("context") == "sync_base"
+            for event in workspace.events
+        )
+
+
+@pytest.mark.unit
 async def test_base_behind_count_failure_is_explicit_not_zero(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2089,7 +2153,8 @@ async def test_execute_sync_base_records_no_progress_noop(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    state = MonitorState()
+    sync_base_retry_key = "__awf_base_fetch_retry_count:sync_base"
+    state = MonitorState(threads_addressed_ids={sync_base_retry_key: "2"})
 
     terminal = await runner._execute(
         action=SyncBase(),
@@ -2115,6 +2180,7 @@ async def test_execute_sync_base_records_no_progress_noop(
         "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
     )
     assert state.sync_base_no_progress_count == 1
+    assert sync_base_retry_key not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
