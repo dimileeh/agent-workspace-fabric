@@ -157,15 +157,6 @@ class Provisioner:
             egress_plan = local_egress_plan(profile.security.egress)
             egress_decision = _egress_plan_decision(egress_plan.mode)
             destination_category = _egress_plan_destination_category(egress_plan.mode)
-            if not await self._record_egress_audit_decision(
-                workspace_id=workspace_id,
-                policy_posture=egress_plan.mode.value,
-                decision=egress_decision.value,
-                destination_category=destination_category,
-                reason_code=egress_plan.reason_code,
-                details=dict(egress_plan.details),
-            ):
-                return
             stack_paths: ComposeProjectPaths | None = None
             if self._stack_launcher is not None:
                 await self._issue_secret_leases(workspace_id, profile)
@@ -278,6 +269,16 @@ class Provisioner:
             remote_push_branch = _provision_remote_push_branch(persisted)
             if remote_push_branch is not None:
                 persisted.remote_push_branch = remote_push_branch
+            attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+            await EgressAuditRepository(session).create(
+                workspace_id=workspace_id,
+                attempt_id=attempt.id if attempt is not None else None,
+                policy_posture=egress_plan.mode.value,
+                decision=egress_decision.value,
+                destination_category=destination_category,
+                reason_code=egress_plan.reason_code,
+                details=dict(egress_plan.details),
+            )
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
                 await SecretLeaseService(session).record_secret_lease_mounts(
@@ -424,49 +425,6 @@ class Provisioner:
                 workspace_id=workspace_id,
             )
             raise
-
-    async def _record_egress_audit_decision(
-        self,
-        *,
-        workspace_id: str,
-        policy_posture: str,
-        decision: str,
-        destination_category: str,
-        reason_code: str,
-        details: dict[str, Any],
-    ) -> bool:
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
-            if ws is None:  # pragma: no cover - race with hard deletion
-                _log.warning(
-                    "provisioner.skip_unknown",
-                    workspace_id=workspace_id,
-                    action="record_egress_audit",
-                )
-                return False
-            if ws.status != WorkspaceStatus.provisioning.value:
-                await self._record_stale_action_skip(
-                    repo,
-                    ws,
-                    action="provision",
-                    expected=WorkspaceStatus.provisioning,
-                    reason_code="PROVISIONER_STALE_STATUS",
-                )
-                await session.commit()
-                return False
-            attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
-            await EgressAuditRepository(session).create(
-                workspace_id=workspace_id,
-                attempt_id=attempt.id if attempt is not None else None,
-                policy_posture=policy_posture,
-                decision=decision,
-                destination_category=destination_category,
-                reason_code=reason_code,
-                details=details,
-            )
-            await session.commit()
-            return True
 
     async def _recheck_status(
         self,
