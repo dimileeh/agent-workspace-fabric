@@ -3312,22 +3312,6 @@ class PullRequestMonitorRunner:
                 evidence=push_result.failure_evidence(),
             )
             return push_result
-        for comment, verdict_result in fixed_review_comments:
-            await self._record_pr_feedback_resolution(
-                workspace_id=workspace_id,
-                repo=repo,
-                pr_number=pr_number,
-                pr_head_sha=pr_head_sha,
-                comment=comment,
-                verdict_result=verdict_result,
-                operation_id=operation_id,
-            )
-        if not push_result.pushed:
-            # No local commits — CLI returned "false_positive" for
-            # everything or "defer" for everything. We still want to
-            # resolve the non-defer threads on GitHub.
-            pass
-
         # Record the pushed HEAD before resolving review threads. The
         # pushed commit is local git state; a transient GraphQL resolve
         # failure should not affect the monitor's push bookkeeping.
@@ -3348,6 +3332,18 @@ class PullRequestMonitorRunner:
                 operation_type=operation_type,
                 monitor_log=monitor_log,
                 source_head_sha=pushed_head_sha,
+            )
+
+        resolution_head_sha = pushed_head_sha or pr_head_sha
+        for comment, verdict_result in fixed_review_comments:
+            await self._record_pr_feedback_resolution(
+                workspace_id=workspace_id,
+                repo=repo,
+                pr_number=pr_number,
+                pr_head_sha=resolution_head_sha,
+                comment=comment,
+                verdict_result=verdict_result,
+                operation_id=operation_id,
             )
 
         # 4) Resolve threads on GitHub. Only inline threads have IDs we can

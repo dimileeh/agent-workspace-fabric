@@ -1254,6 +1254,65 @@ async def test_review_comment_false_positive_is_recorded_by_pr_identity(
 
 
 @pytest.mark.unit
+async def test_review_comment_fix_committed_is_recorded_against_pushed_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed repair")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0, stderr="pushed")
+    cmd.queue_result(returncode=0, stdout="new-head-after-repair-push\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    comment = ReviewComment(
+        comment_id="issue:4391271818",
+        body="Review-level feedback fixed by a repair commit",
+        body_excerpt="Review-level feedback fixed by a repair commit",
+        author="chatgpt-codex-connector[bot]",
+        url="https://github.example/comment/4391271818",
+    )
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="old-head-before-repair-push",
+        initial_threads=(),
+        initial_reviews=(comment,),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as session:
+        rows = await PRFeedbackResolutionRepository(session).list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.feedback_kind == "review_comment"
+    assert row.feedback_id == "issue:4391271818"
+    assert row.head_sha == "new-head-after-repair-push"
+    assert row.verdict == "fix_committed"
+    assert row.reason == "committed repair"
+    assert row.source_workspace_id == workspace_id
+    assert state.last_push_sha == "new-head-after-repair-push"
+
+
+@pytest.mark.unit
 async def test_new_workspace_inherits_review_comment_verdicts_across_pr_head_changes(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
