@@ -32,7 +32,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
-from awf.node.egress_policy import LocalEgressPolicyError, local_egress_plan
+from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import EgressMode as ProfileEgressMode
@@ -128,6 +128,9 @@ class Provisioner:
             branch_prefix=self._config.branch_prefix,
         )
         checkout_base = _provision_checkout_base_branch(ws)
+        egress_plan: LocalEgressPlan | None = None
+        egress_decision: EgressDecision | None = None
+        destination_category: str | None = None
         try:
             layout = await self._git.add_worktree(
                 workspace_id=workspace_id,
@@ -224,6 +227,17 @@ class Provisioner:
                 reason_code=exc.reason_code,
                 stderr=exc.stderr[:2000],
             )
+            if (
+                egress_plan is not None
+                and egress_decision is not None
+                and destination_category is not None
+            ):
+                await self._record_egress_audit_if_current(
+                    workspace_id=workspace_id,
+                    egress_plan=egress_plan,
+                    egress_decision=egress_decision,
+                    destination_category=destination_category,
+                )
             await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.service_startup_failure,
@@ -244,6 +258,10 @@ class Provisioner:
                 from_status=WorkspaceStatus.provisioning,
             )
             raise
+
+        assert egress_plan is not None
+        assert egress_decision is not None
+        assert destination_category is not None
 
         # 3. Commit success: write placement metadata and transition to ready.
         async with self._session_factory() as session:
@@ -269,15 +287,12 @@ class Provisioner:
             remote_push_branch = _provision_remote_push_branch(persisted)
             if remote_push_branch is not None:
                 persisted.remote_push_branch = remote_push_branch
-            attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
-            await EgressAuditRepository(session).create(
+            await self._create_egress_audit_record(
+                session,
                 workspace_id=workspace_id,
-                attempt_id=attempt.id if attempt is not None else None,
-                policy_posture=egress_plan.mode.value,
-                decision=egress_decision.value,
+                egress_plan=egress_plan,
+                egress_decision=egress_decision,
                 destination_category=destination_category,
-                reason_code=egress_plan.reason_code,
-                details=dict(egress_plan.details),
             )
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
@@ -393,6 +408,64 @@ class Provisioner:
                 await session.commit()
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
+
+    async def _record_egress_audit_if_current(
+        self,
+        *,
+        workspace_id: str,
+        egress_plan: LocalEgressPlan,
+        egress_decision: EgressDecision,
+        destination_category: str,
+    ) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - race with hard deletion
+                _log.warning(
+                    "provisioner.skip_unknown",
+                    workspace_id=workspace_id,
+                    action="record_egress_audit",
+                )
+                return False
+            if ws.status != WorkspaceStatus.provisioning.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    ws,
+                    action="record_egress_audit",
+                    expected=WorkspaceStatus.provisioning,
+                    reason_code="PROVISIONER_STALE_STATUS",
+                )
+                await session.commit()
+                return False
+            await self._create_egress_audit_record(
+                session,
+                workspace_id=workspace_id,
+                egress_plan=egress_plan,
+                egress_decision=egress_decision,
+                destination_category=destination_category,
+            )
+            await session.commit()
+            return True
+
+    async def _create_egress_audit_record(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        egress_plan: LocalEgressPlan,
+        egress_decision: EgressDecision,
+        destination_category: str,
+    ) -> None:
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+        await EgressAuditRepository(session).create(
+            workspace_id=workspace_id,
+            attempt_id=attempt.id if attempt is not None else None,
+            policy_posture=egress_plan.mode.value,
+            decision=egress_decision.value,
+            destination_category=destination_category,
+            reason_code=egress_plan.reason_code,
+            details=dict(egress_plan.details),
+        )
 
     async def _issue_secret_leases(
         self,

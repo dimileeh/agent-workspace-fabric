@@ -833,7 +833,7 @@ class TestFailureHandling:
             assert "pull access denied for awf-agent-runtime:test" in reloaded.failure_message
 
     @pytest.mark.unit
-    async def test_stack_startup_failure_does_not_record_egress_audit(
+    async def test_stack_startup_failure_records_computed_egress_audit(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         git_manager: GitManager,
@@ -879,7 +879,12 @@ class TestFailureHandling:
             audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.failed.value
-            assert audit is None
+            assert audit is not None
+            assert audit.policy_posture == "restricted"
+            assert audit.decision == "deferred"
+            assert audit.destination_category == "policy_decision"
+            assert audit.reason_code == "LOCAL_EGRESS_RESTRICTED_LOCAL_ONLY"
+            assert audit.details["destination_filtering"] == "deferred"
 
     @pytest.mark.unit
     async def test_stack_launch_failure_revokes_issued_secret_leases_without_hiding_error(
