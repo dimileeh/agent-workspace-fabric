@@ -1473,17 +1473,17 @@ class CallbackSubscriptionListResponse(BaseModel):
     cursor: str | None = None
 
 
-class WorkspaceControlRequest(BaseModel):
+class WorkspaceReasonRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     reason: Annotated[str | None, Field(default=None, max_length=1024)]
+
+
+class WorkspaceControlRequest(WorkspaceReasonRequest):
     stop_stack: bool = True
 
 
-class WorkspaceOperationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    reason: Annotated[str | None, Field(default=None, max_length=1024)]
+class WorkspaceOperationRequest(WorkspaceReasonRequest):
     requested_tier: Annotated[int | None, Field(default=None, ge=1, le=3)]
 
 

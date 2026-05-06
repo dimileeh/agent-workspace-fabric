@@ -431,6 +431,52 @@ async def test_mcp_destroy_invokes_service_with_canonical_kwargs(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("path", "body", "extra_field"),
+    [
+        (
+            "/v1/workspaces/ws_canonical/stop",
+            {"reason": "operator recovery", "stop_stack": False},
+            "stop_stack",
+        ),
+        (
+            "/v1/workspaces/ws_canonical/remonitor",
+            {"reason": "operator recovery", "stop_stack": False},
+            "stop_stack",
+        ),
+        (
+            "/v1/workspaces/ws_canonical/refresh",
+            {"reason": "operator recovery", "requested_tier": 2},
+            "requested_tier",
+        ),
+        (
+            "/v1/workspaces/ws_canonical/rebase",
+            {"reason": "operator recovery", "requested_tier": 2},
+            "requested_tier",
+        ),
+    ],
+)
+async def test_rest_controls_reject_body_fields_not_forwarded_to_backend(
+    contract_stack: ContractStack,
+    path: str,
+    body: dict[str, object],
+    extra_field: str,
+) -> None:
+    response = await contract_stack.client.post(
+        path,
+        headers={**contract_stack.auth_headers, "Idempotency-Key": "ignored-field"},
+        json=body,
+    )
+
+    assert response.status_code == 422, response.text
+    assert any(
+        error.get("loc") == ["body", extra_field]
+        and error.get("type") == "extra_forbidden"
+        for error in response.json()["detail"]
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
 async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract(
     contract_stack: ContractStack,

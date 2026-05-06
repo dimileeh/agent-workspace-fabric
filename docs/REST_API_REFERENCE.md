@@ -308,7 +308,7 @@ curl -X POST "http://localhost:8000/v1/workspaces/ws_123/rebase" \
   -H "Idempotency-Key: rebase-ws-123" \
   -H "If-Match: 8" \
   -H "Content-Type: application/json" \
-  -d '{"reason": "Stale after target merge", "requested_tier": 2}'
+  -d '{"reason": "Stale after target merge"}'
 ```
 
 ---
@@ -340,7 +340,7 @@ curl -X POST "http://localhost:8000/v1/workspaces/ws_123/stop" \
   -H "Idempotency-Key: stop-ws-123" \
   -H "If-Match: 3" \
   -H "Content-Type: application/json" \
-  -d '{"reason": "Agent stuck", "stop_stack": true}'
+  -d '{"reason": "Agent stuck"}'
 ```
 
 ---

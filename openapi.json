@@ -8954,6 +8954,25 @@
         "title": "WorkspaceProviderRecoveryPolicy",
         "type": "object"
       },
+      "WorkspaceReasonRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "WorkspaceReasonRequest",
+        "type": "object"
+      },
       "WorkspaceRecoveryCurrentOperationResponse": {
         "properties": {
           "created_at": {
@@ -12785,7 +12804,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkspaceOperationRequest"
+                "$ref": "#/components/schemas/WorkspaceReasonRequest"
               }
             }
           },
@@ -12885,7 +12904,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkspaceOperationRequest"
+                "$ref": "#/components/schemas/WorkspaceReasonRequest"
               }
             }
           },
@@ -12985,7 +13004,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkspaceControlRequest"
+                "$ref": "#/components/schemas/WorkspaceReasonRequest"
               }
             }
           },
@@ -13377,7 +13396,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkspaceControlRequest"
+                "$ref": "#/components/schemas/WorkspaceReasonRequest"
               }
             }
           },
