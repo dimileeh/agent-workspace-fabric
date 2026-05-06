@@ -12,7 +12,7 @@ from awf.db.enums import AgentRuntime
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.service.workspaces import WorkspaceService
+from awf.service.workspaces import WorkspaceCreateIdempotencyConflictError, WorkspaceService
 from tests.postgres import postgres_test_engine
 
 
@@ -34,7 +34,7 @@ def _v1_request() -> WorkspaceCreateRequest:
     )
 
 
-def _v2_request() -> WorkspaceCreateV2Request:
+def _v2_request(*, requested_tier: int = 1) -> WorkspaceCreateV2Request:
     return WorkspaceCreateV2Request(
         repo={"url": "git@github.com:example/idempotency.git", "base_branch": "main"},
         task={
@@ -45,7 +45,7 @@ def _v2_request() -> WorkspaceCreateV2Request:
             "owned_paths": [],
         },
         workspace={"profile_ref": "auto", "profile": None},
-        validation={"commands": ["pytest -q"]},
+        validation={"commands": ["pytest -q"], "requested_tier": requested_tier},
         resources={},
         preflight={
             "provider_readiness_override": True,
@@ -113,3 +113,22 @@ async def test_create_v2_locks_idempotency_key_before_lookup(
         ("lock", "service-create-lock-v2"),
         ("lookup", "service-create-lock-v2"),
     ]
+
+
+@pytest.mark.unit
+async def test_create_v2_auto_profile_replay_conflicts_when_requested_tier_changes(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        _v2_request(requested_tier=1),
+        idempotency_key="service-create-v2-tier",
+    )
+
+    assert created.id.startswith("ws_")
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create_v2(
+            _v2_request(requested_tier=2),
+            idempotency_key="service-create-v2-tier",
+        )

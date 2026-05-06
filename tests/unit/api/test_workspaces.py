@@ -1200,12 +1200,30 @@ class TestWorkspaceCreateProviderReadinessPreflight:
                 settings=Settings(_env_file=None),
                 session=session,
             )
+            tier_conflict = await workspaces_route.create_workspace_v2(
+                WorkspaceCreateV2Request.model_validate(
+                    {
+                        **_V2_MINIMAL_BODY,
+                        "validation": {
+                            **_V2_MINIMAL_BODY["validation"],
+                            "requested_tier": 2,
+                        },
+                    }
+                ),
+                _request_with_disk_check(),
+                idempotency_key="direct-v2-replay",
+                settings=Settings(_env_file=None),
+                session=session,
+            )
 
         assert replay.workspace_id == first.json()["workspace_id"]
         assert replay.warnings == []
         assert isinstance(conflict, JSONResponse)
         assert conflict.status_code == 409
         assert json.loads(conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
+        assert isinstance(tier_conflict, JSONResponse)
+        assert tier_conflict.status_code == 409
+        assert json.loads(tier_conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
     async def test_v2_rejects_external_id_reuse_for_different_scope(

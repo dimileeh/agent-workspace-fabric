@@ -169,6 +169,9 @@ OWNED_PATH_OVERLAP_PAYLOAD_FIELDS = (
 PROVIDER_READINESS_PREFLIGHT_EVENT_TYPE = "workspace.provider_readiness_preflight"
 PROVIDER_READINESS_READY_REASON = "PROVIDER_READINESS_READY"
 PROVIDER_READINESS_OVERRIDE_REASON = "PROVIDER_READINESS_OVERRIDE_USED"
+VALIDATION_POLICY_KEY = "validation"
+VALIDATION_REQUESTED_TIER_POLICY_KEY = "requested_tier"
+DEFAULT_REQUESTED_VALIDATION_TIER = 1
 QUEUE_DECISION_ADMITTED = "admitted"
 QUEUE_DECISION_ADMITTED_LOCAL_REASON = "ADMITTED_LOCAL"
 RESOURCE_RESERVATION_PHASE_WORKSPACE = "workspace_lifecycle"
@@ -1067,13 +1070,22 @@ def workspace_create_v2_payload_matches(
         and existing.task_kind == payload.task.kind
         and existing.profile_ref == payload.workspace.profile_ref
         and existing.requested_profile == requested_profile
-        and (
-            existing.resolved_profile is None
-            or _resolved_profile_requested_tier(existing) == payload.validation.requested_tier
-        )
+        and _stored_validation_requested_tier(existing) == payload.validation.requested_tier
         and list(existing.test_commands) == list(payload.validation.commands)
         and _task_provider_readiness_override_matches(existing, payload)
     )
+
+
+def _stored_validation_requested_tier(existing: Workspace) -> int:
+    resolved_tier = _resolved_profile_requested_tier(existing)
+    if resolved_tier is not None:
+        return resolved_tier
+    validation_policy = existing.task_policy.get(VALIDATION_POLICY_KEY)
+    if isinstance(validation_policy, dict):
+        tier = validation_policy.get(VALIDATION_REQUESTED_TIER_POLICY_KEY)
+        if isinstance(tier, int):
+            return tier
+    return DEFAULT_REQUESTED_VALIDATION_TIER
 
 
 def _resolved_profile_requested_tier(existing: Workspace) -> int | None:
@@ -2528,6 +2540,10 @@ def v2_profile_snapshots(
 
 def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]:
     policy: dict[str, Any] = {}
+    if _v2_payload_defers_profile_resolution(payload):
+        policy[VALIDATION_POLICY_KEY] = {
+            VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
+        }
     if payload.task.priority != 0 or payload.task.human_boost != 0:
         policy["scheduler"] = scheduler_policy_snapshot(
             base_priority=payload.task.priority,
@@ -2544,6 +2560,12 @@ def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]
             exclude_unset=True,
         )
     return policy
+
+
+def _v2_payload_defers_profile_resolution(payload: WorkspaceCreateV2Request) -> bool:
+    return payload.workspace.profile is None and (
+        payload.workspace.profile_ref is None or payload.workspace.profile_ref == "auto"
+    )
 
 
 def profile_with_requested_tier(

@@ -79,6 +79,7 @@ from awf.service.workspaces import (
     create_workspace_v2_row,
     owned_path_overlap_warnings,
     retry_workspace_row,
+    workspace_create_v2_payload_matches,
     workspace_provider_readiness_preflight,
     workspace_response,
     workspace_retry_response,
@@ -566,41 +567,7 @@ def _payloads_match_v2(
     existing: Workspace,
     payload: WorkspaceCreateV2Request,
 ) -> bool:
-    requested_profile = (
-        payload.workspace.profile.model_dump(mode="json", by_alias=True)
-        if payload.workspace.profile is not None
-        else None
-    )
-    task_class = payload.task.task_class.value if payload.task.task_class is not None else None
-    return (
-        existing.repo_url == payload.repo.url
-        and existing.branch_base == payload.repo.base_branch
-        and existing.task_title == payload.task.title
-        and existing.task_prompt == payload.task.prompt
-        and existing.task_external_id == payload.task.external_id
-        and existing.task_class == task_class
-        and list(existing.owned_paths) == list(payload.task.owned_paths)
-        and _stored_task_agent_model(existing) == payload.task.model
-        and _stored_task_out_of_scope_policy(existing)
-        == _requested_task_out_of_scope_policy(payload)
-        and _stored_task_provider_recovery_policy(existing)
-        == _requested_task_provider_recovery_policy(payload)
-        and existing.auto_merge == payload.task.auto_merge
-        and (
-            existing.initial_review_grace_period_seconds
-            == payload.task.initial_review_grace_period_seconds
-        )
-        and existing.agent == payload.task.agent.value
-        and existing.task_kind == payload.task.kind
-        and existing.profile_ref == payload.workspace.profile_ref
-        and existing.requested_profile == requested_profile
-        and (
-            existing.resolved_profile is None
-            or _resolved_profile_requested_tier(existing) == payload.validation.requested_tier
-        )
-        and list(existing.test_commands) == list(payload.validation.commands)
-        and _task_provider_readiness_override_matches(existing, payload)
-    )
+    return workspace_create_v2_payload_matches(existing, payload)
 
 
 def _resolved_profile_requested_tier(existing: Workspace) -> int | None:
