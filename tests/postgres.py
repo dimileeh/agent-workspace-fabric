@@ -80,7 +80,8 @@ async def _with_connect_retry[T](
     schema: str,
     action: Callable[[], Awaitable[T]],
 ) -> T:
-    for attempt in range(1, _TEST_CONNECT_ATTEMPTS + 1):
+    attempt = 1
+    while True:
         try:
             return await action()
         except (OSError, TimeoutError, OperationalError) as exc:
@@ -92,9 +93,7 @@ async def _with_connect_retry[T](
                     f"{schema} after {_TEST_CONNECT_ATTEMPTS} attempts."
                 ) from exc
             await asyncio.sleep(0.1 * attempt)
-
-    raise RuntimeError(f"PostgreSQL test helper failed to {operation} for schema {schema}.")
-
+            attempt += 1
 
 def _is_connect_failure(exc: BaseException) -> bool:
     if isinstance(exc, TimeoutError | OSError):
