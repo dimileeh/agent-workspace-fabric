@@ -156,6 +156,7 @@ async def test_runtime_endpoint_surfaces_preserved_live_runtime_health(
             payload={
                 "reason_code": PRESERVED_EXECUTION_REASON_CODE,
                 "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.running.value,
                 "message": "Live agent runtime was preserved after worker restart.",
                 "runtime": {
                     "services": [

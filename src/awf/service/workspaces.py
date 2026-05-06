@@ -1881,6 +1881,12 @@ def _workspace_runtime_health_from_matching_events(
         if reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE:
             if workspace.status not in ACTIVE_RUNTIME_HEALTH_STATUSES:
                 return None
+            event_workspace_status = payload.get("workspace_status")
+            if (
+                not isinstance(event_workspace_status, str)
+                or event_workspace_status != workspace.status
+            ):
+                return None
             status = "ok"
         return WorkspaceRuntimeHealthResponse(
             status=cast(Any, status),

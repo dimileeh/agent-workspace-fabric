@@ -326,6 +326,7 @@ async def test_workspace_detail_exposes_persisted_preserved_runtime_health(
             payload={
                 "reason_code": PRESERVED_EXECUTION_REASON_CODE,
                 "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.running.value,
                 "message": "Live agent runtime was preserved after worker restart.",
                 "runtime": {
                     "services": [
@@ -354,6 +355,38 @@ async def test_workspace_detail_exposes_persisted_preserved_runtime_health(
 
 
 @pytest.mark.unit
+async def test_workspace_detail_ignores_preserved_health_from_prior_active_status(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _workspace_with_runtime_health_event(
+        session_factory,
+        status=WorkspaceStatus.validating,
+        event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+        reason_code=PRESERVED_EXECUTION_REASON_CODE,
+        payload={
+            "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+            "decision": "preserve_runtime",
+            "workspace_status": WorkspaceStatus.running.value,
+            "message": "Live agent runtime was preserved after worker restart.",
+            "runtime": {
+                "services": [
+                    {
+                        "name": "agent",
+                        "state": "running",
+                        "container_id": "agent",
+                    }
+                ]
+            },
+        },
+    )
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is None
+
+
+@pytest.mark.unit
 async def test_workspace_detail_ignores_persisted_preserved_runtime_health_after_cancel(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -365,6 +398,7 @@ async def test_workspace_detail_ignores_persisted_preserved_runtime_health_after
         payload={
             "reason_code": PRESERVED_EXECUTION_REASON_CODE,
             "decision": "preserve_runtime",
+            "workspace_status": WorkspaceStatus.running.value,
             "message": "Live agent runtime was preserved after worker restart.",
             "runtime": {
                 "services": [
@@ -408,6 +442,7 @@ async def test_runtime_detail_uses_preserved_health_when_live_snapshot_is_health
             payload={
                 "reason_code": PRESERVED_EXECUTION_REASON_CODE,
                 "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.pushing.value,
                 "message": "Live agent runtime was preserved after worker restart.",
                 "runtime": {
                     "services": [
@@ -535,6 +570,7 @@ async def test_runtime_detail_ignores_preserved_health_for_stopped_terminal_work
             payload={
                 "reason_code": PRESERVED_EXECUTION_REASON_CODE,
                 "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.running.value,
                 "message": "Live agent runtime was preserved after worker restart.",
                 "runtime": {
                     "services": [
