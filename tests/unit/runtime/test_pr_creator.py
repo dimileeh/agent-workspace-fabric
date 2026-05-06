@@ -113,6 +113,28 @@ class TestPushAndOpen:
         assert all(call.args[:3] != ["gh", "pr", "create"] for call in runner.calls)
 
     @pytest.mark.unit
+    async def test_updates_existing_pr_with_qualified_remote_head_ref(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="feature-sync/ws_local",
+            base_branch="development",
+            title="Update adopted PR",
+            body="Existing PR update.",
+            existing_pr_url="https://github.com/dimileeh/aira-agent/pull/42",
+            remote_branch_name="refs/heads/awf/ws_original",
+        )
+
+        push_args = runner.calls[3].args
+        assert result.branch == "awf/ws_original"
+        assert "HEAD:refs/heads/awf/ws_original" in push_args
+        assert "HEAD:refs/heads/refs/heads/awf/ws_original" not in push_args
+
+    @pytest.mark.unit
     async def test_updates_existing_pr_on_explicit_remote_url(self) -> None:
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)

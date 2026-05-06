@@ -43,12 +43,18 @@ _URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/@\s]+(?::[^/@\s]+)?@")
 # workstreams) would otherwise emit an unbounded list that could
 # exceed log-backend payload limits.
 _MAX_DIAGNOSTIC_COMMITS = 50
+_HEADS_REF_PREFIX = "refs/heads/"
 
 
 def _redact_credentials(text: str) -> str:
     """Replace ``https://user[:pwd]@host`` patterns with ``https://***@host``
     so push/pr-create stderr can be safely logged."""
     return _URL_CREDENTIAL_PATTERN.sub(r"\1***@", text)
+
+
+def _short_branch_name(branch_name: str) -> str:
+    """Return the branch name without a leading ``refs/heads/`` prefix."""
+    return branch_name.removeprefix(_HEADS_REF_PREFIX)
 
 
 @dataclass(frozen=True)
@@ -96,14 +102,12 @@ class PullRequestCreator:
         remote_branch_name: str | None = None,
         remote_url: str | None = None,
     ) -> PullRequestResult:
-        push_target_branch = (
-            remote_branch_name if existing_pr_url and remote_branch_name else branch_name
-        )
-        push_ref = (
-            f"HEAD:refs/heads/{push_target_branch}"
-            if existing_pr_url and remote_branch_name
-            else branch_name
-        )
+        if existing_pr_url and remote_branch_name:
+            push_target_branch = _short_branch_name(remote_branch_name)
+            push_ref = f"HEAD:{_HEADS_REF_PREFIX}{push_target_branch}"
+        else:
+            push_target_branch = branch_name
+            push_ref = branch_name
         push_remote = remote_url or "origin"
         # Step 0: capture the worktree's view of the branch state so we
         # can diagnose post-validation push failures. T39 (ws_eb8c2bd5)
