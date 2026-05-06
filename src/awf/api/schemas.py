@@ -716,9 +716,25 @@ class WorkspaceResponse(BaseModel):
     app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
     provider_recovery_state: ProviderRecoveryStateResponse | None = None
     provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
+    egress_audit: EgressAuditRecordResponse | None = None
 
     created_at: datetime
     updated_at: datetime
+
+
+class EgressAuditRecordResponse(BaseModel):
+    """Immutable evidence of a workspace egress policy enforcement decision."""
+
+    id: str
+    workspace_id: str
+    attempt_id: str | None = None
+    policy_posture: str
+    decision: str
+    destination_category: str
+    reason_code: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    enforced_at: datetime
+    created_at: datetime
 
 
 class OwnedPathOverlapResponse(BaseModel):

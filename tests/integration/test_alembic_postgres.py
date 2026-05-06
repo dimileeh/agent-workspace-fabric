@@ -1,8 +1,8 @@
 """Integration test: Alembic migrations apply cleanly against real Postgres.
 
 Runs against the live Postgres server configured by ``AWF_TEST_DATABASE_URL`` or
-``AWF_DATABASE_URL``. The test creates a temporary database on that server so
-the migration round-trip never downgrades the operator's real AWF database.
+``AWF_DATABASE_URL``. The test creates a temporary schema on that server so the
+migration round-trip never downgrades the operator's real AWF schema.
 
 What this covers:
 - asyncpg driver + ``async_engine_from_config`` path in migrations/env.py
@@ -94,30 +94,28 @@ def _asyncpg_url(url: URL) -> str:
     return url.set(drivername="postgresql").render_as_string(hide_password=False)
 
 
-def _maintenance_database_url(url: URL) -> URL:
-    return url.set(database="postgres")
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
 
 
-async def _create_database(maintenance_url: URL, database_name: str) -> None:
-    conn = await asyncpg.connect(dsn=_asyncpg_url(maintenance_url))
+def _schema_database_url(url: URL, schema_name: str) -> URL:
+    query = dict(url.query)
+    query["awf_search_path"] = schema_name
+    return url.set(query=query)
+
+
+async def _create_schema(database_url: URL, schema_name: str) -> None:
+    conn = await asyncpg.connect(dsn=_asyncpg_url(database_url))
     try:
-        await conn.execute(f'CREATE DATABASE "{database_name}"')
+        await conn.execute(f"CREATE SCHEMA {_quote_identifier(schema_name)}")
     finally:
         await conn.close()
 
 
-async def _drop_database(maintenance_url: URL, database_name: str) -> None:
-    conn = await asyncpg.connect(dsn=_asyncpg_url(maintenance_url))
+async def _drop_schema(database_url: URL, schema_name: str) -> None:
+    conn = await asyncpg.connect(dsn=_asyncpg_url(database_url))
     try:
-        await conn.execute(
-            """
-            SELECT pg_terminate_backend(pid)
-            FROM pg_stat_activity
-            WHERE datname = $1 AND pid <> pg_backend_pid()
-            """,
-            database_name,
-        )
-        await conn.execute(f'DROP DATABASE IF EXISTS "{database_name}"')
+        await conn.execute(f"DROP SCHEMA IF EXISTS {_quote_identifier(schema_name)} CASCADE")
     finally:
         await conn.close()
 
@@ -127,10 +125,9 @@ async def _drop_database(maintenance_url: URL, database_name: str) -> None:
 def test_alembic_upgrade_downgrade_upgrade_on_postgres() -> None:
     """Apply → revert → re-apply the full migration chain against live Postgres."""
     configured_url = _postgres_database_url()
-    maintenance_url = _maintenance_database_url(configured_url)
-    database_name = f"awf_test_alembic_{os.getpid()}_{uuid.uuid4().hex[:8]}"
-    database_url = configured_url.set(database=database_name)
-    asyncio.run(_create_database(maintenance_url, database_name))
+    schema_name = f"awf_test_alembic_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    database_url = _schema_database_url(configured_url, schema_name)
+    asyncio.run(_create_schema(configured_url, schema_name))
 
     env = {**os.environ, "AWF_DATABASE_URL": database_url.render_as_string(hide_password=False)}
     cwd = str(_REPO_ROOT)
@@ -156,4 +153,4 @@ def test_alembic_upgrade_downgrade_upgrade_on_postgres() -> None:
         # And up again — proves the down migrations are correct inverses.
         _alembic("upgrade", "head")
     finally:
-        asyncio.run(_drop_database(maintenance_url, database_name))
+        asyncio.run(_drop_schema(configured_url, schema_name))

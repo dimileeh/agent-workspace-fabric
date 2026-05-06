@@ -17,6 +17,7 @@ from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import (
+    EgressAuditRecordResponse,
     FallbackTargetResponse,
     OperationResponse,
     OwnedPathOverlapResponse,
@@ -37,12 +38,21 @@ from awf.api.schemas import (
     WorkspaceRuntimeResponse,
     WorkspaceWarningResponse,
 )
+from awf.common.audit import redact_audit_value
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceSecretLease
+from awf.db.models import (
+    EgressAuditRecord,
+    Operation,
+    Task,
+    TaskAttempt,
+    Workspace,
+    WorkspaceSecretLease,
+)
 from awf.db.repositories import (
+    EgressAuditRepository,
     OperationRepository,
     OwnedPathOverlap,
     QueueDecisionRepository,
@@ -442,7 +452,45 @@ class WorkspaceService:
                 validation_runs,
                 candidate=latest_merge_candidate(ws),
             )
-            return workspace_response(ws, validation_provenance=validation_provenance)
+            try:
+                audit_record = await EgressAuditRepository(s).get_latest_for_workspace(workspace_id)
+            except Exception:
+                _log.warning(
+                    "Failed to fetch egress audit for workspace %s",
+                    workspace_id,
+                    exc_info=True,
+                )
+                egress_audit = None
+            else:
+                egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
+            return workspace_response(
+                ws,
+                validation_provenance=validation_provenance,
+                egress_audit=egress_audit,
+            )
+
+    async def get_egress_audit_evidence(
+        self,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
+        async with self._factory() as s:
+            workspace_id = workspace_id.strip() if workspace_id is not None else None
+            if not workspace_id:
+                records = await EgressAuditRepository(s).list_all()
+                return [
+                    EgressAuditRecordResponse.model_validate(
+                        _egress_audit_response(record)
+                    ).model_dump(mode="json")
+                    for record in records
+                ]
+            if not await WorkspaceRepository(s).exists(workspace_id):
+                return None
+            audit_record = await EgressAuditRepository(s).get_latest_for_workspace(workspace_id)
+            if audit_record is None:
+                return None
+            return EgressAuditRecordResponse.model_validate(
+                _egress_audit_response(audit_record)
+            ).model_dump(mode="json")
 
     async def list(self, *, limit: int = 50) -> list[WorkspaceResponse]:
         async with self._factory() as s:
@@ -1318,6 +1366,7 @@ def workspace_response(
     workspace: Workspace,
     *,
     validation_provenance: ValidationFreshnessSummaryResponse | None = None,
+    egress_audit: dict[str, Any] | None = None,
 ) -> WorkspaceResponse:
     computed_fields = dict(workspace_observability_payload(workspace))
     computed_fields["is_stale_running"] = is_workspace_stale_running(workspace)
@@ -1349,6 +1398,8 @@ def workspace_response(
         workspace
     )
     computed_fields["pricing"] = _pricing_metadata_response(workspace)
+    if egress_audit is not None:
+        computed_fields["egress_audit"] = egress_audit
     return WorkspaceResponse.model_validate(_WorkspaceResponseSource(workspace, computed_fields))
 
 
@@ -1378,6 +1429,22 @@ def _console_safe_profile_snapshot(raw_profile: object) -> dict[str, Any] | None
         return None
     sanitized = _sanitize_profile_value(raw_profile, path=())
     return cast(dict[str, Any], sanitized)
+
+
+def _egress_audit_response(record: EgressAuditRecord) -> dict[str, Any]:
+    details = redact_audit_value(record.details)
+    return {
+        "id": record.id,
+        "workspace_id": record.workspace_id,
+        "attempt_id": record.attempt_id,
+        "policy_posture": record.policy_posture,
+        "decision": record.decision,
+        "destination_category": record.destination_category,
+        "reason_code": record.reason_code,
+        "details": details if isinstance(details, dict) else {},
+        "enforced_at": record.enforced_at,
+        "created_at": record.created_at,
+    }
 
 
 def _pricing_metadata_response(workspace: Workspace) -> dict[str, Any] | None:

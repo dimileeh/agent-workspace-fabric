@@ -420,6 +420,19 @@ export interface WorkspaceSecretLease {
   revoked_at: string | null;
 }
 
+export interface WorkspaceEgressAudit {
+  id: string;
+  workspace_id: string;
+  attempt_id: string | null;
+  policy_posture: string;
+  decision: string;
+  destination_category: string;
+  reason_code: string;
+  details: Record<string, unknown>;
+  enforced_at: string;
+  created_at: string;
+}
+
 export interface ProfileSecret {
   name: string;
   target: string;
@@ -491,6 +504,7 @@ export interface Workspace {
   failure_message: string | null;
   secret_leases: WorkspaceSecretLease[];
   policy_findings: PolicyFinding[];
+  egress_audit: WorkspaceEgressAudit | null;
   created_at: string;
   updated_at: string;
 }

@@ -11,6 +11,7 @@ returns 409 ``IDEMPOTENCY_CONFLICT`` per docs/PLAN_MVP.md § Error code taxonomy
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Callable
 from datetime import datetime
@@ -41,6 +42,7 @@ from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    EgressAuditRepository,
     TaskExternalIdConflictError,
     ValidationRunRepository,
     WorkspaceEventRepository,
@@ -73,6 +75,7 @@ from awf.service.workspaces import (
     WorkspaceRetryError,
     WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
+    _egress_audit_response,
     create_workspace_v2_row,
     owned_path_overlap_warnings,
     retry_workspace_row,
@@ -85,6 +88,7 @@ router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
 router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 _REDACTED_TEXT = "<redacted>"
+_logger = logging.getLogger(__name__)
 
 __all__ = [
     "InvalidWorkspaceOverviewCursorError",
@@ -469,7 +473,17 @@ async def get_workspace(
         validation_runs,
         candidate=latest_merge_candidate(ws),
     )
-    return workspace_response(ws, validation_provenance=validation_provenance)
+    egress_audit = None
+    try:
+        audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
+        egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
+    except Exception:
+        _logger.warning("egress audit lookup failed for workspace %s", workspace_id, exc_info=True)
+    return workspace_response(
+        ws,
+        validation_provenance=validation_provenance,
+        egress_audit=egress_audit,
+    )
 
 
 @router.get("/{workspace_id}/secret-leases", response_model=WorkspaceSecretLeaseListResponse)

@@ -132,6 +132,7 @@ import type {
   RuntimeService,
   Workspace,
   WorkspaceAppEndpoint,
+  WorkspaceEgressAudit,
   WorkspaceEvent,
   WorkspaceLifecycleStage,
   WorkspaceLogRead,
@@ -1091,6 +1092,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
                 <SecurityEgressPanel
                   resolvedProfile={detail.workspace?.resolved_profile ?? null}
                   policyFindings={detail.workspace?.policy_findings}
+                  egressAudit={detail.workspace?.egress_audit}
                 />
                 <SecretsLeasesPanel
                   resolvedProfile={detail.workspace?.resolved_profile ?? null}
@@ -3869,9 +3871,11 @@ function LogOutput({
 function SecurityEgressPanel({
   resolvedProfile,
   policyFindings,
+  egressAudit,
 }: {
   resolvedProfile: Record<string, unknown> | null;
   policyFindings: PolicyFinding[] | undefined;
+  egressAudit: WorkspaceEgressAudit | null | undefined;
 }) {
   const findingsUnavailable = policyFindings === undefined;
   const security = extractProfileSecurity(resolvedProfile);
@@ -3908,9 +3912,77 @@ function SecurityEgressPanel({
           detail={activeFindings.length > 0 ? activeFindings.map((f) => f.reason_code).join(", ") : undefined}
           tone={findingsUnavailable ? "neutral" : activeFindings.length > 0 ? "warn" : "neutral"}
         />
+        <QueueChip
+          label="Audit decision"
+          value={egressAudit === undefined ? "unavailable" : egressAudit === null ? "none" : egressAudit.decision}
+          detail={
+            egressAudit
+              ? `enforced ${formatDateTime(egressAudit.enforced_at)}`
+              : egressAudit === null
+                ? "no egress decision recorded"
+                : "audit record not loaded"
+          }
+          tone={
+            egressAudit === undefined || egressAudit === null
+              ? "neutral"
+              : egressAuditDecisionTone(egressAudit.decision)
+          }
+        />
+        {egressAudit ? (
+          <>
+            <QueueChip
+              label="Audit posture"
+              value={egressAudit.policy_posture}
+              tone={egressAudit.policy_posture === egressStatus.label ? egressStatus.tone : "warn"}
+            />
+            <QueueChip
+              label="Destination"
+              value={egressAudit.destination_category}
+              detail={egressAuditDetailsSummary(egressAudit.details)}
+              mono
+              tone="info"
+            />
+            <QueueChip
+              label="Audit reason"
+              value={egressAudit.reason_code}
+              mono
+              tone="info"
+            />
+          </>
+        ) : null}
       </div>
     </Panel>
   );
+}
+
+function egressAuditDecisionTone(decision: string): ReturnType<typeof statusTone> {
+  const normalized = decision.toLowerCase();
+  if (normalized === "allowed" || normalized === "allow") {
+    return "good";
+  }
+  if (normalized === "blocked" || normalized === "denied" || normalized === "deny") {
+    return "bad";
+  }
+  if (normalized === "warn" || normalized === "warning") {
+    return "warn";
+  }
+  return "neutral";
+}
+
+function egressAuditDetailsSummary(details: Record<string, unknown>): string | undefined {
+  const hostname = details.hostname;
+  if (typeof hostname === "string" && hostname.trim()) {
+    return hostname;
+  }
+  const host = details.host;
+  if (typeof host === "string" && host.trim()) {
+    return host;
+  }
+  const url = details.url;
+  if (typeof url === "string" && url.trim()) {
+    return url;
+  }
+  return undefined;
 }
 
 function SecretsLeasesPanel({
