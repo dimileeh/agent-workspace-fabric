@@ -56,7 +56,6 @@ _LIVE_ADOPTION_STATUSES = frozenset(
         WorkspaceStatus.validating.value,
         WorkspaceStatus.pushing.value,
         WorkspaceStatus.monitoring_pr.value,
-        WorkspaceStatus.destroying.value,
     }
 )
 # Keep the public adoption error-code contract present in service source so

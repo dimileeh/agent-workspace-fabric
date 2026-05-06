@@ -44,7 +44,6 @@ _LIVE_ADOPTION_STATUSES = {
     WorkspaceStatus.validating.value,
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
-    WorkspaceStatus.destroying.value,
 }
 
 
@@ -562,7 +561,6 @@ class TestPullRequestMonitorAdoptionService:
         [
             WorkspaceStatus.requested.value,
             WorkspaceStatus.monitoring_pr.value,
-            WorkspaceStatus.destroying.value,
         ],
     )
     async def test_replay_attaches_to_live_adoption_without_refetching_metadata(
@@ -606,6 +604,7 @@ class TestPullRequestMonitorAdoptionService:
     @pytest.mark.parametrize(
         "terminal_status",
         [
+            WorkspaceStatus.destroying.value,
             WorkspaceStatus.destroyed.value,
             WorkspaceStatus.cancelled.value,
             WorkspaceStatus.failed.value,
