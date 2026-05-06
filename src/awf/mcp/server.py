@@ -1243,13 +1243,8 @@ def build_mcp_server(
                 is_error=True,
             )
         try:
-            response = await service.get(workspace_id)
-            if response is None:
-                return _safe_result({"workspace_id": workspace_id, "evidence": None})
-            egress = response.egress_audit
-            if egress is None:
-                return _safe_result({"workspace_id": workspace_id, "evidence": None})
-            return _safe_result({"workspace_id": workspace_id, "evidence": egress.model_dump(mode="json")})
+            evidence = await service.get_egress_audit_evidence(workspace_id)
+            return _safe_result({"workspace_id": workspace_id, "evidence": evidence})
         except Exception as exc:
             return _safe_result(
                 {"error_code": "MCP_EGRESS_AUDIT_ERROR", "message": redact_audit_text(str(exc))},

@@ -16,7 +16,7 @@ from awf.common.audit import redact_audit_value
 from awf.common.ids import new_egress_audit_record_id
 from awf.db.enums import EgressDecision, WorkspaceStatus
 from awf.db.models import EgressAuditRecord
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.mcp.server import WorkspaceService, build_mcp_server
 
@@ -120,6 +120,54 @@ async def test_mcp_get_egress_audit_evidence_no_record_returns_null(
 
 
 @pytest.mark.unit
+async def test_mcp_get_egress_audit_evidence_lookup_error_returns_error(
+    factory: async_sessionmaker[AsyncSession],
+    mcp,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit lookup failures must not be flattened into null evidence."""
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/mcp-egress.git",
+            branch_base="main",
+            task_title="mcp egress lookup failure",
+            task_prompt="audit lookup failure",
+            agent="codex",
+            test_commands=[],
+        )
+        ws.status = WorkspaceStatus.running.value
+        await session.commit()
+        wid = ws.id
+
+    async def _raise_lookup(
+        _repo: EgressAuditRepository,
+        _workspace_id: str,
+    ) -> EgressAuditRecord | None:
+        raise RuntimeError(
+            "audit table unavailable at "
+            "postgresql+asyncpg://awf:supersecret@db.internal:5432/awf "
+            "Authorization: Bearer ghp_sensitiveToken123456"
+        )
+
+    monkeypatch.setattr(EgressAuditRepository, "get_latest_for_workspace", _raise_lookup)
+
+    result = await mcp.call_tool(
+        "awf_get_egress_audit_evidence",
+        {"workspace_id": wid},
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error_code"] == "MCP_EGRESS_AUDIT_ERROR"
+    message = result.structuredContent["message"]
+    assert "supersecret" not in message
+    assert "ghp_sensitiveToken123456" not in message
+    assert "postgresql+asyncpg://[redacted]@db.internal:5432/awf" in message
+    assert "Authorization: Bearer [redacted]" in message
+
+
+@pytest.mark.unit
 async def test_mcp_egress_audit_never_exposes_tokens(
     factory: async_sessionmaker[AsyncSession],
     mcp,
@@ -166,6 +214,13 @@ async def test_mcp_get_egress_audit_evidence_unknown_workspace_returns_null(
 
 
 class _FailingWorkspaceService:
+    async def get_egress_audit_evidence(self, _workspace_id: str) -> None:
+        raise RuntimeError(
+            "database unavailable at "
+            "postgresql+asyncpg://awf:supersecret@db.internal:5432/awf "
+            "Authorization: Bearer ghp_sensitiveToken123456"
+        )
+
     async def get(self, _workspace_id: str) -> None:
         raise RuntimeError(
             "database unavailable at "

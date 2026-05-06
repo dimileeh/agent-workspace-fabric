@@ -17,6 +17,7 @@ from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import (
+    EgressAuditRecordResponse,
     FallbackTargetResponse,
     OperationResponse,
     OwnedPathOverlapResponse,
@@ -467,6 +468,17 @@ class WorkspaceService:
                 validation_provenance=validation_provenance,
                 egress_audit=egress_audit,
             )
+
+    async def get_egress_audit_evidence(self, workspace_id: str) -> dict[str, Any] | None:
+        async with self._factory() as s:
+            if not await WorkspaceRepository(s).exists(workspace_id):
+                return None
+            audit_record = await EgressAuditRepository(s).get_latest_for_workspace(workspace_id)
+            if audit_record is None:
+                return None
+            return EgressAuditRecordResponse.model_validate(
+                _egress_audit_response(audit_record)
+            ).model_dump(mode="json")
 
     async def list(self, *, limit: int = 50) -> list[WorkspaceResponse]:
         async with self._factory() as s:
