@@ -89,15 +89,25 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
 
             actual_tier = max(actual_tier, op_tier)
 
+    satisfied_validation_run_tier = 0
+    deferred_required_coverage = False
     for run in validation_runs:
+        if rebase_time and run.started_at <= rebase_time:
+            continue
+
+        if run.status == "succeeded" and _validation_run_deferred_required_coverage(run):
+            deferred_required_coverage = True
+            continue
+
         run_tier = _successful_validation_run_tier(run)
         if run_tier is None:
             continue
 
-        if rebase_time and run.started_at <= rebase_time:
-            continue
-
+        satisfied_validation_run_tier = max(satisfied_validation_run_tier, run_tier)
         actual_tier = max(actual_tier, run_tier)
+
+    if deferred_required_coverage and satisfied_validation_run_tier < required_tier:
+        return VALIDATION_INSUFFICIENT_TIER_STALE_REASON, "validate"
 
     if actual_tier < required_tier:
         return VALIDATION_INSUFFICIENT_TIER_STALE_REASON, "validate"

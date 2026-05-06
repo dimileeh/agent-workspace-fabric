@@ -186,6 +186,53 @@ def test_compute_stale_reason_rejects_targeted_only_validation_when_coverage_was
 
 
 @pytest.mark.unit
+def test_sync_candidate_readiness_keeps_tier_one_deferred_coverage_stale() -> None:
+    validation_run = _validation_run(
+        tier=1,
+        started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        commands=[
+            {"phase": "validate", "command": "pytest tests/unit/cli -q"},
+            {
+                "phase": "coverage",
+                "command": "pytest --cov=awf",
+                "evidence_status": "skipped_by_policy",
+                "evidence_reason_code": "TARGETED_EDIT_GATE",
+            },
+        ],
+    )
+    validate_operation = _operation(
+        operation_type="validate",
+        created_at=datetime(2026, 4, 27, 12, 1, tzinfo=UTC),
+        payload={"requested_tier": 1},
+    )
+    validate_operation.result = {"validation_run_id": validation_run.id}
+    workspace = _workspace_with_operations(
+        task_class=TaskClass.test_task.value,
+        operations=[validate_operation],
+    )
+    workspace.auto_merge = True
+    workspace.validation_runs = [validation_run]
+    attempt = TaskAttempt(
+        id="att_1",
+        agent="codex",
+        is_canonical_for_merge=True,
+    )
+    candidate = MergeCandidate(
+        id="mc_tier_one_deferred_coverage",
+        workspace=workspace,
+        attempt=attempt,
+        status="open",
+        stale=False,
+    )
+
+    sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
+
+    assert candidate.ready is False
+    assert candidate.stale is True
+    assert candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("task_class", "required_tier"),
     [
