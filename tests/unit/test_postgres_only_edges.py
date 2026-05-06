@@ -33,19 +33,20 @@ from tests import postgres as postgres_mod
 
 
 class _FakeSchemaConnection:
-    def __init__(self, schemas: list[str]) -> None:
-        self._schemas = schemas
+    def __init__(self, engine: _FakeSchemaEngine) -> None:
+        self._engine = engine
 
     async def execute(self, _statement: object, _parameters: object = None) -> list[tuple[str]]:
-        return [(schema,) for schema in self._schemas]
+        self._engine.parameters.append(_parameters)
+        return [(schema,) for schema in self._engine.schemas]
 
 
 class _FakeSchemaBegin:
-    def __init__(self, schemas: list[str]) -> None:
-        self._schemas = schemas
+    def __init__(self, engine: _FakeSchemaEngine) -> None:
+        self._engine = engine
 
     async def __aenter__(self) -> _FakeSchemaConnection:
-        return _FakeSchemaConnection(self._schemas)
+        return _FakeSchemaConnection(self._engine)
 
     async def __aexit__(self, *_exc_info: object) -> None:
         return None
@@ -53,10 +54,11 @@ class _FakeSchemaBegin:
 
 class _FakeSchemaEngine:
     def __init__(self, schemas: list[str]) -> None:
-        self._schemas = schemas
+        self.schemas = schemas
+        self.parameters: list[object] = []
 
     def begin(self) -> _FakeSchemaBegin:
-        return _FakeSchemaBegin(self._schemas)
+        return _FakeSchemaBegin(self)
 
 
 class _FakeDisposableEngine:
@@ -173,31 +175,36 @@ def test_postgres_ddl_lock_path_is_scoped_to_current_uid(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_stale_postgres_schema_listing_skips_active_and_unowned_schemas(
+async def test_stale_postgres_schema_listing_scans_only_current_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
-    inactive_namespace = "1" * 16
-    active_namespace = "2" * 16
-    inactive_schema = f"awf_test_{inactive_namespace}_{'a' * 32}"
-    active_schema = f"awf_test_{active_namespace}_{'b' * 32}"
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "current-run")
+    current_namespace = postgres_mod._postgres_test_schema_namespace()
+    other_namespace = "1" * 16
+    current_schema = f"awf_test_{current_namespace}_{'a' * 32}"
+    other_schema = f"awf_test_{other_namespace}_{'b' * 32}"
     legacy_unowned_schema = f"awf_test_{'c' * 32}"
     seen_namespaces: list[str] = []
 
     def _is_active(url: str, namespace: str) -> bool:
         assert url == database_url
         seen_namespaces.append(namespace)
-        return namespace == active_namespace
+        return False
 
     monkeypatch.setattr(postgres_mod, "_is_postgres_test_schema_namespace_active", _is_active)
+    engine = _FakeSchemaEngine([other_schema, legacy_unowned_schema, current_schema])
 
     schemas = await postgres_mod._list_stale_postgres_test_schemas(
-        _FakeSchemaEngine([active_schema, legacy_unowned_schema, inactive_schema]),  # type: ignore[arg-type]
+        engine,  # type: ignore[arg-type]
         database_url,
     )
 
-    assert schemas == [inactive_schema]
-    assert seen_namespaces == [inactive_namespace, active_namespace]
+    assert schemas == [current_schema]
+    assert seen_namespaces == [current_namespace]
+    assert engine.parameters == [
+        {"pattern": f"awf\\_test\\_{current_namespace}\\_%"},
+    ]
 
 
 @pytest.mark.unit
@@ -206,9 +213,13 @@ async def test_stale_postgres_cleanup_reuses_one_engine_for_all_drops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
-    first_schema = f"awf_test_{'1' * 16}_{'a' * 32}"
-    second_schema = f"awf_test_{'2' * 16}_{'b' * 32}"
-    engine = _FakeStaleCleanupEngine([second_schema, first_schema])
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "cleanup-run")
+    current_namespace = postgres_mod._postgres_test_schema_namespace()
+    other_namespace = "1" * 16
+    first_schema = f"awf_test_{current_namespace}_{'a' * 32}"
+    second_schema = f"awf_test_{current_namespace}_{'b' * 32}"
+    other_schema = f"awf_test_{other_namespace}_{'c' * 32}"
+    engine = _FakeStaleCleanupEngine([second_schema, other_schema, first_schema])
     made_engines: list[_FakeStaleCleanupEngine] = []
 
     def _make_engine(url: str) -> _FakeStaleCleanupEngine:

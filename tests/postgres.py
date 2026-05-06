@@ -278,6 +278,7 @@ async def _list_stale_postgres_test_schemas(
     engine: AsyncEngine,
     database_url: str,
 ) -> list[str]:
+    current_namespace = _postgres_test_schema_namespace()
     async with engine.begin() as conn:
         result = await conn.execute(
             text(
@@ -287,14 +288,14 @@ async def _list_stale_postgres_test_schemas(
                 WHERE schema_name LIKE :pattern ESCAPE '\\'
                 """
             ),
-            {"pattern": r"awf\_test\_%"},
+            {"pattern": f"awf\\_test\\_{current_namespace}\\_%"},
         )
         schemas = sorted(str(row[0]) for row in result)
 
     stale_schemas: list[str] = []
     for schema in schemas:
         namespace = _postgres_test_schema_namespace_from_schema(schema)
-        if namespace is None:
+        if namespace != current_namespace:
             continue
         if _is_postgres_test_schema_namespace_active(database_url, namespace):
             continue
