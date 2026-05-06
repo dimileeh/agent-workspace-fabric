@@ -188,9 +188,6 @@ def _resolve_service_work_dir(
     if host_work_dir:
         return host_work_dir
     awf_work_dir = _env_value(host_env, "AWF_WORK_DIR")
-    if awf_work_dir and _is_project_default_work_dir(awf_work_dir):
-        home = _env_value(host_env, "HOME") or settings.host_home or "~"
-        return str(Path(home).expanduser() / ".awf" / "service")
     if awf_work_dir and not _is_project_default_work_dir(awf_work_dir):
         return awf_work_dir
     if "work_dir" in settings.model_fields_set and not _is_project_default_work_dir(

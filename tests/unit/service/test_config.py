@@ -174,6 +174,25 @@ def test_local_service_work_dir_resolves_from_compose_env_file(
 
 
 @pytest.mark.unit
+def test_project_default_awf_work_dir_does_not_hide_compose_host_work_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_work_dir = tmp_path / "compose-service-state"
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AWF_WORK_DIR", ".awf")
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.work_dir == str(host_work_dir)
+
+
+@pytest.mark.unit
 def test_workspace_cleanup_policy_defaults_are_documented_in_payload() -> None:
     settings = resolve_service_settings(Settings(_env_file=None), environ={})
     payload = service_config_payload(settings)
@@ -343,9 +362,7 @@ def test_host_awf_work_dir_precedes_compose_file_default(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
-def test_project_default_awf_work_dir_suppresses_compose_file_host_work_dir(
-    tmp_path: Path,
-) -> None:
+def test_project_default_awf_work_dir_defers_to_compose_file_host_work_dir(tmp_path: Path) -> None:
     compose_env_file = tmp_path / "compose.env"
     compose_env_file.write_text(
         f"AWF_HOST_WORK_DIR={tmp_path / 'compose-service-state'}\n",
@@ -362,7 +379,7 @@ def test_project_default_awf_work_dir_suppresses_compose_file_host_work_dir(
         host_environ={"HOME": str(tmp_path / "home"), "AWF_WORK_DIR": ".awf"},
     )
 
-    assert work_dir == str(tmp_path / "home" / ".awf" / "service")
+    assert work_dir == str(tmp_path / "compose-service-state")
 
 
 @pytest.mark.unit
