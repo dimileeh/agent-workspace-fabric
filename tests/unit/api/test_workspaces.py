@@ -893,6 +893,59 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
+class TestCreateWorkspaceV2ResourceIdempotency:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("resources", "expected_steady_cpu"),
+        [
+            pytest.param({}, 2.0, id="all-defaulted"),
+            pytest.param({"steady_state_cpu_cores": 4.0}, 4.0, id="partial-defaulted"),
+        ],
+    )
+    async def test_idempotent_replay_preserves_resource_defaults_after_settings_change(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        resources: dict[str, object],
+        expected_steady_cpu: float,
+    ) -> None:
+        app, client = disk_app_and_client
+        old_settings = Settings(
+            _env_file=None,
+            workspace_steady_cpu=2.0,
+            workspace_steady_memory_gb=6.0,
+            workspace_peak_cpu=3.0,
+            workspace_peak_memory_gb=8.0,
+        )
+        new_settings = Settings(
+            _env_file=None,
+            workspace_steady_cpu=7.0,
+            workspace_steady_memory_gb=14.0,
+            workspace_peak_cpu=9.0,
+            workspace_peak_memory_gb=18.0,
+        )
+        active_settings = old_settings
+        app.dependency_overrides[get_settings] = lambda: active_settings
+        payload = {**_V2_MINIMAL_BODY, "resources": resources}
+        headers = {
+            "Idempotency-Key": f"resource-default-replay-{expected_steady_cpu:g}",
+        }
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        active_settings = new_settings
+        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+
+        detail = await client.get(f"/v1/workspaces/{first.json()['workspace_id']}")
+        reservation = detail.json()["active_resource_reservation"]
+        assert reservation["steady_cpu"] == expected_steady_cpu
+        assert reservation["steady_memory_gb"] == 6.0
+        assert reservation["peak_cpu"] == 3.0
+        assert reservation["peak_memory_gb"] == 8.0
+
+
 class TestWorkspaceCreateProviderReadinessPreflight:
     @pytest.fixture(autouse=True)
     def _clear_provider_auth_env(self, monkeypatch: pytest.MonkeyPatch) -> None:

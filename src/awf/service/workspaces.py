@@ -173,6 +173,7 @@ PROVIDER_READINESS_OVERRIDE_REASON = "PROVIDER_READINESS_OVERRIDE_USED"
 VALIDATION_POLICY_KEY = "validation"
 VALIDATION_REQUESTED_TIER_POLICY_KEY = "requested_tier"
 DEFAULT_REQUESTED_VALIDATION_TIER = 1
+RESOURCE_RESERVATION_REQUEST_POLICY_KEY = "resource_reservation_request"
 QUEUE_DECISION_ADMITTED = "admitted"
 QUEUE_DECISION_ADMITTED_LOCAL_REASON = "ADMITTED_LOCAL"
 RESOURCE_RESERVATION_PHASE_WORKSPACE = "workspace_lifecycle"
@@ -1109,15 +1110,103 @@ def _stored_resource_reservation_matches(
     reservation = _latest_workspace_resource_reservation(existing)
     if reservation is None:
         return True
+    requested_values = _requested_resource_reservation_values(payload)
+    requested_dind_slots = _requested_resource_dind_slots(payload)
+    stored_values = _stored_resource_reservation_request_values(existing)
+    if stored_values is not None:
+        return (
+            stored_values == requested_values
+            and _resource_reservation_matches_request_values(reservation, requested_values)
+            and reservation.dind_slots == requested_dind_slots
+        )
+
     plan = resource_reservation_plan(payload, settings=settings or get_settings())
-    return (
+    if (
         reservation.steady_cpu == plan.steady_cpu
         and reservation.steady_memory_gb == plan.steady_memory_gb
         and reservation.peak_cpu == plan.peak_cpu
         and reservation.peak_memory_gb == plan.peak_memory_gb
         and reservation.disk_mb == plan.disk_mb
         and reservation.dind_slots == plan.dind_slots
+    ):
+        return True
+    return (
+        _resource_reservation_matches_request_values(reservation, requested_values)
+        and reservation.dind_slots == requested_dind_slots
     )
+
+
+def _requested_resource_reservation_values(
+    payload: WorkspaceCreateV2Request,
+) -> dict[str, int | float]:
+    resources = payload.resources
+    legacy_memory_gb = _parse_memory_gb(resources.memory)
+    values: dict[str, int | float] = {}
+    if resources.steady_state_cpu_cores is not None:
+        values["steady_cpu"] = resources.steady_state_cpu_cores
+    elif resources.cpu is not None:
+        values["steady_cpu"] = resources.cpu
+    if resources.peak_cpu_cores is not None:
+        values["peak_cpu"] = resources.peak_cpu_cores
+    elif resources.cpu is not None:
+        values["peak_cpu"] = resources.cpu
+    if resources.steady_state_memory_gb is not None:
+        values["steady_memory_gb"] = resources.steady_state_memory_gb
+    elif legacy_memory_gb is not None:
+        values["steady_memory_gb"] = legacy_memory_gb
+    if resources.peak_memory_gb is not None:
+        values["peak_memory_gb"] = resources.peak_memory_gb
+    elif legacy_memory_gb is not None:
+        values["peak_memory_gb"] = legacy_memory_gb
+    if resources.disk_mb is not None:
+        values["disk_mb"] = resources.disk_mb
+    return values
+
+
+def _requested_resource_dind_slots(payload: WorkspaceCreateV2Request) -> int:
+    _, resolved_profile = v2_profile_snapshots(payload)
+    return 1 if _dind_mode_from_profile_snapshot(resolved_profile) == "dind" else 0
+
+
+def _stored_resource_reservation_request_values(
+    existing: Workspace,
+) -> dict[str, int | float] | None:
+    resource_request = existing.task_policy.get(RESOURCE_RESERVATION_REQUEST_POLICY_KEY)
+    if not isinstance(resource_request, dict):
+        return None
+    values: dict[str, int | float] = {}
+    for field in (
+        "steady_cpu",
+        "steady_memory_gb",
+        "peak_cpu",
+        "peak_memory_gb",
+        "disk_mb",
+    ):
+        value = resource_request.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            return None
+        if field == "disk_mb":
+            if not isinstance(value, int):
+                return None
+            values[field] = value
+            continue
+        if not isinstance(value, (int, float)):
+            return None
+        values[field] = float(value)
+    return values
+
+
+def _resource_reservation_matches_request_values(
+    reservation: ResourceReservation,
+    requested_values: Mapping[str, int | float],
+) -> bool:
+    for field in ("steady_cpu", "steady_memory_gb", "peak_cpu", "peak_memory_gb"):
+        value = requested_values.get(field)
+        if value is not None and getattr(reservation, field) != value:
+            return False
+    return reservation.disk_mb == requested_values.get("disk_mb")
 
 
 def _latest_workspace_resource_reservation(existing: Workspace) -> ResourceReservation | None:
@@ -2615,7 +2704,9 @@ def v2_profile_snapshots(
 
 
 def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]:
-    policy: dict[str, Any] = {}
+    policy: dict[str, Any] = {
+        RESOURCE_RESERVATION_REQUEST_POLICY_KEY: _requested_resource_reservation_values(payload)
+    }
     if _v2_payload_defers_profile_resolution(payload):
         policy[VALIDATION_POLICY_KEY] = {
             VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
