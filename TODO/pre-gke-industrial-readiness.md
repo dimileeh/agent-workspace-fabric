@@ -733,26 +733,6 @@ coding agent in any project to use AWF for a feature.
   `tests/unit/mcp/test_mcp_client_parity_docs.py`, `tests/unit/mcp/test_mcp_parity_matrix_crossref.py`,
   `tests/unit/mcp/test_mcp_operator_surfaces.py`, `tests/unit/api/test_controls.py`,
   `tests/unit/api/test_workspace_controls_idempotency.py`.
-- [x] Add contract tests proving REST API, CLI, and MCP stay aligned: request
-  payloads, response payloads, reason codes, idempotency keys, `If-Match` /
-  workspace-version concurrency, auth failures, and structured error semantics
-  must not drift across the three clients.
-  Evidence: implemented `tests/unit/contracts/test_control_surface_parity_contract.py`
-  with request/response/error parity assertions across cancel/stop/destroy/refresh/validate/rebase.
-- [x] Add a docs/status consistency test for the parity matrix so entries marked
-  implemented must correspond to real REST routes, CLI commands, MCP tools, and
-  contract-test coverage; partial or missing entries must remain visible as
-  unchecked backlog work.
-  Evidence: added
-  `tests/unit/mcp/test_mcp_client_parity_docs.py::test_control_operations_with_mcp_gaps_are_intentionally_documented`
-  to lock in MCP gap entries and backlog markers for refresh/rebase while preserving
-  CLI command parity for safe control operations.
-- [x] Keep MCP read/control scoped: expose AWF-managed runtime snapshots, logs,
-  operations, and controls, but do not expose arbitrary shell or unrestricted
-  Docker exec. Evidence: MCP operator-surface tests reject shell/exec/Docker
-  exec/host-file/secret/artifact-content tool names and inputs, require bounded
-  list/read schemas, and assert service health/readiness/resource summaries do
-  not echo token values.
 - [ ] Add contract tests proving REST API, CLI, and MCP stay aligned: request
   payloads, response payloads, reason codes, idempotency keys, `If-Match` /
   workspace-version concurrency, auth failures, and structured error semantics
@@ -776,16 +756,24 @@ coding agent in any project to use AWF for a feature.
 - [x] Add a docs/status consistency test for the parity matrix so entries marked
   implemented must correspond to real REST routes, CLI commands, MCP tools, and
   contract-test coverage; partial or missing entries must remain visible as
-  unchecked backlog work. Evidence: `tests/unit/mcp/test_mcp_parity_matrix_crossref.py`
-  now validates implemented rows against the FastAPI route tree, Typer command
-  tree, MCP tool registrations, and active backlog visibility; `tests/unit/contracts/test_registry_smoke.py`
-  now requires executable contract/parity coverage references for implemented
-  rows. Validation: targeted parity/registry pytest, ruff on touched parity and
+  unchecked backlog work. Evidence: parity-matrix consistency coverage in
+  `tests/unit/mcp/test_mcp_client_parity_docs.py`,
+  `tests/unit/mcp/test_mcp_parity_matrix_crossref.py`, and
+  `tests/unit/contracts/test_registry_smoke.py` validates implemented rows
+  against the FastAPI route tree, Typer command tree, MCP tool registrations,
+  active backlog visibility, and executable contract/parity coverage references.
+  Validation: targeted parity/registry pytest, ruff on touched parity and
   contract helpers, and the full `tests/unit/contracts` suite passed on
   2026-05-05; evidence attached in
   `docs/awf-plans/ws_aeec0296eee64c869d328ae2.validation.txt`; PR
   [#215](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/215)
   completed 2026-05-06.
+- [x] Keep MCP read/control scoped: expose AWF-managed runtime snapshots, logs,
+  operations, and controls, but do not expose arbitrary shell or unrestricted
+  Docker exec. Evidence: MCP operator-surface tests reject shell/exec/Docker
+  exec/host-file/secret/artifact-content tool names and inputs, require bounded
+  list/read schemas, and assert service health/readiness/resource summaries do
+  not echo token values.
 - [x] Add `docs/PROJECT_ONBOARDING.md` for Codex, Claude Code, Gemini, OpenCode, OpenClaw, and human operators.
 - [x] Add `awf project init` or `awf profile init` to inspect a repository and generate a draft `.awf/workspace.yml`.
 - [x] Add profile templates for common project shapes: generic, Python, Node/Next.js, Docker Compose, Python+Postgres, Node+browser/Playwright, and multi-service app.
