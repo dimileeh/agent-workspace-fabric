@@ -16,8 +16,6 @@ from awf.db.base import Base
 from awf.db.session import make_engine, make_session_factory
 
 DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
-_SCHEMA_DDL_LOCK_NAMESPACE = 0x415746
-_SCHEMA_DDL_LOCK_KEY = 0x54455354
 
 
 def postgres_test_database_url() -> str:
@@ -44,22 +42,22 @@ def _schema_url(database_url: str, schema: str, *, null_pool: bool = False) -> s
     return parsed_url.set(query=query).render_as_string(hide_password=False)
 
 
-@asynccontextmanager
-async def _postgres_schema_ddl_lock(engine: AsyncEngine) -> AsyncIterator[None]:
-    """Serialize test schema DDL across xdist workers and AWF workspaces."""
+def _admin_url(database_url: str) -> str:
+    return _schema_url(database_url, "public", null_pool=True)
 
-    params = {
-        "namespace": _SCHEMA_DDL_LOCK_NAMESPACE,
-        "key": _SCHEMA_DDL_LOCK_KEY,
-    }
-    async with engine.connect() as conn:
-        await conn.execute(text("SELECT pg_advisory_lock(:namespace, :key)"), params)
-        await conn.commit()
-        try:
-            yield
-        finally:
-            await conn.execute(text("SELECT pg_advisory_unlock(:namespace, :key)"), params)
-            await conn.commit()
+
+def _test_schema_url(
+    database_url: str,
+    quoted_schema: str,
+    *,
+    null_pool: bool = False,
+) -> str:
+    return _schema_url(database_url, quoted_schema, null_pool=null_pool)
+
+
+async def _dispose_engine(engine: AsyncEngine | None) -> None:
+    if engine is not None:
+        await engine.dispose()
 
 
 @asynccontextmanager
@@ -69,27 +67,24 @@ async def postgres_test_engine() -> AsyncIterator[AsyncEngine]:
     database_url = postgres_test_database_url()
     schema = f"awf_test_{uuid.uuid4().hex}"
     quoted_schema = _quote_identifier(schema)
-    admin_engine = make_engine(database_url)
+    admin_engine = make_engine(_admin_url(database_url))
     schema_created = False
     engine: AsyncEngine | None = None
     try:
-        async with _postgres_schema_ddl_lock(admin_engine):
-            await _create_schema(admin_engine, quoted_schema)
-            schema_created = True
-            schema_database_url = _schema_url(database_url, quoted_schema)
-            engine = make_engine(schema_database_url)
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+        await _create_schema(admin_engine, quoted_schema)
+        schema_created = True
+        schema_database_url = _test_schema_url(database_url, quoted_schema)
+        engine = make_engine(schema_database_url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
         if engine is None:
             raise RuntimeError("PostgreSQL test engine was not initialized.")
         yield engine
     finally:
-        if engine is not None:
-            await engine.dispose()
+        await _dispose_engine(engine)
         try:
             if schema_created:
-                async with _postgres_schema_ddl_lock(admin_engine):
-                    await _drop_schema(admin_engine, quoted_schema)
+                await _drop_schema(admin_engine, schema, quoted_schema)
         finally:
             await admin_engine.dispose()
 
@@ -99,8 +94,33 @@ async def _create_schema(engine: AsyncEngine, quoted_schema: str) -> None:
         await conn.execute(text(f"CREATE SCHEMA {quoted_schema}"))
 
 
-async def _drop_schema(engine: AsyncEngine, quoted_schema: str) -> None:
+async def _terminate_schema_lock_holders(engine: AsyncEngine, schema: str) -> None:
     async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                SELECT pg_terminate_backend(activity.pid)
+                FROM pg_stat_activity AS activity
+                WHERE activity.datname = current_database()
+                  AND activity.pid <> pg_backend_pid()
+                  AND EXISTS (
+                    SELECT 1
+                    FROM pg_locks AS locks
+                    JOIN pg_class AS relation ON relation.oid = locks.relation
+                    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                    WHERE locks.pid = activity.pid
+                      AND namespace.nspname = :schema
+                  )
+                """
+            ),
+            {"schema": schema},
+        )
+
+
+async def _drop_schema(engine: AsyncEngine, schema: str, quoted_schema: str) -> None:
+    await _terminate_schema_lock_holders(engine, schema)
+    async with engine.begin() as conn:
+        await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
         await conn.execute(text(f"DROP SCHEMA IF EXISTS {quoted_schema} CASCADE"))
 
 
@@ -115,22 +135,19 @@ async def create_postgres_test_engine() -> AsyncEngine:
     database_url = postgres_test_database_url()
     schema = f"awf_test_{uuid.uuid4().hex}"
     quoted_schema = _quote_identifier(schema)
-    admin_engine = make_engine(database_url)
+    admin_engine = make_engine(_admin_url(database_url))
     schema_created = False
     engine: AsyncEngine | None = None
     try:
-        async with _postgres_schema_ddl_lock(admin_engine):
-            await _create_schema(admin_engine, quoted_schema)
-            schema_created = True
-            engine = make_engine(_schema_url(database_url, quoted_schema, null_pool=True))
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+        await _create_schema(admin_engine, quoted_schema)
+        schema_created = True
+        engine = make_engine(_test_schema_url(database_url, quoted_schema, null_pool=True))
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
     except Exception:
-        if engine is not None:
-            await engine.dispose()
+        await _dispose_engine(engine)
         if schema_created:
-            async with _postgres_schema_ddl_lock(admin_engine):
-                await _drop_schema(admin_engine, quoted_schema)
+            await _drop_schema(admin_engine, schema, quoted_schema)
         raise
     finally:
         await admin_engine.dispose()
@@ -147,29 +164,26 @@ async def postgres_test_url() -> AsyncIterator[str]:
     database_url = postgres_test_database_url()
     schema = f"awf_test_{uuid.uuid4().hex}"
     quoted_schema = _quote_identifier(schema)
-    admin_engine = make_engine(database_url)
+    admin_engine = make_engine(_admin_url(database_url))
     schema_created = False
     engine: AsyncEngine | None = None
     try:
-        async with _postgres_schema_ddl_lock(admin_engine):
-            await _create_schema(admin_engine, quoted_schema)
-            schema_created = True
-            schema_database_url = _schema_url(database_url, quoted_schema)
-            engine = make_engine(schema_database_url)
-            try:
-                async with engine.begin() as conn:
-                    await conn.run_sync(Base.metadata.create_all)
-            finally:
-                await engine.dispose()
-                engine = None
+        await _create_schema(admin_engine, quoted_schema)
+        schema_created = True
+        schema_database_url = _test_schema_url(database_url, quoted_schema)
+        engine = make_engine(_test_schema_url(database_url, quoted_schema, null_pool=True))
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        finally:
+            await _dispose_engine(engine)
+            engine = None
         yield schema_database_url
     finally:
-        if engine is not None:
-            await engine.dispose()
+        await _dispose_engine(engine)
         try:
             if schema_created:
-                async with _postgres_schema_ddl_lock(admin_engine):
-                    await _drop_schema(admin_engine, quoted_schema)
+                await _drop_schema(admin_engine, schema, quoted_schema)
         finally:
             await admin_engine.dispose()
 
@@ -183,37 +197,33 @@ def postgres_test_url_sync() -> Iterator[str]:
     quoted_schema = _quote_identifier(schema)
 
     async def _setup() -> str:
-        admin_engine = make_engine(database_url)
+        admin_engine = make_engine(_admin_url(database_url))
         schema_created = False
         engine: AsyncEngine | None = None
         try:
-            async with _postgres_schema_ddl_lock(admin_engine):
-                await _create_schema(admin_engine, quoted_schema)
-                schema_created = True
-                schema_database_url = _schema_url(database_url, quoted_schema, null_pool=True)
-                engine = make_engine(schema_database_url)
-                try:
-                    async with engine.begin() as conn:
-                        await conn.run_sync(Base.metadata.create_all)
-                finally:
-                    await engine.dispose()
-                    engine = None
-                return schema_database_url
+            await _create_schema(admin_engine, quoted_schema)
+            schema_created = True
+            schema_database_url = _test_schema_url(database_url, quoted_schema)
+            engine = make_engine(_test_schema_url(database_url, quoted_schema, null_pool=True))
+            try:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+            finally:
+                await _dispose_engine(engine)
+                engine = None
+            return schema_database_url
         except Exception:
-            if engine is not None:
-                await engine.dispose()
+            await _dispose_engine(engine)
             if schema_created:
-                async with _postgres_schema_ddl_lock(admin_engine):
-                    await _drop_schema(admin_engine, quoted_schema)
+                await _drop_schema(admin_engine, schema, quoted_schema)
             raise
         finally:
             await admin_engine.dispose()
 
     async def _cleanup() -> None:
-        admin_engine = make_engine(database_url)
+        admin_engine = make_engine(_admin_url(database_url))
         try:
-            async with _postgres_schema_ddl_lock(admin_engine):
-                await _drop_schema(admin_engine, quoted_schema)
+            await _drop_schema(admin_engine, schema, quoted_schema)
         finally:
             await admin_engine.dispose()
 
@@ -231,18 +241,16 @@ async def postgres_empty_test_url() -> AsyncIterator[str]:
     database_url = postgres_test_database_url()
     schema = f"awf_test_{uuid.uuid4().hex}"
     quoted_schema = _quote_identifier(schema)
-    admin_engine = make_engine(database_url)
+    admin_engine = make_engine(_admin_url(database_url))
     schema_created = False
     try:
-        async with _postgres_schema_ddl_lock(admin_engine):
-            await _create_schema(admin_engine, quoted_schema)
-            schema_created = True
-        yield _schema_url(database_url, quoted_schema)
+        await _create_schema(admin_engine, quoted_schema)
+        schema_created = True
+        yield _test_schema_url(database_url, quoted_schema)
     finally:
         try:
             if schema_created:
-                async with _postgres_schema_ddl_lock(admin_engine):
-                    await _drop_schema(admin_engine, quoted_schema)
+                await _drop_schema(admin_engine, schema, quoted_schema)
         finally:
             await admin_engine.dispose()
 
