@@ -83,27 +83,85 @@ def _postgres_call_helper_name(node: ast.expr) -> str | None:
     return None
 
 
-def _test_source_calls_postgres_schema_helper(path: Path, cache: dict[Path, bool]) -> bool:
-    cached = cache.get(path)
+def _item_test_name(item: pytest.Item) -> str | None:
+    original_name = getattr(item, "originalname", None)
+    if isinstance(original_name, str):
+        return original_name
+    name = getattr(item, "name", None)
+    if not isinstance(name, str):
+        return None
+    return name.split("[", 1)[0].rsplit("::", 1)[-1]
+
+
+def _item_source_line(item: pytest.Item) -> int | None:
+    location = getattr(item, "location", None)
+    if not isinstance(location, tuple) or len(location) < 2:
+        return None
+    lineno = location[1]
+    if not isinstance(lineno, int):
+        return None
+    return lineno + 1
+
+
+def _test_function_contains_line(node: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> bool:
+    return node.lineno <= line <= getattr(node, "end_lineno", node.lineno)
+
+
+def _selected_test_function_nodes(
+    tree: ast.AST,
+    item: pytest.Item,
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...]:
+    function_nodes = tuple(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    )
+    source_line = _item_source_line(item)
+    if source_line is not None:
+        line_matches = tuple(
+            node for node in function_nodes if _test_function_contains_line(node, source_line)
+        )
+        if line_matches:
+            return line_matches
+
+    test_name = _item_test_name(item)
+    if test_name is None:
+        return ()
+    return tuple(node for node in function_nodes if node.name == test_name)
+
+
+def _node_calls_postgres_schema_helper(node: ast.AST) -> bool:
+    return any(
+        _postgres_call_helper_name(child.func) in _POSTGRES_SCHEMA_HELPER_CALLS
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call)
+    )
+
+
+def _test_source_calls_postgres_schema_helper(
+    item: pytest.Item,
+    cache: dict[tuple[Path, str | None, int | None], bool],
+) -> bool:
+    path = item.path
+    cache_key = (path, _item_test_name(item), _item_source_line(item))
+    cached = cache.get(cache_key)
     if cached is not None:
         return cached
     try:
         source = path.read_text(encoding="utf-8")
     except OSError:
-        cache[path] = False
+        cache[cache_key] = False
         return False
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError:
-        cache[path] = False
+        cache[cache_key] = False
         return False
 
-    calls_helper = any(
-        _postgres_call_helper_name(node.func) in _POSTGRES_SCHEMA_HELPER_CALLS
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-    )
-    cache[path] = calls_helper
+    selected_nodes = _selected_test_function_nodes(tree, item)
+    nodes_to_scan: tuple[ast.AST, ...] = selected_nodes or (tree,)
+    calls_helper = any(_node_calls_postgres_schema_helper(node) for node in nodes_to_scan)
+    cache[cache_key] = calls_helper
     return calls_helper
 
 
@@ -113,10 +171,13 @@ def _uses_postgres_test_database(item: pytest.Item, cache: dict[Path, bool]) -> 
     return _test_source_uses_postgres(item.path, cache)
 
 
-def _uses_postgres_schema_allocator(item: pytest.Item, cache: dict[Path, bool]) -> bool:
+def _uses_postgres_schema_allocator(
+    item: pytest.Item,
+    cache: dict[tuple[Path, str | None, int | None], bool],
+) -> bool:
     if _uses_postgres_test_fixture(item):
         return True
-    return _test_source_calls_postgres_schema_helper(item.path, cache)
+    return _test_source_calls_postgres_schema_helper(item, cache)
 
 
 def pytest_collection_modifyitems(
@@ -153,7 +214,7 @@ def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
 def pytest_collection_finish(session: pytest.Session) -> None:
     """Clear stale Postgres schemas before DB-backed test selections start."""
 
-    source_cache: dict[Path, bool] = {}
+    source_cache: dict[tuple[Path, str | None, int | None], bool] = {}
     if any(_uses_postgres_schema_allocator(item, source_cache) for item in session.items):
         from tests.postgres import cleanup_stale_postgres_test_schemas
 

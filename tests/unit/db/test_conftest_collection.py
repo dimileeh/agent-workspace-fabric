@@ -8,9 +8,18 @@ import tests.conftest as root_conftest
 
 
 class _FakeItem:
-    def __init__(self, path: Path, fixturenames: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        path: Path,
+        fixturenames: tuple[str, ...] = (),
+        *,
+        name: str = "test_selected",
+        lineno: int = 0,
+    ) -> None:
         self.path = path
         self.fixturenames = fixturenames
+        self.name = name
+        self.location = (str(path), lineno, name)
 
 
 class _FakeSession:
@@ -78,6 +87,57 @@ def test_collection_finish_runs_cleanup_for_direct_postgres_helper_calls(
 
     monkeypatch.setattr(postgres_mod, cleanup_name, lambda: cleanup_calls.append("cleanup"))
 
-    root_conftest.pytest_collection_finish(_FakeSession([_FakeItem(test_file)]))  # type: ignore[arg-type]
+    root_conftest.pytest_collection_finish(
+        _FakeSession(
+            [
+                _FakeItem(
+                    test_file,
+                    name="test_uses_direct_helper",
+                    lineno=2,
+                )
+            ]
+        )  # type: ignore[arg-type]
+    )
 
     assert cleanup_calls == ["cleanup"]
+
+
+def test_collection_finish_skips_unselected_postgres_helper_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_mixed_db_and_non_db.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "from tests.postgres import postgres_test_url",
+                "",
+                "def test_selected_without_db():",
+                "    assert True",
+                "",
+                "async def test_unselected_uses_db():",
+                "    async with postgres_test_url() as database_url:",
+                "        assert database_url",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    postgres_mod = pytest.importorskip("tests." + "postgres")
+    cleanup_name = "cleanup_stale_" + "postgres_" + "test_" + "schemas"
+
+    def fail_cleanup() -> None:
+        raise AssertionError("unselected helper calls should not require DB cleanup")
+
+    monkeypatch.setattr(postgres_mod, cleanup_name, fail_cleanup)
+
+    root_conftest.pytest_collection_finish(
+        _FakeSession(
+            [
+                _FakeItem(
+                    test_file,
+                    name="test_selected_without_db",
+                    lineno=2,
+                )
+            ]
+        )  # type: ignore[arg-type]
+    )
