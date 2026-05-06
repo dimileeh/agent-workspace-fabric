@@ -151,7 +151,10 @@ async def test_mcp_tool_schema_matches_registry(capability_name: str) -> None:
     assert capability.mcp_required_fields <= tool.required
     if "idempotency_key" in capability.mcp_request_fields:
         assert "idempotency_key" in tool.properties
-        assert "idempotency_key" in tool.required
+        if capability.requires_idempotency_key:
+            assert "idempotency_key" in tool.required
+        else:
+            assert "idempotency_key" not in tool.required
     if capability.supports_if_match:
         assert "expected_version" in tool.properties
         assert "expected_version" not in tool.required
@@ -205,14 +208,17 @@ def test_idempotency_key_requirement_is_distinct_from_optional_support() -> None
 
 
 @pytest.mark.unit
-def test_mcp_idempotency_support_declares_optional_request_key() -> None:
+def test_mcp_idempotency_support_distinguishes_optional_and_required_keys() -> None:
     for capability in mcp_capabilities():
         if not capability.supports_idempotency_key:
             continue
 
         assert "Idempotency-Key" in capability.rest_header_fields
         assert "idempotency_key" in capability.mcp_request_fields
-        assert "idempotency_key" not in capability.mcp_required_fields
+        if capability.requires_idempotency_key:
+            assert "idempotency_key" in capability.mcp_required_fields
+        else:
+            assert "idempotency_key" not in capability.mcp_required_fields
 
 
 @pytest.mark.unit

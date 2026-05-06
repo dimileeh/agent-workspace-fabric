@@ -51,7 +51,7 @@ from awf.service.artifacts import (
 )
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.controls import WorkspaceControlError
-from awf.service.disk import DiskCheck
+from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.local_capacity import detect_local_capacity
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
 from awf.service.merge_queue import InvalidMergeQueueCursorError, list_merge_queue_response
@@ -89,6 +89,7 @@ from awf.service.workspace_observability import (
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import (
     WorkspaceCreateIdempotencyConflictError,
+    WorkspaceCreateInsufficientDiskError,
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
     WorkspaceService,
@@ -324,12 +325,19 @@ def build_mcp_server(
                 "provider_readiness_override_reason": provider_readiness_override_reason,
             },
         )
+        disk_check = await _workspace_admission_disk_check(
+            disk_check_provider=disk_check_provider,
+            settings=settings_value,
+        )
         try:
             ws = await service.create_v2(
                 req,
                 idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
+                disk_check=disk_check,
             )
         except WorkspaceCreateIdempotencyConflictError as exc:
+            return _workspace_error_result(exc)
+        except WorkspaceCreateInsufficientDiskError as exc:
             return _workspace_error_result(exc)
         except ProfileResolutionError as exc:
             error = ErrorResponse(
@@ -1425,6 +1433,13 @@ def _required_idempotency_key(idempotency_key: str | None) -> str | None:
     return idempotency_key if idempotency_key.strip() else None
 
 
+def _normalize_mcp_idempotency_key(idempotency_key: str | None) -> str | None:
+    if idempotency_key is None:
+        return None
+    normalized = idempotency_key.strip()
+    return normalized or None
+
+
 def _idempotency_key_error() -> CallToolResult:
     return _error_result("INVALID_REQUEST", _IDEMPOTENCY_KEY_REQUIRED_MESSAGE)
 
@@ -1444,6 +1459,24 @@ async def _provided_disk_check(
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+async def _workspace_admission_disk_check(
+    *,
+    disk_check_provider: DiskCheckProvider | None,
+    settings: Settings,
+) -> DiskCheck:
+    provided = await _provided_disk_check(
+        disk_check_provider=disk_check_provider,
+        settings=settings,
+    )
+    if provided is not None:
+        return provided
+    return await asyncio.to_thread(
+        check_disk_space,
+        settings.work_dir,
+        min_free_bytes=settings.min_free_disk_bytes,
+    )
 
 
 async def _provided_local_capacity(

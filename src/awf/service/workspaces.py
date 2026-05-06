@@ -307,6 +307,16 @@ class WorkspaceCreateIdempotencyConflictError(Exception):
         super().__init__(self.message)
 
 
+class WorkspaceCreateInsufficientDiskError(Exception):
+    error_code = "INSUFFICIENT_DISK"
+    message = "Insufficient free disk to create a new workspace."
+
+    def __init__(self, disk_check: DiskCheck) -> None:
+        self.disk_check = disk_check
+        self.detail: dict[str, Any] | None = {"disk": disk_check.to_dict()}
+        super().__init__(self.message)
+
+
 @dataclass(frozen=True)
 class WorkspaceRetryResult:
     source_workspace_id: str
@@ -455,6 +465,7 @@ class WorkspaceService:
         req: WorkspaceCreateV2Request,
         *,
         idempotency_key: str | None = None,
+        disk_check: DiskCheck | None = None,
     ) -> WorkspaceResponse:
         async with self._factory() as s:
             repo = WorkspaceRepository(s)
@@ -470,11 +481,15 @@ class WorkspaceService:
                         raise WorkspaceCreateIdempotencyConflictError()
                     return workspace_response(existing)
 
+            if disk_check is not None and not disk_check.ok:
+                raise WorkspaceCreateInsufficientDiskError(disk_check)
+
             ws = await create_workspace_v2_row(
                 s,
                 req,
                 idempotency_key=idempotency_key,
                 settings=self._settings,
+                disk_check=disk_check,
             )
             await s.commit()
             return workspace_response(ws)

@@ -28,6 +28,7 @@ from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
 from awf.service.controls import WorkspaceControlError
+from awf.service.disk import DiskCheck
 from awf.service.workspaces import OperationRowsPage, WorkspaceRetryError
 from tests.postgres import postgres_test_engine
 
@@ -136,6 +137,22 @@ def _operation_response() -> OperationResponse:
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
         started_at=None,
         finished_at=None,
+    )
+
+
+def _low_disk_check(settings: Settings) -> DiskCheck:
+    return DiskCheck(
+        path=settings.work_dir,
+        checked_path=settings.work_dir,
+        total_bytes=100,
+        used_bytes=95,
+        free_bytes=5,
+        percent_free=5.0,
+        threshold_bytes=10,
+        ok=False,
+        status="fail",
+        reason="INSUFFICIENT_DISK",
+        detail="free_bytes=5 threshold_bytes=10",
     )
 
 
@@ -1191,6 +1208,43 @@ class TestCreateWorkspaceV2:
         assert preflight["provider"] == "codex"
         assert preflight["model"] == "gpt-5.5"
         assert preflight["blocks_launch"] is True
+
+    @pytest.mark.unit
+    async def test_create_workspace_v2_rejects_insufficient_disk_without_creating_row(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(
+            _env_file=None,
+            work_dir=str(tmp_path / "awf-state"),
+        )
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, settings=settings),
+            settings=settings,
+            disk_check_provider=_low_disk_check,
+        )
+
+        result = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {
+                "repo_url": "git@github.com:example/docs.git",
+                "base_branch": "main",
+                "task_title": "Document low disk admission",
+                "task_prompt": "Update the docs.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp disk admission test fixture",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INSUFFICIENT_DISK"
+        assert result.structuredContent["detail"]["disk"]["reason"] == "INSUFFICIENT_DISK"
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
 
     @pytest.mark.unit
     async def test_create_workspace_v2_override_returns_preflight_summary(
