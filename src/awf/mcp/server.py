@@ -1420,7 +1420,10 @@ async def _provided_readiness(
         _check_agent_runtime_image(runner, settings.agent_runtime_image)
     )
     workspace_view_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
-        _workspace_view_for_readyz(session_factory)
+        _workspace_view_for_readyz(
+            session_factory,
+            min_retention_hours=settings.completed_workspace_retention_hours,
+        )
     )
     docker_scan_task: asyncio.Task[ResourceScan] = asyncio.create_task(
         scan_docker_resources_async(

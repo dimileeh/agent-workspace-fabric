@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -62,7 +62,8 @@ class _FakeSchemaEngine:
 
 
 class _FakeDisposableEngine:
-    def __init__(self) -> None:
+    def __init__(self, name: str = "engine") -> None:
+        self.name = name
         self.disposed = False
         self.dispose_count = 0
 
@@ -86,6 +87,9 @@ class _FakeStaleCleanupConnection:
             return [(schema,) for schema in self._engine.schemas]
         return []
 
+    async def commit(self) -> None:
+        self._engine.commit_count += 1
+
 
 class _FakeStaleCleanupBegin:
     def __init__(self, engine: _FakeStaleCleanupEngine) -> None:
@@ -103,7 +107,9 @@ class _FakeStaleCleanupEngine:
     def __init__(self, schemas: list[str]) -> None:
         self.schemas = schemas
         self.begin_count = 0
+        self.commit_count = 0
         self.dispose_count = 0
+        self.lock_count = 0
         self.statements: list[str] = []
 
     def begin(self) -> _FakeStaleCleanupBegin:
@@ -206,11 +212,20 @@ async def test_stale_postgres_cleanup_reuses_one_engine_for_all_drops(
     made_engines: list[_FakeStaleCleanupEngine] = []
 
     def _make_engine(url: str) -> _FakeStaleCleanupEngine:
-        assert url == database_url
+        assert url == postgres_mod._admin_url(database_url)
         made_engines.append(engine)
         return engine
 
+    @asynccontextmanager
+    async def _ddl_lock(
+        engine_arg: _FakeStaleCleanupEngine,
+    ) -> AsyncIterator[_FakeStaleCleanupConnection]:
+        assert engine_arg is engine
+        engine.lock_count += 1
+        yield _FakeStaleCleanupConnection(engine)
+
     monkeypatch.setattr(postgres_mod, "_make_test_engine", _make_engine)
+    monkeypatch.setattr(postgres_mod, "_postgres_schema_ddl_lock", _ddl_lock)
     monkeypatch.setattr(
         postgres_mod,
         "_is_postgres_test_schema_namespace_active",
@@ -221,9 +236,13 @@ async def test_stale_postgres_cleanup_reuses_one_engine_for_all_drops(
 
     assert made_engines == [engine]
     assert engine.dispose_count == 1
-    assert engine.begin_count == 2
+    assert engine.begin_count == 1
+    assert engine.lock_count == 1
+    assert engine.commit_count == 6
     assert engine.statements[0].count("information_schema.schemata") == 1
-    assert engine.statements[1:] == [
+    assert sum("pg_terminate_backend" in statement for statement in engine.statements) == 3
+    assert engine.statements.count("SET LOCAL lock_timeout = '5s'") == 3
+    assert [statement for statement in engine.statements if statement.startswith("DROP SCHEMA")] == [
         f'DROP SCHEMA IF EXISTS "{other_schema}" CASCADE',
         f'DROP SCHEMA IF EXISTS "{first_schema}" CASCADE',
         f'DROP SCHEMA IF EXISTS "{second_schema}" CASCADE',
@@ -233,62 +252,80 @@ async def test_stale_postgres_cleanup_reuses_one_engine_for_all_drops(
 @pytest.mark.unit
 @pytest.mark.asyncio
 @pytest.mark.parametrize("helper_name", ["postgres_test_engine", "postgres_test_url"])
-async def test_postgres_context_helpers_do_not_lock_and_drop_before_dispose(
+async def test_postgres_context_helpers_lock_ddl_and_drop_after_metadata_dispose(
     monkeypatch: pytest.MonkeyPatch,
     helper_name: str,
 ) -> None:
     database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
     schema = f"awf_test_{'1' * 16}_{'a' * 32}"
     quoted_schema = postgres_mod._quote_identifier(schema)
-    engine = _FakeDisposableEngine()
+    admin_engine = _FakeDisposableEngine("admin")
+    schema_engine = _FakeDisposableEngine("schema")
     events: list[tuple[str, bool, int]] = []
     lock_depth = 0
 
-    @contextmanager
-    def _recording_ddl_lock(_url: str) -> Iterator[None]:
+    @asynccontextmanager
+    async def _recording_ddl_lock(
+        engine_arg: _FakeDisposableEngine,
+    ) -> AsyncIterator[_FakeDisposableEngine]:
+        assert engine_arg is admin_engine
         nonlocal lock_depth
         lock_depth += 1
+        events.append(("lock", schema_engine.disposed, lock_depth))
         try:
-            yield
+            yield admin_engine
         finally:
+            events.append(("unlock", schema_engine.disposed, lock_depth))
             lock_depth -= 1
 
     monkeypatch.setattr(postgres_mod, "postgres_test_database_url", lambda: database_url)
     monkeypatch.setattr(postgres_mod, "_ensure_postgres_test_run_active", lambda _url: None)
     monkeypatch.setattr(postgres_mod, "_new_postgres_test_schema", lambda: schema)
-    monkeypatch.setattr(postgres_mod, "_make_test_engine", lambda _url: engine)
-    monkeypatch.setattr(postgres_mod, "_postgres_ddl_lock", _recording_ddl_lock, raising=False)
+    monkeypatch.setattr(postgres_mod, "_make_test_engine", lambda _url: admin_engine)
+    monkeypatch.setattr(postgres_mod, "_postgres_schema_ddl_lock", _recording_ddl_lock)
 
-    async def _create_schema_and_metadata(
-        engine_arg: _FakeDisposableEngine,
+    async def _create_metadata_engine(schema_database_url: str) -> _FakeDisposableEngine:
+        assert "awf_search_path=" in schema_database_url
+        events.append(("metadata", schema_engine.disposed, lock_depth))
+        return schema_engine
+
+    async def _create_schema(conn: _FakeDisposableEngine, schema_arg: str) -> None:
+        assert conn is admin_engine
+        assert schema_arg == quoted_schema
+        events.append(("create", schema_engine.disposed, lock_depth))
+        assert lock_depth == 1
+
+    async def _drop_schema(
+        conn: _FakeDisposableEngine,
         schema_arg: str,
+        quoted_schema_arg: str,
     ) -> None:
-        assert engine_arg is engine
-        assert schema_arg == quoted_schema
-        events.append(("create", engine_arg.disposed, lock_depth))
-        assert lock_depth == 0
+        assert conn is admin_engine
+        assert schema_arg == schema
+        assert quoted_schema_arg == quoted_schema
+        events.append(("drop", schema_engine.disposed, lock_depth))
+        assert schema_engine.disposed is True
+        assert lock_depth == 1
 
-    async def _drop_schema(engine_arg: _FakeDisposableEngine, schema_arg: str) -> None:
-        assert engine_arg is engine
-        assert schema_arg == quoted_schema
-        events.append(("drop", engine_arg.disposed, lock_depth))
-        assert engine_arg.disposed is False
-        assert lock_depth == 0
-
-    monkeypatch.setattr(postgres_mod, "_create_schema_and_metadata", _create_schema_and_metadata)
+    monkeypatch.setattr(postgres_mod, "_create_metadata_engine", _create_metadata_engine)
+    monkeypatch.setattr(postgres_mod, "_create_schema", _create_schema)
     monkeypatch.setattr(postgres_mod, "_drop_schema", _drop_schema)
 
     manager = getattr(postgres_mod, helper_name)()
     async with manager as yielded:
         if helper_name == "postgres_test_engine":
-            assert yielded is engine
+            assert yielded is schema_engine
+            assert schema_engine.disposed is False
         else:
             assert isinstance(yielded, str)
-        assert engine.disposed is False
+            assert schema_engine.disposed is True
 
-    assert engine.disposed is True
-    assert engine.dispose_count == 1
-    assert events == [("create", False, 0), ("drop", False, 0)]
+    metadata_lock_depth = 0 if helper_name == "postgres_test_engine" else 1
+    assert admin_engine.dispose_count == 1
+    assert schema_engine.dispose_count == 1
+    assert ("metadata", False, metadata_lock_depth) in events
+    assert ("create", False, 1) in events
+    assert ("drop", True, 1) in events
 
 
 @pytest.mark.unit
