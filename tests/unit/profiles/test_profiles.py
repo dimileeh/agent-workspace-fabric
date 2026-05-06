@@ -712,7 +712,7 @@ def test_awf_self_profile_uses_targeted_edit_validation_and_final_coverage_gate(
     assert profile.validation.strategy.edit_gate == "targeted"
     assert profile.validation.strategy.final_gate == "coverage"
     assert profile.validation.strategy.reuse_evidence is True
-    assert profile.validation.strategy.full_gate_concurrency == 1
+    assert profile.validation.strategy.full_gate_concurrency == 0
 
 
 @pytest.mark.unit
