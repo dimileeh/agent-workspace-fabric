@@ -110,13 +110,38 @@ def _assert_test_reference_exists(reference: str) -> None:
     source = path.read_text(encoding="utf-8")
     for node in node_id.split("::"):
         if node.startswith("Test"):
-            assert re.search(rf"^class\s+{re.escape(node)}\b", source, re.MULTILINE), (
+            assert re.search(rf"^\s*class\s+{re.escape(node)}\b", source, re.MULTILINE), (
                 f"Coverage reference {reference!r} points at a missing test class {node!r}"
             )
         elif node.startswith("test_"):
             assert re.search(rf"^\s*(async\s+def|def)\s+{re.escape(node)}\b", source, re.MULTILINE), (
                 f"Coverage reference {reference!r} points at a missing test {node!r}"
             )
+
+
+@pytest.mark.unit
+def test_assert_test_reference_exists_accepts_indented_test_classes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_nested.py"
+    test_file.write_text(
+        "\n".join(
+            (
+                "class TestOuter:",
+                "    class TestInner:",
+                "        def test_nested_reference(self) -> None:",
+                "            pass",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tests.unit.contracts.test_registry_smoke.REPO_ROOT", tmp_path)
+
+    _assert_test_reference_exists(
+        "test_nested.py::TestOuter::TestInner::test_nested_reference"
+    )
 
 
 @pytest.mark.unit
