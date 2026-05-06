@@ -232,12 +232,19 @@ class Provisioner:
                 and egress_decision is not None
                 and destination_category is not None
             ):
-                await self._record_egress_audit_if_current(
-                    workspace_id=workspace_id,
-                    egress_plan=egress_plan,
-                    egress_decision=egress_decision,
-                    destination_category=destination_category,
-                )
+                try:
+                    await self._record_egress_audit_if_current(
+                        workspace_id=workspace_id,
+                        egress_plan=egress_plan,
+                        egress_decision=egress_decision,
+                        destination_category=destination_category,
+                    )
+                except Exception:
+                    _log.exception(
+                        "provisioner.egress_audit_record_failed",
+                        workspace_id=workspace_id,
+                        failure_context="stack_startup_failed",
+                    )
             await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.service_startup_failure,
