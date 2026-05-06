@@ -330,20 +330,27 @@ class PullRequestMonitorAdoptionService:
 
         task_repo = TaskRepository(self._session)
 
-        async def _create_or_get_task(*, external_id: str | None) -> Task:
+        async def _create_or_get_task(
+            *,
+            external_id: str | None,
+            task_idempotency_key: str | None,
+        ) -> Task:
             return await task_repo.create_or_get(
                 repo_url=workspace.repo_url,
                 base_branch=workspace.branch_base,
                 title=workspace.task_title,
                 prompt=workspace.task_prompt,
                 external_id=external_id,
-                idempotency_key=idempotency_key,
+                idempotency_key=task_idempotency_key,
                 task_class=workspace.task_class,
                 owned_paths=list(workspace.owned_paths),
             )
 
         try:
-            task = await _create_or_get_task(external_id=workspace.task_external_id)
+            task = await _create_or_get_task(
+                external_id=workspace.task_external_id,
+                task_idempotency_key=idempotency_key,
+            )
         except TaskExternalIdConflictError:
             if not previous_terminal_adoptions:
                 raise
@@ -353,7 +360,13 @@ class PullRequestMonitorAdoptionService:
                 logical_idempotency_key=logical_idempotency_key,
                 workspace_idempotency_key=idempotency_key,
             )
-            task = await _create_or_get_task(external_id=workspace.task_external_id)
+            task = await _create_or_get_task(
+                external_id=workspace.task_external_id,
+                task_idempotency_key=_adoption_generation_idempotency_key(
+                    logical_idempotency_key=logical_idempotency_key,
+                    workspace_idempotency_key=idempotency_key,
+                ),
+            )
         attempt = await TaskAttemptRepository(self._session).create_for_workspace(
             task=task,
             workspace=workspace,
@@ -740,12 +753,34 @@ def _adoption_generation_external_id(
     workspace_idempotency_key: str,
 ) -> str:
     base_external_id = _adoption_external_id(repo_slug=repo_slug, pr_number=pr_number)
+    generation = _adoption_generation_suffix(
+        logical_idempotency_key=logical_idempotency_key,
+        workspace_idempotency_key=workspace_idempotency_key,
+    )
+    return f"{base_external_id}:{generation}"
+
+
+def _adoption_generation_idempotency_key(
+    *,
+    logical_idempotency_key: str,
+    workspace_idempotency_key: str,
+) -> str:
+    generation = _adoption_generation_suffix(
+        logical_idempotency_key=logical_idempotency_key,
+        workspace_idempotency_key=workspace_idempotency_key,
+    )
+    return f"{logical_idempotency_key}:{generation}"
+
+
+def _adoption_generation_suffix(
+    *,
+    logical_idempotency_key: str,
+    workspace_idempotency_key: str,
+) -> str:
     prefix = f"{logical_idempotency_key}:"
     if workspace_idempotency_key.startswith(prefix):
-        generation = workspace_idempotency_key[len(prefix) :]
-    else:
-        generation = "g1"
-    return f"{base_external_id}:{generation}"
+        return workspace_idempotency_key[len(prefix) :]
+    return "g1"
 
 
 def _adoption_repo_url(*, request: PullRequestMonitorAdoptionRequest, repo: RepoRef) -> str:

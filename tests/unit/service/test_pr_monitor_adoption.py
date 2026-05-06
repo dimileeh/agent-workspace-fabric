@@ -805,6 +805,74 @@ class TestPullRequestMonitorAdoptionService:
             ]
 
     @pytest.mark.unit
+    async def test_terminal_prior_with_stale_task_idempotency_uses_task_generation_key(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        logical_key = adoption_module.pr_adoption_idempotency_key(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+        )
+        logical_task_external_id = adoption_module._adoption_external_id(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+        )
+
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: ready")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            old_task = await session.get(Task, first.task_id)
+            assert old_workspace is not None
+            assert old_task is not None
+            assert old_workspace.idempotency_key == logical_key
+            assert old_task.idempotency_key == logical_key
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            old_workspace.idempotency_key = None
+            await session.commit()
+
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata(title="feature: retitled")),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        assert result.attached_existing is False
+        assert result.workspace_id != first.workspace_id
+        assert result.task_id != first.task_id
+
+        async with factory() as session:
+            assert await _count(session, Task) == 2
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            old_task = await session.get(Task, first.task_id)
+            fresh_workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            fresh_task = await session.get(Task, result.task_id)
+
+            assert old_workspace is not None
+            assert old_task is not None
+            assert fresh_workspace is not None
+            assert fresh_task is not None
+            assert old_workspace.idempotency_key is None
+            assert old_task.idempotency_key == logical_key
+            assert fresh_workspace.task_external_id == f"{logical_task_external_id}:g1"
+            assert fresh_task.external_id == fresh_workspace.task_external_id
+            assert fresh_task.idempotency_key == f"{logical_key}:g1"
+            assert fresh_task.title == "feature: retitled"
+
+    @pytest.mark.unit
     async def test_concurrent_terminal_history_adoptions_create_one_live_monitor(
         self,
         factory: async_sessionmaker[AsyncSession],
