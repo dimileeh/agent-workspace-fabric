@@ -566,6 +566,26 @@ class TestErrorMapping:
         )
         assert service.calls == []
 
+    @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
+    async def test_blank_idempotency_key_returns_structured_mcp_error(
+        self, tool_name: str
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        result = await _call_result(
+            mcp, tool_name, {"workspace_id": "ws_x", "idempotency_key": ""}
+        )
+
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        assert (
+            result.structuredContent["message"]
+            == "Idempotency-Key header is required for this endpoint."
+        )
+        assert service.calls == []
+
     @pytest.mark.parametrize(
         "tool_name",
         [
