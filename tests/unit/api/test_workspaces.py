@@ -382,6 +382,8 @@ def _provider_preflight_settings(tmp_path: Any) -> Settings:
     return Settings(
         _env_file=None,
         host_home=str(tmp_path / "home"),
+        work_dir=str(tmp_path),
+        min_free_disk_bytes=0,
         docker_host="",
     )
 

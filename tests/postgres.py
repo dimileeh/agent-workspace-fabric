@@ -89,7 +89,7 @@ async def _create_metadata_engine(schema_database_url: str) -> AsyncEngine:
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-        except TimeoutError:
+        except (OSError, TimeoutError):
             await _dispose_engine(engine)
             if attempt == _SCHEMA_ENGINE_CONNECT_ATTEMPTS - 1:
                 raise
@@ -105,7 +105,7 @@ async def _connect_with_retries(engine: AsyncEngine) -> AsyncIterator[AsyncConne
         conn_context = engine.connect()
         try:
             conn = await conn_context.__aenter__()
-        except TimeoutError:
+        except (OSError, TimeoutError):
             if attempt == _SCHEMA_ENGINE_CONNECT_ATTEMPTS - 1:
                 raise
             await asyncio.sleep(0.05 * (attempt + 1))
@@ -159,8 +159,6 @@ async def postgres_test_engine() -> AsyncIterator[AsyncEngine]:
             connect_retries=True,
         )
         engine = await _create_metadata_engine(schema_database_url)
-        if engine is None:
-            raise RuntimeError("PostgreSQL test engine was not initialized.")
         yield engine
     finally:
         await _dispose_engine(engine)
@@ -225,9 +223,14 @@ async def create_postgres_test_engine() -> AsyncEngine:
         async with _postgres_schema_ddl_lock(admin_engine) as admin_conn:
             await _create_schema(admin_conn, quoted_schema)
             schema_created = True
-            engine = await _create_metadata_engine(
-                _test_schema_url(database_url, quoted_schema, null_pool=True)
+        engine = await _create_metadata_engine(
+            _test_schema_url(
+                database_url,
+                quoted_schema,
+                null_pool=True,
+                connect_retries=True,
             )
+        )
     except Exception:
         await _dispose_engine(engine)
         if schema_created:
@@ -237,8 +240,6 @@ async def create_postgres_test_engine() -> AsyncEngine:
     finally:
         await admin_engine.dispose()
 
-    if engine is None:
-        raise RuntimeError("PostgreSQL test engine was not initialized.")
     return engine
 
 
@@ -256,16 +257,15 @@ async def postgres_test_url() -> AsyncIterator[str]:
         async with _postgres_schema_ddl_lock(admin_engine) as admin_conn:
             await _create_schema(admin_conn, quoted_schema)
             schema_created = True
-            schema_database_url = _test_schema_url(
-                database_url,
-                quoted_schema,
-                connect_retries=True,
-            )
-            engine = await _create_metadata_engine(
-                _test_schema_url(database_url, quoted_schema, null_pool=True)
-            )
-            await _dispose_engine(engine)
-            engine = None
+        schema_database_url = _test_schema_url(
+            database_url,
+            quoted_schema,
+            null_pool=True,
+            connect_retries=True,
+        )
+        engine = await _create_metadata_engine(schema_database_url)
+        await _dispose_engine(engine)
+        engine = None
         yield schema_database_url
     finally:
         await _dispose_engine(engine)
@@ -293,17 +293,16 @@ def postgres_test_url_sync() -> Iterator[str]:
             async with _postgres_schema_ddl_lock(admin_engine) as admin_conn:
                 await _create_schema(admin_conn, quoted_schema)
                 schema_created = True
-                schema_database_url = _test_schema_url(
-                    database_url,
-                    quoted_schema,
-                    connect_retries=True,
-                )
-                engine = await _create_metadata_engine(
-                    _test_schema_url(database_url, quoted_schema, null_pool=True)
-                )
-                await _dispose_engine(engine)
-                engine = None
-                return schema_database_url
+            schema_database_url = _test_schema_url(
+                database_url,
+                quoted_schema,
+                null_pool=True,
+                connect_retries=True,
+            )
+            engine = await _create_metadata_engine(schema_database_url)
+            await _dispose_engine(engine)
+            engine = None
+            return schema_database_url
         except Exception:
             await _dispose_engine(engine)
             if schema_created:
@@ -341,7 +340,7 @@ async def postgres_empty_test_url() -> AsyncIterator[str]:
         async with _postgres_schema_ddl_lock(admin_engine) as admin_conn:
             await _create_schema(admin_conn, quoted_schema)
             schema_created = True
-        yield _test_schema_url(database_url, quoted_schema)
+        yield _test_schema_url(database_url, quoted_schema, connect_retries=True)
     finally:
         try:
             if schema_created:

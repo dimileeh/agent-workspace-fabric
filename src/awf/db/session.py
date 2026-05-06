@@ -8,8 +8,7 @@ fixtures in tests/conftest.py.
 from __future__ import annotations
 
 import asyncio
-import importlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -24,12 +23,6 @@ from sqlalchemy.pool import NullPool
 
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.runtime.events import ensure_workspace_event_broadcasting
-
-
-def _first_query_value(value: str | tuple[str, ...]) -> str:
-    if isinstance(value, tuple):
-        return value[0]
-    return value
 
 
 def make_engine(
@@ -51,10 +44,11 @@ def make_engine(
     raw_search_path = query.pop("awf_search_path", None)
     raw_null_pool = query.pop("awf_null_pool", None)
     raw_connect_timeout = query.pop("awf_connect_timeout", None)
+    raw_connect_attempts = query.pop("awf_connect_attempts", None)
     raw_connect_retries = query.pop("awf_connect_retries", None)
     engine_options: dict[str, object] = {}
     if raw_search_path is not None:
-        search_path = _first_query_value(raw_search_path)
+        search_path = _single_query_value(raw_search_path)
         existing_server_settings = resolved_connect_args.get("server_settings")
         server_settings = (
             dict(existing_server_settings) if isinstance(existing_server_settings, dict) else {}
@@ -62,53 +56,109 @@ def make_engine(
         server_settings.setdefault("search_path", str(search_path))
         resolved_connect_args["server_settings"] = server_settings
     if raw_null_pool is not None:
-        null_pool = _first_query_value(raw_null_pool)
+        null_pool = _single_query_value(raw_null_pool)
         if str(null_pool).lower() in {"1", "true", "yes"}:
             engine_options["poolclass"] = NullPool
     if raw_connect_timeout is not None:
-        connect_timeout = _first_query_value(raw_connect_timeout)
-        resolved_connect_args.setdefault("timeout", float(str(connect_timeout)))
-    retry_count = 1
+        resolved_connect_args.setdefault(
+            "timeout",
+            _positive_float_query_value(raw_connect_timeout, name="awf_connect_timeout"),
+        )
+    retry_attempts = _positive_int_query_value(
+        raw_connect_attempts,
+        name="awf_connect_attempts",
+        default=1,
+    )
     if raw_connect_retries is not None:
-        connect_retries = _first_query_value(raw_connect_retries)
-        retry_count = max(1, int(str(connect_retries)))
+        retry_attempts = _positive_int_query_value(
+            raw_connect_retries,
+            name="awf_connect_retries",
+            default=retry_attempts,
+        )
     if (
         raw_search_path is not None
         or raw_null_pool is not None
         or raw_connect_timeout is not None
+        or raw_connect_attempts is not None
         or raw_connect_retries is not None
     ):
         parsed_url = parsed_url.set(query=query)
-
-    engine_url = parsed_url.render_as_string(hide_password=False)
-    engine_connect_args = resolved_connect_args
-    if retry_count > 1:
-        asyncpg: Any = importlib.import_module("asyncpg")
-
-        asyncpg_url = parsed_url.set(drivername="postgresql").render_as_string(
-            hide_password=False
+    if retry_attempts > 1:
+        engine_options["async_creator"] = _asyncpg_retrying_creator(
+            parsed_url.set(drivername="postgresql").render_as_string(hide_password=False),
+            connect_args=resolved_connect_args,
+            attempts=retry_attempts,
         )
 
-        async def _async_creator() -> object:
-            for attempt in range(retry_count):
-                try:
-                    return await asyncpg.connect(asyncpg_url, **resolved_connect_args)
-                except TimeoutError:
-                    if attempt == retry_count - 1:
-                        raise
-                    await asyncio.sleep(0.05 * (attempt + 1))
-            raise RuntimeError("AWF database connection was not initialized.")
-
-        engine_options["async_creator"] = _async_creator
-        engine_connect_args = {}
-
-    return create_async_engine(
-        engine_url,
-        echo=echo,
-        future=True,
-        connect_args=engine_connect_args,
+    create_kwargs: dict[str, object] = {
+        "echo": echo,
+        "future": True,
         **engine_options,
-    )
+    }
+    if "async_creator" not in engine_options:
+        create_kwargs["connect_args"] = resolved_connect_args
+
+    return create_async_engine(parsed_url.render_as_string(hide_password=False), **create_kwargs)
+
+
+def _single_query_value(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, tuple):
+        value = value[0] if value else None
+    return None if value is None else str(value)
+
+
+def _positive_float_query_value(value: object, *, name: str) -> float:
+    text = _single_query_value(value)
+    try:
+        parsed = float(text) if text is not None else 0.0
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive number.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive number.")
+    return parsed
+
+
+def _positive_int_query_value(value: object | None, *, name: str, default: int) -> int:
+    text = _single_query_value(value)
+    if text is None:
+        return default
+    try:
+        parsed = int(text)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return parsed
+
+
+def _asyncpg_retrying_creator(
+    dsn: str,
+    *,
+    connect_args: dict[str, object],
+    attempts: int,
+) -> Callable[[], Awaitable[Any]]:
+    async def _connect() -> Any:
+        import asyncpg  # type: ignore[import-untyped]
+
+        transient_errors = (
+            OSError,
+            TimeoutError,
+            asyncpg.PostgresConnectionError,
+            asyncpg.TooManyConnectionsError,
+        )
+        attempt = 1
+        while True:
+            try:
+                return await asyncpg.connect(dsn=dsn, **connect_args)
+            except transient_errors:
+                if attempt >= attempts:
+                    raise
+                await asyncio.sleep(min(0.1 * attempt, 1.0))
+                attempt += 1
+
+    return _connect
 
 
 def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
