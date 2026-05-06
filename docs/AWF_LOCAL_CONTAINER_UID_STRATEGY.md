@@ -152,15 +152,15 @@ worktree directory contains `HEAD`, `commondir`, `gitdir`, and a per-worktree
 ### Cleanup Permissions
 
 - With a root control plane, AWF cleanup runs as root inside its container
-  and can always remove worktrees and the bare mirror. `awf service gc`,
-  `awf service teardown`, and the per-workspace cleanup paths in
+  and can always remove worktrees and the bare mirror. `awf service gc`
+  and the per-workspace cleanup paths in
   `src/awf/node/cleanup.py` therefore do not need elevated host privileges
   — they use the worker's normal Docker socket access plus filesystem
   writes inside `AWF_HOST_WORK_DIR`.
 - An operator who wants to remove `AWF_HOST_WORK_DIR` from the host shell
   needs `sudo rm -rf` on Linux because the directory is root-owned. The
-  recommended path is the in-container `awf service gc` and `awf service
-  teardown` commands, not host `rm`.
+  recommended path is the in-container `awf service gc` command, not host
+  `rm`.
 - A host-UID control plane would let the operator clean up from the host
   shell without `sudo`, but it would also leak host UID into the chown
   surface and break the SSH-agent / Docker-socket assumptions above.

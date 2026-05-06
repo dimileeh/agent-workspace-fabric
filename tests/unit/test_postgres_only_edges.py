@@ -6,6 +6,7 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -31,8 +32,94 @@ from awf.service.pr_monitor_adoption import (
 from awf.service.secret_leases import _ensure_utc
 from awf.service.status import _utc_datetime
 from awf.service.worker import _merge_coordinator_for_database_url
-from tests import postgres as postgres_helpers
-from tests.postgres import _drop_schema
+from tests import postgres as postgres_mod
+
+
+class _FakeSchemaConnection:
+    def __init__(self, engine: _FakeSchemaEngine) -> None:
+        self._engine = engine
+
+    async def execute(self, _statement: object, _parameters: object = None) -> list[tuple[str]]:
+        self._engine.parameters.append(_parameters)
+        return [(schema,) for schema in self._engine.schemas]
+
+
+class _FakeSchemaBegin:
+    def __init__(self, engine: _FakeSchemaEngine) -> None:
+        self._engine = engine
+
+    async def __aenter__(self) -> _FakeSchemaConnection:
+        return _FakeSchemaConnection(self._engine)
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        return None
+
+
+class _FakeSchemaEngine:
+    def __init__(self, schemas: list[str]) -> None:
+        self.schemas = schemas
+        self.parameters: list[object] = []
+
+    def begin(self) -> _FakeSchemaBegin:
+        return _FakeSchemaBegin(self)
+
+
+class _FakeDisposableEngine:
+    def __init__(self, name: str = "engine") -> None:
+        self.name = name
+        self.disposed = False
+        self.dispose_count = 0
+
+    async def dispose(self) -> None:
+        self.dispose_count += 1
+        self.disposed = True
+
+
+class _FakeStaleCleanupConnection:
+    def __init__(self, engine: _FakeStaleCleanupEngine) -> None:
+        self._engine = engine
+
+    async def execute(
+        self,
+        statement: object,
+        _parameters: object = None,
+    ) -> list[tuple[str]]:
+        statement_text = str(statement)
+        self._engine.statements.append(statement_text)
+        if "information_schema.schemata" in statement_text:
+            return [(schema,) for schema in self._engine.schemas]
+        return []
+
+    async def commit(self) -> None:
+        self._engine.commit_count += 1
+
+
+class _FakeStaleCleanupBegin:
+    def __init__(self, engine: _FakeStaleCleanupEngine) -> None:
+        self._engine = engine
+
+    async def __aenter__(self) -> _FakeStaleCleanupConnection:
+        self._engine.begin_count += 1
+        return _FakeStaleCleanupConnection(self._engine)
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        return None
+
+
+class _FakeStaleCleanupEngine:
+    def __init__(self, schemas: list[str]) -> None:
+        self.schemas = schemas
+        self.begin_count = 0
+        self.commit_count = 0
+        self.dispose_count = 0
+        self.lock_count = 0
+        self.statements: list[str] = []
+
+    def begin(self) -> _FakeStaleCleanupBegin:
+        return _FakeStaleCleanupBegin(self)
+
+    async def dispose(self) -> None:
+        self.dispose_count += 1
 
 
 class _AsyncConnectionContext:
@@ -80,6 +167,226 @@ def test_make_engine_strips_test_url_options_and_enables_null_pool(
     assert captured["url"] == "postgresql+asyncpg://awf:pw@localhost:5433/awf"
     assert captured["kwargs"]["connect_args"]["server_settings"]["search_path"] == "first"
     assert captured["kwargs"]["poolclass"] is NullPool
+
+
+@pytest.mark.unit
+def test_postgres_test_schema_name_is_scoped_to_current_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "ci-shard-a")
+
+    namespace = postgres_mod._postgres_test_schema_namespace()
+    schema = postgres_mod._new_postgres_test_schema()
+
+    assert len(namespace) == 16
+    assert schema.startswith(f"awf_test_{namespace}_")
+    assert len(schema) == len("awf_test_") + 16 + 1 + 32
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stale_postgres_schema_listing_scans_all_test_namespaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "current-run")
+    current_namespace = postgres_mod._postgres_test_schema_namespace()
+    other_namespace = "1" * 16
+    active_namespace = "2" * 16
+    current_schema = f"awf_test_{current_namespace}_{'a' * 32}"
+    other_schema = f"awf_test_{other_namespace}_{'b' * 32}"
+    active_schema = f"awf_test_{active_namespace}_{'d' * 32}"
+    legacy_unowned_schema = f"awf_test_{'c' * 32}"
+    seen_namespaces: list[str] = []
+
+    def _is_active(url: str, namespace: str) -> bool:
+        assert url == database_url
+        seen_namespaces.append(namespace)
+        return namespace == active_namespace
+
+    monkeypatch.setattr(postgres_mod, "_is_postgres_test_schema_namespace_active", _is_active)
+    engine = _FakeSchemaEngine([other_schema, legacy_unowned_schema, active_schema, current_schema])
+
+    schemas = await postgres_mod._list_stale_postgres_test_schemas(
+        engine,  # type: ignore[arg-type]
+        database_url,
+    )
+
+    assert schemas == sorted([current_schema, other_schema])
+    assert set(seen_namespaces) == {current_namespace, other_namespace, active_namespace}
+    assert engine.parameters == [
+        {"pattern": "awf\\_test\\_%"},
+    ]
+
+
+@pytest.mark.unit
+def test_stale_postgres_cleanup_ignores_persistent_done_marker_for_reused_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "cleanup-reused-run")
+    namespace = postgres_mod._postgres_test_schema_namespace()
+    database_key = postgres_mod._postgres_database_key(database_url)
+    marker_path = tmp_path / (f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.done")
+    marker_path.touch()
+    dropped_urls: list[str] = []
+    active_urls: list[str] = []
+
+    async def _drop_stale(url: str) -> None:
+        dropped_urls.append(url)
+
+    monkeypatch.setattr(postgres_mod, "postgres_test_database_url", lambda: database_url)
+    monkeypatch.setattr(postgres_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(postgres_mod, "_drop_stale_postgres_test_schemas", _drop_stale)
+    monkeypatch.setattr(
+        postgres_mod,
+        "_ensure_postgres_test_run_active",
+        lambda url: active_urls.append(url),
+    )
+    postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+    try:
+        postgres_mod.cleanup_stale_postgres_test_schemas()
+        postgres_mod.cleanup_stale_postgres_test_schemas()
+    finally:
+        postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+
+    assert dropped_urls == [database_url]
+    assert active_urls == [database_url, database_url]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stale_postgres_cleanup_reuses_one_engine_for_all_drops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "cleanup-run")
+    current_namespace = postgres_mod._postgres_test_schema_namespace()
+    other_namespace = "1" * 16
+    first_schema = f"awf_test_{current_namespace}_{'a' * 32}"
+    second_schema = f"awf_test_{current_namespace}_{'b' * 32}"
+    other_schema = f"awf_test_{other_namespace}_{'c' * 32}"
+    engine = _FakeStaleCleanupEngine([second_schema, other_schema, first_schema])
+    made_engines: list[_FakeStaleCleanupEngine] = []
+
+    def _make_engine(url: str) -> _FakeStaleCleanupEngine:
+        assert url == postgres_mod._admin_url(database_url)
+        made_engines.append(engine)
+        return engine
+
+    @asynccontextmanager
+    async def _ddl_lock(
+        engine_arg: _FakeStaleCleanupEngine,
+    ) -> AsyncIterator[_FakeStaleCleanupConnection]:
+        assert engine_arg is engine
+        engine.lock_count += 1
+        yield _FakeStaleCleanupConnection(engine)
+
+    monkeypatch.setattr(postgres_mod, "_make_test_engine", _make_engine)
+    monkeypatch.setattr(postgres_mod, "_postgres_schema_ddl_lock", _ddl_lock)
+    monkeypatch.setattr(
+        postgres_mod,
+        "_is_postgres_test_schema_namespace_active",
+        lambda _url, _namespace: False,
+    )
+
+    await postgres_mod._drop_stale_postgres_test_schemas(database_url)
+
+    assert made_engines == [engine]
+    assert engine.dispose_count == 1
+    assert engine.begin_count == 1
+    assert engine.lock_count == 1
+    assert engine.commit_count == 6
+    assert engine.statements[0].count("information_schema.schemata") == 1
+    assert sum("pg_terminate_backend" in statement for statement in engine.statements) == 3
+    assert engine.statements.count("SET LOCAL lock_timeout = '5s'") == 3
+    assert [
+        statement for statement in engine.statements if statement.startswith("DROP SCHEMA")
+    ] == [
+        f'DROP SCHEMA IF EXISTS "{other_schema}" CASCADE',
+        f'DROP SCHEMA IF EXISTS "{first_schema}" CASCADE',
+        f'DROP SCHEMA IF EXISTS "{second_schema}" CASCADE',
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("helper_name", ["postgres_test_engine", "postgres_test_url"])
+async def test_postgres_context_helpers_lock_ddl_and_drop_after_metadata_dispose(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    schema = f"awf_test_{'1' * 16}_{'a' * 32}"
+    quoted_schema = postgres_mod._quote_identifier(schema)
+    admin_engine = _FakeDisposableEngine("admin")
+    schema_engine = _FakeDisposableEngine("schema")
+    events: list[tuple[str, bool, int]] = []
+    lock_depth = 0
+
+    @asynccontextmanager
+    async def _recording_ddl_lock(
+        engine_arg: _FakeDisposableEngine,
+    ) -> AsyncIterator[_FakeDisposableEngine]:
+        assert engine_arg is admin_engine
+        nonlocal lock_depth
+        lock_depth += 1
+        events.append(("lock", schema_engine.disposed, lock_depth))
+        try:
+            yield admin_engine
+        finally:
+            events.append(("unlock", schema_engine.disposed, lock_depth))
+            lock_depth -= 1
+
+    monkeypatch.setattr(postgres_mod, "postgres_test_database_url", lambda: database_url)
+    monkeypatch.setattr(postgres_mod, "_ensure_postgres_test_run_active", lambda _url: None)
+    monkeypatch.setattr(postgres_mod, "_new_postgres_test_schema", lambda: schema)
+    monkeypatch.setattr(postgres_mod, "_make_test_engine", lambda _url: admin_engine)
+    monkeypatch.setattr(postgres_mod, "_postgres_schema_ddl_lock", _recording_ddl_lock)
+
+    async def _create_metadata_engine(schema_database_url: str) -> _FakeDisposableEngine:
+        assert "awf_search_path=" in schema_database_url
+        events.append(("metadata", schema_engine.disposed, lock_depth))
+        return schema_engine
+
+    async def _create_schema(conn: _FakeDisposableEngine, schema_arg: str) -> None:
+        assert conn is admin_engine
+        assert schema_arg == quoted_schema
+        events.append(("create", schema_engine.disposed, lock_depth))
+        assert lock_depth == 1
+
+    async def _drop_schema(
+        conn: _FakeDisposableEngine,
+        schema_arg: str,
+        quoted_schema_arg: str,
+    ) -> None:
+        assert conn is admin_engine
+        assert schema_arg == schema
+        assert quoted_schema_arg == quoted_schema
+        events.append(("drop", schema_engine.disposed, lock_depth))
+        assert schema_engine.disposed is True
+        assert lock_depth == 1
+
+    monkeypatch.setattr(postgres_mod, "_create_metadata_engine", _create_metadata_engine)
+    monkeypatch.setattr(postgres_mod, "_create_schema", _create_schema)
+    monkeypatch.setattr(postgres_mod, "_drop_schema", _drop_schema)
+
+    manager = getattr(postgres_mod, helper_name)()
+    async with manager as yielded:
+        if helper_name == "postgres_test_engine":
+            assert yielded is schema_engine
+            assert schema_engine.disposed is False
+        else:
+            assert isinstance(yielded, str)
+            assert schema_engine.disposed is True
+
+    metadata_lock_depth = 0
+    assert admin_engine.dispose_count == 1
+    assert schema_engine.dispose_count == 1
+    assert ("metadata", False, metadata_lock_depth) in events
+    assert ("create", False, 1) in events
+    assert ("drop", True, 1) in events
 
 
 @pytest.mark.unit
@@ -241,7 +548,7 @@ async def test_drop_schema_terminates_lock_holders_before_cascade_drop() -> None
     statements: list[tuple[str, object | None]] = []
     conn = _RecordingConnection(statements)
 
-    await _drop_schema(conn, "awf_test", '"awf_test"')
+    await postgres_mod._drop_schema(conn, "awf_test", '"awf_test"')
 
     assert "pg_terminate_backend" in statements[0][0]
     assert statements[0][1] == {"schema": "awf_test"}
@@ -255,7 +562,7 @@ async def test_postgres_schema_ddl_lock_uses_database_advisory_lock() -> None:
     conn = _RecordingConnection(statements)
     engine = SimpleNamespace(connect=lambda: _AsyncConnectionContext(conn))
 
-    async with postgres_helpers._postgres_schema_ddl_lock(engine):
+    async with postgres_mod._postgres_schema_ddl_lock(engine):
         statements.append(("inside", None))
 
     assert "pg_advisory_lock" in statements[0][0]
@@ -284,17 +591,17 @@ async def test_postgres_test_url_marks_yielded_url_null_pool(
         return _Engine()
 
     monkeypatch.setattr(
-        postgres_helpers,
+        postgres_mod,
         "postgres_test_database_url",
         lambda: "postgresql+asyncpg://awf:pw@localhost:5433/awf",
     )
-    monkeypatch.setattr(postgres_helpers, "_make_test_engine", lambda _url: _Engine())
-    monkeypatch.setattr(postgres_helpers, "_postgres_schema_ddl_lock", _fake_lock)
-    monkeypatch.setattr(postgres_helpers, "_create_schema", _noop)
-    monkeypatch.setattr(postgres_helpers, "_create_metadata_engine", _metadata_engine)
-    monkeypatch.setattr(postgres_helpers, "_drop_schema", _noop)
+    monkeypatch.setattr(postgres_mod, "_make_test_engine", lambda _url: _Engine())
+    monkeypatch.setattr(postgres_mod, "_postgres_schema_ddl_lock", _fake_lock)
+    monkeypatch.setattr(postgres_mod, "_create_schema", _noop)
+    monkeypatch.setattr(postgres_mod, "_create_metadata_engine", _metadata_engine)
+    monkeypatch.setattr(postgres_mod, "_drop_schema", _noop)
 
-    async with postgres_helpers.postgres_test_url() as database_url:
+    async with postgres_mod.postgres_test_url() as database_url:
         parsed = make_url(database_url)
 
     assert parsed.query["awf_search_path"].strip('"').startswith("awf_test_")

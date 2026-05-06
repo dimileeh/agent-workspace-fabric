@@ -29,21 +29,21 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Docker CLI is not installed or is not on PATH.",
         "Install Docker Desktop or make the docker CLI available to the AWF service environment.",
         "The docker CLI is missing from the host environment or not accessible to the AWF process.",
-        "awf doctor",
+        "awf service doctor",
         "https://docs.docker.com/get-docker/",
     ),
     "DOCKER_SOCKET_UNREACHABLE": _ReasonText(
         "Docker socket is not reachable.",
         "Start Docker Desktop or verify AWF_DOCKER_HOST.",
         "The Docker daemon is not running or the socket permissions are incorrect.",
-        "awf doctor",
+        "awf service doctor",
         "https://docs.docker.com/config/daemon/",
     ),
     "DOCKER_DAEMON_UNREACHABLE": _ReasonText(
         "Docker is installed but the daemon is not reachable.",
         "Start Docker Desktop or verify AWF_DOCKER_HOST.",
         "The Docker daemon is stopped, crashing, or blocking connections.",
-        "awf doctor",
+        "awf service doctor",
         "https://docs.docker.com/config/daemon/",
     ),
     "API_OK": _ReasonText(
@@ -169,28 +169,28 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "No Codex auth signal was visible.",
         "Mount ~/.codex or set OPENAI_API_KEY, OPENAI_API_TOKEN, CODEX_API_KEY, or CODEX_AUTH_TOKEN.",
         "Missing Codex API credentials.",
-        "awf doctor",
+        "awf service doctor",
         "docs/REASON_CATALOG.md#codex_auth_missing",
     ),
     "CLAUDE_AUTH_MISSING": _ReasonText(
         "No Claude Code auth signal was visible.",
         "Mount ~/.claude or set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN.",
         "Missing Claude API credentials.",
-        "awf doctor",
+        "awf service doctor",
         "docs/REASON_CATALOG.md#claude_auth_missing",
     ),
     "GEMINI_AUTH_MISSING": _ReasonText(
         "No Gemini auth signal was visible.",
         "Mount ~/.gemini or set GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_APPLICATION_CREDENTIALS.",
         "Missing Gemini API credentials.",
-        "awf doctor",
+        "awf service doctor",
         "docs/REASON_CATALOG.md#gemini_auth_missing",
     ),
     "OPENCODE_OLLAMA_AUTH_MISSING": _ReasonText(
         "No OpenCode/Ollama auth signal was visible.",
         "Mount ~/.config/opencode, mount ~/.ollama auth files, or set OLLAMA_API_KEY.",
         "Missing OpenCode/Ollama credentials.",
-        "awf doctor",
+        "awf service doctor",
         "docs/REASON_CATALOG.md#opencode_ollama_auth_missing",
     ),
     "PORT_OPEN": _ReasonText(
@@ -211,7 +211,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Required local port could not be derived from configuration.",
         "Fix the local AWF URL configuration and re-run doctor.",
         "Invalid AWF_API_URL or AWF_FRONTEND_URL.",
-        "awf doctor",
+        "awf service doctor",
         "docs/REASON_CATALOG.md#port_config_invalid",
     ),
     "SUFFICIENT_DISK": _ReasonText(
@@ -232,7 +232,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Free disk could not be inspected for the AWF work directory.",
         "Verify AWF_WORK_DIR is accessible and re-run doctor.",
         "Permission denied or path does not exist.",
-        "awf doctor",
+        "awf service doctor",
         "docs/REASON_CATALOG.md#disk_usage_unavailable",
     ),
     "NO_STRANDED_WORKSPACES": _ReasonText(
@@ -260,7 +260,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Orphan AWF Docker resources were detected.",
         "Review the listed resources before running cleanup.",
         "Networks or volumes left behind by deleted workspaces.",
-        "awf service cleanup",
+        "awf service gc",
         "docs/REASON_CATALOG.md#orphan_resources_present",
     ),
     "NETWORK_POSTURE_NO_ACTIVE_OPEN": _ReasonText(
@@ -281,7 +281,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Workspace network posture could not be inspected.",
         "Restore control-plane database access and re-run doctor.",
         "Cannot query the local database to check workspace posture.",
-        "awf doctor",
+        "awf service doctor",
         "docs/REASON_CATALOG.md#network_posture_unavailable",
     ),
     "LOCAL_CONFIG_OK": _ReasonText(
@@ -295,14 +295,14 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Local AWF configuration has issues that block reliable service use.",
         "Fix the listed environment or path settings and re-run doctor.",
         "Invalid values in .env or missing required paths.",
-        "awf doctor",
+        "awf service doctor",
         "docs/REASON_CATALOG.md#local_config_invalid",
     ),
     "SERVICE_STATUS_COLLECTION_FAILED": _ReasonText(
         "AWF service status checks could not be collected.",
         "Fix the reported local configuration error and re-run doctor.",
         "Service discovery or database connection failed.",
-        "awf doctor",
+        "awf service doctor",
         "docs/REASON_CATALOG.md#service_status_collection_failed",
     ),
     "COMPLETED_WORKSPACE_WITHOUT_PR": _ReasonText(
@@ -338,14 +338,14 @@ def _reason_text(
                 f"{label} check was skipped.",
                 "Fix prerequisite checks first.",
                 "Prerequisites failed.",
-                "awf doctor",
+                "awf service doctor",
                 "",
             )
         return _ReasonText(
             f"{label} check reported {status}.",
             "Inspect the diagnostic detail and the matching service status check.",
             "An unknown diagnostic check failed.",
-            "awf doctor",
+            "awf service doctor",
             "",
         )
     if reason == "API_UNREACHABLE" and context and context.get("url"):

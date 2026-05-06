@@ -119,13 +119,18 @@ See:
 ## Documentation
 
 - [Getting Started](docs/GETTING_STARTED.md) / [Start Here Quickstart](docs/QUICKSTART.md)
+- [Project Onboarding](docs/PROJECT_ONBOARDING.md)
 - [Concepts & Architecture](docs/CONCEPTS.md)
 - [CLI Reference](docs/CLI_REFERENCE.md)
+- [DX Smoke Command](docs/SMOKE_COMMAND.md)
 - [REST API Reference](docs/REST_API_REFERENCE.md)
 - [MCP Reference](docs/MCP_REFERENCE.md)
+- [MCP Client Parity Matrix](docs/MCP_CLIENT_PARITY.md)
+- [Reason Catalog](docs/REASON_CATALOG.md)
 - [Client Surfaces](docs/CLIENT_SURFACES.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Trust Model](docs/AWF_CORE_TRUST_MODEL.md)
+- [Test Quality Guardrails](docs/test-quality-guardrails.md)
 - [Contributor Guide](CONTRIBUTING.md)
 
 ## Supported Client Surfaces (v0.1)
