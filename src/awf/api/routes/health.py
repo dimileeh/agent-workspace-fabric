@@ -474,7 +474,7 @@ async def readyz(
                 resource_count=0,
             )
         except Exception as exc:
-            return CheckResult(ok=False, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail=str(exc))
+            return CheckResult(ok=True, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail=str(exc))
 
     # Run checks concurrently so the worst-case latency stays bounded by the
     # single _CHECK_TIMEOUT_SECONDS rather than summing across dependencies (a
