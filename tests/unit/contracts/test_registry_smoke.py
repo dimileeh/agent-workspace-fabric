@@ -8,8 +8,7 @@ test points at the inconsistency.
 
 from __future__ import annotations
 
-import subprocess
-import sys
+import ast
 from functools import cache
 from pathlib import Path
 
@@ -110,7 +109,7 @@ def _assert_test_reference_exists(reference: str) -> None:
     path = REPO_ROOT / path_text
     assert path.is_file(), f"Coverage reference {reference!r} points at a missing file"
     assert node_id, f"Coverage reference {reference!r} must include a pytest node ID"
-    collected = _collected_test_node_ids(str(REPO_ROOT), path_text)
+    collected = _source_test_node_ids(str(REPO_ROOT), path_text)
     assert reference in collected, (
         f"Coverage reference {reference!r} is not a collected pytest node ID. "
         f"Collected {len(collected)} node IDs from {path_text!r}."
@@ -118,34 +117,29 @@ def _assert_test_reference_exists(reference: str) -> None:
 
 
 @cache
-def _collected_test_node_ids(repo_root_text: str, path_text: str) -> frozenset[str]:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "--rootdir",
-            repo_root_text,
-            "--collect-only",
-            "-q",
-            path_text,
-        ],
-        cwd=repo_root_text,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode == 0, (
-        f"Could not collect pytest node IDs from {path_text!r}:\n"
-        f"{result.stdout}{result.stderr}"
-    )
-    node_prefix = f"{path_text}::"
-    return frozenset(
-        line.strip()
-        for line in result.stdout.splitlines()
-        if line.strip().startswith(node_prefix)
-    )
+def _source_test_node_ids(repo_root_text: str, path_text: str) -> frozenset[str]:
+    source_path = Path(repo_root_text) / path_text
+    module = ast.parse(source_path.read_text(encoding="utf-8"), filename=path_text)
+    node_ids: set[str] = set()
+
+    def collect_class(body: list[ast.stmt], parents: tuple[str, ...]) -> None:
+        for child in body:
+            if isinstance(child, ast.AsyncFunctionDef | ast.FunctionDef):
+                if child.name.startswith("test_"):
+                    node_ids.add(f"{path_text}::{'::'.join((*parents, child.name))}")
+                continue
+            if isinstance(child, ast.ClassDef) and child.name.startswith("Test"):
+                collect_class(child.body, (*parents, child.name))
+
+    for node in module.body:
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+            if node.name.startswith("test_"):
+                node_ids.add(f"{path_text}::{node.name}")
+            continue
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            collect_class(node.body, (node.name,))
+
+    return frozenset(node_ids)
 
 
 @pytest.mark.unit
