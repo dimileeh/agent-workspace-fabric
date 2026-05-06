@@ -8,11 +8,10 @@ AWF and the coding CLI for post-agent work, so keep them:
   leave room for the CLI to read its own prior work.
 * **Concrete.** Always name the PR number, the thread/check, the file +
   line anchor. Nothing decorative.
-* **Prescriptive on the return shape.** The CLI should either (a) push a
-  fix commit and a one-line reply quoting the resolve or (b) reply with
-  a short justification that starts with ``FALSE POSITIVE:``. The
-  runner parses the reply to mark the thread ``fix_committed`` or
-  ``false_positive`` respectively.
+* **Prescriptive on the return shape.** Inline review threads may need a
+  reviewer-facing reply before AWF resolves the thread. Review-level
+  comments use private stdout verdicts instead so GitHub does not become
+  AWF's durable bookkeeping store for no-op/false-positive decisions.
 * **Non-negotiable on git hygiene.** Every prompt ends with a "do not
   push" reminder — AWF handles the push once the comment burst settles.
 """
@@ -98,10 +97,20 @@ def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: Re
         f"(comment id {comment.comment_id}) needs to be addressed. "
         "These are usually summary / architecture remarks from CodeRabbit or similar. "
         f"Body evidence:\n\n{evidence}\n\n"
-        "Use the same decision tree as for inline threads: either fix and reply "
-        '"fixed in commit <sha>", or reply "FALSE POSITIVE: <one-sentence reason>", '
-        'or reply "DEFER: <what you need>". Comment replies should be made with '
-        "`gh pr comment` so the review record reflects the resolution."
+        "Use this decision tree:\n"
+        "  (1) If the reviewer is right, make the fix, stage only the files "
+        "you actually changed, and commit with a message like "
+        '"fix: address review comment <comment id> — <short summary>". Then '
+        "print `AWF-VERDICT: FIXED: <one-sentence summary>` to stdout.\n"
+        "  (2) If the feedback is wrong, stale, or pure review boilerplate, do "
+        "not change code. Do not post a GitHub comment for false-positive or "
+        "no-op review-level feedback. Instead print `AWF-VERDICT: FALSE POSITIVE: "
+        "<one-sentence reason>` to stdout so AWF can record the handled verdict "
+        "internally.\n"
+        "  (3) If you genuinely need information you don't have, print "
+        "`AWF-VERDICT: DEFER: <what you need>` and exit; AWF will surface it to "
+        "the human.\n"
+        "Do not write any PR comment for review-level verdict bookkeeping."
         f"{_FOOTER}"
     )
 

@@ -1143,7 +1143,7 @@ async def test_address_review_comment_passes_quoted_evidence_prompt_to_adapter(
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
-    adapter.queue(stdout="FALSE POSITIVE: existing policy still applies")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: existing policy still applies")
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
@@ -1173,6 +1173,8 @@ async def test_address_review_comment_passes_quoted_evidence_prompt_to_adapter(
     assert len(adapter.calls) == 1
     prompt = adapter.calls[0]
     assert "UNTRUSTED EXTERNAL EVIDENCE" in prompt
+    assert "gh pr comment" not in prompt
+    assert "AWF-VERDICT:" in prompt
     assert "source_kind: github_pr_review_comment" in prompt
     assert "source_id: issue:9001" in prompt
     assert "comment_kind: issue-style PR comment" in prompt
@@ -2201,6 +2203,13 @@ class TestParseVerdict:
     @pytest.mark.unit
     def test_false_positive_marker(self) -> None:
         assert _parse_verdict("FALSE POSITIVE: reviewer misread the diff") == "false_positive"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_false_positive_marker(self) -> None:
+        assert (
+            _parse_verdict("AWF-VERDICT: FALSE POSITIVE: stale review boilerplate")
+            == "false_positive"
+        )
 
     @pytest.mark.unit
     def test_false_positive_case_insensitive(self) -> None:
