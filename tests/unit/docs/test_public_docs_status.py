@@ -99,6 +99,28 @@ def test_copy_paste_marked_snippets_are_syntactically_valid() -> None:
     assert checked, "Expected at least one copy-paste-marked snippet to validate."
 
 
+def test_shell_snippet_validation_fails_cleanly_when_bash_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing_bash(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("bash")
+
+    monkeypatch.setattr(subprocess, "run", _missing_bash)
+
+    fence = MarkdownFence(
+        path="docs/example.md",
+        line=12,
+        language="bash",
+        body="echo ok",
+    )
+
+    with pytest.raises(
+        pytest.fail.Exception,
+        match=r"docs/example\.md:12 cannot validate shell snippet because bash is not available on PATH",
+    ):
+        _assert_snippet_syntax(fence)
+
+
 def test_public_docs_are_discovered_from_docs_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -325,14 +347,20 @@ def _assert_snippet_syntax(fence: MarkdownFence) -> None:
         ast.parse(fence.body)
     elif language in {"bash", "sh", "shell"}:
         script = _strip_shell_prompts(fence.body)
-        result = subprocess.run(
-            ["bash", "-n"],
-            input=script,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=5,
-        )
+        try:
+            result = subprocess.run(
+                ["bash", "-n"],
+                input=script,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+        except FileNotFoundError:
+            pytest.fail(
+                f"{fence.path}:{fence.line} cannot validate shell snippet because "
+                "bash is not available on PATH"
+            )
         assert result.returncode == 0, (
             f"{fence.path}:{fence.line} has invalid shell syntax: {result.stderr.strip()}"
         )
