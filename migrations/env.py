@@ -61,11 +61,23 @@ async def run_migrations_online() -> None:
     parsed_url = make_url(raw_url)
     query = dict(parsed_url.query)
     search_path = query.pop("awf_search_path", None)
+    null_pool = query.pop("awf_null_pool", None)
+    connect_timeout = query.pop("awf_connect_timeout", None)
+    query.pop("awf_connect_attempts", None)
     connect_args = {}
     if search_path is not None:
         if isinstance(search_path, tuple):
             search_path = search_path[0]
         connect_args["server_settings"] = {"search_path": str(search_path)}
+    if connect_timeout is not None:
+        if isinstance(connect_timeout, tuple):
+            connect_timeout = connect_timeout[0]
+        connect_args["timeout"] = float(connect_timeout)
+    if (
+        search_path is not None
+        or null_pool is not None
+        or connect_timeout is not None
+    ):
         parsed_url = parsed_url.set(query=query)
 
     connectable = create_async_engine(

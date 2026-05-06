@@ -47,6 +47,8 @@ def _schema_url(database_url: str, schema: str, *, null_pool: bool = False) -> s
     parsed_url = make_url(database_url)
     query = dict(parsed_url.query)
     query["awf_search_path"] = schema
+    query["awf_connect_timeout"] = str(_TEST_CONNECT_ARGS["timeout"])
+    query["awf_connect_attempts"] = str(_TEST_CONNECT_ATTEMPTS)
     if null_pool:
         query["awf_null_pool"] = "1"
     return parsed_url.set(query=query).render_as_string(hide_password=False)

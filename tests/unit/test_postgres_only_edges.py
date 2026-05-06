@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -89,6 +90,160 @@ def test_make_engine_strips_test_url_options_and_enables_null_pool(
 
 
 @pytest.mark.unit
+def test_make_engine_strips_test_retry_options_and_installs_async_creator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _create_async_engine(url: str, **kwargs: Any) -> object:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(url=url)
+
+    monkeypatch.setattr(session_mod, "create_async_engine", _create_async_engine)
+
+    make_engine(
+        "postgresql+asyncpg://awf:pw@localhost:5433/awf"
+        "?awf_search_path=first&awf_connect_timeout=2&awf_connect_attempts=5"
+    )
+
+    assert captured["url"] == "postgresql+asyncpg://awf:pw@localhost:5433/awf"
+    assert "connect_args" not in captured["kwargs"]
+    assert callable(captured["kwargs"]["async_creator"])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        (
+            "postgresql+asyncpg://awf:pw@localhost:5433/awf?awf_connect_timeout=nope",
+            "awf_connect_timeout must be a positive number.",
+        ),
+        (
+            "postgresql+asyncpg://awf:pw@localhost:5433/awf?awf_connect_timeout=0",
+            "awf_connect_timeout must be a positive number.",
+        ),
+        (
+            "postgresql+asyncpg://awf:pw@localhost:5433/awf?awf_connect_attempts=nope",
+            "awf_connect_attempts must be a positive integer.",
+        ),
+        (
+            "postgresql+asyncpg://awf:pw@localhost:5433/awf?awf_connect_attempts=0",
+            "awf_connect_attempts must be a positive integer.",
+        ),
+    ],
+)
+def test_make_engine_rejects_invalid_test_retry_options(url: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        make_engine(url)
+
+
+@pytest.mark.unit
+async def test_test_retry_async_creator_retries_transient_connect_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _create_async_engine(url: str, **kwargs: Any) -> object:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(url=url)
+
+    class TransientConnectError(Exception):
+        pass
+
+    attempts: list[tuple[str, dict[str, object]]] = []
+    sleeps: list[float] = []
+
+    async def _connect(*, dsn: str, **connect_args: object) -> object:
+        attempts.append((dsn, connect_args))
+        if len(attempts) == 1:
+            raise TransientConnectError
+        return SimpleNamespace(ok=True)
+
+    async def _sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(session_mod, "create_async_engine", _create_async_engine)
+    monkeypatch.setattr(session_mod.asyncio, "sleep", _sleep)
+    monkeypatch.setitem(
+        sys.modules,
+        "asyncpg",
+        SimpleNamespace(
+            connect=_connect,
+            PostgresConnectionError=TransientConnectError,
+            TooManyConnectionsError=RuntimeError,
+        ),
+    )
+
+    make_engine(
+        "postgresql+asyncpg://awf:pw@localhost:5433/awf"
+        "?awf_search_path=first&awf_connect_timeout=2&awf_connect_attempts=2"
+    )
+    creator = captured["kwargs"]["async_creator"]
+
+    assert await creator() == SimpleNamespace(ok=True)
+    assert attempts == [
+        (
+            "postgresql://awf:pw@localhost:5433/awf",
+            {"server_settings": {"search_path": "first"}, "timeout": 2.0},
+        ),
+        (
+            "postgresql://awf:pw@localhost:5433/awf",
+            {"server_settings": {"search_path": "first"}, "timeout": 2.0},
+        ),
+    ]
+    assert sleeps == [0.1]
+
+
+@pytest.mark.unit
+async def test_test_retry_async_creator_reraises_after_configured_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _create_async_engine(url: str, **kwargs: Any) -> object:
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(url=url)
+
+    class TransientConnectError(Exception):
+        pass
+
+    attempts = 0
+
+    async def _connect(*, dsn: str, **connect_args: object) -> object:
+        del dsn, connect_args
+        nonlocal attempts
+        attempts += 1
+        raise TransientConnectError
+
+    async def _sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(session_mod, "create_async_engine", _create_async_engine)
+    monkeypatch.setattr(session_mod.asyncio, "sleep", _sleep)
+    monkeypatch.setitem(
+        sys.modules,
+        "asyncpg",
+        SimpleNamespace(
+            connect=_connect,
+            PostgresConnectionError=TransientConnectError,
+            TooManyConnectionsError=RuntimeError,
+        ),
+    )
+
+    make_engine(
+        "postgresql+asyncpg://awf:pw@localhost:5433/awf"
+        "?awf_connect_timeout=2&awf_connect_attempts=2"
+    )
+
+    with pytest.raises(TransientConnectError):
+        await captured["kwargs"]["async_creator"]()
+    assert attempts == 2
+
+
+@pytest.mark.unit
 async def test_drop_schema_uses_single_cascade_drop() -> None:
     engine = _SchemaDropEngine()
 
@@ -151,6 +306,8 @@ async def test_postgres_test_url_marks_yielded_url_null_pool(
 
     assert parsed.query["awf_search_path"].startswith("awf_test_")
     assert parsed.query["awf_null_pool"] == "1"
+    assert parsed.query["awf_connect_timeout"] == "2"
+    assert parsed.query["awf_connect_attempts"] == "5"
 
 
 @pytest.mark.unit
