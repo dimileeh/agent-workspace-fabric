@@ -139,6 +139,19 @@ def test_runbook_covers_auth_policy_idempotency_and_terminal_behavior() -> None:
 
 
 @pytest.mark.unit
+def test_runbook_documents_exact_grace_override_for_idempotent_retries() -> None:
+    doc = _read("docs/PR_MONITOR_ADOPTION.md")
+
+    for retry_term in (
+        "Retry with the same raw grace override",
+        "omitted/null",
+        "explicit `900`",
+    ):
+        assert retry_term in doc
+    assert re.search(r"different adoption\s+policies", doc)
+
+
+@pytest.mark.unit
 def test_runbook_covers_observability_and_recovery_surfaces() -> None:
     doc = _read("docs/PR_MONITOR_ADOPTION.md")
 

@@ -67,6 +67,10 @@ repairing the PR, but a human must merge it.
 profile monitor policy; the profile default is 900 seconds. Set it to `0` only
 for explicit fast-path tests.
 
+Retry with the same raw grace override used by the first adoption request. An
+omitted/null value means "use the profile policy" and is stored separately from
+an explicit `900`, even when the resolved profile default is also 900 seconds.
+
 ## Adopt Through REST
 
 REST adoption requires `Authorization: Bearer $AWF_API_TOKEN` but does not
@@ -126,6 +130,11 @@ Policy changes on an existing live adoption return
 `PR_ADOPTION_POLICY_CONFLICT`. That includes changes to `repo_url`, `agent`,
 `profile_ref`, inline profile, `auto_merge`, or
 `initial_review_grace_period_seconds`.
+
+For idempotent retries, omitted/null and explicit `900` are different adoption
+policies. If the first request omitted the grace override, later REST or MCP
+retries must also omit it or send `null`; if the first request set `900`,
+retries must set `900`.
 
 Current behavior: deterministic adoption-key reuse does not yet distinguish
 terminal adoption rows. A previous terminal row can still satisfy the
