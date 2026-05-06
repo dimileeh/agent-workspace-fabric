@@ -199,6 +199,35 @@ async def test_create_v2_replay_ignores_absent_disk_request(
 
 
 @pytest.mark.unit
+async def test_create_v2_replay_allows_explicit_resource_matching_prior_default(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        _v2_request(),
+        idempotency_key="service-create-v2-default-then-explicit-resource",
+    )
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(created.id)
+        steady_cpu = reservations[0].steady_cpu
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        workspace.task_policy = {
+            **workspace.task_policy,
+            workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY: {},
+        }
+        await session.commit()
+
+    replayed = await service.create_v2(
+        _v2_request(resources={"steady_state_cpu_cores": steady_cpu}),
+        idempotency_key="service-create-v2-default-then-explicit-resource",
+    )
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
 async def test_create_v2_named_profile_replay_preserves_stored_dind_mode(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

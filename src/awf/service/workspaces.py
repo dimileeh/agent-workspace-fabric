@@ -1204,7 +1204,7 @@ def _stored_resource_reservation_request_values(
         if not isinstance(value, (int, float)):
             return None
         values[field] = float(value)
-    return values
+    return values or None
 
 
 def _resource_reservation_matches_request_values(
@@ -2714,9 +2714,10 @@ def v2_profile_snapshots(
 
 
 def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]:
-    policy: dict[str, Any] = {
-        RESOURCE_RESERVATION_REQUEST_POLICY_KEY: _requested_resource_reservation_values(payload)
-    }
+    policy: dict[str, Any] = {}
+    resource_request = _requested_resource_reservation_values(payload)
+    if resource_request:
+        policy[RESOURCE_RESERVATION_REQUEST_POLICY_KEY] = resource_request
     if _v2_payload_defers_profile_resolution(payload):
         policy[VALIDATION_POLICY_KEY] = {
             VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
