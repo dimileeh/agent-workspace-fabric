@@ -66,7 +66,6 @@ def _postgres_database_key(database_url: str) -> str:
 def _postgres_test_run_uid() -> str:
     return (
         os.environ.get("PYTEST_XDIST_TESTRUNUID")
-        or os.environ.get("AWF_EXEC_INVOCATION_ID")
         or os.environ.get("AWF_POSTGRES_TEST_RUN_UID")
         or _POSTGRES_TEST_LOCAL_RUN_UID
     )
@@ -250,14 +249,14 @@ def cleanup_stale_postgres_test_schemas() -> None:
     )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Serialize concurrent workers, but keep "done" state process-local so a
-    # reused namespace still cleans leftovers from a later pytest invocation.
+    # Serialize concurrent workers and mark this run active before scanning so
+    # stale cleanup cannot drop schemas allocated by another live worker.
     with lock_path.open("w", encoding="utf-8") as lock_file:
         if fcntl is not None:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            asyncio.run(_drop_stale_postgres_test_schemas(database_url))
             _ensure_postgres_test_run_active(database_url)
+            asyncio.run(_drop_stale_postgres_test_schemas(database_url))
             _STALE_SCHEMA_CLEANUP_DONE_KEYS.add(cleanup_key)
         finally:
             if fcntl is not None:
