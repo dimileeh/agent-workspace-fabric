@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.service import status as status_mod
 from awf.service.config import ServiceSettings
@@ -38,6 +38,7 @@ from awf.service.status import (
     _truncate,
     _workspace_id_from_project,
     check_database,
+    collect_egress_audit_status,
     collect_service_status,
     collect_workspace_cleanup_status,
 )
@@ -326,6 +327,76 @@ async def test_service_status_exposes_workspace_cleanup_readiness(tmp_path: Path
         "WORKSPACE_WITHIN_RETENTION",
         "FAILED_WORKSPACE_TRIAGE_PRESERVED",
     }
+
+
+@pytest.mark.unit
+async def test_service_status_includes_egress_audit_posture_counts(tmp_path: Path) -> None:
+    async with postgres_test_url() as database_url:
+        engine = make_engine(database_url)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/repo.git",
+                branch_base="development",
+                task_title="egress audited",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            workspace.status = WorkspaceStatus.running.value
+            await EgressAuditRepository(session).create(
+                workspace_id=workspace.id,
+                attempt_id=None,
+                policy_posture="restricted",
+                decision="deferred",
+                destination_category="allowlisted_public",
+                reason_code="LOCAL_EGRESS_RESTRICTED_ALLOWLIST",
+                details={},
+            )
+            await session.commit()
+        await engine.dispose()
+
+        status = await collect_service_status(
+            _settings(tmp_path, database_url=database_url),
+            api_get=_api_get,
+            run_subprocess=_make_run_subprocess(),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            provider_environ={},
+        )
+
+    egress_audit = status["checks"]["egress_audit"]
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "ok"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_AVAILABLE"
+    assert egress_audit["resource_count"] == 1
+    assert egress_audit["egress_posture_counts"] == {"restricted": 1}
+
+
+@pytest.mark.unit
+async def test_egress_audit_status_redacts_unavailable_detail() -> None:
+    async def _failing_lookup(_database_url: str) -> dict[str, int]:
+        raise RuntimeError(
+            "could not connect to "
+            "postgresql+asyncpg://awf:db_password@db.internal:5432/awf; "
+            "Authorization: Bearer ghp_secret1234567890; "
+            f"{'x' * 400}"
+        )
+
+    egress_audit = await collect_egress_audit_status(
+        "postgresql+asyncpg://awf:db_password@db.internal:5432/awf",
+        summary_lookup=_failing_lookup,
+    )
+
+    detail = str(egress_audit["detail"])
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unavailable"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_UNAVAILABLE"
+    assert len(detail) <= 240
+    assert "db_password" not in detail
+    assert "ghp_secret1234567890" not in detail
+    assert "postgresql+asyncpg://[redacted]@db.internal:5432/awf" in detail
+    assert "Authorization: Bearer [redacted]" in detail
 
 
 @pytest.mark.unit

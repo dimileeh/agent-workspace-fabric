@@ -36,6 +36,7 @@ from awf.api.schemas import (
     WorkspaceLockResponse,
     WorkspaceOverlapGraphResponse,
 )
+from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.profiles.resolver import ProfileResolutionError
@@ -1226,6 +1227,26 @@ def build_mcp_server(
         except WorkspaceControlError as exc:
             return _tool_error(exc)
         return _tool_result(OperationResponse.model_validate(result).model_dump(mode="json"))
+
+    @mcp.tool(name="awf_get_egress_audit_evidence")
+    async def awf_get_egress_audit_evidence(
+        workspace_id: str | None = Field(
+            default=None,
+            max_length=256,
+            description="Optional workspace ID filter for egress audit evidence.",
+        ),
+    ) -> StructuredToolResult:
+        """Read-only: return outbound egress audit evidence."""
+        workspace_filter = workspace_id.strip() if workspace_id is not None else None
+        workspace_filter = workspace_filter or None
+        try:
+            evidence = await service.get_egress_audit_evidence(workspace_filter)
+            return _safe_result({"workspace_id": workspace_filter, "evidence": evidence})
+        except Exception as exc:
+            return _safe_result(
+                {"error_code": "MCP_EGRESS_AUDIT_ERROR", "message": redact_audit_text(str(exc))},
+                is_error=True,
+            )
 
     return mcp
 
