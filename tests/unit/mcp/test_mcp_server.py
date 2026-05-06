@@ -418,6 +418,18 @@ class TestToolRegistration:
     async def test_operator_parity_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]
         tools = {tool.name: tool for tool in await mcp.list_tools()}
 
+        list_workspaces_props = tools["awf_list_workspaces"].inputSchema["properties"]
+        assert list_workspaces_props["limit"]["default"] == 50
+        assert list_workspaces_props["limit"]["minimum"] == 1
+        assert list_workspaces_props["limit"]["maximum"] == 500
+        assert "workspace_status" in list_workspaces_props
+        assert list_workspaces_props["workspace_status"]["default"] is None
+        assert "agent" in list_workspaces_props
+        assert list_workspaces_props["agent"]["default"] is None
+        repo_url_schema = _optional_string_schema(list_workspaces_props["repo_url"])
+        assert repo_url_schema["maxLength"] == 512
+        assert repo_url_schema["minLength"] == 1
+
         merge_props = tools["awf_list_merge_queue"].inputSchema["properties"]
         repo_url_schema = _optional_string_schema(merge_props["repo_url"])
         assert repo_url_schema["maxLength"] == 512
@@ -1345,6 +1357,86 @@ class TestGetAndList:
         listed = await _call(mcp, "awf_list_workspaces", {"limit": 10})
         assert isinstance(listed, list)
         assert [r["id"] for r in listed] == list(reversed(ids))
+
+    @pytest.mark.unit
+    async def test_list_filters_by_status_agent_and_repo_url(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        repo_url = "git@github.com:example/filtered.git"
+        matching = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": repo_url,
+                "task_title": "matching",
+                "agent": "gemini",
+            },
+        )
+        wrong_status = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": repo_url,
+                "task_title": "wrong status",
+                "agent": "gemini",
+            },
+        )
+        wrong_agent = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": repo_url,
+                "task_title": "wrong agent",
+                "agent": "codex",
+            },
+        )
+        wrong_repo = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": "git@github.com:example/other.git",
+                "task_title": "wrong repo",
+                "agent": "gemini",
+            },
+        )
+        assert isinstance(matching, dict)
+        assert isinstance(wrong_status, dict)
+        assert isinstance(wrong_agent, dict)
+        assert isinstance(wrong_repo, dict)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            for workspace_id in (matching["id"], wrong_agent["id"], wrong_repo["id"]):
+                workspace = await repo.get(str(workspace_id))
+                assert workspace is not None
+                await repo.transition(
+                    workspace,
+                    to=WorkspaceStatus.provisioning,
+                    reason_code="TEST",
+                )
+                await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="TEST")
+            await session.commit()
+
+        listed = await _call(
+            mcp,
+            "awf_list_workspaces",
+            {
+                "workspace_status": "ready",
+                "agent": "gemini",
+                "repo_url": repo_url,
+                "limit": 10,
+            },
+        )
+
+        assert isinstance(listed, list)
+        assert [row["id"] for row in listed] == [matching["id"]]
+        assert wrong_status["id"] not in [row["id"] for row in listed]
 
 
 class TestWaitForWorkspace:

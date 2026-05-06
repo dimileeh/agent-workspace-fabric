@@ -13,7 +13,7 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 | `awf_create_workspace` | Create a legacy v1 workspace request. |
 | `awf_create_workspace_v2` | Create a profile-driven v2 workspace request. |
 | `awf_get_workspace` | Fetch one workspace by id. |
-| `awf_list_workspaces` | List recent workspaces newest-first. |
+| `awf_list_workspaces` | List recent workspaces newest-first, optionally filtered by status, agent, or repo URL. |
 | `awf_wait_for_workspace` | Poll until a workspace reaches a terminal state or times out. |
 | `awf_get_workspace_runtime` | Fetch one workspace's compose/container runtime snapshot. |
 | `awf_list_merge_queue` | List the REST merge queue envelope for operator review. |

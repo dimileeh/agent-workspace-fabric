@@ -356,10 +356,29 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_list_workspaces")
     async def awf_list_workspaces(
+        workspace_status: WorkspaceStatus | None = Field(
+            default=None,
+            description="Optional workspace status filter.",
+        ),
+        agent: AgentRuntime | None = Field(
+            default=None,
+            description="Optional agent runtime filter.",
+        ),
+        repo_url: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="Optional repository URL filter.",
+        ),
         limit: int = Field(default=50, ge=1, le=500),
     ) -> list[dict[str, Any]]:
         """List workspaces, newest first."""
-        rows = await service.list(limit=limit)
+        rows = await service.list(
+            workspace_status=workspace_status,
+            agent=agent,
+            repo_url=repo_url,
+            limit=limit,
+        )
         return [r.model_dump(mode="json") for r in rows]
 
     @mcp.tool(name="awf_wait_for_workspace")

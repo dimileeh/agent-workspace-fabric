@@ -504,9 +504,21 @@ class WorkspaceService:
                 _egress_audit_response(audit_record)
             ).model_dump(mode="json")
 
-    async def list(self, *, limit: int = 50) -> list[WorkspaceResponse]:
+    async def list(
+        self,
+        *,
+        workspace_status: WorkspaceStatus | None = None,
+        agent: AgentRuntime | None = None,
+        repo_url: str | None = None,
+        limit: int = 50,
+    ) -> list[WorkspaceResponse]:
         async with self._factory() as s:
-            rows = await WorkspaceRepository(s).list(limit=limit)
+            rows = await WorkspaceRepository(s).list(
+                status=workspace_status,
+                agent=agent,
+                repo_url=repo_url,
+                limit=limit,
+            )
             return [workspace_response(r) for r in rows]
 
     async def cancel_workspace(
