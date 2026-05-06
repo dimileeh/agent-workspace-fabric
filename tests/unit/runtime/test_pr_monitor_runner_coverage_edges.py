@@ -1603,6 +1603,7 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(thread,),
         initial_reviews=(),
         state=state,
@@ -1663,6 +1664,7 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(thread,),
         initial_reviews=(),
         state=state,
@@ -1736,6 +1738,7 @@ async def test_fix_cycle_reraises_non_transient_settle_poll_error(
             workspace_id="ws_auth",
             repo=RepoRef(owner="dimileeh", name="aira-web"),
             pr_number=42,
+            pr_head_sha="abc1234567890def",
             initial_threads=(thread,),
             initial_reviews=(),
             state=MonitorState(),
@@ -1775,6 +1778,7 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_policy_block(
         workspace_id="ws_supply_thread",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(thread,),
         initial_reviews=(),
         state=MonitorState(),
@@ -1811,12 +1815,13 @@ async def test_fix_cycle_returns_failed_push_when_review_fix_hits_policy_block(
     async def _blocked_review(**_kwargs: object) -> str:
         raise _MonitorPolicyBlockedError("Supply-chain policy blocked review fix.")
 
-    monkeypatch.setattr(runner, "_address_review_comment", _blocked_review)
+    monkeypatch.setattr(runner, "_address_review_comment_result", _blocked_review)
 
     result = await runner._run_fix_cycle(
         workspace_id="ws_supply_review",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(),
         initial_reviews=(review,),
         state=MonitorState(),
@@ -1851,6 +1856,7 @@ async def test_fix_cycle_zero_passes_still_runs_push(
         workspace_id="ws_zero_pass",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(),
         initial_reviews=(),
         state=MonitorState(),
@@ -2867,6 +2873,7 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(),
         initial_reviews=(first_review,),
         state=state,

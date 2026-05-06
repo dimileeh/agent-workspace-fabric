@@ -58,9 +58,11 @@ from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
+    PRFeedbackResolutionRepository,
     ProviderModelCircuitBreakerRepository,
     WorkspaceEventCreate,
     WorkspaceRepository,
+    pr_feedback_body_hash,
 )
 from awf.runtime.logs import LogStore, WorkspaceLogSink
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
@@ -91,6 +93,7 @@ from awf.runtime.pr_monitor import (
     SyncBase,
     WaitForCI,
     _is_bot_author,
+    _needs_comment_attention,
     decide,
     sync_base_no_progress_signature,
 )
@@ -127,6 +130,12 @@ _log = get_logger(__name__)
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
 Verdict = Literal["fix_committed", "false_positive", "defer", "agent_failed"]
+
+
+@dataclass(frozen=True)
+class VerdictResult:
+    verdict: Verdict
+    reason: str | None = None
 
 
 class PostMergeTargetReconciler(Protocol):
@@ -939,6 +948,14 @@ class PullRequestMonitorRunner:
                     return
                 if _clear_transient_base_fetch_retry_state(state):
                     await self._persist_state(workspace_id, state)
+                if await self._apply_pr_feedback_resolution_state(
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                ):
+                    await self._persist_state(workspace_id, state)
 
                 # Determine the remote push target for this workspace.
                 # ``remote_push_branch`` is the canonical destination.
@@ -1546,6 +1563,7 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
+                    pr_head_sha=status.head_sha,
                     initial_threads=action.threads,
                     initial_reviews=action.review_comments,
                     state=state,
@@ -3139,6 +3157,7 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         repo: RepoRef,
         pr_number: int,
+        pr_head_sha: str,
         initial_threads: tuple[ReviewThread, ...],
         initial_reviews: tuple[ReviewComment, ...],
         state: MonitorState,
@@ -3161,6 +3180,7 @@ class PullRequestMonitorRunner:
         """
         threads_to_resolve: list[str] = []
         publish_dependent_ids: list[str] = []
+        fixed_review_comments: list[tuple[ReviewComment, VerdictResult]] = []
         threads = list(initial_threads)
         reviews = list(initial_reviews)
 
@@ -3190,7 +3210,7 @@ class PullRequestMonitorRunner:
                     publish_dependent_ids.append(t.thread_id)
             for c in reviews:
                 try:
-                    verdict = await self._address_review_comment(
+                    verdict_result = await self._address_review_comment_result(
                         workspace_id=workspace_id,
                         repo=repo,
                         pr_number=pr_number,
@@ -3206,7 +3226,20 @@ class PullRequestMonitorRunner:
                         returncode=1,
                         stderr=str(exc),
                     )
+                verdict = verdict_result.verdict
                 state.mark_addressed(c.comment_id, verdict)
+                if verdict in {"false_positive", "defer"}:
+                    await self._record_pr_feedback_resolution(
+                        workspace_id=workspace_id,
+                        repo=repo,
+                        pr_number=pr_number,
+                        pr_head_sha=pr_head_sha,
+                        comment=c,
+                        verdict_result=verdict_result,
+                        operation_id=operation_id,
+                    )
+                elif verdict == "fix_committed":
+                    fixed_review_comments.append((c, verdict_result))
                 if verdict not in {"defer", "agent_failed"}:
                     publish_dependent_ids.append(c.comment_id)
 
@@ -3271,6 +3304,16 @@ class PullRequestMonitorRunner:
                 evidence=push_result.failure_evidence(),
             )
             return push_result
+        for comment, verdict_result in fixed_review_comments:
+            await self._record_pr_feedback_resolution(
+                workspace_id=workspace_id,
+                repo=repo,
+                pr_number=pr_number,
+                pr_head_sha=pr_head_sha,
+                comment=comment,
+                verdict_result=verdict_result,
+                operation_id=operation_id,
+            )
         if not push_result.pushed:
             # No local commits — CLI returned "false_positive" for
             # everything or "defer" for everything. We still want to
@@ -3423,10 +3466,32 @@ class PullRequestMonitorRunner:
         compose_file: Path,
         state: MonitorState | None = None,
     ) -> Verdict:
+        result = await self._address_review_comment_result(
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            comment=comment,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+        )
+        return result.verdict
+
+    async def _address_review_comment_result(
+        self,
+        *,
+        workspace_id: str,
+        repo: RepoRef,
+        pr_number: int,
+        comment: ReviewComment,
+        compose_project: str,
+        compose_file: Path,
+        state: MonitorState | None = None,
+    ) -> VerdictResult:
         prompt = address_review_comment_prompt(
             pr_number=pr_number, repo_slug=repo.slug(), comment=comment
         )
-        return await self._invoke_cli_for_verdict(
+        return await self._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             prompt=prompt,
             commit_message=f"fix: address PR review comment {comment.comment_id}",
@@ -3445,6 +3510,27 @@ class PullRequestMonitorRunner:
         compose_file: Path,
         state: MonitorState | None = None,
     ) -> Verdict:
+        return (
+            await self._invoke_cli_for_verdict_result(
+                workspace_id=workspace_id,
+                prompt=prompt,
+                commit_message=commit_message,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+            )
+        ).verdict
+
+    async def _invoke_cli_for_verdict_result(
+        self,
+        *,
+        workspace_id: str,
+        prompt: str,
+        commit_message: str,
+        compose_project: str,
+        compose_file: Path,
+        state: MonitorState | None = None,
+    ) -> VerdictResult:
         result_stdout = ""
         cli_failed = False
         command_evidence: list[str] = []
@@ -3492,10 +3578,11 @@ class PullRequestMonitorRunner:
             )
 
         if committed_dirty_changes:
-            return "fix_committed"
+            parsed = _parse_verdict_result(result_stdout)
+            return VerdictResult(verdict="fix_committed", reason=parsed.reason)
         if cli_failed:
-            return "agent_failed"
-        return _parse_verdict(result_stdout)
+            return VerdictResult(verdict="agent_failed")
+        return _parse_verdict_result(result_stdout)
 
     # ── SyncBase ───────────────────────────────────────────────────────────
 
@@ -4431,6 +4518,79 @@ class PullRequestMonitorRunner:
 
     # ── DB state management ───────────────────────────────────────────────
 
+    async def _record_pr_feedback_resolution(
+        self,
+        *,
+        workspace_id: str,
+        repo: RepoRef,
+        pr_number: int,
+        pr_head_sha: str,
+        comment: ReviewComment,
+        verdict_result: VerdictResult,
+        operation_id: str | None,
+    ) -> None:
+        if verdict_result.verdict == "agent_failed":
+            return
+        async with self._deps.session_factory() as s:
+            await PRFeedbackResolutionRepository(s).record_resolution(
+                scm_provider="github",
+                repository_key=repo.slug(),
+                pull_request_key=str(pr_number),
+                pull_request_url=f"https://github.com/{repo.slug()}/pull/{pr_number}",
+                head_sha=pr_head_sha,
+                feedback_kind="review_comment",
+                feedback_id=comment.comment_id,
+                feedback_body=_review_comment_resolution_body(comment),
+                feedback_author=comment.author,
+                feedback_url=comment.url,
+                verdict=verdict_result.verdict,
+                reason=verdict_result.reason,
+                source_workspace_id=workspace_id,
+                source_operation_id=operation_id,
+            )
+            await s.commit()
+
+    async def _apply_pr_feedback_resolution_state(
+        self,
+        *,
+        workspace_id: str,
+        repo: RepoRef,
+        pr_number: int,
+        status: PRStatus,
+        state: MonitorState,
+    ) -> bool:
+        del workspace_id
+        if not status.unresolved_review_comments:
+            return False
+        async with self._deps.session_factory() as s:
+            rows = await PRFeedbackResolutionRepository(s).list_for_pr_head(
+                scm_provider="github",
+                repository_key=repo.slug(),
+                pull_request_key=str(pr_number),
+                head_sha=status.head_sha,
+            )
+        if not rows:
+            return False
+        rows_by_feedback = {
+            (row.feedback_kind, row.feedback_id, row.feedback_body_hash): row for row in rows
+        }
+        changed = False
+        for comment in status.unresolved_review_comments:
+            if not _needs_comment_attention(state.threads_addressed_ids.get(comment.comment_id)):
+                continue
+            row = rows_by_feedback.get(
+                (
+                    "review_comment",
+                    comment.comment_id,
+                    pr_feedback_body_hash(_review_comment_resolution_body(comment)),
+                )
+            )
+            if row is None:
+                continue
+            state.mark_addressed(comment.comment_id, _monitor_state_verdict(row.verdict))
+            changed = True
+        return changed
+
     async def _load_workspace(self, workspace_id: str) -> Workspace:
         async with self._deps.session_factory() as s:
             ws = await WorkspaceRepository(s).get_with_validation_runs(workspace_id)
@@ -4842,6 +5002,12 @@ def _is_callback_terminal_workspace_status(status: str) -> bool:
 
 _VERDICT_FALSE_POSITIVE = re.compile(r"\bFALSE\s+POSITIVE\s*:", re.IGNORECASE)
 _VERDICT_DEFER = re.compile(r"\bDEFER\s*:", re.IGNORECASE)
+_AWF_VERDICT = re.compile(
+    r"\bAWF-VERDICT\s*:\s*"
+    r"(?P<label>FIXED|FALSE\s+POSITIVE|DEFER|NEEDS_HUMAN)"
+    r"\s*:\s*(?P<reason>[^\n\r]+)",
+    re.IGNORECASE,
+)
 
 
 def _parse_verdict(stdout: str) -> Verdict:
@@ -4852,12 +5018,48 @@ def _parse_verdict(stdout: str) -> Verdict:
     for those markers in the captured stdout; anything else counts as a
     fix commit (the default happy path).
     """
+    return _parse_verdict_result(stdout).verdict
+
+
+def _parse_verdict_result(stdout: str) -> VerdictResult:
     if not stdout:
-        return "defer"
+        return VerdictResult(verdict="defer")
+    awf_match = _AWF_VERDICT.search(stdout)
+    if awf_match is not None:
+        label = re.sub(r"\s+", " ", awf_match.group("label").strip().lower())
+        reason = awf_match.group("reason").strip() or None
+        if label == "false positive":
+            return VerdictResult(verdict="false_positive", reason=reason)
+        if label in {"defer", "needs_human"}:
+            return VerdictResult(verdict="defer", reason=reason)
+        return VerdictResult(verdict="fix_committed", reason=reason)
     if _VERDICT_FALSE_POSITIVE.search(stdout):
-        return "false_positive"
+        return VerdictResult(verdict="false_positive", reason=_verdict_reason(stdout))
     if _VERDICT_DEFER.search(stdout):
+        return VerdictResult(verdict="defer", reason=_verdict_reason(stdout))
+    return VerdictResult(verdict="fix_committed")
+
+
+def _verdict_reason(stdout: str) -> str | None:
+    _prefix, separator, reason = stdout.partition(":")
+    if not separator:
+        return None
+    cleaned = reason.strip()
+    return cleaned or None
+
+
+def _review_comment_resolution_body(comment: ReviewComment) -> str:
+    return comment.body or comment.body_excerpt or ""
+
+
+def _monitor_state_verdict(verdict: str) -> Verdict:
+    normalized = verdict.strip().lower()
+    if normalized == "false_positive":
+        return "false_positive"
+    if normalized in {"defer", "needs_human"}:
         return "defer"
+    if normalized == "agent_failed":
+        return "agent_failed"
     return "fix_committed"
 
 

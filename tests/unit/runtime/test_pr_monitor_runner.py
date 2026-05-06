@@ -36,6 +36,7 @@ from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON, Operation, Work
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    PRFeedbackResolutionRepository,
     ProviderModelCircuitBreakerRepository,
     StaleReasonCreate,
     StaleReasonRepository,
@@ -1183,6 +1184,124 @@ async def test_address_review_comment_passes_quoted_evidence_prompt_to_adapter(
         assert [prompt_line for prompt_line in prompt.splitlines() if line in prompt_line] == [
             f"AWF-EVIDENCE> {line}"
         ]
+
+
+@pytest.mark.unit
+async def test_review_comment_false_positive_is_recorded_by_pr_identity(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: automated review wrapper only")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    comment = ReviewComment(
+        comment_id="issue:4391271818",
+        body="Codex automated review wrapper",
+        body_excerpt="Codex automated review wrapper",
+        author="chatgpt-codex-connector[bot]",
+        url="https://github.example/comment/4391271818",
+    )
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(),
+        initial_reviews=(comment,),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as session:
+        rows = await PRFeedbackResolutionRepository(session).list_for_pr_head(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            head_sha="abc1234567890def",
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.feedback_kind == "review_comment"
+    assert row.feedback_id == "issue:4391271818"
+    assert row.verdict == "false_positive"
+    assert row.reason == "automated review wrapper only"
+    assert row.source_workspace_id == workspace_id
+
+
+@pytest.mark.unit
+async def test_new_workspace_inherits_review_comment_verdicts_by_pr_identity(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    old_workspace_id = await seed_monitoring_workspace(factory)
+    new_workspace_id = await seed_monitoring_workspace(factory)
+    comment = ReviewComment(
+        comment_id="issue:4391271818",
+        body="Codex automated review wrapper",
+        body_excerpt="Codex automated review wrapper",
+        author="chatgpt-codex-connector[bot]",
+    )
+    async with factory() as session:
+        await PRFeedbackResolutionRepository(session).record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="abc1234567890def",
+            feedback_kind="review_comment",
+            feedback_id=comment.comment_id,
+            feedback_body=comment.body or comment.body_excerpt,
+            feedback_author=comment.author,
+            feedback_url=comment.url,
+            verdict="false_positive",
+            reason="automated review wrapper only",
+            source_workspace_id=old_workspace_id,
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(comment,),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    await runner._apply_pr_feedback_resolution_state(
+        workspace_id=new_workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+    )
+
+    assert state.threads_addressed_ids == {"issue:4391271818": "false_positive"}
 
 
 @pytest.mark.unit

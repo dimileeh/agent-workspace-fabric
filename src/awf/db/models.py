@@ -855,6 +855,53 @@ class WorkspaceEvent(Base):
     workspace: Mapped[Workspace] = relationship(back_populates="events")
 
 
+class PRFeedbackResolution(Base):
+    """PR-scoped monitor verdict for a review comment or thread.
+
+    The identity is deliberately PR/provider feedback identity, not workspace
+    identity. Workspaces fail and get replaced; the PR review state they already
+    inspected must survive that replacement.
+    """
+
+    __tablename__ = "pr_feedback_resolutions"
+    __table_args__ = (
+        Index(
+            "ix_pr_feedback_resolutions_pr",
+            "scm_provider",
+            "repository_key",
+            "pull_request_key",
+            "head_sha",
+        ),
+        Index("ix_pr_feedback_resolutions_source_workspace", "source_workspace_id"),
+        Index("ix_pr_feedback_resolutions_updated_at", "updated_at"),
+    )
+
+    scm_provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    repository_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    pull_request_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    head_sha: Mapped[str] = mapped_column(String(128), primary_key=True)
+    feedback_kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    feedback_id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    feedback_body_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    pull_request_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    feedback_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    feedback_author: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    verdict: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    source_workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_operation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    resolved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+
 class CallbackSubscription(Base):
     """External operator callback target registration.
 
