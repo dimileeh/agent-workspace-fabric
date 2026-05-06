@@ -617,13 +617,10 @@ class GitHubClient:
             if _is_awf_status_issue_comment(body):
                 continue
             author = _dig(node, "author", "login")
-            if _is_known_bot_comment_author(author) and _is_non_actionable_review_skip_comment(
-                body
-            ):
+            known_bot_comment = _is_known_bot_comment_author(author)
+            if known_bot_comment and _is_non_actionable_bot_issue_comment(body):
                 continue
             blocks_merge = _is_merge_blocking_issue_comment(body)
-            if not blocks_merge and _is_known_bot_comment_author(author):
-                continue
             reviews.append(
                 ReviewComment(
                     comment_id=f"issue:{node['databaseId']}",
@@ -1045,6 +1042,15 @@ def _is_merge_blocking_issue_comment(body: str) -> bool:
 def _is_non_actionable_review_skip_comment(body: str) -> bool:
     lower = " ".join(body.lower().split())
     return "review skipped" in lower and "auto reviews are disabled" in lower
+
+
+def _is_non_actionable_bot_issue_comment(body: str) -> bool:
+    lower = " ".join(body.lower().split())
+    return (
+        _is_non_actionable_review_skip_comment(body)
+        or _is_non_actionable_bot_review_body(body)
+        or ("finishing touches" in lower and "review summary" in lower)
+    )
 
 
 def _is_awf_status_issue_comment(body: str) -> bool:

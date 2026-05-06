@@ -800,6 +800,105 @@ class TestFetchPrStatus:
         assert status.unresolved_review_comments == ()
 
     @pytest.mark.unit
+    async def test_parses_actionable_codex_issue_comment_as_review_comment(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 4390521275,
+                        "body": (
+                            "\n### 💡 Codex Review\n\n"
+                            "https://github.com/dimileeh/aira-agent-workspace-fabric/"
+                            "blob/49c0c400de80f2b7ffb4f67bb6a76868f4d0e6ae/"
+                            "src/awf/runtime/pr_monitor_runner.py#L940-L941\n"
+                            "**P2 Preserve action-specific base-fetch retry counts**\n\n"
+                            "When `sync_base` or the pre-merge recheck keeps hitting "
+                            "a transient `BaseFetchError`, clear only the successful "
+                            "context's counter."
+                        ),
+                        "isMinimized": False,
+                        "author": {"login": "chatgpt-codex-connector[bot]"},
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert len(status.unresolved_review_comments) == 1
+        comment = status.unresolved_review_comments[0]
+        assert comment.comment_id == "issue:4390521275"
+        assert comment.author == "chatgpt-codex-connector[bot]"
+        assert "Preserve action-specific base-fetch retry counts" in comment.body_excerpt
+        assert comment.blocks_merge is False
+
+    @pytest.mark.unit
+    async def test_codex_review_envelope_does_not_hide_actionable_review_thread(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "PRRT_kwDOSJAM6s5_-ehR",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/awf/runtime/merge_eligibility.py",
+                        "line": 164,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "bodyText": (
+                                        "**P2 Keep tier-1 deferred coverage stale**\n\n"
+                                        "The candidate can be marked fresh before "
+                                        "the final coverage recovery runs."
+                                    ),
+                                    "author": {"login": "chatgpt-codex-connector[bot]"},
+                                }
+                            ]
+                        },
+                    }
+                ],
+                reviews=[
+                    {
+                        "databaseId": 4236551690,
+                        "body": (
+                            "\n### 💡 Codex Review\n\n"
+                            "Here are some automated review suggestions for this pull request.\n\n"
+                            "**Reviewed commit:** `7b94ebd4b6`\n\n"
+                            "<details> <summary>ℹ️ About Codex in GitHub</summary>\n"
+                            "<br/>\n\n"
+                            "Codex has been enabled to automatically review pull requests "
+                            "in this repo."
+                            "</details>"
+                        ),
+                        "state": "COMMENTED",
+                        "author": {"login": "chatgpt-codex-connector[bot]"},
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [t.thread_id for t in status.unresolved_inline_threads] == [
+            "PRRT_kwDOSJAM6s5_-ehR"
+        ]
+        assert "Keep tier-1 deferred coverage stale" in (
+            status.unresolved_inline_threads[0].body_excerpt
+        )
+        assert status.unresolved_review_comments == ()
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "body",
         [

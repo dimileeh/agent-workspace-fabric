@@ -19,7 +19,7 @@ from awf.common.github_client import RepoRef
 from awf.db.enums import OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import Merge, MonitorState, decide
+from awf.runtime.pr_monitor import AddressComments, Merge, MonitorState, decide
 from awf.runtime.pr_monitor_runner import _initial_review_grace_started_key
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -75,6 +75,22 @@ def _late_actionable_review() -> dict:
         cid=7802,
         author="human-reviewer",
         body="late actionable review: document the monitor behavior before merging.",
+    )
+
+
+def _actionable_codex_issue_comment() -> dict:
+    return issue_comment_node(
+        cid=7804,
+        author="chatgpt-codex-connector[bot]",
+        body=(
+            "\n### Codex Review\n\n"
+            "https://github.com/dimileeh/aira-agent-workspace-fabric/"
+            "blob/49c0c400de80f2b7ffb4f67bb6a76868f4d0e6ae/"
+            "src/awf/runtime/pr_monitor_runner.py#L940-L941\n"
+            "**P2 Preserve action-specific base-fetch retry counts**\n\n"
+            "When `sync_base` keeps hitting a transient `BaseFetchError`, "
+            "clear only the successful context's counter."
+        ),
     )
 
 
@@ -178,6 +194,47 @@ async def test_only_non_actionable_bot_issue_comment_does_not_trigger_human_wait
     async with factory() as session:
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
     assert not any(operation.type == OperationType.human_wait.value for operation in operations)
+
+
+@pytest.mark.unit
+async def test_actionable_bot_issue_comment_routes_to_address_comments(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    sleep_fn = RecordedSleep()
+    cmd.queue_result(returncode=0)  # git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(comments=[_actionable_codex_issue_comment()]),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        initial_review_grace_period_seconds=0,
+    )
+
+    status = await runner._fetch_status_for_decision(
+        repo=REPO,
+        pr_number=42,
+        workspace_id=workspace_id,
+        base_branch="development",
+    )
+    action = decide(status, MonitorState(), runner._config)
+
+    assert isinstance(action, AddressComments)
+    assert action.threads == ()
+    assert [c.comment_id for c in action.review_comments] == ["issue:7804"]
+    assert "Preserve action-specific base-fetch retry counts" in (
+        action.review_comments[0].body_excerpt
+    )
 
 
 @pytest.mark.unit
