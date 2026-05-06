@@ -418,6 +418,11 @@ def _assert_usage_unavailable(row: dict[str, Any]) -> None:
 async def disk_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[Any, AsyncClient]]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    app.state.workspace_admission_disk_check = lambda settings: _disk_check(
+        free_bytes=settings.min_free_disk_bytes + 1,
+        threshold_bytes=settings.min_free_disk_bytes,
+        ok=True,
+    )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield app, c
 

@@ -32,6 +32,9 @@ except ImportError:  # pragma: no cover - Windows does not run AWF Docker CI.
     fcntl = None  # type: ignore[assignment]
 
 
+POSTGRES_TEST_TIMEOUT_SECONDS = 120
+
+
 def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
     threshold = settings.min_free_disk_bytes
     free = threshold + 1
@@ -46,6 +49,48 @@ def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
         ok=True,
         status="ok",
         reason="SUFFICIENT_DISK",
+    )
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if _uses_postgres_test_database(item) and item.get_closest_marker("timeout") is None:
+            item.add_marker(pytest.mark.timeout(POSTGRES_TEST_TIMEOUT_SECONDS))
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Clear stale Postgres schemas before DB-backed test selections start."""
+
+    if any(_uses_postgres_test_database(item) for item in session.items):
+        from tests.postgres import cleanup_stale_postgres_test_schemas
+
+        cleanup_stale_postgres_test_schemas()
+
+
+def _uses_postgres_test_database(item: pytest.Item) -> bool:
+    postgres_fixtures = {
+        "client",
+        "disk_app_and_client",
+        "engine",
+        "session_factory",
+    }
+    if postgres_fixtures.intersection(getattr(item, "fixturenames", ())):
+        return True
+
+    module = getattr(item, "module", None)
+    if module is None:
+        return False
+    module_globals = vars(module)
+    return any(
+        name in module_globals
+        for name in (
+            "create_postgres_test_engine",
+            "postgres_empty_test_url",
+            "postgres_test_engine",
+            "postgres_test_session",
+            "postgres_test_url",
+            "postgres_test_url_sync",
+        )
     )
 
 
