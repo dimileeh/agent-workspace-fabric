@@ -621,6 +621,47 @@ class TestSuccess:
             assert reloaded.compose_project_name == f"awf_{ws_id}"
 
     @pytest.mark.unit
+    async def test_egress_audit_records_workspace_task_attempt(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=f"provisioner-audit:{ws.id}",
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            attempt = await TaskAttemptRepository(s).create_for_workspace(
+                task=task,
+                workspace=ws,
+            )
+            await s.commit()
+            ws_id = ws.id
+            attempt_id = attempt.id
+
+        await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
+            assert audit is not None
+            assert audit.attempt_id == attempt_id
+
+    @pytest.mark.unit
     async def test_records_state_transition_events(
         self,
         provisioner: Provisioner,

@@ -28,6 +28,7 @@ from awf.db.models import Workspace
 from awf.db.repositories import (
     EgressAuditRepository,
     ResourceReservationRepository,
+    TaskAttemptRepository,
     WorkspaceRepository,
 )
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
@@ -454,9 +455,10 @@ class Provisioner:
                 )
                 await session.commit()
                 return False
+            attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
             await EgressAuditRepository(session).create(
                 workspace_id=workspace_id,
-                attempt_id=None,
+                attempt_id=attempt.id if attempt is not None else None,
                 policy_posture=policy_posture,
                 decision=decision,
                 destination_category=destination_category,
