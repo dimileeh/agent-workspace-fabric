@@ -3612,6 +3612,83 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert inspector.calls == [compose_project, compose_project]
 
     @pytest.mark.unit
+    async def test_restart_recovery_preservation_idempotency_is_scoped_to_fresh_execution(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserve_fresh_execution"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserve-fresh-execution",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        old_event_time = datetime.now(UTC) - timedelta(days=1)
+        new_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            old_event = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            old_event.occurred_at = old_event_time
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="TEST_ADVANCE")
+            await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="TEST_ADVANCE")
+            await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="TEST_REQUEUE")
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="TEST_REEXECUTE")
+            ws.execution_claimed_by = "fresh-dead-worker"
+            ws.execution_claim_expires_at = new_claim_expires_at
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: _live_agent_snapshot(container_id="agent-fresh")}
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+        assert len(preserved_events) == 2
+        latest_preserved = preserved_events[0]
+        assert latest_preserved.occurred_at > old_event_time
+        assert latest_preserved.payload is not None
+        assert latest_preserved.payload["previous_claim"]["execution_claimed_by"] == (
+            "fresh-dead-worker"
+        )
+        assert latest_preserved.payload["previous_claim"]["execution_claim_expires_at"] == (
+            new_claim_expires_at.isoformat()
+        )
+        assert len(operations) == 1
+        assert operations[0].payload["runtime"]["services"][0]["container_id"] == "agent-fresh"
+        assert inspector.calls == [compose_project]
+
+    @pytest.mark.unit
     async def test_restart_recovery_serializes_concurrent_preservation_recording(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -3647,6 +3724,8 @@ class TestRunOnceStaleActiveExecutionRecovery:
             session: AsyncSession,
             workspace_id: str,
             status: WorkspaceStatus,
+            *,
+            event_floor: datetime | None = None,
         ) -> bool:
             nonlocal call_count, selected_count
             async with count_lock:
@@ -3663,7 +3742,13 @@ class TestRunOnceStaleActiveExecutionRecovery:
             else:
                 await first_checked.wait()
 
-            has_event = await original_has_event(self, session, workspace_id, status)
+            has_event = await original_has_event(
+                self,
+                session,
+                workspace_id,
+                status,
+                event_floor=event_floor,
+            )
             async with count_lock:
                 selected_count += 1
                 if selected_count == 2:

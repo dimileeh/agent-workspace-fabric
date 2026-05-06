@@ -841,10 +841,16 @@ class ControlWorker:
                 return
             if not _execution_claim_is_stale(ws, now):
                 return
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
             if await self._has_preserved_active_execution_event(
                 session,
                 candidate.workspace_id,
                 candidate.status,
+                event_floor=event_floor,
             ):
                 return
 
@@ -902,6 +908,8 @@ class ControlWorker:
         session: AsyncSession,
         workspace_id: str,
         status: WorkspaceStatus,
+        *,
+        event_floor: datetime | None = None,
     ) -> bool:
         stmt = (
             select(WorkspaceEvent.id)
@@ -913,7 +921,35 @@ class ControlWorker:
             )
             .limit(1)
         )
+        if event_floor is not None:
+            stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
         return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _active_execution_preservation_event_floor(
+        self,
+        session: AsyncSession,
+        workspace: Workspace,
+        status: WorkspaceStatus,
+    ) -> datetime | None:
+        floors: list[datetime] = []
+        if workspace.execution_claim_expires_at is not None:
+            floors.append(_utc_datetime(workspace.execution_claim_expires_at))
+
+        stmt = (
+            select(WorkspaceEvent.occurred_at)
+            .where(
+                WorkspaceEvent.workspace_id == workspace.id,
+                WorkspaceEvent.event_type == "workspace.state_changed",
+                WorkspaceEvent.new_state == status.value,
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        status_started_at = (await session.execute(stmt)).scalar_one_or_none()
+        if status_started_at is not None:
+            floors.append(_utc_datetime(status_started_at))
+
+        return max(floors) if floors else None
 
     async def _cleanup_and_fail_stale_active_execution(
         self,
@@ -967,10 +1003,16 @@ class ControlWorker:
                 return False
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return False
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
             if await self._has_preserved_active_execution_event(
                 session,
                 candidate.workspace_id,
                 candidate.status,
+                event_floor=event_floor,
             ):
                 return False
             return await self._has_stale_active_execution_event(
@@ -1871,6 +1913,12 @@ def _json_datetime(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.isoformat()
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:
