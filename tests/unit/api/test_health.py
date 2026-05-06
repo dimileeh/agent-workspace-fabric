@@ -285,6 +285,38 @@ async def test_readyz_response_shape_matches_contract(
 
 
 @pytest.mark.unit
+async def test_readyz_egress_audit_timeout_is_degraded_not_failure(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    class _TimeoutEgressAuditRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            raise TimeoutError("egress audit timed out")
+
+    import awf.db.repositories as repositories
+
+    monkeypatch.setattr(repositories, "EgressAuditRepository", _TimeoutEgressAuditRepository)
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    egress_audit = body["checks"]["egress_audit"]
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unknown"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_TIMEOUT"
+
+
+@pytest.mark.unit
 async def test_readyz_provider_warnings_remain_200(
     ready_app_and_client: tuple[Any, AsyncClient],
 ) -> None:

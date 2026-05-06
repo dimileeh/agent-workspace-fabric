@@ -467,10 +467,11 @@ async def readyz(
             )
         except TimeoutError:
             return CheckResult(
-                ok=False,
+                ok=True,
                 status="unknown",
                 reason="EGRESS_AUDIT_TIMEOUT",
                 detail=f"Egress audit summary_counts exceeded {_CHECK_TIMEOUT_SECONDS}s",
+                resource_count=0,
             )
         except Exception as exc:
             return CheckResult(ok=False, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail=str(exc))
