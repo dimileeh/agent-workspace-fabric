@@ -344,10 +344,13 @@ def _protected_rest_body(capability_name: str) -> dict[str, object] | None:
 
 
 def _protected_cli_args(capability_name: str) -> list[str]:
+    capability = CAPABILITIES_BY_NAME[capability_name]
+    if capability.cli_tokens is None:
+        raise AssertionError(f"{capability_name} has no registered CLI command")
+    command = list(capability.cli_tokens)
+
     if capability_name == "remonitor_workspace":
-        return [
-            "workspace",
-            "remonitor",
+        return command + [
             "ws_auth_contract",
             "--idempotency-key",
             "cli-auth",
@@ -355,9 +358,7 @@ def _protected_cli_args(capability_name: str) -> list[str]:
             "wrong-token",
         ]
     if capability_name == "adopt_pr_monitor":
-        return [
-            "workspace",
-            "adopt-pr",
+        return command + [
             "--repo",
             "owner/repo",
             "--pr",
@@ -366,17 +367,13 @@ def _protected_cli_args(capability_name: str) -> list[str]:
             "wrong-token",
         ]
     if capability_name == "workspace_logs":
-        return [
-            "workspace",
-            "logs",
+        return command + [
             "ws_auth_contract",
             "--api-token",
             "wrong-token",
         ]
     if capability_name == "read_workspace_log":
-        return [
-            "workspace",
-            "log",
+        return command + [
             "ws_auth_contract",
             "agent.stdout",
             "--api-token",
