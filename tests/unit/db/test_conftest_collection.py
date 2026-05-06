@@ -149,6 +149,52 @@ def test_collection_finish_runs_cleanup_for_all_schema_allocating_helpers(
     assert cleanup_calls == ["cleanup"]
 
 
+def test_collection_finish_runs_cleanup_for_schema_allocating_module_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_module_fixture_db.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "from collections.abc import AsyncIterator",
+                "import pytest",
+                "from sqlalchemy.ext.asyncio import AsyncSession",
+                "from tests.postgres import postgres_test_session",
+                "",
+                "@pytest.fixture",
+                "async def session() -> AsyncIterator[AsyncSession]:",
+                "    async with postgres_test_session() as s:",
+                "        yield s",
+                "",
+                "async def test_uses_module_fixture(session: AsyncSession):",
+                "    assert session",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    postgres_mod = pytest.importorskip("tests." + "postgres")
+    cleanup_name = "cleanup_stale_" + "postgres_" + "test_" + "schemas"
+    cleanup_calls: list[str] = []
+
+    monkeypatch.setattr(postgres_mod, cleanup_name, lambda: cleanup_calls.append("cleanup"))
+
+    root_conftest.pytest_collection_finish(
+        _FakeSession(
+            [
+                _FakeItem(
+                    test_file,
+                    fixturenames=("session",),
+                    name="test_uses_module_fixture",
+                    lineno=10,
+                )
+            ]
+        )  # type: ignore[arg-type]
+    )
+
+    assert cleanup_calls == ["cleanup"]
+
+
 def test_collection_finish_skips_unselected_postgres_helper_calls(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

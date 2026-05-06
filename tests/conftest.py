@@ -105,6 +105,10 @@ def _item_source_line(item: pytest.Item) -> int | None:
     return lineno + 1
 
 
+def _item_fixture_names(item: pytest.Item) -> tuple[str, ...]:
+    return tuple(sorted(name for name in getattr(item, "fixturenames", ()) if isinstance(name, str)))
+
+
 def _test_function_contains_line(node: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> bool:
     return node.lineno <= line <= getattr(node, "end_lineno", node.lineno)
 
@@ -132,6 +136,47 @@ def _selected_test_function_nodes(
     return tuple(node for node in function_nodes if node.name == test_name)
 
 
+def _pytest_fixture_name(
+    node: ast.expr,
+    function_name: str,
+) -> str | None:
+    decorator = node.func if isinstance(node, ast.Call) else node
+    if isinstance(decorator, ast.Name):
+        is_fixture = decorator.id == "fixture"
+    elif isinstance(decorator, ast.Attribute):
+        is_fixture = decorator.attr == "fixture"
+    else:
+        is_fixture = False
+    if not is_fixture:
+        return None
+    if isinstance(node, ast.Call):
+        for keyword in node.keywords:
+            if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
+                name = keyword.value.value
+                if isinstance(name, str):
+                    return name
+    return function_name
+
+
+def _selected_fixture_nodes(
+    tree: ast.AST,
+    item: pytest.Item,
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...]:
+    fixture_names = set(_item_fixture_names(item))
+    if not fixture_names:
+        return ()
+    selected_nodes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if any(
+            _pytest_fixture_name(decorator, node.name) in fixture_names
+            for decorator in node.decorator_list
+        ):
+            selected_nodes.append(node)
+    return tuple(selected_nodes)
+
+
 def _node_calls_postgres_schema_helper(node: ast.AST) -> bool:
     return any(
         _postgres_call_helper_name(child.func) in _POSTGRES_SCHEMA_HELPER_CALLS
@@ -142,10 +187,10 @@ def _node_calls_postgres_schema_helper(node: ast.AST) -> bool:
 
 def _test_source_calls_postgres_schema_helper(
     item: pytest.Item,
-    cache: dict[tuple[Path, str | None, int | None], bool],
+    cache: dict[tuple[Path, str | None, int | None, tuple[str, ...]], bool],
 ) -> bool:
     path = item.path
-    cache_key = (path, _item_test_name(item), _item_source_line(item))
+    cache_key = (path, _item_test_name(item), _item_source_line(item), _item_fixture_names(item))
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
@@ -160,7 +205,7 @@ def _test_source_calls_postgres_schema_helper(
         cache[cache_key] = False
         return False
 
-    selected_nodes = _selected_test_function_nodes(tree, item)
+    selected_nodes = _selected_test_function_nodes(tree, item) + _selected_fixture_nodes(tree, item)
     nodes_to_scan: tuple[ast.AST, ...] = selected_nodes or (tree,)
     calls_helper = any(_node_calls_postgres_schema_helper(node) for node in nodes_to_scan)
     cache[cache_key] = calls_helper
@@ -175,7 +220,7 @@ def _uses_postgres_test_database(item: pytest.Item, cache: dict[Path, bool]) -> 
 
 def _uses_postgres_schema_allocator(
     item: pytest.Item,
-    cache: dict[tuple[Path, str | None, int | None], bool],
+    cache: dict[tuple[Path, str | None, int | None, tuple[str, ...]], bool],
 ) -> bool:
     if _uses_postgres_test_fixture(item):
         return True
@@ -216,7 +261,7 @@ def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
 def pytest_collection_finish(session: pytest.Session) -> None:
     """Clear stale Postgres schemas before DB-backed test selections start."""
 
-    source_cache: dict[tuple[Path, str | None, int | None], bool] = {}
+    source_cache: dict[tuple[Path, str | None, int | None, tuple[str, ...]], bool] = {}
     if any(_uses_postgres_schema_allocator(item, source_cache) for item in session.items):
         from tests.postgres import cleanup_stale_postgres_test_schemas
 
