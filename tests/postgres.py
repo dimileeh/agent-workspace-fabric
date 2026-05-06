@@ -115,25 +115,6 @@ async def _create_metadata(engine: AsyncEngine) -> None:
 
 async def _drop_schema(engine: AsyncEngine, schema: str) -> None:
     quoted_schema = _quote_identifier(schema)
-    async with engine.connect() as conn:
-        result = await conn.execute(
-            text(
-                """
-                SELECT tablename
-                FROM pg_tables
-                WHERE schemaname = :schema
-                ORDER BY tablename
-                """
-            ),
-            {"schema": schema},
-        )
-        table_names = list(result.scalars())
-
-    for table_name in table_names:
-        quoted_table = _quote_identifier(table_name)
-        async with engine.begin() as conn:
-            await conn.execute(text(f"DROP TABLE IF EXISTS {quoted_schema}.{quoted_table} CASCADE"))
-
     async with engine.begin() as conn:
         await conn.execute(text(f"DROP SCHEMA IF EXISTS {quoted_schema} CASCADE"))
 

@@ -27,6 +27,37 @@ from awf.service.pr_monitor_adoption import (
 from awf.service.secret_leases import _ensure_utc
 from awf.service.status import _utc_datetime
 from awf.service.worker import _merge_coordinator_for_database_url
+from tests.postgres import _drop_schema
+
+
+class _AsyncConnectionContext:
+    def __init__(self, connection: _RecordingConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self) -> _RecordingConnection:
+        return self._connection
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+
+class _RecordingConnection:
+    def __init__(self, statements: list[tuple[str, object | None]]) -> None:
+        self._statements = statements
+
+    async def execute(self, statement: object, params: object | None = None) -> None:
+        self._statements.append((str(statement), params))
+
+
+class _SchemaDropEngine:
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, object | None]] = []
+
+    def begin(self) -> _AsyncConnectionContext:
+        return _AsyncConnectionContext(_RecordingConnection(self.statements))
+
+    def connect(self) -> _AsyncConnectionContext:
+        raise AssertionError("_drop_schema should rely on DROP SCHEMA CASCADE")
 
 
 @pytest.mark.unit
@@ -52,6 +83,15 @@ def test_make_engine_strips_test_url_options_and_enables_null_pool(
     assert captured["url"] == "postgresql+asyncpg://awf:pw@localhost:5433/awf"
     assert captured["kwargs"]["connect_args"]["server_settings"]["search_path"] == "first"
     assert captured["kwargs"]["poolclass"] is NullPool
+
+
+@pytest.mark.unit
+async def test_drop_schema_uses_single_cascade_drop() -> None:
+    engine = _SchemaDropEngine()
+
+    await _drop_schema(engine, "awf_test")
+
+    assert engine.statements == [('DROP SCHEMA IF EXISTS "awf_test" CASCADE', None)]
 
 
 @pytest.mark.unit
