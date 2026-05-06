@@ -8,6 +8,7 @@ backend call — which is the single source of truth for downstream behavior.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -18,10 +19,17 @@ from awf.api.schemas import (
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
 )
-from awf.db.enums import OperationStatus, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Operation
 from awf.mcp.server import build_mcp_server
 from awf.service.workspaces import WorkspaceService
 from tests.unit.contracts._capabilities import CAPABILITIES_BY_NAME
+from tests.unit.contracts._control_scenarios import (
+    CONTROL_CAPABILITY_NAMES,
+    call_mcp_control,
+    call_rest_control,
+    response_operation_id_field,
+)
 from tests.unit.contracts._stack import ContractStack
 
 
@@ -420,3 +428,191 @@ async def test_mcp_destroy_invokes_service_with_canonical_kwargs(
             },
         )
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Every registered control normalizes REST headers/body/query and MCP args alike."""
+    from awf.service import controls as controls_module
+
+    calls: list[dict[str, Any]] = []
+
+    async def record_cancel(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        stop_stack: bool,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "stop_stack": stop_stack,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_control_response(workspace_id, operation_id="op_cancel_contract")
+
+    async def record_stop_or_remonitor(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_control_response(workspace_id, operation_id=f"op_{capability_name}")
+
+    async def record_destroy(
+        self: Any,
+        workspace_id: str,
+        *,
+        force: bool,
+        remove_volumes: bool,
+        remove_worktree: bool,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "force": force,
+                "remove_volumes": remove_volumes,
+                "remove_worktree": remove_worktree,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_control_response(workspace_id, operation_id="op_destroy_contract")
+
+    async def record_refresh(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_operation(workspace_id, OperationType.refresh)
+
+    async def record_validate(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        requested_tier: int | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "requested_tier": requested_tier,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_operation(workspace_id, OperationType.validate)
+
+    async def record_rebase(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_operation(workspace_id, OperationType.rebase)
+
+    monkeypatch.setattr(controls_module.WorkspaceControlService, "cancel_workspace", record_cancel)
+    monkeypatch.setattr(controls_module.WorkspaceControlService, "stop_workspace", record_stop_or_remonitor)
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService,
+        "remonitor_workspace",
+        record_stop_or_remonitor,
+    )
+    monkeypatch.setattr(controls_module.WorkspaceControlService, "destroy_workspace", record_destroy)
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService,
+        "request_refresh_workspace",
+        record_refresh,
+    )
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService,
+        "request_validate_workspace",
+        record_validate,
+    )
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService,
+        "request_rebase_workspace",
+        record_rebase,
+    )
+
+    rest_response = await call_rest_control(
+        contract_stack,
+        capability_name,
+        workspace_id="ws_canonical",
+        idempotency_key="shared-key",
+        expected_version=11,
+    )
+    mcp_response = await call_mcp_control(
+        contract_stack,
+        capability_name,
+        workspace_id="ws_canonical",
+        idempotency_key="shared-key",
+        expected_version=11,
+    )
+
+    assert rest_response.status_code in {200, 202}, rest_response.text
+    assert mcp_response.isError is False, mcp_response.structuredContent
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    operation_field = response_operation_id_field(capability_name)
+    assert operation_field in rest_response.json()
+    assert operation_field in mcp_response.structuredContent
+
+
+def _stub_operation(workspace_id: str, operation_type: OperationType) -> Operation:
+    return Operation(
+        id=f"op_{operation_type.value}_contract",
+        workspace_id=workspace_id,
+        type=operation_type.value,
+        status=OperationStatus.pending.value,
+        payload={"source": "contract"},
+        idempotency_key="shared-key",
+        created_at=datetime.now(UTC),
+    )

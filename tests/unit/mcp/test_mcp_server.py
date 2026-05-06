@@ -1777,10 +1777,11 @@ class TestWorkspaceLogs:
             "awf_list_workspace_logs",
             {"workspace_id": workspace.id},
         )
-        assert isinstance(listed, list)
-        assert [stream["stream_id"] for stream in listed] == ["agent.stdout"]
-        assert listed[0]["byte_count"] == len("alpha\nbeta\n")
-        assert listed[0]["line_count"] == 2
+        assert isinstance(listed, dict)
+        assert [stream["stream_id"] for stream in listed["items"]] == ["agent.stdout"]
+        assert listed["items"][0]["byte_count"] == len("alpha\nbeta\n")
+        assert listed["items"][0]["line_count"] == 2
+        assert listed["limit"] == 1
 
         chunk = await _call(
             mcp,
@@ -1797,7 +1798,7 @@ class TestWorkspaceLogs:
             "offset": 6,
             "next_offset": 10,
             "eof": False,
-            "text": "beta",
+            "data": "beta",
         }
 
         eof = await _call(
@@ -1815,7 +1816,7 @@ class TestWorkspaceLogs:
             "offset": len("alpha\nbeta\n"),
             "next_offset": len("alpha\nbeta\n"),
             "eof": True,
-            "text": "",
+            "data": "",
         }
 
     @pytest.mark.unit

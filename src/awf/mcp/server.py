@@ -33,6 +33,8 @@ from awf.api.schemas import (
     WorkspaceCreateV2Request,
     WorkspaceLockListResponse,
     WorkspaceLockResponse,
+    WorkspaceLogListResponse,
+    WorkspaceLogReadResponse,
     WorkspaceOverlapGraphResponse,
 )
 from awf.common.audit import redact_audit_text
@@ -570,10 +572,17 @@ def build_mcp_server(
     @mcp.tool(name="awf_list_workspace_logs")
     async def awf_list_workspace_logs(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
-    ) -> list[dict[str, Any]] | None:
-        """List indexed durable log streams for one workspace."""
+    ) -> CallToolResult:
+        """List indexed durable log streams for one workspace using the REST envelope."""
         rows = await service.list_logs(workspace_id)
-        return [row.model_dump(mode="json") for row in rows] if rows is not None else None
+        if rows is None:
+            return _null_tool_result()
+        response = WorkspaceLogListResponse(
+            items=rows,
+            limit=len(rows),
+            cursor=None,
+        )
+        return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_list_merge_queue")
     async def awf_list_merge_queue(
@@ -868,12 +877,21 @@ def build_mcp_server(
         ),
     ) -> dict[str, Any] | None:
         """Read a bounded chunk from an indexed durable log stream."""
-        return await service.read_log(
+        result = await service.read_log(
             workspace_id,
             stream_id,
             offset=offset,
             limit_bytes=limit_bytes,
         )
+        if result is None:
+            return None
+        return WorkspaceLogReadResponse(
+            stream_id=str(result["stream_id"]),
+            offset=int(result["offset"]),
+            next_offset=int(result["next_offset"]),
+            eof=bool(result["eof"]),
+            data=str(result["text"]),
+        ).model_dump(mode="json")
 
     @mcp.tool(name="awf_list_tasks")
     async def awf_list_tasks(

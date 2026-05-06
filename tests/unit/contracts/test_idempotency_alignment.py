@@ -26,6 +26,15 @@ from tests.unit.contracts._capabilities import (
     normalize_mcp_error_body,
     normalize_rest_error_body,
 )
+from tests.unit.contracts._control_scenarios import (
+    CONTROL_CAPABILITY_NAMES,
+    call_mcp_control,
+    call_rest_control,
+    control_success_status,
+    install_control_side_effect_stubs,
+    response_operation_id_field,
+    seed_workspace_for_control,
+)
 from tests.unit.contracts._stack import ContractStack
 
 _runner = CliRunner()
@@ -306,3 +315,145 @@ async def test_mcp_control_tools_require_idempotency_key_in_schema(
     assert capability.requires_idempotency_key is True
     tools = {tool.name: tool for tool in await contract_stack.mcp.list_tools()}
     assert "idempotency_key" in tools[capability.mcp_tool or ""].inputSchema.get("required", [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+async def test_rest_control_idempotency_replay_returns_same_operation_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Every registered versioned control replays exactly at the REST boundary."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, _version = await seed_workspace_for_control(
+        contract_stack.factory,
+        capability_name,
+    )
+    key = f"{capability_name}-rest-replay"
+
+    first = await call_rest_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+    replay = await call_rest_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+
+    assert first.status_code == control_success_status(capability_name), first.text
+    assert replay.status_code == control_success_status(capability_name), replay.text
+    operation_field = response_operation_id_field(capability_name)
+    assert replay.json()[operation_field] == first.json()[operation_field]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+async def test_mcp_control_idempotency_replay_returns_same_operation_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Every registered versioned control replays exactly at the MCP boundary."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, _version = await seed_workspace_for_control(
+        contract_stack.factory,
+        capability_name,
+    )
+    key = f"{capability_name}-mcp-replay"
+
+    first = await call_mcp_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+    replay = await call_mcp_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+
+    assert isinstance(first, CallToolResult)
+    assert isinstance(replay, CallToolResult)
+    assert first.isError is False, first.structuredContent
+    assert replay.isError is False, replay.structuredContent
+    operation_field = response_operation_id_field(capability_name)
+    assert replay.structuredContent[operation_field] == first.structuredContent[operation_field]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+async def test_rest_control_idempotency_conflict_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Same idempotency key plus changed user payload conflicts on every REST control."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, _version = await seed_workspace_for_control(
+        contract_stack.factory,
+        capability_name,
+    )
+    key = f"{capability_name}-rest-conflict"
+
+    first = await call_rest_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+    conflict = await call_rest_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+        variant="changed",
+    )
+
+    assert first.status_code == control_success_status(capability_name), first.text
+    assert conflict.status_code == 409, conflict.text
+    envelope = normalize_rest_error_body(conflict.json())
+    assert envelope["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+async def test_mcp_control_idempotency_conflict_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Same idempotency key plus changed user payload conflicts on every MCP control."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, _version = await seed_workspace_for_control(
+        contract_stack.factory,
+        capability_name,
+    )
+    key = f"{capability_name}-mcp-conflict"
+
+    first = await call_mcp_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+    conflict = await call_mcp_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+        variant="changed",
+    )
+
+    assert isinstance(first, CallToolResult)
+    assert isinstance(conflict, CallToolResult)
+    assert first.isError is False, first.structuredContent
+    assert conflict.isError is True, conflict.structuredContent
+    envelope = normalize_mcp_error_body(conflict.structuredContent)
+    assert envelope["error_code"] == "IDEMPOTENCY_CONFLICT"

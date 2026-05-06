@@ -22,6 +22,13 @@ from tests.unit.contracts._capabilities import (
     normalize_rest_error_body,
     parity_matrix_error_codes,
 )
+from tests.unit.contracts._control_scenarios import (
+    CONTROL_CAPABILITY_NAMES,
+    call_mcp_control,
+    call_rest_control,
+    seed_basic_workspace,
+    seed_monitoring_workspace,
+)
 from tests.unit.contracts._stack import ContractStack
 
 
@@ -277,3 +284,137 @@ async def test_rest_and_mcp_agree_on_invalid_request_missing_idempotency_key() -
     capability = CAPABILITIES_BY_NAME["cancel_workspace"]
     assert capability.supports_idempotency_key is True
     assert capability.mcp_tool is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+async def test_rest_and_mcp_agree_on_not_found_for_every_control_registry_row(
+    contract_stack: ContractStack,
+    capability_name: str,
+) -> None:
+    rest_response = await call_rest_control(
+        contract_stack,
+        capability_name,
+        workspace_id="ws_not_present",
+        idempotency_key=f"{capability_name}-not-found",
+    )
+    assert rest_response.status_code == 404, rest_response.text
+    rest_envelope = normalize_rest_error_body(rest_response.json())
+
+    mcp_result = await call_mcp_control(
+        contract_stack,
+        capability_name,
+        workspace_id="ws_not_present",
+        idempotency_key=f"{capability_name}-not-found-mcp",
+    )
+    assert mcp_result.isError is True, mcp_result.structuredContent
+    mcp_envelope = normalize_mcp_error_body(mcp_result.structuredContent)
+
+    assert rest_envelope == mcp_envelope
+    assert rest_envelope["error_code"] == "NOT_FOUND"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("capability_name", "final_status", "expected_code"),
+    [
+        ("remonitor_workspace", WorkspaceStatus.completed, "WORKSPACE_STATE_NOT_REMONITORABLE"),
+        ("request_validation", WorkspaceStatus.completed, "WORKSPACE_STATE_NOT_VALIDATABLE"),
+        ("refresh_workspace", WorkspaceStatus.destroyed, "WORKSPACE_STATE_NOT_REFRESHABLE"),
+        ("rebase_workspace", WorkspaceStatus.completed, "WORKSPACE_STATE_NOT_REBASEABLE"),
+    ],
+)
+async def test_rest_and_mcp_agree_on_invalid_state_for_registry_controls(
+    contract_stack: ContractStack,
+    capability_name: str,
+    final_status: WorkspaceStatus,
+    expected_code: str,
+) -> None:
+    workspace_id, _version = await seed_monitoring_workspace(
+        contract_stack.factory,
+        final_status=final_status,
+        with_open_candidate=capability_name == "rebase_workspace",
+    )
+
+    rest_response = await call_rest_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=f"{capability_name}-invalid-state",
+    )
+    assert rest_response.status_code == 409, rest_response.text
+    rest_envelope = normalize_rest_error_body(rest_response.json())
+
+    mcp_result = await call_mcp_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=f"{capability_name}-invalid-state-mcp",
+    )
+    assert mcp_result.isError is True, mcp_result.structuredContent
+    mcp_envelope = normalize_mcp_error_body(mcp_result.structuredContent)
+
+    assert rest_envelope["error_code"] == mcp_envelope["error_code"] == expected_code
+    assert rest_envelope["message"] == mcp_envelope["message"]
+    assert rest_envelope["detail"] == mcp_envelope["detail"]
+
+
+@pytest.mark.unit
+async def test_rest_and_mcp_agree_on_destroy_active_without_force(
+    contract_stack: ContractStack,
+) -> None:
+    workspace_id, _version = await seed_basic_workspace(contract_stack.factory)
+    capability = CAPABILITIES_BY_NAME["destroy_workspace"]
+
+    rest_response = await contract_stack.client.delete(
+        capability.rest_path.format(workspace_id=workspace_id),
+        headers={
+            **contract_stack.auth_headers,
+            "Idempotency-Key": "destroy-active-rest",
+        },
+    )
+    assert rest_response.status_code == 409, rest_response.text
+    rest_envelope = normalize_rest_error_body(rest_response.json())
+
+    mcp_result = await _call_mcp(
+        contract_stack.mcp,
+        capability.mcp_tool or "",
+        {
+            "workspace_id": workspace_id,
+            "force": False,
+            "remove_volumes": True,
+            "remove_worktree": True,
+            "idempotency_key": "destroy-active-mcp",
+        },
+    )
+    assert mcp_result.isError is True, mcp_result.structuredContent
+    mcp_envelope = normalize_mcp_error_body(mcp_result.structuredContent)
+
+    assert rest_envelope["error_code"] == mcp_envelope["error_code"] == "WORKSPACE_ACTIVE"
+    assert rest_envelope["message"] == mcp_envelope["message"]
+
+
+@pytest.mark.unit
+async def test_rest_and_mcp_retry_invalid_state_reason_code_matches_registry(
+    contract_stack: ContractStack,
+) -> None:
+    workspace_id, _version = await seed_basic_workspace(contract_stack.factory)
+    capability = CAPABILITIES_BY_NAME["retry_workspace"]
+
+    rest_response = await contract_stack.client.post(
+        capability.rest_path.format(workspace_id=workspace_id),
+    )
+    assert rest_response.status_code == 409, rest_response.text
+    rest_envelope = normalize_rest_error_body(rest_response.json())
+
+    mcp_result = await _call_mcp(
+        contract_stack.mcp,
+        capability.mcp_tool or "",
+        {"workspace_id": workspace_id},
+    )
+    assert mcp_result.isError is True, mcp_result.structuredContent
+    mcp_envelope = normalize_mcp_error_body(mcp_result.structuredContent)
+
+    assert rest_envelope["error_code"] == mcp_envelope["error_code"] == "WORKSPACE_NOT_RETRYABLE"
+    assert rest_envelope["message"] == mcp_envelope["message"]
+    assert rest_envelope["detail"] == mcp_envelope["detail"]

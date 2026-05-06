@@ -29,10 +29,27 @@ from awf.cli.main import app as cli_app
 from awf.common.config import Settings, get_settings
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from tests.unit.contracts._capabilities import mutating_capabilities, normalize_rest_error_body
+from tests.unit.contracts._capabilities import (
+    CAPABILITIES_BY_NAME,
+    all_capabilities,
+    mutating_capabilities,
+    normalize_rest_error_body,
+)
 from tests.unit.contracts._stack import ContractStack
 
 _runner = CliRunner()
+
+PROTECTED_REST_CAPABILITY_NAMES = tuple(
+    sorted(capability.name for capability in all_capabilities() if capability.auth_required)
+)
+
+PROTECTED_CLI_CAPABILITY_NAMES = tuple(
+    sorted(
+        capability.name
+        for capability in all_capabilities()
+        if capability.auth_required and capability.cli_tokens is not None
+    )
+)
 
 
 @pytest.mark.unit
@@ -222,3 +239,147 @@ async def test_rest_cancel_workspace_rejects_wrong_bearer_after_token_required(
     assert response.status_code == 401
     envelope = normalize_rest_error_body(response.json())
     assert envelope["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", PROTECTED_REST_CAPABILITY_NAMES)
+async def test_every_registry_protected_rest_route_rejects_wrong_bearer(
+    contract_stack: ContractStack,
+    capability_name: str,
+) -> None:
+    capability = CAPABILITIES_BY_NAME[capability_name]
+    response = await contract_stack.client.request(
+        capability.rest_method,
+        _protected_rest_path(capability_name),
+        headers=_protected_rest_headers(capability_name),
+        params=_protected_rest_params(capability_name),
+        json=_protected_rest_body(capability_name),
+    )
+
+    assert response.status_code == 401, (capability_name, response.text)
+    envelope = normalize_rest_error_body(response.json())
+    assert envelope["error_code"] == "UNAUTHORIZED"
+    assert response.headers.get("WWW-Authenticate") == "Bearer"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", PROTECTED_CLI_CAPABILITY_NAMES)
+def test_every_registry_protected_cli_command_propagates_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    captured: dict[str, Any] = {}
+    body = {"detail": {"error_code": "UNAUTHORIZED", "message": "Invalid AWF API token."}}
+
+    def _capture(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        captured["method"] = method
+        captured["url"] = url
+        captured["headers"] = kwargs.get("headers", {})
+        return httpx.Response(
+            status_code=401,
+            content=json.dumps(body).encode(),
+            headers={"content-type": "application/json"},
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr("awf.cli.main.httpx.request", _capture)
+
+    result = _runner.invoke(cli_app, _protected_cli_args(capability_name))
+
+    assert result.exit_code != 0
+    assert captured["headers"]["Authorization"] == "Bearer wrong-token"
+    combined = (result.output or "") + (result.stderr or "")
+    assert "UNAUTHORIZED" in combined
+
+
+def _protected_rest_path(capability_name: str) -> str:
+    capability = CAPABILITIES_BY_NAME[capability_name]
+    return capability.rest_path.format(
+        workspace_id="ws_auth_contract",
+        stream_id="agent.stdout",
+    )
+
+
+def _protected_rest_headers(capability_name: str) -> dict[str, str]:
+    headers = {"Authorization": "Bearer wrong-token"}
+    capability = CAPABILITIES_BY_NAME[capability_name]
+    if capability.supports_idempotency_key:
+        headers["Idempotency-Key"] = f"{capability_name}-auth"
+    return headers
+
+
+def _protected_rest_params(capability_name: str) -> dict[str, object] | None:
+    if capability_name == "destroy_workspace":
+        return {"force": True, "remove_volumes": True, "remove_worktree": False}
+    if capability_name == "workspace_artifact_download":
+        return {"path": "logs/stdout.txt"}
+    if capability_name == "read_workspace_log":
+        return {"offset": 0, "limit_bytes": 16}
+    return None
+
+
+def _protected_rest_body(capability_name: str) -> dict[str, object] | None:
+    if capability_name == "cancel_workspace":
+        return {"reason": "auth contract", "stop_stack": True}
+    if capability_name in {"stop_workspace", "remonitor_workspace", "refresh_workspace", "rebase_workspace"}:
+        return {"reason": "auth contract"}
+    if capability_name == "request_validation":
+        return {"reason": "auth contract", "requested_tier": 1}
+    if capability_name == "adopt_pr_monitor":
+        return {
+            "repo_url": None,
+            "repo_slug": "owner/repo",
+            "pr_number": 1,
+            "pr_url": None,
+            "agent": "codex",
+            "profile_ref": "auto",
+            "profile": None,
+            "auto_merge": True,
+            "initial_review_grace_period_seconds": None,
+            "task_title": None,
+            "task_prompt": None,
+            "reason": None,
+        }
+    return None
+
+
+def _protected_cli_args(capability_name: str) -> list[str]:
+    if capability_name == "remonitor_workspace":
+        return [
+            "workspace",
+            "remonitor",
+            "ws_auth_contract",
+            "--idempotency-key",
+            "cli-auth",
+            "--api-token",
+            "wrong-token",
+        ]
+    if capability_name == "adopt_pr_monitor":
+        return [
+            "workspace",
+            "adopt-pr",
+            "--repo",
+            "owner/repo",
+            "--pr",
+            "1",
+            "--api-token",
+            "wrong-token",
+        ]
+    if capability_name == "workspace_logs":
+        return [
+            "workspace",
+            "logs",
+            "ws_auth_contract",
+            "--api-token",
+            "wrong-token",
+        ]
+    if capability_name == "read_workspace_log":
+        return [
+            "workspace",
+            "log",
+            "ws_auth_contract",
+            "agent.stdout",
+            "--api-token",
+            "wrong-token",
+        ]
+    raise AssertionError(f"no protected CLI args for {capability_name}")
