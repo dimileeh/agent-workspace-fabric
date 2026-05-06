@@ -422,6 +422,7 @@ class WorkspaceService:
         async with self._factory() as s:
             repo = WorkspaceRepository(s)
             if idempotency_key is not None:
+                await repo.acquire_idempotency_key_lock(idempotency_key)
                 existing = await repo.get_by_idempotency_key(idempotency_key)
                 if existing is not None:
                     if not workspace_create_payload_matches(existing, req):
@@ -454,6 +455,7 @@ class WorkspaceService:
         async with self._factory() as s:
             repo = WorkspaceRepository(s)
             if idempotency_key is not None:
+                await repo.acquire_idempotency_key_lock(idempotency_key)
                 existing = await repo.get_by_idempotency_key(idempotency_key)
                 if existing is not None:
                     if not workspace_create_v2_payload_matches(existing, req):
