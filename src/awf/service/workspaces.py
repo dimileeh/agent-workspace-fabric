@@ -642,14 +642,14 @@ class WorkspaceService:
             compose_project_name = workspace.compose_project_name
             runtime_workspace = runtime_workspace_from_workspace(workspace)
             app_endpoints = _workspace_app_endpoint_responses(workspace)
-            persisted_runtime_health = _workspace_runtime_health_from_events(workspace)
+            preserved_runtime_health = _workspace_preserved_runtime_health_from_events(workspace)
 
         snapshot = await self._runtime_inspector.inspect(compose_project_name)
         finding = classify_runtime_snapshot(runtime_workspace, snapshot)
         runtime_health = (
             WorkspaceRuntimeHealthResponse(**finding.to_response_dict())
             if finding is not None
-            else persisted_runtime_health
+            else preserved_runtime_health
         )
         return WorkspaceRuntimeResponse(
             workspace_id=workspace_id,
@@ -1839,11 +1839,33 @@ def _approved_planning_scope_fallback_model(
 def _workspace_runtime_health_from_events(
     workspace: Workspace,
 ) -> WorkspaceRuntimeHealthResponse | None:
+    return _workspace_runtime_health_from_matching_events(
+        workspace,
+        event_types=frozenset(
+            {
+                RUNTIME_STRANDED_EVENT_TYPE,
+                ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+            }
+        ),
+    )
+
+
+def _workspace_preserved_runtime_health_from_events(
+    workspace: Workspace,
+) -> WorkspaceRuntimeHealthResponse | None:
+    return _workspace_runtime_health_from_matching_events(
+        workspace,
+        event_types=frozenset({ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE}),
+    )
+
+
+def _workspace_runtime_health_from_matching_events(
+    workspace: Workspace,
+    *,
+    event_types: frozenset[str],
+) -> WorkspaceRuntimeHealthResponse | None:
     for event in reversed(workspace.events):
-        if event.event_type not in {
-            RUNTIME_STRANDED_EVENT_TYPE,
-            ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
-        }:
+        if event.event_type not in event_types:
             continue
         payload = event.payload or {}
         reason_code = payload.get("reason_code") or event.reason_code

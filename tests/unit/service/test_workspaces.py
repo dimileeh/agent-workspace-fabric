@@ -452,6 +452,70 @@ async def test_runtime_detail_uses_preserved_health_when_live_snapshot_is_health
 
 
 @pytest.mark.unit
+async def test_runtime_detail_ignores_stale_stranded_health_when_live_snapshot_is_healthy(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="recovered runtime endpoint",
+            task_prompt="do not show stale stranded findings",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.running.value
+        workspace.compose_project_name = "awf_recovered_runtime_endpoint"
+        workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
+        await repo.add_event(
+            workspace,
+            event_type=RUNTIME_STRANDED_EVENT_TYPE,
+            reason_code="AGENT_CONTAINER_EXITED",
+            payload={
+                "reason_code": "AGENT_CONTAINER_EXITED",
+                "decision": "fail_workspace",
+                "message": "Workspace agent container is not running.",
+                "runtime": {
+                    "services": [
+                        {
+                            "name": "agent",
+                            "state": "exited",
+                            "container_id": "agent-old",
+                        }
+                    ]
+                },
+            },
+        )
+        await session.commit()
+        workspace_id = workspace.id
+
+    inspector = _RuntimeInspector(
+        {
+            "awf_recovered_runtime_endpoint": RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent-running",
+                        image="awf-agent:latest",
+                        state="running",
+                    )
+                ],
+            )
+        }
+    )
+
+    runtime = await WorkspaceService(
+        session_factory,
+        runtime_inspector=inspector,
+    ).get_runtime(workspace_id)
+
+    assert runtime is not None
+    assert runtime.runtime_health is None
+
+
+@pytest.mark.unit
 async def test_runtime_detail_ignores_preserved_health_for_stopped_terminal_workspace(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
