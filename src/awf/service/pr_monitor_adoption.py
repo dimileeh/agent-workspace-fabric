@@ -535,12 +535,13 @@ async def _next_adoption_workspace_idempotency_key(
     *,
     logical_idempotency_key: str,
 ) -> str:
-    if await workspace_repo.get_by_idempotency_key(logical_idempotency_key) is None:
+    existing_keys = set(await workspace_repo.list_idempotency_key_family(logical_idempotency_key))
+    if logical_idempotency_key not in existing_keys:
         return logical_idempotency_key
 
     for generation in range(1, 1000):
         candidate = f"{logical_idempotency_key}:g{generation}"
-        if await workspace_repo.get_by_idempotency_key(candidate) is None:
+        if candidate not in existing_keys:
             return candidate
     raise RuntimeError("Could not allocate a fresh PR adoption workspace idempotency key.")
 

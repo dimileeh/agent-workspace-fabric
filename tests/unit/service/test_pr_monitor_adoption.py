@@ -2119,10 +2119,41 @@ class TestPullRequestMonitorAdoptionService:
         assert task_attempt_selects == []
 
     @pytest.mark.unit
+    async def test_adoption_workspace_idempotency_key_prefetches_generation_family(
+        self,
+    ) -> None:
+        class _WorkspaceRepo:
+            def __init__(self) -> None:
+                self.list_calls: list[str] = []
+
+            async def list_idempotency_key_family(self, logical_key: str) -> list[str]:
+                self.list_calls.append(logical_key)
+                return [
+                    logical_key,
+                    f"{logical_key}:g1",
+                    f"{logical_key}:g3",
+                    f"{logical_key}:g1000",
+                    f"{logical_key}:gignored",
+                ]
+
+            async def get_by_idempotency_key(self, key: str) -> object | None:
+                raise AssertionError(f"unexpected per-key lookup for {key}")
+
+        repo = _WorkspaceRepo()
+
+        key = await adoption_module._next_adoption_workspace_idempotency_key(
+            repo,  # type: ignore[arg-type]
+            logical_idempotency_key="pr-adopt:logical",
+        )
+
+        assert key == "pr-adopt:logical:g2"
+        assert repo.list_calls == ["pr-adopt:logical"]
+
+    @pytest.mark.unit
     async def test_adoption_workspace_idempotency_key_exhaustion_is_explicit(self) -> None:
         class _ExhaustedWorkspaceRepo:
-            async def get_by_idempotency_key(self, key: str) -> object:
-                return object()
+            async def list_idempotency_key_family(self, logical_key: str) -> list[str]:
+                return [logical_key, *(f"{logical_key}:g{generation}" for generation in range(1, 1000))]
 
         with pytest.raises(RuntimeError, match="fresh PR adoption workspace idempotency key"):
             await adoption_module._next_adoption_workspace_idempotency_key(

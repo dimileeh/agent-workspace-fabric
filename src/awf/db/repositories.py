@@ -2674,6 +2674,21 @@ class WorkspaceRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_idempotency_key_family(self, logical_key: str) -> builtins.list[str]:
+        generation_pattern = f"{_escape_like_pattern(logical_key)}:g%"
+        stmt = (
+            select(Workspace.idempotency_key)
+            .where(
+                or_(
+                    Workspace.idempotency_key == logical_key,
+                    Workspace.idempotency_key.like(generation_pattern, escape="\\"),
+                )
+            )
+            .order_by(Workspace.idempotency_key.asc())
+        )
+        keys = (await self._session.execute(stmt)).scalars().all()
+        return [key for key in keys if key is not None]
+
     async def list_pr_adoption_history(
         self,
         *,
@@ -3738,6 +3753,10 @@ def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -
     if unsigned >= 1 << 63:
         return unsigned - (1 << 64)
     return unsigned
+
+
+def _escape_like_pattern(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _operation_idempotency_advisory_lock_key(key: str) -> int:

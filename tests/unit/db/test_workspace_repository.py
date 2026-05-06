@@ -969,6 +969,41 @@ class TestIdempotency:
         repo = WorkspaceRepository(session)
         assert await repo.get_by_idempotency_key("never-used") is None
 
+    @pytest.mark.unit
+    async def test_list_idempotency_key_family_returns_exact_and_generation_keys(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        logical_key = "adopt_%:key"
+        for index, idempotency_key in enumerate(
+            [
+                logical_key,
+                f"{logical_key}:g1",
+                f"{logical_key}:g2",
+                f"{logical_key}:retry",
+                "adoptX%:key:g1",
+                "adopt_%:other:g1",
+            ],
+            start=1,
+        ):
+            await repo.create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="development",
+                task_title=f"t {index}",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                idempotency_key=idempotency_key,
+            )
+        await session.commit()
+
+        assert await repo.list_idempotency_key_family(logical_key) == [
+            logical_key,
+            f"{logical_key}:g1",
+            f"{logical_key}:g2",
+        ]
+
 
 class TestExists:
     @pytest.mark.unit
