@@ -71,7 +71,11 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _green_status(*, head_sha: str = "abc1234567890def") -> PRStatus:
+def _green_status(
+    *,
+    head_sha: str = "abc1234567890def",
+    merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
+) -> PRStatus:
     return PRStatus(
         number=42,
         head_sha=head_sha,
@@ -80,7 +84,7 @@ def _green_status(*, head_sha: str = "abc1234567890def") -> PRStatus:
         unresolved_inline_threads=(),
         unresolved_review_comments=(),
         base_behind_count=0,
-        merge_state_status=MergeStateStatus.CLEAN,
+        merge_state_status=merge_state_status,
     )
 
 
@@ -256,6 +260,81 @@ async def test_manual_merge_green_pr_dispatches_validation_before_handoff(
         initial_review_grace_period_seconds=0,
     )
     status = _green_status()
+    state = MonitorState()
+    action = decide(
+        status,
+        state,
+        MonitorConfig(
+            auto_merge=False,
+            poll_interval_seconds=60,
+            settle_interval_seconds=30,
+            initial_review_grace_period_seconds=0,
+            pre_merge_settle_seconds=0,
+            non_check_reviewer_settle_seconds=0,
+            non_check_reviewer_logins=("greptile-apps",),
+            stale_pending_check_warning_seconds=900,
+        ),
+    )
+
+    terminal = await runner._execute(
+        action=action,
+        workspace_id=ws_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert isinstance(action, NotifyHuman)
+    assert terminal is True
+    assert not _has_call(cmd, _is_pr_comment)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.ready.value
+        operations = await OperationRepository(session).list_all(workspace_id=ws_id)
+    validate_operations = [op for op in operations if op.type == OperationType.validate.value]
+    assert len(validate_operations) == 1
+    assert validate_operations[0].payload["recovery_mode"] == "validate_only"
+    assert validate_operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "merge_state_status",
+    (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS),
+)
+async def test_manual_merge_protected_pr_dispatches_validation_before_handoff(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+    merge_state_status: MergeStateStatus,
+) -> None:
+    ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        ws.task_class = TaskClass.refactor_task.value
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        auto_merge=False,
+        initial_review_grace_period_seconds=0,
+    )
+    status = _green_status(merge_state_status=merge_state_status)
     state = MonitorState()
     action = decide(
         status,

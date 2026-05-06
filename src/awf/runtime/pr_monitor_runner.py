@@ -5145,7 +5145,25 @@ def _is_manual_ready_handoff(
 ) -> bool:
     if config.auto_merge or action.message is not None:
         return False
-    return isinstance(decide(status, state, replace(config, auto_merge=True)), Merge)
+    auto_merge_action = decide(status, state, replace(config, auto_merge=True))
+    if isinstance(auto_merge_action, Merge):
+        return True
+    return isinstance(
+        auto_merge_action,
+        NotifyHuman,
+    ) and _is_protected_manual_ready_handoff(status, state)
+
+
+def _is_protected_manual_ready_handoff(status: PRStatus, state: MonitorState) -> bool:
+    if status.merge_state_status not in (
+        MergeStateStatus.BLOCKED,
+        MergeStateStatus.HAS_HOOKS,
+    ):
+        return False
+    if any(c.blocks_merge for c in status.unresolved_review_comments):
+        return False
+    _, human_deferred = _collect_defer_items(status, state)
+    return not human_deferred
 
 
 def _has_successful_validation_for_pr_head(
