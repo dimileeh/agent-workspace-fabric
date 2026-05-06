@@ -22,7 +22,12 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from tests.unit.mcp._parity_utils import _parity_rows, _strip_backticks
+from tests.unit.mcp._parity_utils import (
+    _extract_mcp_tool_tokens_from_cell,
+    _extract_rest_endpoints_from_cell,
+    _parity_rows,
+    _strip_backticks,
+)
 
 
 @dataclass(frozen=True)
@@ -305,11 +310,6 @@ def control_capabilities() -> tuple[ContractCapability, ...]:
 # ── Parity matrix cross-validation ────────────────────────────────────────
 
 
-_REST_ENDPOINT_RE = re.compile(
-    r"(GET|POST|PUT|DELETE|PATCH)\s+(/[^\s,]+)",
-)
-
-
 def _parity_row_for(capability_name: str) -> dict[str, str]:
     rows = _parity_rows()
     for row in rows:
@@ -322,18 +322,11 @@ def _parity_row_for(capability_name: str) -> dict[str, str]:
 
 
 def _row_endpoints(row: Mapping[str, str]) -> list[tuple[str, str]]:
-    cleaned = _strip_backticks(row.get("Canonical REST surface", ""))
-    return [(m.group(1), m.group(2).rstrip(",")) for m in _REST_ENDPOINT_RE.finditer(cleaned)]
+    return _extract_rest_endpoints_from_cell(row.get("Canonical REST surface", ""))
 
 
 def _row_mcp_tools(row: Mapping[str, str]) -> set[str]:
-    cleaned = _strip_backticks(row.get("MCP tool name", ""))
-    tools: set[str] = set()
-    for raw in re.split(r",\s*", cleaned):
-        token = raw.strip()
-        if token.startswith("awf_"):
-            tools.add(token)
-    return tools
+    return set(_extract_mcp_tool_tokens_from_cell(row.get("MCP tool name", "")))
 
 
 def assert_capability_matches_parity_matrix(capability: ContractCapability) -> None:

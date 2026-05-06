@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
 
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
@@ -120,6 +122,28 @@ class _FakeStaleCleanupEngine:
         self.dispose_count += 1
 
 
+class _AsyncConnectionContext:
+    def __init__(self, connection: _RecordingConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self) -> _RecordingConnection:
+        return self._connection
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+
+class _RecordingConnection:
+    def __init__(self, statements: list[tuple[str, object | None]]) -> None:
+        self._statements = statements
+
+    async def execute(self, statement: object, params: object | None = None) -> None:
+        self._statements.append((str(statement), params))
+
+    async def commit(self) -> None:
+        return None
+
+
 @pytest.mark.unit
 def test_make_engine_strips_test_url_options_and_enables_null_pool(
     monkeypatch: pytest.MonkeyPatch,
@@ -181,9 +205,7 @@ async def test_stale_postgres_schema_listing_scans_all_test_namespaces(
         return namespace == active_namespace
 
     monkeypatch.setattr(postgres_mod, "_is_postgres_test_schema_namespace_active", _is_active)
-    engine = _FakeSchemaEngine(
-        [other_schema, legacy_unowned_schema, active_schema, current_schema]
-    )
+    engine = _FakeSchemaEngine([other_schema, legacy_unowned_schema, active_schema, current_schema])
 
     schemas = await postgres_mod._list_stale_postgres_test_schemas(
         engine,  # type: ignore[arg-type]
@@ -206,9 +228,7 @@ def test_stale_postgres_cleanup_ignores_persistent_done_marker_for_reused_namesp
     monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "cleanup-reused-run")
     namespace = postgres_mod._postgres_test_schema_namespace()
     database_key = postgres_mod._postgres_database_key(database_url)
-    marker_path = tmp_path / (
-        f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.done"
-    )
+    marker_path = tmp_path / (f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.done")
     marker_path.touch()
     dropped_urls: list[str] = []
     active_urls: list[str] = []
@@ -281,7 +301,9 @@ async def test_stale_postgres_cleanup_reuses_one_engine_for_all_drops(
     assert engine.statements[0].count("information_schema.schemata") == 1
     assert sum("pg_terminate_backend" in statement for statement in engine.statements) == 3
     assert engine.statements.count("SET LOCAL lock_timeout = '5s'") == 3
-    assert [statement for statement in engine.statements if statement.startswith("DROP SCHEMA")] == [
+    assert [
+        statement for statement in engine.statements if statement.startswith("DROP SCHEMA")
+    ] == [
         f'DROP SCHEMA IF EXISTS "{other_schema}" CASCADE',
         f'DROP SCHEMA IF EXISTS "{first_schema}" CASCADE',
         f'DROP SCHEMA IF EXISTS "{second_schema}" CASCADE',
@@ -359,12 +381,233 @@ async def test_postgres_context_helpers_lock_ddl_and_drop_after_metadata_dispose
             assert isinstance(yielded, str)
             assert schema_engine.disposed is True
 
-    metadata_lock_depth = 0 if helper_name == "postgres_test_engine" else 1
+    metadata_lock_depth = 0
     assert admin_engine.dispose_count == 1
     assert schema_engine.dispose_count == 1
     assert ("metadata", False, metadata_lock_depth) in events
     assert ("create", False, 1) in events
     assert ("drop", True, 1) in events
+
+
+@pytest.mark.unit
+def test_make_engine_strips_test_retry_options_and_installs_async_creator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _create_async_engine(url: str, **kwargs: Any) -> object:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(url=url)
+
+    monkeypatch.setattr(session_mod, "create_async_engine", _create_async_engine)
+
+    make_engine(
+        "postgresql+asyncpg://awf:pw@localhost:5433/awf"
+        "?awf_search_path=first&awf_connect_timeout=2&awf_connect_attempts=5"
+    )
+
+    assert captured["url"] == "postgresql+asyncpg://awf:pw@localhost:5433/awf"
+    assert "connect_args" not in captured["kwargs"]
+    assert callable(captured["kwargs"]["async_creator"])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        (
+            "postgresql+asyncpg://awf:pw@localhost:5433/awf?awf_connect_timeout=nope",
+            "awf_connect_timeout must be a positive number.",
+        ),
+        (
+            "postgresql+asyncpg://awf:pw@localhost:5433/awf?awf_connect_timeout=0",
+            "awf_connect_timeout must be a positive number.",
+        ),
+        (
+            "postgresql+asyncpg://awf:pw@localhost:5433/awf?awf_connect_attempts=nope",
+            "awf_connect_attempts must be a positive integer.",
+        ),
+        (
+            "postgresql+asyncpg://awf:pw@localhost:5433/awf?awf_connect_attempts=0",
+            "awf_connect_attempts must be a positive integer.",
+        ),
+    ],
+)
+def test_make_engine_rejects_invalid_test_retry_options(url: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        make_engine(url)
+
+
+@pytest.mark.unit
+async def test_test_retry_async_creator_retries_transient_connect_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _create_async_engine(url: str, **kwargs: Any) -> object:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(url=url)
+
+    class TransientConnectError(Exception):
+        pass
+
+    attempts: list[tuple[str, dict[str, object]]] = []
+    sleeps: list[float] = []
+
+    async def _connect(*, dsn: str, **connect_args: object) -> object:
+        attempts.append((dsn, connect_args))
+        if len(attempts) == 1:
+            raise TransientConnectError
+        return SimpleNamespace(ok=True)
+
+    async def _sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(session_mod, "create_async_engine", _create_async_engine)
+    monkeypatch.setattr(session_mod.asyncio, "sleep", _sleep)
+    monkeypatch.setitem(
+        sys.modules,
+        "asyncpg",
+        SimpleNamespace(
+            connect=_connect,
+            PostgresConnectionError=TransientConnectError,
+            TooManyConnectionsError=RuntimeError,
+        ),
+    )
+
+    make_engine(
+        "postgresql+asyncpg://awf:pw@localhost:5433/awf"
+        "?awf_search_path=first&awf_connect_timeout=2&awf_connect_attempts=2"
+    )
+    creator = captured["kwargs"]["async_creator"]
+
+    assert await creator() == SimpleNamespace(ok=True)
+    assert attempts == [
+        (
+            "postgresql://awf:pw@localhost:5433/awf",
+            {"server_settings": {"search_path": "first"}, "timeout": 2.0},
+        ),
+        (
+            "postgresql://awf:pw@localhost:5433/awf",
+            {"server_settings": {"search_path": "first"}, "timeout": 2.0},
+        ),
+    ]
+    assert sleeps == [0.1]
+
+
+@pytest.mark.unit
+async def test_test_retry_async_creator_reraises_after_configured_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _create_async_engine(url: str, **kwargs: Any) -> object:
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(url=url)
+
+    class TransientConnectError(Exception):
+        pass
+
+    attempts = 0
+
+    async def _connect(*, dsn: str, **connect_args: object) -> object:
+        del dsn, connect_args
+        nonlocal attempts
+        attempts += 1
+        raise TransientConnectError
+
+    async def _sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(session_mod, "create_async_engine", _create_async_engine)
+    monkeypatch.setattr(session_mod.asyncio, "sleep", _sleep)
+    monkeypatch.setitem(
+        sys.modules,
+        "asyncpg",
+        SimpleNamespace(
+            connect=_connect,
+            PostgresConnectionError=TransientConnectError,
+            TooManyConnectionsError=RuntimeError,
+        ),
+    )
+
+    make_engine(
+        "postgresql+asyncpg://awf:pw@localhost:5433/awf"
+        "?awf_connect_timeout=2&awf_connect_attempts=2"
+    )
+
+    with pytest.raises(TransientConnectError):
+        await captured["kwargs"]["async_creator"]()
+    assert attempts == 2
+
+
+@pytest.mark.unit
+async def test_drop_schema_terminates_lock_holders_before_cascade_drop() -> None:
+    statements: list[tuple[str, object | None]] = []
+    conn = _RecordingConnection(statements)
+
+    await postgres_mod._drop_schema(conn, "awf_test", '"awf_test"')
+
+    assert "pg_terminate_backend" in statements[0][0]
+    assert statements[0][1] == {"schema": "awf_test"}
+    assert statements[1] == ("SET LOCAL lock_timeout = '5s'", None)
+    assert statements[2] == ('DROP SCHEMA IF EXISTS "awf_test" CASCADE', None)
+
+
+@pytest.mark.unit
+async def test_postgres_schema_ddl_lock_uses_database_advisory_lock() -> None:
+    statements: list[tuple[str, object | None]] = []
+    conn = _RecordingConnection(statements)
+    engine = SimpleNamespace(connect=lambda: _AsyncConnectionContext(conn))
+
+    async with postgres_mod._postgres_schema_ddl_lock(engine):
+        statements.append(("inside", None))
+
+    assert "pg_advisory_lock" in statements[0][0]
+    assert statements[0][1] == {"namespace": 0x415746, "key": 0x54455354}
+    assert statements[1] == ("inside", None)
+    assert "pg_advisory_unlock" in statements[2][0]
+    assert statements[2][1] == {"namespace": 0x415746, "key": 0x54455354}
+
+
+@pytest.mark.unit
+async def test_postgres_test_url_marks_yielded_url_null_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _fake_lock(engine: _Engine) -> AsyncIterator[_Engine]:
+        yield engine
+
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def _metadata_engine(_url: str) -> _Engine:
+        return _Engine()
+
+    monkeypatch.setattr(
+        postgres_mod,
+        "postgres_test_database_url",
+        lambda: "postgresql+asyncpg://awf:pw@localhost:5433/awf",
+    )
+    monkeypatch.setattr(postgres_mod, "_make_test_engine", lambda _url: _Engine())
+    monkeypatch.setattr(postgres_mod, "_postgres_schema_ddl_lock", _fake_lock)
+    monkeypatch.setattr(postgres_mod, "_create_schema", _noop)
+    monkeypatch.setattr(postgres_mod, "_create_metadata_engine", _metadata_engine)
+    monkeypatch.setattr(postgres_mod, "_drop_schema", _noop)
+
+    async with postgres_mod.postgres_test_url() as database_url:
+        parsed = make_url(database_url)
+
+    assert parsed.query["awf_search_path"].strip('"').startswith("awf_test_")
+    assert parsed.query["awf_null_pool"] == "1"
+    assert parsed.query["awf_connect_timeout"] == "10"
+    assert parsed.query["awf_connect_retries"] == "3"
 
 
 @pytest.mark.unit
