@@ -8,6 +8,8 @@ MCP all expose. Every entry maps a single operator capability to:
 - the CLI invocation tokens when one exists (``cli_tokens``);
 - the parity matrix Status / Backlog Slice columns at the time of writing
   (``parity_status``, ``parity_backlog_slice``).
+- whether ``Idempotency-Key`` is optional replay support or a required
+  client-boundary contract.
 
 The registry is cross-validated against ``docs/MCP_CLIENT_PARITY.md`` at test
 collection time so the harness fails loudly if either side drifts. Tests that
@@ -44,6 +46,7 @@ class ContractCapability:
     parity_backlog_slice: str
     supports_idempotency_key: bool
     supports_if_match: bool
+    requires_idempotency_key: bool = False
     error_codes: frozenset[str] = field(default_factory=frozenset)
     rest_response_model: str | None = None
     rest_path_fields: frozenset[str] = field(default_factory=frozenset)
@@ -70,11 +73,6 @@ class ContractCapability:
         return self.parity_status == "MCP missing/backlog"
 
     @property
-    def requires_idempotency_key(self) -> bool:
-        """Whether this operator action requires an idempotency key at the client boundary."""
-        return self.supports_idempotency_key
-
-    @property
     def is_safe_read(self) -> bool:
         return self.rest_method == "GET"
 
@@ -91,6 +89,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         parity_backlog_slice="—",
         supports_idempotency_key=True,
         supports_if_match=True,
+        requires_idempotency_key=True,
         error_codes=frozenset({"NOT_FOUND", "VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT"}),
         rest_response_model="WorkspaceControlResponse",
         rest_path_fields=frozenset({"workspace_id"}),
@@ -126,6 +125,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         parity_backlog_slice="—",
         supports_idempotency_key=True,
         supports_if_match=True,
+        requires_idempotency_key=True,
         error_codes=frozenset(
             {"NOT_FOUND", "VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT", "STACK_STOP_FAILED"}
         ),
@@ -155,6 +155,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         parity_backlog_slice="—",
         supports_idempotency_key=True,
         supports_if_match=True,
+        requires_idempotency_key=True,
         error_codes=frozenset(
             {
                 "NOT_FOUND",
@@ -206,6 +207,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         parity_backlog_slice="—",
         supports_idempotency_key=True,
         supports_if_match=True,
+        requires_idempotency_key=True,
         error_codes=frozenset(
             {
                 "NOT_FOUND",
@@ -241,6 +243,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         parity_backlog_slice="—",
         supports_idempotency_key=True,
         supports_if_match=True,
+        requires_idempotency_key=True,
         error_codes=frozenset(
             {
                 "NOT_FOUND",
@@ -276,6 +279,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         parity_backlog_slice="—",
         supports_idempotency_key=True,
         supports_if_match=True,
+        requires_idempotency_key=True,
         error_codes=frozenset(
             {
                 "NOT_FOUND",
@@ -308,6 +312,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         parity_backlog_slice="—",
         supports_idempotency_key=True,
         supports_if_match=True,
+        requires_idempotency_key=True,
         error_codes=frozenset(
             {
                 "NOT_FOUND",
@@ -1107,15 +1112,15 @@ def cli_capabilities() -> tuple[ContractCapability, ...]:
 
 
 def control_capabilities() -> tuple[ContractCapability, ...]:
-    """Return capabilities that take an Idempotency-Key + If-Match (control surfaces).
+    """Return capabilities that require an Idempotency-Key + support If-Match.
 
-    Excludes create/adopt because those have a different shape (idempotency only,
-    no If-Match).
+    Excludes create/adopt because those have a different shape from versioned
+    control operations.
     """
     return tuple(
         c
         for c in _CAPABILITIES
-        if c.supports_idempotency_key
+        if c.requires_idempotency_key
         and c.supports_if_match
         and c.name
         in {

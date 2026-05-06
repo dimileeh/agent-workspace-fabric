@@ -148,20 +148,24 @@ async def test_mcp_surface_stays_inside_operator_safety_boundary() -> None:
 
 
 @pytest.mark.unit
-def test_idempotency_key_requirement_does_not_depend_on_if_match() -> None:
-    idempotent_capabilities = {
+def test_idempotency_key_requirement_is_distinct_from_optional_support() -> None:
+    required_capabilities = {
         capability.name
         for capability in all_capabilities()
         if capability.requires_idempotency_key
     }
-
-    assert idempotent_capabilities == {
+    supported_capabilities = {
         capability.name
         for capability in all_capabilities()
         if capability.supports_idempotency_key
     }
-    assert CAPABILITIES_BY_NAME["create_workspace_v1"].requires_idempotency_key is True
-    assert CAPABILITIES_BY_NAME["create_workspace_v2"].requires_idempotency_key is True
+
+    assert required_capabilities == {capability.name for capability in control_capabilities()}
+    assert required_capabilities <= supported_capabilities
+    assert CAPABILITIES_BY_NAME["create_workspace_v1"].supports_idempotency_key is True
+    assert CAPABILITIES_BY_NAME["create_workspace_v1"].requires_idempotency_key is False
+    assert CAPABILITIES_BY_NAME["create_workspace_v2"].supports_idempotency_key is True
+    assert CAPABILITIES_BY_NAME["create_workspace_v2"].requires_idempotency_key is False
 
 
 @pytest.mark.unit
