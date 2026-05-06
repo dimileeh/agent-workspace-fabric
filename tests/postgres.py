@@ -128,6 +128,12 @@ def _make_test_engine(url: str) -> AsyncEngine:
     return make_engine(url, connect_args={"timeout": _TEST_CONNECT_TIMEOUT_SECONDS})
 
 
+def _query_value(value: object | None) -> str | None:
+    if isinstance(value, tuple):
+        value = value[0] if value else None
+    return None if value is None else str(value)
+
+
 async def _with_postgres_connection_retry[T](operation: Callable[[], Awaitable[T]]) -> T:
     for attempt in range(_SCHEMA_ENGINE_CONNECT_ATTEMPTS):
         try:
@@ -305,6 +311,14 @@ async def _create_metadata_engine(schema_database_url: str) -> AsyncEngine:
         engine = _make_test_engine(schema_database_url)
         try:
             async with engine.begin() as conn:
+                search_path = _query_value(
+                    make_url(schema_database_url).query.get("awf_search_path")
+                )
+                if search_path is not None:
+                    await conn.execute(
+                        text("SELECT set_config('search_path', :search_path, false)"),
+                        {"search_path": search_path},
+                    )
                 await conn.run_sync(Base.metadata.create_all)
         except Exception as exc:
             await _dispose_engine(engine)
