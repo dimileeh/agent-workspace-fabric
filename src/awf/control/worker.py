@@ -916,19 +916,19 @@ class ControlWorker:
         candidate: _ActiveExecutionCandidate,
     ) -> bool:
         async with self._session_factory() as session:
-            latest_preservation = await self._latest_preserved_active_execution_at(
-                session,
-                candidate.workspace_id,
-                candidate.status,
-            )
-            if latest_preservation is None:
-                return False
             latest_refresh = await self._latest_operator_refresh_requested_at(
                 session,
                 candidate.workspace_id,
             )
             if latest_refresh is None:
                 return False
+            latest_preservation = await self._latest_preserved_active_execution_at(
+                session,
+                candidate.workspace_id,
+                candidate.status,
+            )
+            if latest_preservation is None:
+                return True
             return _utc_datetime(latest_refresh) >= _utc_datetime(latest_preservation)
 
     async def _has_current_preserved_active_execution(
