@@ -1258,6 +1258,41 @@ class TestCreateWorkspaceV2:
         assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
+    async def test_create_workspace_v2_external_id_scope_conflict_returns_structured_error(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        external_id = "mcp-create-v2-external-id-conflict"
+        args = {
+            "repo_url": "git@github.com:example/docs.git",
+            "base_branch": "main",
+            "task_title": "Document external id",
+            "task_prompt": "Update the docs.",
+            "task_external_id": external_id,
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "mcp external id conflict test fixture",
+        }
+
+        created = await _call(mcp, "awf_create_workspace_v2", args)
+        conflict = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {**args, "base_branch": "release/next"},
+        )
+
+        assert isinstance(created, dict)
+        assert isinstance(conflict, CallToolResult)
+        assert conflict.isError is True
+        assert conflict.structuredContent == {
+            "error_code": "TASK_EXTERNAL_ID_CONFLICT",
+            "message": (
+                "Task external_id is already associated with a different "
+                "repo/base/task-class/owned-path scope; use a unique "
+                "external_id for this backlog slice or retry the original scope."
+            ),
+            "detail": {"external_id": external_id},
+        }
+
+    @pytest.mark.unit
     async def test_retry_workspace_provider_preflight_error_and_override(
         self,
         factory: async_sessionmaker[AsyncSession],

@@ -40,6 +40,7 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.repositories import TaskExternalIdConflictError
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
@@ -337,6 +338,8 @@ def build_mcp_server(
                 detail=exc.detail,
             )
             return _tool_result(error.model_dump(mode="json"), is_error=True)
+        except TaskExternalIdConflictError as exc:
+            return _task_external_id_conflict_result(exc)
         except WorkspaceProviderReadinessBlockedError as exc:
             return _provider_readiness_blocked_result(exc)
         return _tool_result(ws.model_dump(mode="json"))
@@ -1387,6 +1390,19 @@ def _provider_readiness_blocked_result(
     exc: WorkspaceProviderReadinessBlockedError,
 ) -> CallToolResult:
     return _workspace_error_result(exc)
+
+
+def _task_external_id_conflict_result(exc: TaskExternalIdConflictError) -> CallToolResult:
+    error = ErrorResponse(
+        error_code="TASK_EXTERNAL_ID_CONFLICT",
+        message=(
+            "Task external_id is already associated with a different "
+            "repo/base/task-class/owned-path scope; use a unique "
+            "external_id for this backlog slice or retry the original scope."
+        ),
+        detail={"external_id": exc.external_id},
+    )
+    return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
 def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
