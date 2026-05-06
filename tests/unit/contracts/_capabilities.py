@@ -417,6 +417,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "requires_database",
                 "env_profile",
                 "task_external_id",
+                "idempotency_key",
             }
         ),
         mcp_required_fields=frozenset({"repo_url", "task_title", "task_prompt"}),
@@ -461,6 +462,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "initial_review_grace_period_seconds",
                 "provider_readiness_override",
                 "provider_readiness_override_reason",
+                "idempotency_key",
             }
         ),
         mcp_required_fields=frozenset({"repo_url", "task_title", "task_prompt"}),

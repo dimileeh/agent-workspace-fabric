@@ -169,6 +169,17 @@ def test_idempotency_key_requirement_is_distinct_from_optional_support() -> None
 
 
 @pytest.mark.unit
+def test_mcp_idempotency_support_declares_optional_request_key() -> None:
+    for capability in mcp_capabilities():
+        if not capability.supports_idempotency_key:
+            continue
+
+        assert "Idempotency-Key" in capability.rest_header_fields
+        assert "idempotency_key" in capability.mcp_request_fields
+        assert "idempotency_key" not in capability.mcp_required_fields
+
+
+@pytest.mark.unit
 def test_versioned_control_registry_declares_client_semantics() -> None:
     """Cross-cutting If-Match matrix row is represented by all versioned controls."""
     expected = {

@@ -87,6 +87,7 @@ from awf.service.workspace_observability import (
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import (
+    WorkspaceCreateIdempotencyConflictError,
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
     WorkspaceService,
@@ -199,7 +200,11 @@ def build_mcp_server(
         task_external_id: str | None = Field(
             default=None, description="Optional caller-side task ID for correlation."
         ),
-    ) -> dict[str, Any]:
+        idempotency_key: str | None = Field(
+            default=None,
+            description="Optional replay key matching the REST Idempotency-Key header.",
+        ),
+    ) -> StructuredToolResult:
         """Create a new AWF workspace. Returns the initial workspace state (async)."""
         req = WorkspaceCreateRequest(
             repo_url=repo_url,
@@ -212,7 +217,14 @@ def build_mcp_server(
             env_profile=env_profile,
             task_external_id=task_external_id,
         )
-        return (await service.create(req)).model_dump(mode="json")
+        try:
+            response = await service.create(
+                req,
+                idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
+            )
+        except WorkspaceCreateIdempotencyConflictError as exc:
+            return _workspace_error_result(exc)
+        return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_create_workspace_v2")
     async def awf_create_workspace_v2(
@@ -284,6 +296,10 @@ def build_mcp_server(
             max_length=512,
             description="Audit reason for provider_readiness_override.",
         ),
+        idempotency_key: str | None = Field(
+            default=None,
+            description="Optional replay key matching the REST Idempotency-Key header.",
+        ),
     ) -> StructuredToolResult:
         """Create a new AWF workspace using the clean v2 contract."""
         req = WorkspaceCreateV2Request(
@@ -308,7 +324,12 @@ def build_mcp_server(
             },
         )
         try:
-            ws = await service.create_v2(req)
+            ws = await service.create_v2(
+                req,
+                idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
+            )
+        except WorkspaceCreateIdempotencyConflictError as exc:
+            return _workspace_error_result(exc)
         except ProfileResolutionError as exc:
             error = ErrorResponse(
                 error_code="INVALID_PROFILE",

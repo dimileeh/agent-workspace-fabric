@@ -54,6 +54,11 @@ not provide shell access or arbitrary Docker execution. Known MCP parity backlog
 is documented in the matrix, including artifact content/download and global
 workspace event streaming.
 
+The create tools `awf_create_workspace` and `awf_create_workspace_v2` accept a
+schema-optional `idempotency_key` argument. Reusing the same key with the same
+effective create payload returns the existing workspace; reusing the key with a
+changed payload returns structured `IDEMPOTENCY_CONFLICT`.
+
 **MCP control migration note:** The control tools `awf_cancel_workspace`,
 `awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`,
 `awf_request_workspace_validation`, `awf_refresh_workspace`, and
@@ -82,7 +87,8 @@ Example `awf_create_workspace_v2` arguments:
   "validation_commands": ["pytest -q"],
   "requested_tier": 1,
   "auto_merge": true,
-  "initial_review_grace_period_seconds": null
+  "initial_review_grace_period_seconds": null,
+  "idempotency_key": "example-task-001"
 }
 ```
 

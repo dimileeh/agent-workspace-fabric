@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
@@ -179,6 +180,11 @@ MAX_CONFORMANCE_RETRY_ATTEMPTS = 4
 PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
     {"monitor_release_pr", "sync_release_pr", "sync_feature_pr"}
 )
+_REDACTED_TEXT = "<redacted>"
+_IDEMPOTENCY_CONFLICT_MESSAGE = (
+    "Idempotency-Key previously used with a different payload; "
+    "supply a fresh key or replay with the original body."
+)
 
 
 @dataclass(frozen=True)
@@ -286,6 +292,15 @@ class WorkspaceProviderReadinessBlockedError(WorkspaceRetryError):
             "Selected provider readiness blocked workspace launch.",
             detail={"provider_readiness_preflight": dict(preflight)},
         )
+
+
+class WorkspaceCreateIdempotencyConflictError(Exception):
+    error_code = "IDEMPOTENCY_CONFLICT"
+    message = _IDEMPOTENCY_CONFLICT_MESSAGE
+    detail: dict[str, Any] | None = None
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
 
 
 @dataclass(frozen=True)
@@ -398,9 +413,22 @@ class WorkspaceService:
         """Expose the shared session factory for read-only parity clients."""
         return self._factory
 
-    async def create(self, req: WorkspaceCreateRequest) -> WorkspaceResponse:
+    async def create(
+        self,
+        req: WorkspaceCreateRequest,
+        *,
+        idempotency_key: str | None = None,
+    ) -> WorkspaceResponse:
         async with self._factory() as s:
-            ws = await WorkspaceRepository(s).create(
+            repo = WorkspaceRepository(s)
+            if idempotency_key is not None:
+                existing = await repo.get_by_idempotency_key(idempotency_key)
+                if existing is not None:
+                    if not workspace_create_payload_matches(existing, req):
+                        raise WorkspaceCreateIdempotencyConflictError()
+                    return workspace_response(existing)
+
+            ws = await repo.create(
                 repo_url=req.repo_url,
                 branch_base=req.branch_base,
                 task_title=req.task_title,
@@ -412,13 +440,32 @@ class WorkspaceService:
                 env_profile=req.env_profile,
                 test_commands=req.test_commands,
                 requires_database=req.requires_database,
+                idempotency_key=idempotency_key,
             )
             await s.commit()
             return workspace_response(ws)
 
-    async def create_v2(self, req: WorkspaceCreateV2Request) -> WorkspaceResponse:
+    async def create_v2(
+        self,
+        req: WorkspaceCreateV2Request,
+        *,
+        idempotency_key: str | None = None,
+    ) -> WorkspaceResponse:
         async with self._factory() as s:
-            ws = await create_workspace_v2_row(s, req, settings=self._settings)
+            repo = WorkspaceRepository(s)
+            if idempotency_key is not None:
+                existing = await repo.get_by_idempotency_key(idempotency_key)
+                if existing is not None:
+                    if not workspace_create_v2_payload_matches(existing, req):
+                        raise WorkspaceCreateIdempotencyConflictError()
+                    return workspace_response(existing)
+
+            ws = await create_workspace_v2_row(
+                s,
+                req,
+                idempotency_key=idempotency_key,
+                settings=self._settings,
+            )
             await s.commit()
             return workspace_response(ws)
 
@@ -965,6 +1012,191 @@ async def create_workspace_v2_row(
     await _record_owned_path_overlap_risk(repo, ws, overlaps)
     await session.flush()
     return ws
+
+
+def workspace_create_payload_matches(
+    existing: Workspace,
+    payload: WorkspaceCreateRequest,
+) -> bool:
+    """Compare a persisted v1 workspace against an idempotent replay payload."""
+    return (
+        existing.repo_url == payload.repo_url
+        and existing.branch_base == payload.branch_base
+        and existing.task_title == payload.task_title
+        and existing.task_prompt == payload.task_prompt
+        and existing.agent == payload.agent.value
+        and list(existing.test_commands) == list(payload.test_commands)
+        and existing.requires_database == payload.requires_database
+    )
+
+
+def workspace_create_v2_payload_matches(
+    existing: Workspace,
+    payload: WorkspaceCreateV2Request,
+) -> bool:
+    """Compare user-authored v2 create fields for idempotent replay."""
+    requested_profile = (
+        payload.workspace.profile.model_dump(mode="json", by_alias=True)
+        if payload.workspace.profile is not None
+        else None
+    )
+    task_class = payload.task.task_class.value if payload.task.task_class is not None else None
+    return (
+        existing.repo_url == payload.repo.url
+        and existing.branch_base == payload.repo.base_branch
+        and existing.task_title == payload.task.title
+        and existing.task_prompt == payload.task.prompt
+        and existing.task_external_id == payload.task.external_id
+        and existing.task_class == task_class
+        and list(existing.owned_paths) == list(payload.task.owned_paths)
+        and _stored_task_agent_model(existing) == payload.task.model
+        and _stored_task_out_of_scope_policy(existing)
+        == _requested_task_out_of_scope_policy(payload)
+        and _stored_task_provider_recovery_policy(existing)
+        == _requested_task_provider_recovery_policy(payload)
+        and existing.auto_merge == payload.task.auto_merge
+        and (
+            existing.initial_review_grace_period_seconds
+            == payload.task.initial_review_grace_period_seconds
+        )
+        and existing.agent == payload.task.agent.value
+        and existing.task_kind == payload.task.kind
+        and existing.profile_ref == payload.workspace.profile_ref
+        and existing.requested_profile == requested_profile
+        and (
+            existing.resolved_profile is None
+            or _resolved_profile_requested_tier(existing) == payload.validation.requested_tier
+        )
+        and list(existing.test_commands) == list(payload.validation.commands)
+        and _task_provider_readiness_override_matches(existing, payload)
+    )
+
+
+def _resolved_profile_requested_tier(existing: Workspace) -> int | None:
+    profile = existing.resolved_profile
+    if profile is None:
+        return None
+    validation = profile.get("validation")
+    if not isinstance(validation, dict):
+        return None
+    tier = validation.get("requested_tier")
+    return tier if isinstance(tier, int) else None
+
+
+def _requested_task_out_of_scope_policy(
+    payload: WorkspaceCreateV2Request,
+) -> dict[str, object] | None:
+    if payload.task.out_of_scope_changes is None:
+        return None
+    return payload.task.out_of_scope_changes.model_dump(mode="json")
+
+
+def _stored_task_out_of_scope_policy(existing: Workspace) -> dict[str, object] | None:
+    out_of_scope = existing.task_policy.get("out_of_scope_changes")
+    return out_of_scope if isinstance(out_of_scope, dict) else None
+
+
+def _requested_task_provider_recovery_policy(
+    payload: WorkspaceCreateV2Request,
+) -> dict[str, object] | None:
+    if payload.task.provider_recovery is None:
+        return None
+    return payload.task.provider_recovery.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_unset=True,
+    )
+
+
+def _stored_task_provider_recovery_policy(
+    existing: Workspace,
+) -> dict[str, object] | None:
+    provider_recovery = existing.task_policy.get("provider_recovery")
+    return provider_recovery if isinstance(provider_recovery, dict) else None
+
+
+def _stored_task_agent_model(existing: Workspace) -> str | None:
+    model = existing.task_policy.get("agent_model")
+    return model if isinstance(model, str) and model else None
+
+
+def _requested_provider_readiness_override(
+    payload: WorkspaceCreateV2Request,
+) -> tuple[bool, str | None]:
+    return (
+        payload.preflight.provider_readiness_override,
+        _normalized_provider_readiness_override_reason(
+            payload.preflight.provider_readiness_override_reason
+        ),
+    )
+
+
+def _stored_task_provider_readiness_override(
+    existing: Workspace,
+) -> tuple[bool, str | None]:
+    preflight = workspace_provider_readiness_preflight(existing)
+    if preflight is None:
+        return (False, None)
+    reason = preflight.get("override_reason")
+    override_requested = preflight.get("override_requested")
+    return (
+        override_requested
+        if isinstance(override_requested, bool)
+        else preflight.get("override_used") is True,
+        reason if isinstance(reason, str) else None,
+    )
+
+
+def _task_provider_readiness_override_matches(
+    existing: Workspace,
+    payload: WorkspaceCreateV2Request,
+) -> bool:
+    stored_override, stored_reason = _stored_task_provider_readiness_override(existing)
+    stored_redaction_parts = _stored_task_provider_readiness_override_redaction_parts(existing)
+    requested_override, requested_reason = _requested_provider_readiness_override(payload)
+    return stored_override == requested_override and _override_reasons_match(
+        stored_reason,
+        requested_reason,
+        stored_redaction_parts=stored_redaction_parts,
+    )
+
+
+def _normalized_provider_readiness_override_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    normalized = reason.strip()
+    return normalized or None
+
+
+def _override_reasons_match(
+    stored_reason: str | None,
+    requested_reason: str | None,
+    *,
+    stored_redaction_parts: list[str] | None = None,
+) -> bool:
+    if stored_reason == requested_reason:
+        return True
+    if stored_reason is None or requested_reason is None:
+        return False
+    if stored_redaction_parts is None:
+        return False
+
+    if _REDACTED_TEXT.join(stored_redaction_parts) != stored_reason:
+        return False
+    pattern = ".+".join(re.escape(part) for part in stored_redaction_parts)
+    return re.fullmatch(pattern, requested_reason, flags=re.DOTALL) is not None
+
+
+def _stored_task_provider_readiness_override_redaction_parts(
+    existing: Workspace,
+) -> list[str] | None:
+    preflight = workspace_provider_readiness_preflight(existing)
+    if preflight is None:
+        return None
+    parts = preflight.get("override_reason_redaction_parts")
+    if not isinstance(parts, list) or len(parts) < 2:
+        return None
+    return cast(list[str], parts) if all(isinstance(part, str) for part in parts) else None
 
 
 async def retry_workspace_row(

@@ -667,6 +667,25 @@ class TestCreateWorkspace:
         assert payload["test_commands"] == ["pytest -q"]
 
     @pytest.mark.unit
+    async def test_idempotency_key_replays_or_conflicts(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        args = {**_CREATE_ARGS, "idempotency_key": "mcp-create-v1-replay"}
+
+        first = await _call(mcp, "awf_create_workspace", args)
+        replay = await _call(mcp, "awf_create_workspace", args)
+        conflict = await mcp.call_tool(
+            "awf_create_workspace",
+            {**args, "task_title": "Changed MCP idempotency title"},
+        )
+
+        assert isinstance(first, dict)
+        assert isinstance(replay, dict)
+        assert replay["id"] == first["id"]
+        assert isinstance(conflict, CallToolResult)
+        assert conflict.isError is True
+        assert conflict.structuredContent is not None
+        assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
     async def test_rejects_unknown_agent(self, mcp) -> None:  # type: ignore[no-untyped-def]
         bad = {**_CREATE_ARGS, "agent": "not-a-real-cli"}
         from mcp.shared.exceptions import McpError  # imported lazily to keep top clean
@@ -1174,6 +1193,36 @@ class TestCreateWorkspaceV2:
         assert preflight["provider"] == "codex"
         assert preflight["override_used"] is True
         assert preflight["override_reason"] == "operator verified local auth"
+
+    @pytest.mark.unit
+    async def test_create_workspace_v2_idempotency_key_replays_or_conflicts(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        args = {
+            "repo_url": "git@github.com:example/docs.git",
+            "base_branch": "main",
+            "task_title": "Document MCP idempotency",
+            "task_prompt": "Update the docs.",
+            "idempotency_key": "mcp-create-v2-replay",
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "mcp idempotency test fixture",
+        }
+
+        first = await _call(mcp, "awf_create_workspace_v2", args)
+        replay = await _call(mcp, "awf_create_workspace_v2", args)
+        conflict = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {**args, "task_title": "Changed MCP idempotency title"},
+        )
+
+        assert isinstance(first, dict)
+        assert isinstance(replay, dict)
+        assert replay["id"] == first["id"]
+        assert isinstance(conflict, CallToolResult)
+        assert conflict.isError is True
+        assert conflict.structuredContent is not None
+        assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
     async def test_retry_workspace_provider_preflight_error_and_override(
