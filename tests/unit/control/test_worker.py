@@ -3532,6 +3532,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         preserved = preserved_events[0]
         assert preserved.reason_code == PRESERVED_EXECUTION_REASON_CODE
         assert preserved.payload is not None
+        assert preserved.payload["message"].startswith("Worker restart found")
         assert preserved.payload["decision"] == "preserve_runtime"
         assert preserved.payload["requested_action"] == OperationType.refresh.value
         assert preserved.payload["workspace_status"] == WorkspaceStatus.running.value

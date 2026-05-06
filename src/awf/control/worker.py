@@ -1901,15 +1901,17 @@ def _active_execution_preservation_payload(
     previous_claim: dict[str, str | None],
     claim_cleanup: dict[str, str | None],
 ) -> dict[str, Any]:
+    message = (
+        "Worker restart found a persisted active execution with a live running "
+        "agent runtime. AWF preserved the runtime for explicit operator recovery "
+        "instead of starting a duplicate execution or stopping the compose stack."
+    )
     return {
         "owner": _ACTIVE_EXECUTION_PRESERVED_OWNER,
         "source": _ACTIVE_EXECUTION_PRESERVED_SOURCE,
         "requested_action": OperationType.refresh.value,
-        "reason": (
-            "Worker restart found a persisted active execution with a live running "
-            "agent runtime. AWF preserved the runtime for explicit operator recovery "
-            "instead of starting a duplicate execution or stopping the compose stack."
-        ),
+        "reason": message,
+        "message": message,
         "reason_code": ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
         "decision": "preserve_runtime",
         "workspace_status": candidate.status.value,
