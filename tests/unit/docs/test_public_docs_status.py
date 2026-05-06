@@ -186,6 +186,23 @@ def test_public_docs_are_discovered_from_docs_tree(
     assert _public_docs() == {"docs/NEW_GUIDE.md"}
 
 
+def test_copy_paste_docs_ignore_missing_readme_linked_docs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "README.md").write_text(
+        "See [missing guide](docs/MISSING.md).\n",
+        encoding="utf-8",
+    )
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(module, "README_PATH", tmp_path / "README.md")
+
+    assert _public_docs() == {"docs/MISSING.md"}
+    assert _copy_paste_docs() == set()
+
+
 def _public_docs() -> set[str]:
     public_docs = _all_public_markdown_docs()
     public_docs.update(_readme_public_doc_links())
@@ -353,7 +370,7 @@ def _copy_paste_docs() -> set[str]:
     docs = _present_docs(COPY_PASTE_DOC_HINTS)
     docs.update(
         rel_path
-        for rel_path in _public_docs()
+        for rel_path in _present_docs(_public_docs())
         if "copy-paste" in (REPO_ROOT / rel_path).read_text(encoding="utf-8").lower()
         and rel_path.endswith(".md")
     )
