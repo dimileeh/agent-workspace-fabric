@@ -93,7 +93,12 @@ from awf.runtime.pr_monitor import (
     SyncBase,
     WaitForCI,
     _is_bot_author,
+    _is_bot_review_thread,
+    _mark_review_thread_addressed,
     _needs_comment_attention,
+    _review_thread_body_hash,
+    _review_thread_body_state_key,
+    _review_thread_needs_attention,
     decide,
     sync_base_no_progress_signature,
 )
@@ -963,6 +968,8 @@ class PullRequestMonitorRunner:
                     status=status,
                     state=state,
                 )
+                if _drop_stale_review_thread_addressed_state(status, state):
+                    feedback_state_changed = True
                 if _drop_stale_review_comment_addressed_state(status, state):
                     feedback_state_changed = True
                 if feedback_state_changed:
@@ -3222,7 +3229,7 @@ class PullRequestMonitorRunner:
                         returncode=1,
                         stderr=str(exc),
                     )
-                state.mark_addressed(t.thread_id, verdict)
+                _mark_review_thread_addressed(state, t, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     threads_to_resolve.append(t.thread_id)
                     publish_dependent_ids.append(t.thread_id)
@@ -3280,7 +3287,7 @@ class PullRequestMonitorRunner:
             new_threads = [
                 t
                 for t in status.unresolved_inline_threads
-                if t.thread_id not in state.threads_addressed_ids
+                if _review_thread_needs_attention(state, t)
             ]
             new_reviews = [
                 c
@@ -3371,7 +3378,7 @@ class PullRequestMonitorRunner:
                     context="resolve_thread",
                     monitor_log=monitor_log,
                 ):
-                    state.threads_addressed_ids.pop(tid, None)
+                    _clear_addressed_state_by_id(state, tid)
                     await self._record_pr_monitor_audit_event(
                         workspace_id=workspace_id,
                         event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -3404,7 +3411,7 @@ class PullRequestMonitorRunner:
                 # IDs before it returns AddressComments, so retaining a
                 # failed resolve would make the next poll treat an open
                 # GitHub thread as handled forever.
-                state.threads_addressed_ids.pop(tid, None)
+                _clear_addressed_state_by_id(state, tid)
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
                     event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -5094,7 +5101,27 @@ def _mark_review_comment_addressed(
 
 def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
     state.threads_addressed_ids.pop(item_id, None)
+    state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
+
+
+def _drop_stale_review_thread_addressed_state(
+    status: PRStatus,
+    state: MonitorState,
+) -> bool:
+    changed = False
+    for thread in status.unresolved_inline_threads:
+        verdict = state.threads_addressed_ids.get(thread.thread_id)
+        if _needs_comment_attention(verdict):
+            continue
+        if (
+            state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
+            == _review_thread_body_hash(thread)
+        ):
+            continue
+        _clear_addressed_state_by_id(state, thread.thread_id)
+        changed = True
+    return changed
 
 
 def _review_comment_needs_attention(state: MonitorState, comment: ReviewComment) -> bool:
@@ -5933,7 +5960,7 @@ def _collect_defer_items(
     for t in status.unresolved_inline_threads:
         if state.threads_addressed_ids.get(t.thread_id) != "defer":
             continue
-        bucket = bot_items if _is_bot_author(t.author) else human_items
+        bucket = bot_items if _is_bot_review_thread(t) else human_items
         bucket.append(
             {
                 "kind": "thread",

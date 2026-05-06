@@ -59,9 +59,12 @@ from awf.runtime.pr_monitor import (
     ReportCiFailure,
     ReviewComment,
     ReviewThread,
+    ReviewThreadComment,
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    _mark_review_thread_addressed,
+    _review_thread_body_state_key,
 )
 from awf.runtime.pr_monitor_runner import (
     BaseBehindCountError,
@@ -74,6 +77,7 @@ from awf.runtime.pr_monitor_runner import (
     _as_utc,
     _collect_defer_items,
     _drop_stale_review_comment_addressed_state,
+    _drop_stale_review_thread_addressed_state,
     _GitPushResult,
     _infer_service_work_dir,
     _initial_review_grace_done_key,
@@ -1729,6 +1733,62 @@ def test_changed_review_comment_body_requeues_private_verdict() -> None:
     assert changed is True
     assert "issue:handled" not in state.threads_addressed_ids
     assert _review_comment_body_state_key("issue:handled") not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_changed_review_thread_history_requeues_private_verdict() -> None:
+    state = MonitorState()
+    original = ReviewThread(
+        thread_id="T_handled",
+        path="src/awf/runtime/pr_monitor_runner.py",
+        line=698,
+        body_excerpt="bot finding",
+        author="chatgpt-codex-connector",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101",
+                body="bot finding",
+                author="chatgpt-codex-connector",
+            ),
+        ),
+    )
+    _mark_review_thread_addressed(state, original, "false_positive")
+    status = PRStatus(
+        number=42,
+        head_sha="new-head-after-thread-reply",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(
+            ReviewThread(
+                thread_id="T_handled",
+                path="src/awf/runtime/pr_monitor_runner.py",
+                line=698,
+                body_excerpt="bot finding",
+                author="chatgpt-codex-connector",
+                comments=(
+                    ReviewThreadComment(
+                        comment_id="101",
+                        body="bot finding",
+                        author="chatgpt-codex-connector",
+                    ),
+                    ReviewThreadComment(
+                        comment_id="102",
+                        body="maintainer says this still needs a fix",
+                        author="dimileeh",
+                    ),
+                ),
+            ),
+        ),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    changed = _drop_stale_review_thread_addressed_state(status, state)
+
+    assert changed is True
+    assert "T_handled" not in state.threads_addressed_ids
+    assert _review_thread_body_state_key("T_handled") not in state.threads_addressed_ids
 
 
 @pytest.mark.unit

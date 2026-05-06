@@ -40,7 +40,9 @@ from awf.runtime.pr_monitor import (
     ReportCiFailure,
     ReviewComment,
     ReviewThread,
+    ReviewThreadComment,
     SyncBase,
+    _review_thread_body_state_key,
 )
 from awf.runtime.pr_monitor_runner import (
     BaseBehindCountError,
@@ -1633,7 +1635,8 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     )
 
     assert sleep_fn.calls == [30, 60]
-    assert state.threads_addressed_ids == {"T_retry": "fix_committed"}
+    assert state.threads_addressed_ids["T_retry"] == "fix_committed"
+    assert _review_thread_body_state_key("T_retry") in state.threads_addressed_ids
     assert [call.args[:3] for call in cmd.calls] == [
         ["gh", "api", "graphql"],
         ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
@@ -2909,6 +2912,82 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
     assert len(adapter.calls) == 2
     assert runner._deps.sleep.calls == [30, 30]  # type: ignore[attr-defined]
     assert cmd.calls[-1].args[-2:] == ["origin", "HEAD:refs/heads/awf/ws_review_burst"]
+
+
+@pytest.mark.unit
+async def test_fix_cycle_readdresses_thread_when_history_changes_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="DEFER: bot-only feedback is advisory")
+    adapter.queue(stdout="DEFER: maintainer reply needs human input")
+    changed_thread = {
+        "id": "T_same",
+        "isResolved": False,
+        "isOutdated": False,
+        "path": "src/foo.py",
+        "line": 12,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 101,
+                    "bodyText": "bot-only feedback",
+                    "author": {"login": "chatgpt-codex-connector"},
+                },
+                {
+                    "databaseId": 102,
+                    "bodyText": "maintainer reply needs a second look",
+                    "author": {"login": "dimileeh"},
+                },
+            ]
+        },
+    }
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    initial_thread = ReviewThread(
+        thread_id="T_same",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="bot-only feedback",
+        author="chatgpt-codex-connector",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101",
+                body="bot-only feedback",
+                author="chatgpt-codex-connector",
+            ),
+        ),
+    )
+
+    await runner._run_fix_cycle(
+        workspace_id="ws_thread_history_burst",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(initial_thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_thread_history_burst",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert len(adapter.calls) == 2
+    assert "maintainer reply needs a second look" in adapter.calls[1]
+    assert state.threads_addressed_ids["T_same"] == "defer"
+    assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
+    assert runner._deps.sleep.calls == [30, 30]  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit

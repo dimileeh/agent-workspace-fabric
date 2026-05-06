@@ -18,10 +18,9 @@ Design notes:
   ignores ``state.iter_count`` entirely — the counter exists for
   structured-log context, not as a terminal gate. Bumping happens in
   the runner after an action executes.
-* **Thread dedup is the caller's problem**. ``decide`` returns a
-  ``batch`` of threads on ``AddressComments`` consisting *only* of threads
-  whose IDs are absent from ``state.threads_addressed_ids``. If every
-  thread is already addressed, ``decide`` skips to the other gates.
+* **Thread dedup is the caller's problem**. The runner drops stale
+  addressed-state when fetched review-thread/comment evidence changes,
+  then ``decide`` skips only the still-current addressed items.
 * **Release-PR variant** (``task_kind="monitor_release_pr"``) differs in
   exactly one place: when all 5 gates are green it returns
   ``NotifyHuman`` instead of ``Merge``. The runner treats that as a live
@@ -31,6 +30,8 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -218,8 +219,9 @@ class MonitorState:
     last_push_sha: str | None = None  # SHA at the time of last push
     sync_base_no_progress_signature: str | None = None
     sync_base_no_progress_count: int = 0
-    # thread_id → one of:
-    # "fix_committed" / "false_positive" / "defer" / "agent_failed"
+    # thread/comment id → one of:
+    # "fix_committed" / "false_positive" / "defer" / "agent_failed";
+    # reserved "__review_*_body_hash__:<id>" keys track addressed evidence.
     threads_addressed_ids: dict[str, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.monotonic)
 
@@ -404,6 +406,66 @@ def _needs_comment_attention(verdict: str | None) -> bool:
     """
 
     return verdict is None or verdict == "agent_failed"
+
+
+def _review_thread_body_state_key(thread_id: str) -> str:
+    return f"__review_thread_body_hash__:{thread_id}"
+
+
+def _review_thread_resolution_body(thread: ReviewThread) -> str:
+    if thread.comments:
+        payload = [
+            {
+                "author": comment.author,
+                "body": comment.body,
+                "comment_id": comment.comment_id,
+                "created_at": (
+                    comment.created_at.isoformat() if comment.created_at is not None else None
+                ),
+            }
+            for comment in thread.comments
+        ]
+    else:
+        payload = [
+            {
+                "author": thread.author,
+                "body": thread.body_excerpt,
+                "comment_id": None,
+                "created_at": None,
+            }
+        ]
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _review_thread_body_hash(thread: ReviewThread) -> str:
+    return hashlib.sha256(_review_thread_resolution_body(thread).encode("utf-8")).hexdigest()
+
+
+def _mark_review_thread_addressed(
+    state: MonitorState,
+    thread: ReviewThread,
+    verdict: str,
+) -> None:
+    state.mark_addressed(thread.thread_id, verdict)
+    state.mark_addressed(
+        _review_thread_body_state_key(thread.thread_id),
+        _review_thread_body_hash(thread),
+    )
+
+
+def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) -> bool:
+    verdict = state.threads_addressed_ids.get(thread.thread_id)
+    if _needs_comment_attention(verdict):
+        return True
+    return (
+        state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
+        != _review_thread_body_hash(thread)
+    )
+
+
+def _is_bot_review_thread(thread: ReviewThread) -> bool:
+    authors = [comment.author for comment in thread.comments] if thread.comments else [thread.author]
+    return all(_is_bot_author(author) for author in authors)
 
 
 def sync_base_no_progress_signature(status: PRStatus) -> str:
@@ -612,7 +674,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # fires. Review feedback on PR #2 (CodeRabbit, Major): "Deferred
     # feedback still disappears from the merge gate".
     has_human_defer = any(
-        state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_author(t.author)
+        state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_review_thread(t)
         for t in status.unresolved_inline_threads
     ) or any(
         state.threads_addressed_ids.get(c.comment_id) == "defer" and not _is_bot_author(c.author)
