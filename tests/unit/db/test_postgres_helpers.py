@@ -21,8 +21,19 @@ class _FakeConnection:
         return None
 
     async def execute(self, _statement: Any, params: dict[str, object] | None = None) -> None:
+        statement = str(_statement)
+        if statement.startswith("CREATE SCHEMA IF NOT EXISTS "):
+            self._events.append(
+                f"ensure_schema:{statement.removeprefix('CREATE SCHEMA IF NOT EXISTS ')}"
+            )
+        if statement.startswith("SET search_path TO "):
+            self._events.append(f"set_search_path:{statement.removeprefix('SET search_path TO ')}")
         if params and "search_path" in params:
             self._events.append(f"set_search_path:{params['search_path']}")
+
+    async def scalar(self, _statement: Any) -> str:
+        self._events.append("verify_schema")
+        return "awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     async def run_sync(self, fn: Any) -> None:
         fn(self)
@@ -146,7 +157,9 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
         "lock:admin",
         "create:admin",
         "unlock:admin",
+        'ensure_schema:"awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
         'set_search_path:"awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+        "verify_schema",
         "create_all",
         "yield:schema",
         "dispose:schema",
