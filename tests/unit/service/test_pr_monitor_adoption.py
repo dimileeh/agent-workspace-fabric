@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
@@ -2021,6 +2021,102 @@ class TestPullRequestMonitorAdoptionService:
                 "attempt_id": first.attempt_id,
             }
         ]
+
+    @pytest.mark.unit
+    async def test_terminal_lineage_uses_adoption_history_attempts_without_extra_reads(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            first_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert first_workspace is not None
+            first_workspace.status = WorkspaceStatus.destroyed.value
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            second_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            assert second_workspace is not None
+            second_workspace.status = WorkspaceStatus.destroyed.value
+            await session.flush()
+
+            repo_slug = "dimileeh/aira-web"
+            pr_number = 277
+            history = await WorkspaceRepository(session).list_pr_adoption_history(
+                task_external_id=adoption_module._adoption_external_id(
+                    repo_slug=repo_slug,
+                    pr_number=pr_number,
+                ),
+                idempotency_key=adoption_module.pr_adoption_idempotency_key(
+                    repo_slug=repo_slug,
+                    pr_number=pr_number,
+                ),
+                task_kind=adoption_module.PR_ADOPTION_TASK_KIND,
+                repo_slug=repo_slug,
+                pr_number=pr_number,
+            )
+
+            task_attempt_selects: list[str] = []
+
+            def _capture_task_attempt_selects(
+                _conn: object,
+                _cursor: object,
+                statement: str,
+                _parameters: object,
+                _context: object,
+                _executemany: bool,
+            ) -> None:
+                normalized = statement.upper()
+                if not normalized.lstrip().startswith("SELECT"):
+                    return
+                if "FROM TASK_ATTEMPTS" in normalized:
+                    task_attempt_selects.append(statement)
+
+            engine = factory.kw["bind"]
+            event.listen(
+                engine.sync_engine,
+                "before_cursor_execute",
+                _capture_task_attempt_selects,
+            )
+            try:
+                lineage = await adoption_module._terminal_adoption_lineage(
+                    session,
+                    history,
+                )
+            finally:
+                event.remove(
+                    engine.sync_engine,
+                    "before_cursor_execute",
+                    _capture_task_attempt_selects,
+                )
+
+        assert lineage == [
+            {
+                "workspace_id": first.workspace_id,
+                "status": WorkspaceStatus.destroyed.value,
+                "task_id": first.task_id,
+                "attempt_id": first.attempt_id,
+            },
+            {
+                "workspace_id": second.workspace_id,
+                "status": WorkspaceStatus.destroyed.value,
+                "task_id": second.task_id,
+                "attempt_id": second.attempt_id,
+            },
+        ]
+        assert task_attempt_selects == []
 
     @pytest.mark.unit
     async def test_adoption_workspace_idempotency_key_exhaustion_is_explicit(self) -> None:

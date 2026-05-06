@@ -6,6 +6,7 @@ import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+from sqlalchemy import inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
@@ -24,7 +25,7 @@ from awf.common.github_client import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import MergeCandidate, Task, Workspace
+from awf.db.models import MergeCandidate, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -548,12 +549,26 @@ async def _terminal_adoption_lineage(
     session: AsyncSession,
     workspaces: list[Workspace],
 ) -> list[dict[str, str | None]]:
-    attempt_repo = TaskAttemptRepository(session)
+    terminal_workspaces = [
+        workspace for workspace in workspaces if not _is_live_adoption_status(workspace.status)
+    ]
+    attempts_by_workspace_id: dict[str, TaskAttempt | None] = {}
+    unloaded_workspace_ids: list[str] = []
+    for workspace in terminal_workspaces:
+        if "task_attempt" in inspect(workspace).unloaded:
+            unloaded_workspace_ids.append(workspace.id)
+        else:
+            attempts_by_workspace_id[workspace.id] = workspace.task_attempt
+    if unloaded_workspace_ids:
+        stmt = select(TaskAttempt).where(TaskAttempt.workspace_id.in_(unloaded_workspace_ids))
+        attempts = (await session.execute(stmt)).scalars()
+        attempts_by_workspace_id.update(
+            {attempt.workspace_id: attempt for attempt in attempts}
+        )
+
     lineage: list[dict[str, str | None]] = []
-    for workspace in workspaces:
-        if _is_live_adoption_status(workspace.status):
-            continue
-        attempt = await attempt_repo.get_by_workspace_id(workspace.id)
+    for workspace in terminal_workspaces:
+        attempt = attempts_by_workspace_id.get(workspace.id)
         lineage.append(
             {
                 "workspace_id": workspace.id,

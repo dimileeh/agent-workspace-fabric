@@ -2686,6 +2686,7 @@ class WorkspaceRepository:
         """List workspaces that represent adoption history for one repo/PR."""
         stmt = (
             select(Workspace)
+            .options(selectinload(Workspace.task_attempt))
             .where(
                 or_(
                     Workspace.task_external_id == task_external_id,
