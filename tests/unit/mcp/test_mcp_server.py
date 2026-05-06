@@ -685,6 +685,39 @@ class TestCreateWorkspace:
         assert conflict.structuredContent is not None
         assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
 
+    @pytest.mark.parametrize(
+        ("changed_field", "changed_value"),
+        [
+            ("env_profile", "profile-b"),
+            ("task_external_id", "TASK-B"),
+        ],
+    )
+    @pytest.mark.unit
+    async def test_v1_idempotency_conflicts_on_profile_and_external_id(
+        self,
+        mcp,
+        changed_field: str,
+        changed_value: str,
+    ) -> None:  # type: ignore[no-untyped-def]
+        args = {
+            **_CREATE_ARGS,
+            "env_profile": "profile-a",
+            "task_external_id": "TASK-A",
+            "idempotency_key": "mcp-create-v1-user-fields",
+        }
+
+        first = await _call(mcp, "awf_create_workspace", args)
+        conflict = await mcp.call_tool(
+            "awf_create_workspace",
+            {**args, changed_field: changed_value},
+        )
+
+        assert isinstance(first, dict)
+        assert isinstance(conflict, CallToolResult)
+        assert conflict.isError is True
+        assert conflict.structuredContent is not None
+        assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
+
     @pytest.mark.unit
     async def test_rejects_unknown_agent(self, mcp) -> None:  # type: ignore[no-untyped-def]
         bad = {**_CREATE_ARGS, "agent": "not-a-real-cli"}

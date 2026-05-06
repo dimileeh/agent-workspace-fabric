@@ -1024,7 +1024,9 @@ def workspace_create_payload_matches(
         and existing.branch_base == payload.branch_base
         and existing.task_title == payload.task_title
         and existing.task_prompt == payload.task_prompt
+        and existing.task_external_id == payload.task_external_id
         and existing.agent == payload.agent.value
+        and existing.env_profile == payload.env_profile
         and list(existing.test_commands) == list(payload.test_commands)
         and existing.requires_database == payload.requires_database
     )
