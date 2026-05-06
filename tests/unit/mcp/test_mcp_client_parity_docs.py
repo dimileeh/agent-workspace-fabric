@@ -144,8 +144,24 @@ def test_global_operations_safe_read_has_cli_parity() -> None:
     assert "CLI absent" not in cli_cell
     assert "awf operations list" in cli_cell
     assert "awf operations show" in cli_cell
-    assert row.get("Status", "").strip() == "MCP implemented"
-    assert backlog_cell == "—"
+    assert row.get("Status", "").strip() == "MCP partial"
+    assert backlog_cell == "TODO§P1-operation-read-auth"
+
+
+@pytest.mark.unit
+def test_operation_read_rows_keep_auth_parity_open() -> None:
+    rows = _parity_rows()
+
+    for capability in ("Workspace operations", "Global operations"):
+        row = _row_for_capability(rows, capability)
+        security_cell = row.get("Security Boundary", "")
+
+        assert "require_api_token" not in security_cell, capability
+        assert "auth parity open" in security_cell, capability
+        assert row.get("Status", "").strip() == "MCP partial", capability
+        assert _strip_backticks(row.get("Backlog Slice", "")).strip() == (
+            "TODO§P1-operation-read-auth"
+        )
 
 
 @pytest.mark.unit
