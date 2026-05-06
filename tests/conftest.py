@@ -47,6 +47,11 @@ _POSTGRES_SOURCE_SENTINELS = (
 )
 
 
+def _uses_postgres_test_fixture(item: pytest.Item) -> bool:
+    fixture_names = set(getattr(item, "fixturenames", ()))
+    return not fixture_names.isdisjoint(_POSTGRES_FIXTURE_NAMES)
+
+
 def _test_source_uses_postgres(path: Path, cache: dict[Path, bool]) -> bool:
     cached = cache.get(path)
     if cached is not None:
@@ -62,8 +67,7 @@ def _test_source_uses_postgres(path: Path, cache: dict[Path, bool]) -> bool:
 
 
 def _uses_postgres_test_database(item: pytest.Item, cache: dict[Path, bool]) -> bool:
-    fixture_names = set(getattr(item, "fixturenames", ()))
-    if not fixture_names.isdisjoint(_POSTGRES_FIXTURE_NAMES):
+    if _uses_postgres_test_fixture(item):
         return True
     return _test_source_uses_postgres(item.path, cache)
 
@@ -102,8 +106,7 @@ def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
 def pytest_collection_finish(session: pytest.Session) -> None:
     """Clear stale Postgres schemas before DB-backed test selections start."""
 
-    source_cache: dict[Path, bool] = {}
-    if any(_uses_postgres_test_database(item, source_cache) for item in session.items):
+    if any(_uses_postgres_test_fixture(item) for item in session.items):
         from tests.postgres import cleanup_stale_postgres_test_schemas
 
         cleanup_stale_postgres_test_schemas()
