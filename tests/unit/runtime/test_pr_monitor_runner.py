@@ -935,6 +935,63 @@ async def test_pre_merge_recheck_blocks_when_check_becomes_pending(
 
 
 @pytest.mark.unit
+async def test_pre_merge_recheck_transient_base_fetch_exhaustion_is_terminal_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    transient_stderr = (
+        "remote: Internal Server Error\n"
+        "fatal: unable to access 'https://github.com/example/repo.git/': "
+        "The requested URL returned error: 500"
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr=transient_stderr)
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        pre_merge_settle_seconds=5,
+    )
+    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 0)
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert sleep_fn.calls == [5]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        failed_transitions = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+        ]
+        assert failed_transitions[-1].reason_code == (
+            "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+        )
+
+
+@pytest.mark.unit
 async def test_clean_pr_merges_only_after_pre_merge_recheck_passes(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2079,6 +2136,15 @@ async def test_run_fails_after_transient_base_fetch_retry_budget_is_exhausted(
             event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
             for event in workspace.events
         )
+        failed_transitions = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+        ]
+        assert failed_transitions[-1].reason_code == (
+            "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+        )
 
 
 @pytest.mark.unit
@@ -2138,6 +2204,15 @@ async def test_sync_base_transient_base_fetch_retry_budget_survives_status_refre
             event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
             and event.payload.get("context") == "sync_base"
             for event in workspace.events
+        )
+        failed_transitions = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+        ]
+        assert failed_transitions[-1].reason_code == (
+            "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
         )
 
 
@@ -2403,6 +2478,55 @@ async def test_execute_sync_base_base_fetch_failure_finishes_operation_and_fails
     assert "broken mirror" in workspace.failure_message
     assert operations[0].status == OperationStatus.failed.value
     assert operations[0].error_code == "GIT_FETCH_BASE_FAILED"
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_transient_exhaustion_records_terminal_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 0)
+
+    async def _raise_transient_base_fetch_error(**_kwargs: object) -> object:
+        raise BaseFetchError("git fetch base failed: HTTP 500 server error")
+
+    mocker.patch.object(runner, "_run_sync_base", _raise_transient_base_fetch_error)
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(merge_state_status=MergeStateStatus.DIRTY),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    assert terminal is True
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+    assert operations[0].result["reason_code"] == (
+        "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+    )
 
 
 @pytest.mark.unit

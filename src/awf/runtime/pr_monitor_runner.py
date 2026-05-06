@@ -138,6 +138,12 @@ class VerdictResult:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class _BaseFetchHandlingResult:
+    retry: bool
+    reason_code: str
+
+
 class PostMergeTargetReconciler(Protocol):
     """Best-effort target-branch repair hook invoked after a PR is merged."""
 
@@ -883,14 +889,15 @@ class PullRequestMonitorRunner:
                         base_branch=ws.branch_base,
                     )
                 except BaseFetchError as exc:
-                    if await self._wait_after_transient_base_fetch_error(
+                    base_fetch_result = await self._wait_after_transient_base_fetch_error(
                         exc,
                         workspace_id=workspace_id,
                         pr_number=pr_number,
                         context="fetch_pr_status",
                         state=state,
                         monitor_log=monitor_log,
-                    ):
+                    )
+                    if base_fetch_result.retry:
                         continue
                     await self._write_monitor_log(
                         monitor_log,
@@ -898,13 +905,14 @@ class PullRequestMonitorRunner:
                             "event": "monitor.failed",
                             "workspace_id": workspace_id,
                             "reason": "base_fetch_failed",
+                            "reason_code": base_fetch_result.reason_code,
                             "message": str(exc)[:400],
                         },
                     )
                     await self._terminate_failed(
                         workspace_id,
                         message=f"monitor: could not refresh base branch: {exc}"[:2000],
-                        reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                        reason_code=base_fetch_result.reason_code,
                     )
                     return
                 except BaseBehindCountError as exc:
@@ -1274,24 +1282,25 @@ class PullRequestMonitorRunner:
                 )
                 raise
             except BaseFetchError as exc:
-                if await self._wait_after_transient_base_fetch_error(
+                base_fetch_result = await self._wait_after_transient_base_fetch_error(
                     exc,
                     workspace_id=workspace_id,
                     pr_number=pr_number,
                     context="sync_base",
                     state=state,
                     monitor_log=monitor_log,
-                ):
+                )
+                if base_fetch_result.retry:
                     await self._finish_monitor_operation(
                         operation,
                         status=OperationStatus.failed,
                         result={
                             "status": "retrying",
                             "outcome": "transient_base_fetch_error",
-                            "reason_code": _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+                            "reason_code": base_fetch_result.reason_code,
                             "pushed": False,
                         },
-                        error_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+                        error_code=base_fetch_result.reason_code,
                         error_message=str(exc),
                     )
                     return False
@@ -1301,16 +1310,16 @@ class PullRequestMonitorRunner:
                     result={
                         "status": "failed",
                         "outcome": "base_fetch_failed",
-                        "reason_code": _GIT_FETCH_BASE_FAILED_REASON,
+                        "reason_code": base_fetch_result.reason_code,
                         "pushed": False,
                     },
-                    error_code=_GIT_FETCH_BASE_FAILED_REASON,
+                    error_code=base_fetch_result.reason_code,
                     error_message=str(exc),
                 )
                 await self._terminate_failed(
                     workspace_id,
                     message=f"monitor: could not refresh base branch: {exc}"[:2000],
-                    reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                    reason_code=base_fetch_result.reason_code,
                 )
                 return True
             except ComposeExecCleanupError as exc:
@@ -2058,14 +2067,15 @@ class PullRequestMonitorRunner:
                 return handled
 
             if recheck_base_error is not None:
-                if await self._wait_after_transient_base_fetch_error(
+                base_fetch_result = await self._wait_after_transient_base_fetch_error(
                     recheck_base_error,
                     workspace_id=workspace_id,
                     pr_number=pr_number,
                     context="pre_merge_recheck",
                     state=state,
                     monitor_log=monitor_log,
-                ):
+                )
+                if base_fetch_result.retry:
                     return False
                 await self._terminate_failed(
                     workspace_id,
@@ -2073,7 +2083,7 @@ class PullRequestMonitorRunner:
                         f"monitor: could not refresh base branch during pre-merge recheck: "
                         f"{recheck_base_error}"
                     )[:2000],
-                    reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                    reason_code=base_fetch_result.reason_code,
                 )
                 return True
 
@@ -4386,9 +4396,12 @@ class PullRequestMonitorRunner:
         context: str,
         state: MonitorState,
         monitor_log: WorkspaceLogSink | None,
-    ) -> bool:
+    ) -> _BaseFetchHandlingResult:
         if not _is_transient_base_fetch_error(exc):
-            return False
+            return _BaseFetchHandlingResult(
+                retry=False,
+                reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+            )
 
         retry_number = _increment_base_fetch_retry_count(state, context)
         max_retries = max(self._runner_config.transient_base_fetch_max_retries, 0)
@@ -4426,7 +4439,10 @@ class PullRequestMonitorRunner:
                 ],
             )
             await self._persist_state(workspace_id, state)
-            return False
+            return _BaseFetchHandlingResult(
+                retry=False,
+                reason_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
+            )
 
         wait_seconds = _base_fetch_retry_wait_seconds(
             retry_number=retry_number,
@@ -4469,7 +4485,10 @@ class PullRequestMonitorRunner:
         )
         await self._persist_state(workspace_id, state)
         await self._deps.sleep(wait_seconds)
-        return True
+        return _BaseFetchHandlingResult(
+            retry=True,
+            reason_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+        )
 
     # ── Defer-signal artifact ─────────────────────────────────────────────
 
