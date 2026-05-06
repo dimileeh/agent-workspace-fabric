@@ -24,13 +24,14 @@ from awf.common.github_client import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import MergeCandidate, Workspace
+from awf.db.models import MergeCandidate, Task, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
+    TaskExternalIdConflictError,
     TaskRepository,
     ValidationRunRepository,
     WorkspaceRepository,
@@ -326,16 +327,32 @@ class PullRequestMonitorAdoptionService:
             else None
         )
 
-        task = await TaskRepository(self._session).create_or_get(
-            repo_url=workspace.repo_url,
-            base_branch=workspace.branch_base,
-            title=workspace.task_title,
-            prompt=workspace.task_prompt,
-            external_id=workspace.task_external_id,
-            idempotency_key=idempotency_key,
-            task_class=workspace.task_class,
-            owned_paths=list(workspace.owned_paths),
-        )
+        task_repo = TaskRepository(self._session)
+
+        async def _create_or_get_task(*, external_id: str | None) -> Task:
+            return await task_repo.create_or_get(
+                repo_url=workspace.repo_url,
+                base_branch=workspace.branch_base,
+                title=workspace.task_title,
+                prompt=workspace.task_prompt,
+                external_id=external_id,
+                idempotency_key=idempotency_key,
+                task_class=workspace.task_class,
+                owned_paths=list(workspace.owned_paths),
+            )
+
+        try:
+            task = await _create_or_get_task(external_id=workspace.task_external_id)
+        except TaskExternalIdConflictError:
+            if not previous_terminal_adoptions:
+                raise
+            workspace.task_external_id = _adoption_generation_external_id(
+                repo_slug=repo.slug(),
+                pr_number=metadata.number,
+                logical_idempotency_key=logical_idempotency_key,
+                workspace_idempotency_key=idempotency_key,
+            )
+            task = await _create_or_get_task(external_id=workspace.task_external_id)
         attempt = await TaskAttemptRepository(self._session).create_for_workspace(
             task=task,
             workspace=workspace,
@@ -697,6 +714,22 @@ def _superseded_adoption_idempotency_key(*, idempotency_key: str, workspace_id: 
 
 def _superseded_adoption_external_id(*, external_id: str, workspace_id: str) -> str:
     return f"{external_id}:superseded:{workspace_id}"
+
+
+def _adoption_generation_external_id(
+    *,
+    repo_slug: str,
+    pr_number: int,
+    logical_idempotency_key: str,
+    workspace_idempotency_key: str,
+) -> str:
+    base_external_id = _adoption_external_id(repo_slug=repo_slug, pr_number=pr_number)
+    prefix = f"{logical_idempotency_key}:"
+    if workspace_idempotency_key.startswith(prefix):
+        generation = workspace_idempotency_key[len(prefix) :]
+    else:
+        generation = "g1"
+    return f"{base_external_id}:{generation}"
 
 
 def _adoption_repo_url(*, request: PullRequestMonitorAdoptionRequest, repo: RepoRef) -> str:
