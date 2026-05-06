@@ -149,6 +149,12 @@ class MonitorRunnerConfig:
     max_outer_iterations: int = 10_000
     # Max fix_cycle re-polls inside a single AddressComments action.
     max_fix_cycle_passes: int = 5
+    # Transient GitHub outages can surface through `git fetch`, not only `gh`.
+    # Keep base refresh authoritative, but retry remote 5xx/network failures
+    # before declaring the monitor infrastructure-failed.
+    transient_base_fetch_max_retries: int = 5
+    transient_base_fetch_initial_backoff_seconds: float = 5.0
+    transient_base_fetch_max_backoff_seconds: float = 120.0
 
 
 _NON_TRANSIENT_GITHUB_ERROR_MARKERS = (
@@ -172,6 +178,11 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
     "504 gateway timeout",
     "bad gateway",
     "gateway timeout",
+    "internal server error",
+    "returned error: 500",
+    "returned error: 502",
+    "returned error: 503",
+    "returned error: 504",
     "service unavailable",
     "temporarily unavailable",
     "try again",
@@ -192,6 +203,10 @@ _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
 _GIT_FETCH_BASE_FAILED_REASON = "GIT_FETCH_BASE_FAILED"
+_GIT_BASE_FETCH_TRANSIENT_RETRY_REASON = "GIT_BASE_FETCH_TRANSIENT_RETRY"
+_GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON = (
+    "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+)
 _GIT_BASE_BEHIND_FAILED_REASON = "GIT_BASE_BEHIND_FAILED"
 _GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
@@ -218,6 +233,7 @@ _TOKEN_RE = re.compile(
     r")(?![A-Za-z0-9])"
 )
 _BROKEN_AWF_REF_RE = re.compile(r"refs/heads/awf/(ws_[A-Za-z0-9_-]+)")
+_BASE_FETCH_RETRY_COUNT_KEY_PREFIX = "__awf_base_fetch_retry_count:"
 _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY = "__awf_sync_base_no_progress_signature"
 _SYNC_BASE_NO_PROGRESS_COUNT_KEY = "__awf_sync_base_no_progress_count"
 _TERMINAL_WORKSPACE_STATUSES = {
@@ -858,6 +874,15 @@ class PullRequestMonitorRunner:
                         base_branch=ws.branch_base,
                     )
                 except BaseFetchError as exc:
+                    if await self._wait_after_transient_base_fetch_error(
+                        exc,
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        context="fetch_pr_status",
+                        state=state,
+                        monitor_log=monitor_log,
+                    ):
+                        continue
                     await self._write_monitor_log(
                         monitor_log,
                         {
@@ -912,6 +937,8 @@ class PullRequestMonitorRunner:
                         message=f"monitor: github error: {exc}"[:2000],
                     )
                     return
+                if _clear_transient_base_fetch_retry_state(state):
+                    await self._persist_state(workspace_id, state)
 
                 # Determine the remote push target for this workspace.
                 # ``remote_push_branch`` is the canonical destination.
@@ -1226,6 +1253,27 @@ class PullRequestMonitorRunner:
                 )
                 raise
             except BaseFetchError as exc:
+                if await self._wait_after_transient_base_fetch_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="sync_base",
+                    state=state,
+                    monitor_log=monitor_log,
+                ):
+                    await self._finish_monitor_operation(
+                        operation,
+                        status=OperationStatus.failed,
+                        result={
+                            "status": "retrying",
+                            "outcome": "transient_base_fetch_error",
+                            "reason_code": _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+                            "pushed": False,
+                        },
+                        error_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+                        error_message=str(exc),
+                    )
+                    return False
                 await self._finish_monitor_operation(
                     operation,
                     status=OperationStatus.failed,
@@ -1984,6 +2032,15 @@ class PullRequestMonitorRunner:
                 return handled
 
             if recheck_base_error is not None:
+                if await self._wait_after_transient_base_fetch_error(
+                    recheck_base_error,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="pre_merge_recheck",
+                    state=state,
+                    monitor_log=monitor_log,
+                ):
+                    return False
                 await self._terminate_failed(
                     workspace_id,
                     message=(
@@ -4229,6 +4286,100 @@ class PullRequestMonitorRunner:
         await self._deps.sleep(wait_seconds)
         return True
 
+    async def _wait_after_transient_base_fetch_error(
+        self,
+        exc: BaseFetchError,
+        *,
+        workspace_id: str,
+        pr_number: int,
+        context: str,
+        state: MonitorState,
+        monitor_log: WorkspaceLogSink | None,
+    ) -> bool:
+        if not _is_transient_base_fetch_error(exc):
+            return False
+
+        retry_number = _increment_base_fetch_retry_count(state, context)
+        max_retries = max(self._runner_config.transient_base_fetch_max_retries, 0)
+        if retry_number > max_retries:
+            payload = _transient_base_fetch_retry_payload(
+                exc,
+                context=context,
+                pr_number=pr_number,
+                retry_number=retry_number,
+                max_retries=max_retries,
+                wait_seconds=0.0,
+            )
+            _log.warning(
+                "monitor.git_base_fetch_transient_retry_exhausted",
+                workspace_id=workspace_id,
+                **payload,
+            )
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.git_base_fetch_transient_retry_exhausted",
+                    "workspace_id": workspace_id,
+                    "reason_code": _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
+                    **payload,
+                },
+            )
+            await self._append_workspace_events(
+                workspace_id=workspace_id,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="monitor.git_base_fetch_transient_retry_exhausted",
+                        reason_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
+                        payload=payload,
+                    )
+                ],
+            )
+            await self._persist_state(workspace_id, state)
+            return False
+
+        wait_seconds = _base_fetch_retry_wait_seconds(
+            retry_number=retry_number,
+            initial_backoff_seconds=(
+                self._runner_config.transient_base_fetch_initial_backoff_seconds
+            ),
+            max_backoff_seconds=self._runner_config.transient_base_fetch_max_backoff_seconds,
+        )
+        payload = _transient_base_fetch_retry_payload(
+            exc,
+            context=context,
+            pr_number=pr_number,
+            retry_number=retry_number,
+            max_retries=max_retries,
+            wait_seconds=wait_seconds,
+        )
+        _log.warning(
+            "monitor.git_base_fetch_transient_retrying",
+            workspace_id=workspace_id,
+            **payload,
+        )
+        await self._write_monitor_log(
+            monitor_log,
+            {
+                "event": "monitor.git_base_fetch_transient_retrying",
+                "workspace_id": workspace_id,
+                "reason_code": _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+                **payload,
+            },
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="monitor.git_base_fetch_transient_retrying",
+                    reason_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+                    payload=payload,
+                )
+            ],
+        )
+        await self._persist_state(workspace_id, state)
+        await self._deps.sleep(wait_seconds)
+        return True
+
     # ── Defer-signal artifact ─────────────────────────────────────────────
 
     def _write_defer_signal(
@@ -4888,6 +5039,26 @@ def _transient_github_retry_payload(
     }
 
 
+def _transient_base_fetch_retry_payload(
+    exc: BaseFetchError,
+    *,
+    context: str,
+    pr_number: int,
+    retry_number: int,
+    max_retries: int,
+    wait_seconds: float,
+) -> dict[str, object]:
+    return {
+        "context": context,
+        "operation": "git fetch base",
+        "pr_number": pr_number,
+        "retry_number": retry_number,
+        "max_retries": max_retries,
+        "wait_seconds": wait_seconds,
+        "message": _redact_and_truncate_github_error(str(exc)),
+    }
+
+
 def _redact_and_truncate_github_error(value: str, *, limit: int = 400) -> str:
     redacted = _URL_CREDENTIAL_RE.sub(r"\1<redacted>@", value)
     redacted = _AUTHORIZATION_BEARER_RE.sub(r"\1<redacted>", redacted)
@@ -4923,6 +5094,55 @@ def _is_transient_github_client_error(exc: GitHubClientError) -> bool:
     if any(marker in text for marker in _NON_TRANSIENT_GITHUB_ERROR_MARKERS):
         return False
     return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)
+
+
+def _is_transient_base_fetch_error(exc: BaseFetchError) -> bool:
+    """Classify git transport failures caused by transient GitHub outages."""
+
+    text = str(exc).lower()
+    if any(marker in text for marker in _NON_TRANSIENT_GITHUB_ERROR_MARKERS):
+        return False
+    return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)
+
+
+def _base_fetch_retry_count_key(context: str) -> str:
+    return f"{_BASE_FETCH_RETRY_COUNT_KEY_PREFIX}{context}"
+
+
+def _increment_base_fetch_retry_count(state: MonitorState, context: str) -> int:
+    key = _base_fetch_retry_count_key(context)
+    raw_count = state.threads_addressed_ids.get(key, "0")
+    try:
+        current = int(raw_count)
+    except ValueError:
+        current = 0
+    retry_number = current + 1
+    state.threads_addressed_ids[key] = str(retry_number)
+    return retry_number
+
+
+def _clear_transient_base_fetch_retry_state(state: MonitorState) -> bool:
+    keys = [
+        key
+        for key in state.threads_addressed_ids
+        if key.startswith(_BASE_FETCH_RETRY_COUNT_KEY_PREFIX)
+    ]
+    for key in keys:
+        state.threads_addressed_ids.pop(key, None)
+    return bool(keys)
+
+
+def _base_fetch_retry_wait_seconds(
+    *,
+    retry_number: int,
+    initial_backoff_seconds: float,
+    max_backoff_seconds: float,
+) -> float:
+    initial = max(initial_backoff_seconds, 0.0)
+    cap = max(max_backoff_seconds, 0.0)
+    exponent = min(max(retry_number - 1, 0), 30)
+    wait_seconds = initial * float(2**exponent)
+    return wait_seconds if wait_seconds < cap else cap
 
 
 def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:

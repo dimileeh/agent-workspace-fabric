@@ -7,6 +7,7 @@ from awf.db.models import MergeCandidate, Operation, TaskAttempt, ValidationRun,
 from awf.db.repositories import sync_candidate_readiness
 from awf.runtime.merge_eligibility import (
     VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+    _successful_validation_run_tier,
     compute_stale_reason,
     compute_stale_reason_for_attempt,
 )
@@ -183,6 +184,24 @@ def test_compute_stale_reason_rejects_targeted_only_validation_when_coverage_was
         VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
         "validate",
     )
+
+
+@pytest.mark.unit
+def test_successful_validation_run_tier_excludes_deferred_coverage_runs() -> None:
+    run = _validation_run(
+        tier=2,
+        started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        commands=[
+            {
+                "phase": "coverage",
+                "command": "pytest --cov=awf",
+                "evidence_status": "skipped_by_policy",
+                "evidence_reason_code": "TARGETED_EDIT_GATE",
+            }
+        ],
+    )
+
+    assert _successful_validation_run_tier(run) is None
 
 
 @pytest.mark.unit

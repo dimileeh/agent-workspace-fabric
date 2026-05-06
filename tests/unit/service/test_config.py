@@ -341,6 +341,31 @@ def test_host_awf_host_work_dir_overrides_host_awf_work_dir(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
+def test_explicit_awf_work_dir_environment_is_service_work_dir(tmp_path: Path) -> None:
+    work_dir = tmp_path / "explicit-service-state"
+
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"AWF_WORK_DIR": str(work_dir)},
+    )
+
+    assert settings.work_dir == str(work_dir)
+
+
+@pytest.mark.unit
+def test_compose_file_awf_work_dir_is_used_when_host_env_has_no_work_dir(tmp_path: Path) -> None:
+    work_dir = tmp_path / "compose-explicit-service-state"
+
+    resolved = _resolve_service_work_dir(
+        Settings(_env_file=None),
+        environ={"AWF_WORK_DIR": str(work_dir)},
+        host_environ={},
+    )
+
+    assert resolved == str(work_dir)
+
+
+@pytest.mark.unit
 def test_host_awf_work_dir_precedes_compose_file_default(tmp_path: Path) -> None:
     compose_env_file = tmp_path / "compose.env"
     compose_env_file.write_text(

@@ -165,6 +165,40 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "gh auth status",
         "docs/REASON_CATALOG.md#github_auth_unusable",
     ),
+    "GIT_FETCH_BASE_FAILED": _ReasonText(
+        "The PR monitor could not refresh the target branch ref for a workspace.",
+        (
+            "Inspect the workspace monitor log and run `git fsck` on the AWF mirror. "
+            "If AWF reports a repaired orphan ref, restart or remonitor the workspace; "
+            "otherwise repair GitHub/network access before retrying."
+        ),
+        (
+            "The shared git mirror has a broken AWF ref, network access to the remote "
+            "failed, or the target branch no longer exists."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#git_fetch_base_failed",
+    ),
+    "GIT_BASE_FETCH_TRANSIENT_RETRY": _ReasonText(
+        (
+            "The PR monitor hit a transient GitHub or network error while refreshing "
+            "the target branch and is retrying."
+        ),
+        (
+            "No immediate action required. AWF will retry with bounded exponential "
+            "backoff; inspect monitor logs if retries keep recurring."
+        ),
+        "GitHub returned a temporary 5xx response, timed out, or reset the connection during `git fetch`.",
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#git_base_fetch_transient_retry",
+    ),
+    "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED": _ReasonText(
+        "The PR monitor exhausted retries for transient target-branch fetch failures.",
+        "Verify GitHub/network availability, then remonitor the workspace once the remote is reachable.",
+        "GitHub or network access remained unavailable past the configured retry budget.",
+        "awf workspace remonitor <workspace_id>",
+        "docs/REASON_CATALOG.md#git_base_fetch_transient_retry_exhausted",
+    ),
     "CODEX_AUTH_MISSING": _ReasonText(
         "No Codex auth signal was visible.",
         "Mount ~/.codex or set OPENAI_API_KEY, OPENAI_API_TOKEN, CODEX_API_KEY, or CODEX_AUTH_TOKEN.",

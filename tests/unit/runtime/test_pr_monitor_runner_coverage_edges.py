@@ -62,6 +62,7 @@ from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_wait_seconds,
     _initial_review_grace_wall_started_value_from_datetime,
     _is_pending_check,
+    _is_protected_manual_ready_handoff,
     _is_transient_github_client_error,
     _merge_rejection_reason,
     _MonitorPolicyBlockedError,
@@ -3822,6 +3823,29 @@ def test_notify_human_reason_and_merge_rejection_detail() -> None:
     assert _merge_rejection_reason("  protected\n branch  ") == (
         "GitHub rejected the merge attempt: protected branch"
     )
+
+
+@pytest.mark.unit
+def test_protected_manual_ready_handoff_rejects_blocking_review_comments() -> None:
+    blocking_review = ReviewComment(
+        comment_id="C1",
+        body_excerpt="still blocking",
+        author="reviewer",
+        blocks_merge=True,
+    )
+    base = _status_for_helpers(reviews=(blocking_review,))
+    status = PRStatus(
+        number=base.number,
+        head_sha=base.head_sha,
+        mergeable=base.mergeable,
+        check_state=base.check_state,
+        unresolved_inline_threads=base.unresolved_inline_threads,
+        unresolved_review_comments=base.unresolved_review_comments,
+        base_behind_count=base.base_behind_count,
+        merge_state_status=MergeStateStatus.BLOCKED,
+    )
+
+    assert _is_protected_manual_ready_handoff(status, MonitorState()) is False
 
 
 @pytest.mark.unit

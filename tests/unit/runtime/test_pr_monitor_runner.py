@@ -1483,6 +1483,114 @@ async def test_run_fails_workspace_when_base_fetch_cannot_be_refreshed(
 
 
 @pytest.mark.unit
+async def test_run_retries_transient_base_fetch_500_and_completes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    cmd.queue_result(
+        returncode=128,
+        stderr=(
+            "remote: Internal Server Error\n"
+            "fatal: unable to access 'https://github.com/example/repo.git/': "
+            "The requested URL returned error: 500"
+        ),
+    )
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=0, stdout=pr_payload(closed=True, merged=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.gh = _CapturingGH(  # type: ignore[assignment]
+        status=replace(
+            _green_status(),
+            closed=True,
+            merged=True,
+            merge_commit_sha="mergecommit1234567890",
+        )
+    )
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [5.0]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.completed.value
+        assert any(
+            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY"
+            for event in workspace.events
+        )
+
+
+@pytest.mark.unit
+async def test_run_fails_after_transient_base_fetch_retry_budget_is_exhausted(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    transient_stderr = (
+        "remote: Internal Server Error\n"
+        "fatal: unable to access 'https://github.com/example/repo.git/': "
+        "The requested URL returned error: 500"
+    )
+    cmd.queue_result(returncode=128, stderr=transient_stderr)
+    cmd.queue_result(returncode=128, stderr=transient_stderr)
+    cmd.queue_result(returncode=128, stderr=transient_stderr)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 2)
+    object.__setattr__(
+        runner._runner_config,
+        "transient_base_fetch_initial_backoff_seconds",
+        3.0,
+    )
+    object.__setattr__(
+        runner._runner_config,
+        "transient_base_fetch_max_backoff_seconds",
+        10.0,
+    )
+    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [3.0, 6.0]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == "infrastructure_failure"
+        assert workspace.failure_message is not None
+        assert "could not refresh base branch" in workspace.failure_message
+        assert any(
+            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+            for event in workspace.events
+        )
+
+
+@pytest.mark.unit
 async def test_base_behind_count_failure_is_explicit_not_zero(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

@@ -15,6 +15,7 @@ from awf.profiles.compose import (
     AGENT_AUTH_ENV_VARS,
     agent_environment_with_github_token,
     profile_agent_environment,
+    profile_services,
     resolve_app_endpoints,
 )
 from awf.profiles.models import WorkspaceProfile
@@ -69,6 +70,11 @@ def _load_node_browser_profile() -> WorkspaceProfile:
         )
         .profile
     )
+
+
+def _load_awf_self_profile() -> tuple[Path, WorkspaceProfile]:
+    repo_root = Path(__file__).resolve().parents[3]
+    return repo_root, ProfileResolver().resolve(worktree_path=repo_root, profile_ref="auto").profile
 
 
 def _clear_host_auth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,6 +145,45 @@ def test_profile_agent_environment_exposes_only_agent_and_validation_app_endpoin
     assert [endpoint["name"] for endpoint in endpoints] == ["app", "browser_validation"]
     assert endpoints[0]["internal_url"] == "http://app:3000/"
     assert endpoints[1]["health"]["internal_url"] == "http://browser:9323/healthz"
+
+
+@pytest.mark.unit
+def test_awf_self_profile_renders_workspace_local_test_postgres(
+    tmp_path: Path,
+) -> None:
+    repo_root, profile = _load_awf_self_profile()
+    manager = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+    paths = manager.render(
+        WorkspaceComposeSpec(
+            workspace_id="ws_awf_self",
+            worktree_host_path=repo_root,
+            postgres_password="workspace-secret",
+            agent_environment=profile_agent_environment(profile),
+            services=profile_services(profile, base_path=repo_root),
+        )
+    )
+
+    rendered = paths.compose_file.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(rendered)
+    agent = parsed["services"]["agent"]
+    postgres = parsed["services"]["postgres"]
+
+    assert agent["environment"]["AWF_DATABASE_URL"] == (
+        "postgresql+asyncpg://awf:workspace-secret@postgres:5432/awf"
+    )
+    assert agent["environment"]["AWF_TEST_DATABASE_URL"] == (
+        "postgresql+asyncpg://awf:workspace-secret@postgres:5432/awf"
+    )
+    assert "host.docker.internal:5433" not in rendered
+    assert agent["depends_on"] == {"postgres": {"condition": "service_healthy"}}
+    assert postgres["image"] == "postgres:16-alpine"
+    assert postgres["environment"] == {
+        "POSTGRES_DB": "awf",
+        "POSTGRES_PASSWORD": "workspace-secret",
+        "POSTGRES_USER": "awf",
+    }
+    assert "ports" not in postgres
+    assert parsed["volumes"]["postgres_data"]["name"] == "awf-ws_awf_self-postgres_data"
 
 
 @pytest.mark.unit
