@@ -36,7 +36,7 @@ COPY_PASTE_DOC_HINTS = {
 
 LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\((?P<target>[^)]+)\)")
 FENCE_RE = re.compile(
-    r"^```(?P<language>[A-Za-z0-9_+.-]*)[^\n]*\n(?P<body>.*?)(?=^```)",
+    r"^```(?P<language>[A-Za-z0-9_+.-]*)[^\n]*\n(?P<body>.*?)^```[ \t]*$",
     re.MULTILINE | re.DOTALL,
 )
 AWF_COMMAND_RE = re.compile(r"(?<![\w./-])awf(?P<tail>\s+[^`\n|;)]*)")
@@ -119,6 +119,31 @@ def test_shell_snippet_validation_fails_cleanly_when_bash_is_missing(
         match=r"docs/example\.md:12 cannot validate shell snippet because bash is not available on PATH",
     ):
         _assert_snippet_syntax(fence)
+
+
+def test_markdown_fences_consumes_closing_fence_between_adjacent_snippets() -> None:
+    text = """```bash
+echo ok
+```
+```json
+{"ok": true}
+```
+"""
+
+    assert _markdown_fences("docs/example.md", text) == [
+        MarkdownFence(
+            path="docs/example.md",
+            line=1,
+            language="bash",
+            body="echo ok",
+        ),
+        MarkdownFence(
+            path="docs/example.md",
+            line=4,
+            language="json",
+            body='{"ok": true}',
+        ),
+    ]
 
 
 def test_public_docs_are_discovered_from_docs_tree(
