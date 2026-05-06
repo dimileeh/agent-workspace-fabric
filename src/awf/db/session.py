@@ -7,8 +7,11 @@ fixtures in tests/conftest.py.
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
@@ -21,6 +24,12 @@ from sqlalchemy.pool import NullPool
 
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.runtime.events import ensure_workspace_event_broadcasting
+
+
+def _first_query_value(value: str | tuple[str, ...]) -> str:
+    if isinstance(value, tuple):
+        return value[0]
+    return value
 
 
 def make_engine(
@@ -39,31 +48,65 @@ def make_engine(
         raise ValueError("AWF requires a postgresql+asyncpg:// database URL.")
     resolved_connect_args = dict(connect_args or {})
     query = dict(parsed_url.query)
-    search_path = query.pop("awf_search_path", None)
-    null_pool = query.pop("awf_null_pool", None)
+    raw_search_path = query.pop("awf_search_path", None)
+    raw_null_pool = query.pop("awf_null_pool", None)
+    raw_connect_timeout = query.pop("awf_connect_timeout", None)
+    raw_connect_retries = query.pop("awf_connect_retries", None)
     engine_options: dict[str, object] = {}
-    if search_path is not None:
-        if isinstance(search_path, tuple):
-            search_path = search_path[0]
+    if raw_search_path is not None:
+        search_path = _first_query_value(raw_search_path)
         existing_server_settings = resolved_connect_args.get("server_settings")
         server_settings = (
             dict(existing_server_settings) if isinstance(existing_server_settings, dict) else {}
         )
         server_settings.setdefault("search_path", str(search_path))
         resolved_connect_args["server_settings"] = server_settings
-    if null_pool is not None:
-        if isinstance(null_pool, tuple):
-            null_pool = null_pool[0]
+    if raw_null_pool is not None:
+        null_pool = _first_query_value(raw_null_pool)
         if str(null_pool).lower() in {"1", "true", "yes"}:
             engine_options["poolclass"] = NullPool
-    if search_path is not None or null_pool is not None:
+    if raw_connect_timeout is not None:
+        connect_timeout = _first_query_value(raw_connect_timeout)
+        resolved_connect_args.setdefault("timeout", float(str(connect_timeout)))
+    retry_count = 1
+    if raw_connect_retries is not None:
+        connect_retries = _first_query_value(raw_connect_retries)
+        retry_count = max(1, int(str(connect_retries)))
+    if (
+        raw_search_path is not None
+        or raw_null_pool is not None
+        or raw_connect_timeout is not None
+        or raw_connect_retries is not None
+    ):
         parsed_url = parsed_url.set(query=query)
 
+    engine_url = parsed_url.render_as_string(hide_password=False)
+    engine_connect_args = resolved_connect_args
+    if retry_count > 1:
+        asyncpg: Any = importlib.import_module("asyncpg")
+
+        asyncpg_url = parsed_url.set(drivername="postgresql").render_as_string(
+            hide_password=False
+        )
+
+        async def _async_creator() -> object:
+            for attempt in range(retry_count):
+                try:
+                    return await asyncpg.connect(asyncpg_url, **resolved_connect_args)
+                except TimeoutError:
+                    if attempt == retry_count - 1:
+                        raise
+                    await asyncio.sleep(0.05 * (attempt + 1))
+            raise RuntimeError("AWF database connection was not initialized.")
+
+        engine_options["async_creator"] = _async_creator
+        engine_connect_args = {}
+
     return create_async_engine(
-        parsed_url.render_as_string(hide_password=False),
+        engine_url,
         echo=echo,
         future=True,
-        connect_args=resolved_connect_args,
+        connect_args=engine_connect_args,
         **engine_options,
     )
 
