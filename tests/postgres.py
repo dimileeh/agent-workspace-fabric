@@ -61,6 +61,16 @@ def _postgres_database_key(database_url: str) -> str:
     return hashlib.sha256(database_url.encode("utf-8")).hexdigest()[:16]
 
 
+def _postgres_lock_owner_key() -> str:
+    getuid = getattr(os, "getuid", None)
+    if callable(getuid):
+        return f"uid-{getuid()}"
+
+    username = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
+    safe_username = re.sub(r"[^0-9A-Za-z_.-]", "_", username).strip("._-")
+    return f"user-{safe_username or 'unknown'}"
+
+
 def _postgres_test_run_uid() -> str:
     return (
         os.environ.get("PYTEST_XDIST_TESTRUNUID")
@@ -133,7 +143,10 @@ def _postgres_ddl_lock(database_url: str) -> Iterator[None]:
         return
 
     lock_key = _postgres_database_key(database_url)
-    lock_path = Path(tempfile.gettempdir()) / f"awf-pytest-postgres-ddl-{lock_key}.lock"
+    owner_key = _postgres_lock_owner_key()
+    lock_path = Path(tempfile.gettempdir()) / (
+        f"awf-pytest-postgres-ddl-{owner_key}-{lock_key}.lock"
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)

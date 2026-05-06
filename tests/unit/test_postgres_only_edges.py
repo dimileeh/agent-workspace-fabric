@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -105,6 +106,27 @@ def test_postgres_test_schema_name_is_scoped_to_current_run(
     assert len(namespace) == 16
     assert schema.startswith(f"awf_test_{namespace}_")
     assert len(schema) == len("awf_test_") + 16 + 1 + 32
+
+
+@pytest.mark.unit
+def test_postgres_ddl_lock_path_is_scoped_to_current_uid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if postgres_mod.fcntl is None:
+        pytest.skip("fcntl-based lock files are not used on this platform")
+
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    database_key = postgres_mod._postgres_database_key(database_url)
+    monkeypatch.setattr(postgres_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(postgres_mod.os, "getuid", lambda: 4242)
+
+    with postgres_mod._postgres_ddl_lock(database_url):
+        pass
+
+    assert (
+        tmp_path / f"awf-pytest-postgres-ddl-uid-4242-{database_key}.lock"
+    ).is_file()
 
 
 @pytest.mark.unit
