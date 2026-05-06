@@ -8,7 +8,9 @@ test points at the inconsistency.
 
 from __future__ import annotations
 
-import re
+import subprocess
+import sys
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -107,16 +109,43 @@ def _assert_test_reference_exists(reference: str) -> None:
     path_text, _, node_id = reference.partition("::")
     path = REPO_ROOT / path_text
     assert path.is_file(), f"Coverage reference {reference!r} points at a missing file"
-    source = path.read_text(encoding="utf-8")
-    for node in node_id.split("::"):
-        if node.startswith("Test"):
-            assert re.search(rf"^\s*class\s+{re.escape(node)}\b", source, re.MULTILINE), (
-                f"Coverage reference {reference!r} points at a missing test class {node!r}"
-            )
-        elif node.startswith("test_"):
-            assert re.search(rf"^\s*(async\s+def|def)\s+{re.escape(node)}\b", source, re.MULTILINE), (
-                f"Coverage reference {reference!r} points at a missing test {node!r}"
-            )
+    assert node_id, f"Coverage reference {reference!r} must include a pytest node ID"
+    collected = _collected_test_node_ids(str(REPO_ROOT), path_text)
+    assert reference in collected, (
+        f"Coverage reference {reference!r} is not a collected pytest node ID. "
+        f"Collected {len(collected)} node IDs from {path_text!r}."
+    )
+
+
+@cache
+def _collected_test_node_ids(repo_root_text: str, path_text: str) -> frozenset[str]:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--rootdir",
+            repo_root_text,
+            "--collect-only",
+            "-q",
+            path_text,
+        ],
+        cwd=repo_root_text,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"Could not collect pytest node IDs from {path_text!r}:\n"
+        f"{result.stdout}{result.stderr}"
+    )
+    node_prefix = f"{path_text}::"
+    return frozenset(
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith(node_prefix)
+    )
 
 
 @pytest.mark.unit
@@ -142,6 +171,35 @@ def test_assert_test_reference_exists_accepts_indented_test_classes(
     _assert_test_reference_exists(
         "test_nested.py::TestOuter::TestInner::test_nested_reference"
     )
+
+
+@pytest.mark.unit
+def test_assert_test_reference_exists_rejects_test_moved_to_another_class(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_moved.py"
+    test_file.write_text(
+        "\n".join(
+            (
+                "class TestExpected:",
+                "    def test_other_reference(self) -> None:",
+                "        pass",
+                "",
+                "class TestActual:",
+                "    def test_target_reference(self) -> None:",
+                "        pass",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tests.unit.contracts.test_registry_smoke.REPO_ROOT", tmp_path)
+
+    with pytest.raises(AssertionError, match="is not a collected pytest node ID"):
+        _assert_test_reference_exists(
+            "test_moved.py::TestExpected::test_target_reference"
+        )
 
 
 @pytest.mark.unit
