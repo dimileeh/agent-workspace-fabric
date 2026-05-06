@@ -962,17 +962,13 @@ class PullRequestMonitorRunner:
                     return
                 if _clear_transient_base_fetch_retry_state(state, context="fetch_pr_status"):
                     await self._persist_state(workspace_id, state)
-                feedback_state_changed = await self._apply_pr_feedback_resolution_state(
+                feedback_state_changed = await self._refresh_pr_feedback_resolution_state(
                     workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
                     status=status,
                     state=state,
                 )
-                if _drop_stale_review_thread_addressed_state(status, state):
-                    feedback_state_changed = True
-                if _drop_stale_review_comment_addressed_state(status, state):
-                    feedback_state_changed = True
                 if feedback_state_changed:
                     await self._persist_state(workspace_id, state)
 
@@ -1898,10 +1894,20 @@ class PullRequestMonitorRunner:
                     except BaseBehindCountError as exc:
                         recheck_behind_error = exc
                     else:
-                        _clear_transient_base_fetch_retry_state(
+                        pre_merge_state_changed = _clear_transient_base_fetch_retry_state(
                             state,
                             context="pre_merge_recheck",
                         )
+                        if await self._refresh_pr_feedback_resolution_state(
+                            workspace_id=workspace_id,
+                            repo=repo,
+                            pr_number=pr_number,
+                            status=checked_status,
+                            state=state,
+                        ):
+                            pre_merge_state_changed = True
+                        if pre_merge_state_changed:
+                            await self._persist_state(workspace_id, state)
                         checked_action = decide(checked_status, state, self._config)
                         if not isinstance(checked_action, Merge):
                             fresh_action = checked_action
@@ -4581,6 +4587,28 @@ class PullRequestMonitorRunner:
                 source_operation_id=operation_id,
             )
             await s.commit()
+
+    async def _refresh_pr_feedback_resolution_state(
+        self,
+        *,
+        workspace_id: str,
+        repo: RepoRef,
+        pr_number: int,
+        status: PRStatus,
+        state: MonitorState,
+    ) -> bool:
+        changed = await self._apply_pr_feedback_resolution_state(
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            status=status,
+            state=state,
+        )
+        if _drop_stale_review_thread_addressed_state(status, state):
+            changed = True
+        if _drop_stale_review_comment_addressed_state(status, state):
+            changed = True
+        return changed
 
     async def _apply_pr_feedback_resolution_state(
         self,

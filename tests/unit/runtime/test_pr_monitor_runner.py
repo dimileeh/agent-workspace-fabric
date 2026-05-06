@@ -939,6 +939,93 @@ async def test_pre_merge_recheck_blocks_when_check_becomes_pending(
 
 
 @pytest.mark.unit
+async def test_pre_merge_recheck_requeues_changed_thread_history_before_deciding(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="DEFER: maintainer reply needs human input")
+    cmd.queue_result(returncode=0)  # git fetch origin development
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    changed_thread = {
+        "id": "T_handled",
+        "isResolved": False,
+        "isOutdated": False,
+        "path": "src/awf/runtime/pr_monitor_runner.py",
+        "line": 1904,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 101,
+                    "bodyText": "bot finding",
+                    "author": {"login": "chatgpt-codex-connector"},
+                },
+                {
+                    "databaseId": 102,
+                    "bodyText": "maintainer reply needs human input",
+                    "author": {"login": "dimileeh"},
+                },
+            ]
+        },
+    }
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # fix-cycle settle poll
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push no-op
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        pre_merge_settle_seconds=5,
+    )
+    original_thread = ReviewThread(
+        thread_id="T_handled",
+        path="src/awf/runtime/pr_monitor_runner.py",
+        line=1904,
+        body_excerpt="bot finding",
+        author="chatgpt-codex-connector",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101",
+                body="bot finding",
+                author="chatgpt-codex-connector",
+            ),
+        ),
+    )
+    state = MonitorState(started_at=0.0)
+    _mark_review_thread_addressed(state, original_thread, "false_positive")
+    initial_status = replace(_green_status(), unresolved_inline_threads=(original_thread,))
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=initial_status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [5, 30]
+    assert _gh_pr_merge_calls(cmd) == []
+    assert len(adapter.calls) == 1
+    assert "maintainer reply needs human input" in adapter.calls[0]
+    assert state.threads_addressed_ids["T_handled"] == "defer"
+    assert _review_thread_body_state_key("T_handled") in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_pre_merge_recheck_transient_base_fetch_exhaustion_is_terminal_reason(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
