@@ -14,6 +14,7 @@ from awf.common.config import DEFAULT_MIN_FREE_DISK_BYTES, Settings
 from awf.service.config import (
     DEFAULT_LOCAL_SERVICE_WORK_DIR,
     _redact_database_url,
+    _resolve_service_work_dir,
     local_service_environ,
     resolve_service_settings,
     service_config_payload,
@@ -305,6 +306,63 @@ def test_local_service_environ_loads_compose_env_with_host_override(tmp_path: Pa
     assert environ["GH_TOKEN"] == "ghp_compose_gh_token"
     assert environ["EMPTY_VALUE"] == ""
     assert environ["PATH"] == "/usr/bin"
+
+
+@pytest.mark.unit
+def test_host_awf_host_work_dir_overrides_host_awf_work_dir(tmp_path: Path) -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={
+            "AWF_WORK_DIR": str(tmp_path / "explicit-service-state"),
+            "AWF_HOST_WORK_DIR": str(tmp_path / "host-service-state"),
+        },
+    )
+
+    assert settings.work_dir == str(tmp_path / "host-service-state")
+
+
+@pytest.mark.unit
+def test_host_awf_work_dir_precedes_compose_file_default(tmp_path: Path) -> None:
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        f"AWF_HOST_WORK_DIR={tmp_path / 'compose-service-state'}\n",
+        encoding="utf-8",
+    )
+    environ = local_service_environ(
+        {"AWF_WORK_DIR": str(tmp_path / "explicit-service-state")},
+        env_file=compose_env_file,
+    )
+
+    work_dir = _resolve_service_work_dir(
+        Settings(_env_file=None),
+        environ,
+        host_environ={"AWF_WORK_DIR": str(tmp_path / "explicit-service-state")},
+    )
+
+    assert work_dir == str(tmp_path / "explicit-service-state")
+
+
+@pytest.mark.unit
+def test_project_default_awf_work_dir_suppresses_compose_file_host_work_dir(
+    tmp_path: Path,
+) -> None:
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        f"AWF_HOST_WORK_DIR={tmp_path / 'compose-service-state'}\n",
+        encoding="utf-8",
+    )
+    environ = local_service_environ(
+        {"HOME": str(tmp_path / "home"), "AWF_WORK_DIR": ".awf"},
+        env_file=compose_env_file,
+    )
+
+    work_dir = _resolve_service_work_dir(
+        Settings(_env_file=None),
+        environ,
+        host_environ={"HOME": str(tmp_path / "home"), "AWF_WORK_DIR": ".awf"},
+    )
+
+    assert work_dir == str(tmp_path / "home" / ".awf" / "service")
 
 
 @pytest.mark.unit

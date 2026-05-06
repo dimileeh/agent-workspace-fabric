@@ -90,6 +90,7 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
+    engine_urls: list[str] = []
 
     @asynccontextmanager
     async def fake_lock(engine: _FakeEngine) -> AsyncIterator[_FakeEngine]:
@@ -100,6 +101,7 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
             events.append(f"unlock:{engine.name}")
 
     def fake_make_engine(url: str, **_kwargs: Any) -> _FakeEngine:
+        engine_urls.append(url)
         name = "admin" if "awf_search_path=public" in url else "schema"
         return _FakeEngine(name, events)
 
@@ -140,3 +142,6 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
         "unlock:admin",
         "dispose:admin",
     ]
+    schema_urls = [url for url in engine_urls if "awf_search_path=public" not in url]
+    assert schema_urls
+    assert all("awf_null_pool=1" in url for url in schema_urls)

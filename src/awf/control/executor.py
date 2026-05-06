@@ -168,6 +168,11 @@ class _MonitorRunnerProto(Protocol):
 
 _log = get_logger(__name__)
 
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
 WORKTREE_MISSING_REASON_CODE = "WORKTREE_MISSING"
 PR_REEXECUTION_GUARD_REASON_CODE = "PR_REEXECUTION_GUARD"
 _EXECUTOR_AUDIT_ACTOR = "executor"
@@ -3526,7 +3531,7 @@ class WorkspaceExecutor:
             # compare call produced it.
             before_report_text = _read_text_if_present(worktree_path / report_path)
             before_report_digest = _digest_text(before_report_text) if before_report_text else None
-            iteration_started_at = time.monotonic()
+            iteration_started_at = _monotonic()
             compare_error: AgentRunError | None = None
             compare_result = None
             try:
@@ -3558,7 +3563,7 @@ class WorkspaceExecutor:
                     stderr=exc.result.stderr,
                 )
 
-            elapsed_seconds = time.monotonic() - iteration_started_at
+            elapsed_seconds = _monotonic() - iteration_started_at
             # Compute after_compare on both success and timeout paths so the
             # scope check runs uniformly. Otherwise an idle/timeout that still
             # leaves a satisfied report could write files outside report_path
