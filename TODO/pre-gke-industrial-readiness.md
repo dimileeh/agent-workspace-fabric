@@ -77,7 +77,7 @@ Status values:
 | --- | --- | --- | --- | --- | --- |
 | P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_657b484a622544b6aee70924` | [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing the destroyed monitor `ws_941096a4dc4942dcb877656a`; AWF owns conflict, validation, comment, and merge monitoring. |
 | P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_3b90c8728f0c4862a28d82cc` | [#212](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/212) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing cancelled workspace `ws_7e7f6d54bc924c47a5723621`; AWF owns validation, comment, and merge monitoring. |
-| P1 MCP And Project Onboarding Client Parity | PR adoption terminal idempotency hardening | `ws_e5b86a598da842e0aaf50d1f` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to harden first-class PR adoption after the destroyed-row idempotency edge case found while reattaching PR #206. |
+| P0 Operation And Recovery Truth | PR adoption terminal idempotency hardening | `ws_e5b86a598da842e0aaf50d1f` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to harden first-class PR adoption after destroyed adoption workspaces retained deterministic repo/PR task/idempotency slots and caused the first clean re-adoption attempt to 500 while reattaching PR #206. |
 | P0 Control-Plane Restart Recovery Hardening | Adopt or preserve active executions after worker restart | `ws_13dd6ba7165141c285bd771e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to prevent worker restarts or transient control-loop loss from killing live `running` / `validating` / `pushing` agent runtimes when only the in-memory task map was lost. Escalated to P0 after `ws_4f44c108a58f46d092f4e411` was failed as `STALE_ACTIVE_EXECUTION` despite no API/worker Docker restart. |
 | P1 API Contract Completion | REST CLI MCP contract parity tests | `ws_3a9bb03983e343e28f462e3e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to make REST, CLI, and MCP request/response/reason/idempotency/auth/error parity executable through contract tests. |
 | P1 Developer Experience And Public Core Surface | Document and demo existing PR monitor adoption | `ws_e332a1d013c54928863320f0` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to document and demo the supported existing-PR adoption path across CLI, REST, MCP, and console inspection surfaces. |
@@ -286,6 +286,21 @@ not listed here.
 - [x] Add optimistic concurrency or equivalent conflict protection for mutating APIs.
 - [x] Persist operation start, finish, owner, reason, result, failure code, and log streams.
 - [x] Ensure cancelled/destroyed workspaces cannot move forward after stale executor or monitor callbacks.
+- [ ] Release deterministic PR adoption task/idempotency slots when an
+  adoption workspace is destroyed or otherwise terminal. Regression source: a
+  destroyed PR monitor adoption workspace left the deterministic repo/PR
+  adoption task/idempotency slot behind, so the first clean re-adoption attempt
+  hit HTTP 500 instead of creating a fresh monitor workspace. Acceptance:
+  destroy/cancel/fail/supersede paths must mark the prior adoption lineage
+  terminal, release or safely supersede deterministic repo/PR adoption slots,
+  and allow a subsequent adoption request for the same open PR to create or
+  attach to exactly one live monitor. Active live adoption workspaces must still
+  be idempotent, active monitor policy mismatches must still return
+  `PR_ADOPTION_POLICY_CONFLICT`, and concurrent re-adoption races must be
+  conflict-safe. Add regression coverage for destroyed, cancelled, failed, and
+  superseded prior adoption rows; stale unique task/idempotency records after
+  destroy; active idempotent reattach; policy conflict; and concurrent
+  REST/CLI/MCP-visible adoption requests.
 - [x] Add recovery for stranded workspaces whose containers exited but DB state is active.
 - [x] Add recovery for active PR workspaces after AWF service restart.
 - [x] Add console controls for safe remonitor/refresh/revalidate once API semantics are stable.
@@ -699,19 +714,6 @@ coding agent in any project to use AWF for a feature.
   service/api/cli/mcp/control/node/runtime/scripts unit gate all passed. PR
   [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198)
   merged 2026-05-05.
-- [ ] Harden PR monitor adoption when a previous repo/PR adoption workspace is
-  terminal. Acceptance: adoption attaches only to live adoption workspaces that
-  can still monitor the PR; terminal rows such as `destroyed`, `cancelled`,
-  `failed`, and `superseded` must not satisfy the deterministic repo/PR
-  idempotency key as a successful monitor attachment. For an open PR with only
-  terminal adoption history, AWF creates a fresh monitor workspace while
-  preserving audit/lineage context and avoiding unique idempotency conflicts.
-  Active monitor policy mismatches must still return
-  `PR_ADOPTION_POLICY_CONFLICT`, and concurrent adoption attempts must create at
-  most one live monitor. Add regression coverage for destroyed, cancelled,
-  failed, and superseded prior adoption rows; active idempotent reattach; active
-  policy conflict; and concurrent adoption races across REST/CLI/MCP-visible
-  behavior.
 - [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
