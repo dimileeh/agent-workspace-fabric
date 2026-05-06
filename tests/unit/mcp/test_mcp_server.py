@@ -882,7 +882,7 @@ class TestWorkspaceControls:
                 "idempotency_key": "cancel-real-service",
             },
         )
-        operations = await _call(
+        operations_payload = await _call(
             mcp,
             "awf_list_workspace_operations",
             {"workspace_id": workspace_id},
@@ -891,7 +891,10 @@ class TestWorkspaceControls:
         assert payload["workspace_id"] == workspace_id  # type: ignore[index]
         assert payload["status"] == "cancelled"  # type: ignore[index]
         assert payload["message"] == "workspace cancellation requested"  # type: ignore[index]
+        assert isinstance(operations_payload, dict)
+        operations = operations_payload["items"]
         assert isinstance(operations, list)
+        assert operations_payload["has_more"] is False
         assert operations[0]["type"] == "cancel"
         assert operations[0]["status"] == "succeeded"
         assert operations[0]["payload"] == {
