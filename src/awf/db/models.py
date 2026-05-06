@@ -870,8 +870,8 @@ class PRFeedbackResolution(Base):
             "scm_provider",
             "repository_key",
             "pull_request_key",
-            "head_sha",
         ),
+        Index("ix_pr_feedback_resolutions_head_sha", "head_sha"),
         Index("ix_pr_feedback_resolutions_source_workspace", "source_workspace_id"),
         Index("ix_pr_feedback_resolutions_updated_at", "updated_at"),
     )
@@ -879,7 +879,7 @@ class PRFeedbackResolution(Base):
     scm_provider: Mapped[str] = mapped_column(String(32), primary_key=True)
     repository_key: Mapped[str] = mapped_column(String(512), primary_key=True)
     pull_request_key: Mapped[str] = mapped_column(String(128), primary_key=True)
-    head_sha: Mapped[str] = mapped_column(String(128), primary_key=True)
+    head_sha: Mapped[str] = mapped_column(String(128), nullable=False)
     feedback_kind: Mapped[str] = mapped_column(String(32), primary_key=True)
     feedback_id: Mapped[str] = mapped_column(String(256), primary_key=True)
     feedback_body_hash: Mapped[str] = mapped_column(String(64), primary_key=True)

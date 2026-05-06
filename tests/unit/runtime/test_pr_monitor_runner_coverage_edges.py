@@ -55,6 +55,7 @@ from awf.runtime.pr_monitor_runner import (
     _collect_defer_items,
     _GitPushResult,
     _has_successful_validation_for_pr_head,
+    _increment_base_fetch_retry_count,
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
     _initial_review_grace_state_for_persistence,
@@ -63,6 +64,7 @@ from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_wall_started_value_from_datetime,
     _is_pending_check,
     _is_protected_manual_ready_handoff,
+    _is_transient_base_fetch_error,
     _is_transient_github_client_error,
     _merge_rejection_reason,
     _MonitorPolicyBlockedError,
@@ -73,6 +75,7 @@ from awf.runtime.pr_monitor_runner import (
     _notify_human_reason,
     _redact_and_truncate_github_error,
     _remote_push_url_for_workspace,
+    _review_comment_body_state_key,
     _stale_pending_check_warnings,
     _target_reconcile_failure_payload,
     _target_reconcile_payload,
@@ -492,6 +495,23 @@ def test_transient_github_error_classifier_keeps_auth_errors_terminal() -> None:
             stderr="review is required before merging",
         )
     )
+
+
+@pytest.mark.unit
+def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> None:
+    assert _is_transient_base_fetch_error(
+        BaseFetchError("git fetch origin development failed: HTTP 500 server error")
+    )
+    assert not _is_transient_base_fetch_error(
+        BaseFetchError("git fetch origin development failed: repository not found")
+    )
+    retry_key = "__awf_base_fetch_retry_count:sync_base"
+    state = MonitorState(threads_addressed_ids={retry_key: "not-an-integer"})
+
+    retry_number = _increment_base_fetch_retry_count(state, "sync_base")
+
+    assert retry_number == 1
+    assert state.threads_addressed_ids[retry_key] == "1"
 
 
 @pytest.mark.unit
@@ -2882,7 +2902,10 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert state.threads_addressed_ids == {"1": "false_positive", "2": "false_positive"}
+    assert state.threads_addressed_ids["1"] == "false_positive"
+    assert state.threads_addressed_ids["2"] == "false_positive"
+    assert _review_comment_body_state_key("1") in state.threads_addressed_ids
+    assert _review_comment_body_state_key("2") in state.threads_addressed_ids
     assert len(adapter.calls) == 2
     assert runner._deps.sleep.calls == [30, 30]  # type: ignore[attr-defined]
     assert cmd.calls[-1].args[-2:] == ["origin", "HEAD:refs/heads/awf/ws_review_burst"]

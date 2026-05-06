@@ -948,13 +948,16 @@ class PullRequestMonitorRunner:
                     return
                 if _clear_transient_base_fetch_retry_state(state):
                     await self._persist_state(workspace_id, state)
-                if await self._apply_pr_feedback_resolution_state(
+                feedback_state_changed = await self._apply_pr_feedback_resolution_state(
                     workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
                     status=status,
                     state=state,
-                ):
+                )
+                if _drop_stale_review_comment_addressed_state(status, state):
+                    feedback_state_changed = True
+                if feedback_state_changed:
                     await self._persist_state(workspace_id, state)
 
                 # Determine the remote push target for this workspace.
@@ -3227,7 +3230,7 @@ class PullRequestMonitorRunner:
                         stderr=str(exc),
                     )
                 verdict = verdict_result.verdict
-                state.mark_addressed(c.comment_id, verdict)
+                _mark_review_comment_addressed(state, c, verdict)
                 if verdict in {"false_positive", "defer"}:
                     await self._record_pr_feedback_resolution(
                         workspace_id=workspace_id,
@@ -3267,7 +3270,7 @@ class PullRequestMonitorRunner:
             new_reviews = [
                 c
                 for c in status.unresolved_review_comments
-                if not c.blocks_merge and c.comment_id not in state.threads_addressed_ids
+                if not c.blocks_merge and _review_comment_needs_attention(state, c)
             ]
             if not new_threads and not new_reviews:
                 break  # burst settled
@@ -3287,7 +3290,7 @@ class PullRequestMonitorRunner:
         pushed_head_sha: str | None = None
         if push_result.failed:
             for item_id in publish_dependent_ids:
-                state.threads_addressed_ids.pop(item_id, None)
+                _clear_addressed_state_by_id(state, item_id)
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_GIT_PUSH_EVENT,
@@ -4563,11 +4566,10 @@ class PullRequestMonitorRunner:
         if not status.unresolved_review_comments:
             return False
         async with self._deps.session_factory() as s:
-            rows = await PRFeedbackResolutionRepository(s).list_for_pr_head(
+            rows = await PRFeedbackResolutionRepository(s).list_for_pr(
                 scm_provider="github",
                 repository_key=repo.slug(),
                 pull_request_key=str(pr_number),
-                head_sha=status.head_sha,
             )
         if not rows:
             return False
@@ -4576,7 +4578,7 @@ class PullRequestMonitorRunner:
         }
         changed = False
         for comment in status.unresolved_review_comments:
-            if not _needs_comment_attention(state.threads_addressed_ids.get(comment.comment_id)):
+            if not _review_comment_needs_attention(state, comment):
                 continue
             row = rows_by_feedback.get(
                 (
@@ -4587,7 +4589,7 @@ class PullRequestMonitorRunner:
             )
             if row is None:
                 continue
-            state.mark_addressed(comment.comment_id, _monitor_state_verdict(row.verdict))
+            _mark_review_comment_addressed(state, comment, _monitor_state_verdict(row.verdict))
             changed = True
         return changed
 
@@ -5041,15 +5043,67 @@ def _parse_verdict_result(stdout: str) -> VerdictResult:
 
 
 def _verdict_reason(stdout: str) -> str | None:
-    _prefix, separator, reason = stdout.partition(":")
-    if not separator:
-        return None
+    _prefix, _separator, reason = stdout.partition(":")
     cleaned = reason.strip()
     return cleaned or None
 
 
 def _review_comment_resolution_body(comment: ReviewComment) -> str:
     return comment.body or comment.body_excerpt or ""
+
+
+def _review_comment_body_state_key(comment_id: str) -> str:
+    return f"__review_comment_body_hash__:{comment_id}"
+
+
+def _review_comment_body_hash(comment: ReviewComment) -> str:
+    return pr_feedback_body_hash(_review_comment_resolution_body(comment))
+
+
+def _mark_review_comment_addressed(
+    state: MonitorState,
+    comment: ReviewComment,
+    verdict: str,
+) -> None:
+    state.mark_addressed(comment.comment_id, verdict)
+    state.mark_addressed(
+        _review_comment_body_state_key(comment.comment_id),
+        _review_comment_body_hash(comment),
+    )
+
+
+def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
+    state.threads_addressed_ids.pop(item_id, None)
+    state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
+
+
+def _review_comment_needs_attention(state: MonitorState, comment: ReviewComment) -> bool:
+    verdict = state.threads_addressed_ids.get(comment.comment_id)
+    if _needs_comment_attention(verdict):
+        return True
+    return (
+        state.threads_addressed_ids.get(_review_comment_body_state_key(comment.comment_id))
+        != _review_comment_body_hash(comment)
+    )
+
+
+def _drop_stale_review_comment_addressed_state(
+    status: PRStatus,
+    state: MonitorState,
+) -> bool:
+    changed = False
+    for comment in status.unresolved_review_comments:
+        verdict = state.threads_addressed_ids.get(comment.comment_id)
+        if _needs_comment_attention(verdict):
+            continue
+        if (
+            state.threads_addressed_ids.get(_review_comment_body_state_key(comment.comment_id))
+            == _review_comment_body_hash(comment)
+        ):
+            continue
+        _clear_addressed_state_by_id(state, comment.comment_id)
+        changed = True
+    return changed
 
 
 def _monitor_state_verdict(verdict: str) -> Verdict:

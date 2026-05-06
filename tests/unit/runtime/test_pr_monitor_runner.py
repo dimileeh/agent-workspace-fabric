@@ -70,8 +70,10 @@ from awf.runtime.pr_monitor_runner import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
+    VerdictResult,
     _as_utc,
     _collect_defer_items,
+    _drop_stale_review_comment_addressed_state,
     _GitPushResult,
     _infer_service_work_dir,
     _initial_review_grace_done_key,
@@ -82,11 +84,15 @@ from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_wall_seconds,
     _initial_review_grace_wall_started_value_from_datetime,
     _is_pending_check,
+    _mark_review_comment_addressed,
     _merge_rejection_reason,
     _MergeGateResult,
+    _monitor_state_verdict,
     _non_check_reviewer_settle_started_key,
     _notify_human_reason,
     _parse_verdict,
+    _parse_verdict_result,
+    _review_comment_body_state_key,
     _stale_pending_check_warning_key,
     _stale_pending_check_warnings,
     _target_reconcile_payload,
@@ -1227,24 +1233,24 @@ async def test_review_comment_false_positive_is_recorded_by_pr_identity(
     )
 
     async with factory() as session:
-        rows = await PRFeedbackResolutionRepository(session).list_for_pr_head(
+        rows = await PRFeedbackResolutionRepository(session).list_for_pr(
             scm_provider="github",
             repository_key="dimileeh/aira-web",
             pull_request_key="42",
-            head_sha="abc1234567890def",
         )
 
     assert len(rows) == 1
     row = rows[0]
     assert row.feedback_kind == "review_comment"
     assert row.feedback_id == "issue:4391271818"
+    assert row.head_sha == "abc1234567890def"
     assert row.verdict == "false_positive"
     assert row.reason == "automated review wrapper only"
     assert row.source_workspace_id == workspace_id
 
 
 @pytest.mark.unit
-async def test_new_workspace_inherits_review_comment_verdicts_by_pr_identity(
+async def test_new_workspace_inherits_review_comment_verdicts_across_pr_head_changes(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1262,7 +1268,7 @@ async def test_new_workspace_inherits_review_comment_verdicts_by_pr_identity(
             repository_key="dimileeh/aira-web",
             pull_request_key="42",
             pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
-            head_sha="abc1234567890def",
+            head_sha="old-head-before-repair-push",
             feedback_kind="review_comment",
             feedback_id=comment.comment_id,
             feedback_body=comment.body or comment.body_excerpt,
@@ -1284,7 +1290,7 @@ async def test_new_workspace_inherits_review_comment_verdicts_by_pr_identity(
     state = MonitorState()
     status = PRStatus(
         number=42,
-        head_sha="abc1234567890def",
+        head_sha="new-head-after-repair-push",
         mergeable=MergeableState.MERGEABLE,
         check_state=CheckState.SUCCESS,
         unresolved_inline_threads=(),
@@ -1301,7 +1307,308 @@ async def test_new_workspace_inherits_review_comment_verdicts_by_pr_identity(
         state=state,
     )
 
-    assert state.threads_addressed_ids == {"issue:4391271818": "false_positive"}
+    assert state.threads_addressed_ids["issue:4391271818"] == "false_positive"
+    assert _review_comment_body_state_key("issue:4391271818") in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_pr_feedback_resolution_upsert_updates_same_comment_across_head_changes(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    comment_body = "Codex review wrapper for already-handled non-actionable feedback"
+    async with factory() as session:
+        repo = PRFeedbackResolutionRepository(session)
+        await repo.record_resolution(
+            scm_provider="GitHub",
+            repository_key="Dimileeh/Aira-Web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="old-head-before-repair-push",
+            feedback_kind="REVIEW_COMMENT",
+            feedback_id="issue:4391271818",
+            feedback_body=comment_body,
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="false_positive",
+            reason="first monitor handled it privately",
+            source_workspace_id=workspace_id,
+            source_operation_id="op-old",
+        )
+        await session.commit()
+
+        updated = await repo.record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="new-head-after-repair-push",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body=comment_body,
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="false_positive",
+            reason="second monitor saw the inherited no-op verdict",
+            source_workspace_id=workspace_id,
+            source_operation_id="op-new",
+        )
+        await session.commit()
+
+        rows = await repo.list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+        fetched = await repo.get(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body_hash=updated.feedback_body_hash,
+        )
+
+    assert len(rows) == 1
+    assert fetched is not None
+    assert rows[0].head_sha == "new-head-after-repair-push"
+    assert rows[0].source_operation_id == "op-new"
+    assert rows[0].reason == "second monitor saw the inherited no-op verdict"
+    assert fetched.head_sha == "new-head-after-repair-push"
+
+
+@pytest.mark.unit
+async def test_pr_feedback_resolution_body_change_creates_new_comment_identity(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        repo = PRFeedbackResolutionRepository(session)
+        await repo.record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="old-head",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body="old body",
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="false_positive",
+            reason="old comment body",
+            source_workspace_id=workspace_id,
+        )
+        await repo.record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="new-head",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body="new body with new actionable content",
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="defer",
+            reason="body changed, so the monitor must re-evaluate it",
+            source_workspace_id=workspace_id,
+        )
+        await session.commit()
+
+        rows = await repo.list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert len(rows) == 2
+    assert {row.reason for row in rows} == {
+        "old comment body",
+        "body changed, so the monitor must re-evaluate it",
+    }
+
+
+@pytest.mark.unit
+async def test_pr_feedback_resolution_requires_postgresql_dialect(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        repo = PRFeedbackResolutionRepository(session, dialect_name="mysql")
+
+        with pytest.raises(RuntimeError, match="requires PostgreSQL"):
+            await repo.record_resolution(
+                scm_provider="github",
+                repository_key="dimileeh/aira-web",
+                pull_request_key="42",
+                pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+                head_sha="abc1234567890def",
+                feedback_kind="review_comment",
+                feedback_id="issue:4391271818",
+                feedback_body="body",
+                feedback_author="reviewer",
+                feedback_url=None,
+                verdict="false_positive",
+                reason="postgres-only persistence guard",
+                source_workspace_id=workspace_id,
+            )
+
+
+@pytest.mark.unit
+async def test_agent_failed_review_verdict_is_not_recorded_as_handled(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._record_pr_feedback_resolution(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        comment=ReviewComment(
+            comment_id="issue:4391271818",
+            body_excerpt="The agent failed before reaching a comment verdict.",
+            body="The agent failed before reaching a comment verdict.",
+            author="reviewer",
+        ),
+        verdict_result=VerdictResult(verdict="agent_failed", reason="adapter crashed"),
+        operation_id="op-failed",
+    )
+
+    async with factory() as session:
+        rows = await PRFeedbackResolutionRepository(session).list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert rows == []
+
+
+@pytest.mark.unit
+async def test_pr_feedback_resolution_state_ignores_absent_or_already_current_comments(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        await PRFeedbackResolutionRepository(session).record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="abc1234567890def",
+            feedback_kind="review_comment",
+            feedback_id="issue:handled",
+            feedback_body="old body",
+            feedback_author="reviewer",
+            feedback_url=None,
+            verdict="false_positive",
+            reason="already handled",
+            source_workspace_id=workspace_id,
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    _mark_review_comment_addressed(
+        state,
+        ReviewComment(
+            comment_id="issue:handled",
+            body_excerpt="old body",
+            body="old body",
+            author="reviewer",
+        ),
+        "false_positive",
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="new-head-after-repair-push",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(
+            ReviewComment(
+                comment_id="issue:handled",
+                body_excerpt="old body",
+                body="old body",
+                author="reviewer",
+            ),
+            ReviewComment(
+                comment_id="issue:unknown",
+                body_excerpt="unseen body",
+                body="unseen body",
+                author="reviewer",
+            ),
+        ),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    changed = await runner._apply_pr_feedback_resolution_state(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+    )
+
+    assert changed is False
+    assert state.threads_addressed_ids["issue:handled"] == "false_positive"
+    assert _review_comment_body_state_key("issue:handled") in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_changed_review_comment_body_requeues_private_verdict() -> None:
+    state = MonitorState()
+    _mark_review_comment_addressed(
+        state,
+        ReviewComment(
+            comment_id="issue:handled",
+            body_excerpt="old body",
+            body="old body",
+            author="reviewer",
+        ),
+        "false_positive",
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="new-head-after-review-edit",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(
+            ReviewComment(
+                comment_id="issue:handled",
+                body_excerpt="new body that must be evaluated again",
+                body="new body that must be evaluated again",
+                author="reviewer",
+            ),
+        ),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    changed = _drop_stale_review_comment_addressed_state(status, state)
+
+    assert changed is True
+    assert "issue:handled" not in state.threads_addressed_ids
+    assert _review_comment_body_state_key("issue:handled") not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -2331,6 +2638,20 @@ class TestParseVerdict:
         )
 
     @pytest.mark.unit
+    def test_private_awf_verdict_defer_marker_preserves_reason(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: NEEDS_HUMAN: maintainer decision")
+
+        assert result.verdict == "defer"
+        assert result.reason == "maintainer decision"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_fixed_marker_preserves_reason(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: FIXED: pushed regression test")
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "pushed regression test"
+
+    @pytest.mark.unit
     def test_false_positive_case_insensitive(self) -> None:
         assert _parse_verdict("false positive: minor") == "false_positive"
 
@@ -2347,6 +2668,13 @@ class TestParseVerdict:
         # Scanner checks FALSE POSITIVE first.
         reply = "FALSE POSITIVE: not a real issue. (not DEFER:)"
         assert _parse_verdict(reply) == "false_positive"
+
+    @pytest.mark.unit
+    def test_monitor_state_verdict_normalizes_persisted_private_verdicts(self) -> None:
+        assert _monitor_state_verdict("NEEDS_HUMAN") == "defer"
+        assert _monitor_state_verdict("defer") == "defer"
+        assert _monitor_state_verdict("agent_failed") == "agent_failed"
+        assert _monitor_state_verdict("fixed") == "fix_committed"
 
 
 class TestCollectDeferItems:

@@ -123,7 +123,6 @@ _PR_FEEDBACK_RESOLUTION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "scm_provider",
     "repository_key",
     "pull_request_key",
-    "head_sha",
     "feedback_kind",
     "feedback_id",
     "feedback_body_hash",
@@ -281,6 +280,7 @@ def _pr_feedback_resolution_upsert_stmt(dialect_name: str | None) -> Any | None:
         index_elements=_PR_FEEDBACK_RESOLUTION_CONFLICT_COLUMNS,
         set_={
             "pull_request_url": inserted.excluded.pull_request_url,
+            "head_sha": inserted.excluded.head_sha,
             "feedback_url": inserted.excluded.feedback_url,
             "feedback_author": inserted.excluded.feedback_author,
             "verdict": inserted.excluded.verdict,
@@ -632,32 +632,14 @@ class PRFeedbackResolutionRepository:
             "updated_at": now,
         }
         stmt = _pr_feedback_resolution_upsert_stmt(self._dialect_name)
-        if stmt is not None:
-            row = cast(
-                PRFeedbackResolution,
-                (await self._session.execute(stmt.values(**values))).scalar_one(),
-            )
-            await self._session.flush()
-            return row
-
-        existing = await self.get(
-            scm_provider=values["scm_provider"],
-            repository_key=values["repository_key"],
-            pull_request_key=values["pull_request_key"],
-            head_sha=values["head_sha"],
-            feedback_kind=values["feedback_kind"],
-            feedback_id=values["feedback_id"],
-            feedback_body_hash=values["feedback_body_hash"],
+        if stmt is None:
+            raise RuntimeError("PR feedback resolution persistence requires PostgreSQL")
+        row = cast(
+            PRFeedbackResolution,
+            (await self._session.execute(stmt.values(**values))).scalar_one(),
         )
-        if existing is None:
-            existing = PRFeedbackResolution(**values)
-            self._session.add(existing)
-        else:
-            for key, value in values.items():
-                if key != "created_at":
-                    setattr(existing, key, value)
         await self._session.flush()
-        return existing
+        return row
 
     async def get(
         self,
@@ -665,7 +647,6 @@ class PRFeedbackResolutionRepository:
         scm_provider: str,
         repository_key: str,
         pull_request_key: str,
-        head_sha: str,
         feedback_kind: str,
         feedback_id: str,
         feedback_body_hash: str,
@@ -674,20 +655,18 @@ class PRFeedbackResolutionRepository:
             PRFeedbackResolution.scm_provider == _normalize_provider_key(scm_provider),
             PRFeedbackResolution.repository_key == _normalize_repository_key(repository_key),
             PRFeedbackResolution.pull_request_key == pull_request_key.strip(),
-            PRFeedbackResolution.head_sha == head_sha.strip(),
             PRFeedbackResolution.feedback_kind == feedback_kind.strip().lower(),
             PRFeedbackResolution.feedback_id == feedback_id.strip(),
             PRFeedbackResolution.feedback_body_hash == feedback_body_hash,
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def list_for_pr_head(
+    async def list_for_pr(
         self,
         *,
         scm_provider: str,
         repository_key: str,
         pull_request_key: str,
-        head_sha: str,
     ) -> list[PRFeedbackResolution]:
         stmt = (
             select(PRFeedbackResolution)
@@ -695,7 +674,6 @@ class PRFeedbackResolutionRepository:
                 PRFeedbackResolution.scm_provider == _normalize_provider_key(scm_provider),
                 PRFeedbackResolution.repository_key == _normalize_repository_key(repository_key),
                 PRFeedbackResolution.pull_request_key == pull_request_key.strip(),
-                PRFeedbackResolution.head_sha == head_sha.strip(),
             )
             .order_by(PRFeedbackResolution.updated_at.desc())
         )

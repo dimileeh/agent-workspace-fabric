@@ -57,7 +57,6 @@ def upgrade() -> None:
             "scm_provider",
             "repository_key",
             "pull_request_key",
-            "head_sha",
             "feedback_kind",
             "feedback_id",
             "feedback_body_hash",
@@ -67,7 +66,12 @@ def upgrade() -> None:
     op.create_index(
         "ix_pr_feedback_resolutions_pr",
         "pr_feedback_resolutions",
-        ["scm_provider", "repository_key", "pull_request_key", "head_sha"],
+        ["scm_provider", "repository_key", "pull_request_key"],
+    )
+    op.create_index(
+        "ix_pr_feedback_resolutions_head_sha",
+        "pr_feedback_resolutions",
+        ["head_sha"],
     )
     op.create_index(
         "ix_pr_feedback_resolutions_source_workspace",
@@ -83,6 +87,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_pr_feedback_resolutions_updated_at", table_name="pr_feedback_resolutions")
+    op.drop_index("ix_pr_feedback_resolutions_head_sha", table_name="pr_feedback_resolutions")
     op.drop_index(
         "ix_pr_feedback_resolutions_source_workspace",
         table_name="pr_feedback_resolutions",
