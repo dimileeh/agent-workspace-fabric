@@ -69,6 +69,48 @@ class _FakeDisposableEngine:
         self.disposed = True
 
 
+class _FakeStaleCleanupConnection:
+    def __init__(self, engine: _FakeStaleCleanupEngine) -> None:
+        self._engine = engine
+
+    async def execute(
+        self,
+        statement: object,
+        _parameters: object = None,
+    ) -> list[tuple[str]]:
+        statement_text = str(statement)
+        self._engine.statements.append(statement_text)
+        if "information_schema.schemata" in statement_text:
+            return [(schema,) for schema in self._engine.schemas]
+        return []
+
+
+class _FakeStaleCleanupBegin:
+    def __init__(self, engine: _FakeStaleCleanupEngine) -> None:
+        self._engine = engine
+
+    async def __aenter__(self) -> _FakeStaleCleanupConnection:
+        self._engine.begin_count += 1
+        return _FakeStaleCleanupConnection(self._engine)
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        return None
+
+
+class _FakeStaleCleanupEngine:
+    def __init__(self, schemas: list[str]) -> None:
+        self.schemas = schemas
+        self.begin_count = 0
+        self.dispose_count = 0
+        self.statements: list[str] = []
+
+    def begin(self) -> _FakeStaleCleanupBegin:
+        return _FakeStaleCleanupBegin(self)
+
+    async def dispose(self) -> None:
+        self.dispose_count += 1
+
+
 @pytest.mark.unit
 def test_make_engine_strips_test_url_options_and_enables_null_pool(
     monkeypatch: pytest.MonkeyPatch,
@@ -156,6 +198,41 @@ async def test_stale_postgres_schema_listing_skips_active_and_unowned_schemas(
 
     assert schemas == [inactive_schema]
     assert seen_namespaces == [inactive_namespace, active_namespace]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stale_postgres_cleanup_reuses_one_engine_for_all_drops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    first_schema = f"awf_test_{'1' * 16}_{'a' * 32}"
+    second_schema = f"awf_test_{'2' * 16}_{'b' * 32}"
+    engine = _FakeStaleCleanupEngine([second_schema, first_schema])
+    made_engines: list[_FakeStaleCleanupEngine] = []
+
+    def _make_engine(url: str) -> _FakeStaleCleanupEngine:
+        assert url == database_url
+        made_engines.append(engine)
+        return engine
+
+    monkeypatch.setattr(postgres_mod, "_make_test_engine", _make_engine)
+    monkeypatch.setattr(
+        postgres_mod,
+        "_is_postgres_test_schema_namespace_active",
+        lambda _url, _namespace: False,
+    )
+
+    await postgres_mod._drop_stale_postgres_test_schemas(database_url)
+
+    assert made_engines == [engine]
+    assert engine.dispose_count == 1
+    assert engine.begin_count == 2
+    assert engine.statements[0].count("information_schema.schemata") == 1
+    assert engine.statements[1:] == [
+        f'DROP SCHEMA IF EXISTS "{first_schema}" CASCADE',
+        f'DROP SCHEMA IF EXISTS "{second_schema}" CASCADE',
+    ]
 
 
 @pytest.mark.unit

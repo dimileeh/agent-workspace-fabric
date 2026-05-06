@@ -251,29 +251,27 @@ def cleanup_stale_postgres_test_schemas() -> None:
 
 async def _drop_stale_postgres_test_schemas(database_url: str | None = None) -> None:
     database_url = database_url or postgres_test_database_url()
-    schemas = await _with_postgres_connection_retry(
-        lambda: _list_stale_postgres_test_schemas_for_url(database_url)
-    )
-    for schema in schemas:
-        await _with_postgres_connection_retry(
-            lambda schema=schema: _drop_stale_postgres_test_schema(database_url, schema)
+    engine = _make_test_engine(database_url)
+    try:
+        schemas = await _with_postgres_connection_retry(
+            lambda: _list_stale_postgres_test_schemas(engine, database_url)
         )
-
-
-async def _list_stale_postgres_test_schemas_for_url(database_url: str) -> list[str]:
-    engine = _make_test_engine(database_url)
-    try:
-        return await _list_stale_postgres_test_schemas(engine, database_url)
+        await _with_postgres_connection_retry(
+            lambda: _drop_postgres_test_schemas(engine, schemas)
+        )
     finally:
         await engine.dispose()
 
 
-async def _drop_stale_postgres_test_schema(database_url: str, schema: str) -> None:
-    engine = _make_test_engine(database_url)
-    try:
-        await _drop_schema(engine, _quote_identifier(schema))
-    finally:
-        await engine.dispose()
+async def _drop_postgres_test_schemas(engine: AsyncEngine, schemas: list[str]) -> None:
+    if not schemas:
+        return
+
+    async with engine.begin() as conn:
+        for schema in schemas:
+            await conn.execute(
+                text(f"DROP SCHEMA IF EXISTS {_quote_identifier(schema)} CASCADE")
+            )
 
 
 async def _list_stale_postgres_test_schemas(
