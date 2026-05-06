@@ -49,7 +49,9 @@ _POSTGRES_SOURCE_SENTINELS = (
 _POSTGRES_SCHEMA_HELPER_CALLS = frozenset(
     {
         "create_postgres_test_engine",
+        "postgres_empty_test_url",
         "postgres_test_engine",
+        "postgres_test_session",
         "postgres_test_url",
         "postgres_test_url_sync",
     }

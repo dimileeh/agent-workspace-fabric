@@ -102,6 +102,53 @@ def test_collection_finish_runs_cleanup_for_direct_postgres_helper_calls(
     assert cleanup_calls == ["cleanup"]
 
 
+@pytest.mark.parametrize(
+    "helper_name, call_line",
+    [
+        ("postgres_empty_test_url", "    async with postgres_empty_test_url() as database_url:"),
+        ("postgres_test_session", "    async with postgres_test_session() as session:"),
+    ],
+)
+def test_collection_finish_runs_cleanup_for_all_schema_allocating_helpers(
+    helper_name: str,
+    call_line: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_schema_allocating_helpers.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                f"from tests.postgres import {helper_name}",
+                "",
+                "async def test_uses_schema_allocating_helper():",
+                call_line,
+                "        pass",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    postgres_mod = pytest.importorskip("tests." + "postgres")
+    cleanup_name = "cleanup_stale_" + "postgres_" + "test_" + "schemas"
+    cleanup_calls: list[str] = []
+
+    monkeypatch.setattr(postgres_mod, cleanup_name, lambda: cleanup_calls.append("cleanup"))
+
+    root_conftest.pytest_collection_finish(
+        _FakeSession(
+            [
+                _FakeItem(
+                    test_file,
+                    name="test_uses_schema_allocating_helper",
+                    lineno=2,
+                )
+            ]
+        )  # type: ignore[arg-type]
+    )
+
+    assert cleanup_calls == ["cleanup"]
+
+
 def test_collection_finish_skips_unselected_postgres_helper_calls(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
