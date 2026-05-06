@@ -2517,6 +2517,7 @@ class WorkspaceExecutor:
         push_branch_name = ws.branch_name or f"awf/{workspace_id}"
         existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None
         existing_pr_remote_url = _existing_pr_remote_push_url(ws) if ws.pr_url else None
+        audit_remote_branch = existing_pr_remote_branch or push_branch_name
 
         try:
             pr = await self._pr_creator.push_and_open(
@@ -2544,7 +2545,7 @@ class WorkspaceExecutor:
                     outcome="succeeded",
                     reason_code="PR_UPDATED" if ws.pr_url else "PR_OPENED",
                     branch_name=push_branch_name,
-                    remote_branch=push_branch_name,
+                    remote_branch=audit_remote_branch,
                     pr_number=_extract_pr_number(ws.pr_url) if ws.pr_url else None,
                     pr_url=ws.pr_url,
                     source_head_sha=exc.head_sha,
@@ -2564,7 +2565,7 @@ class WorkspaceExecutor:
                     else _PR_CREATE_FAILED_REASON_CODE
                 ),
                 branch_name=push_branch_name,
-                remote_branch=push_branch_name,
+                remote_branch=audit_remote_branch,
                 pr_number=_extract_pr_number(ws.pr_url) if ws.pr_url else None,
                 pr_url=ws.pr_url,
                 source_head_sha=exc.head_sha,

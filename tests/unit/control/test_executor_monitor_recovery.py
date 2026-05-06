@@ -37,7 +37,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
-from awf.runtime.pr_creator import PullRequestCreator
+from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationRunner
 from tests.postgres import postgres_test_engine
 
@@ -1272,6 +1272,81 @@ async def test_sync_feature_pr_validate_only_recovery_pushes_adopted_pr_head(
         and event.payload["branch_name"] == f"feature-sync/{ws_id}"
         for event in events
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["git push", "gh pr create"])
+async def test_sync_feature_pr_push_error_audit_records_adopted_pr_head(
+    operation: str,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        max_fix_passes=1,
+    )
+    source_head = "d" * 40
+    fixed_head = "e" * 40
+    ws_id = await _seed_sync_feature_pr_ready_workspace_with_recovery(
+        factory,
+        pr_number=208,
+        source_head_sha=source_head,
+    )
+    push_attempts: list[dict[str, Any]] = []
+
+    async def fail_push_and_open(**kwargs: Any) -> None:
+        push_attempts.append(kwargs)
+        raise PullRequestError(
+            operation=operation,
+            returncode=128 if operation == "git push" else 1,
+            stderr="remote rejected the adopted PR head",
+            head_sha=fixed_head,
+        )
+
+    monkeypatch.setattr(executor._pr_creator, "push_and_open", fail_push_and_open)
+
+    _queue_validation_head(fake, head=source_head)
+    fake.queue_result(returncode=1, stderr="pytest: failed")  # initial validation fails
+    fake.queue_result(returncode=0)  # adapter.run (fix pass)
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="tests/integration/test_alembic_postgres.py\n")
+    fake.queue_result(returncode=0)  # git commit
+    _queue_validation_head(fake, head=fixed_head)
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation passes after fix
+
+    await executor.execute(ws_id)
+
+    assert len(push_attempts) == 1
+    assert push_attempts[0]["branch_name"] == f"feature-sync/{ws_id}"
+    assert push_attempts[0]["remote_branch_name"] == "feature/existing-pr"
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+        pr_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type="workspace.audit.pr_created",
+            limit=10,
+        )
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    events = push_events + pr_events
+    assert len(events) == (1 if operation == "git push" else 2)
+    assert all(event.payload is not None for event in events)
+    for event in events:
+        assert event.payload["remote_branch"] == "feature/existing-pr"
+        assert event.payload["branch_name"] == f"feature-sync/{ws_id}"
+        assert event.payload["source_head_sha"] == fixed_head
+    assert any(event.payload["outcome"] == "failed" for event in events)
 
 
 @pytest.mark.unit
