@@ -35,9 +35,9 @@ COPY_PASTE_DOC_HINTS = {
 }
 
 LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\((?P<target>[^)]+)\)")
-FENCE_RE = re.compile(
-    r"^```(?P<language>[A-Za-z0-9_+.-]*)[^\n]*\n(?P<body>.*?)^```[ \t]*$",
-    re.MULTILINE | re.DOTALL,
+FENCE_DELIMITER_RE = re.compile(r"^ {0,3}```", re.MULTILINE)
+OPENING_FENCE_RE = re.compile(
+    r"^(?P<indent> {0,3})(?P<delimiter>`{3,})(?P<language>[A-Za-z0-9_+.-]*)[^\n]*$",
 )
 AWF_COMMAND_RE = re.compile(r"(?<![\w./-])awf(?P<tail>\s+[^`\n|;)]*)")
 
@@ -142,6 +142,26 @@ echo ok
             line=4,
             language="json",
             body='{"ok": true}',
+        ),
+    ]
+
+
+def test_markdown_fences_accepts_indented_copy_paste_fences() -> None:
+    text = (
+        "1. Step\n"
+        "   ```python\n"
+        '   print("ok")\n'
+        "   ```\n"
+    )
+
+    assert _fence_delimiter_count_is_even(text)
+    assert not _fence_delimiter_count_is_even("1. Step\n   ```python\n   print('ok')\n")
+    assert _markdown_fences("docs/example.md", text) == [
+        MarkdownFence(
+            path="docs/example.md",
+            line=2,
+            language="python",
+            body='print("ok")',
         ),
     ]
 
@@ -341,22 +361,53 @@ def _copy_paste_docs() -> set[str]:
 
 
 def _fence_delimiter_count_is_even(text: str) -> bool:
-    return len(re.findall(r"^```", text, flags=re.MULTILINE)) % 2 == 0
+    return len(FENCE_DELIMITER_RE.findall(text)) % 2 == 0
 
 
 def _markdown_fences(rel_path: str, text: str) -> list[MarkdownFence]:
     fences: list[MarkdownFence] = []
-    for match in FENCE_RE.finditer(text):
-        line = text.count("\n", 0, match.start()) + 1
-        fences.append(
-            MarkdownFence(
-                path=rel_path,
-                line=line,
-                language=match.group("language").lower(),
-                body=match.group("body").strip("\n"),
-            )
-        )
+    lines = text.splitlines()
+    line_index = 0
+
+    while line_index < len(lines):
+        opening_match = OPENING_FENCE_RE.match(lines[line_index])
+        if opening_match is None:
+            line_index += 1
+            continue
+
+        opening_line = line_index + 1
+        indent_width = len(opening_match.group("indent"))
+        delimiter_width = len(opening_match.group("delimiter"))
+        body_lines: list[str] = []
+        line_index += 1
+
+        while line_index < len(lines):
+            line = lines[line_index]
+            if _is_closing_fence(line, delimiter_width):
+                fences.append(
+                    MarkdownFence(
+                        path=rel_path,
+                        line=opening_line,
+                        language=opening_match.group("language").lower(),
+                        body="\n".join(body_lines).strip("\n"),
+                    )
+                )
+                break
+
+            body_lines.append(_strip_fence_body_indent(line, indent_width))
+            line_index += 1
+        line_index += 1
     return fences
+
+
+def _is_closing_fence(line: str, delimiter_width: int) -> bool:
+    match = re.match(r"^ {0,3}(?P<delimiter>`{3,})[ \t]*$", line)
+    return match is not None and len(match.group("delimiter")) >= delimiter_width
+
+
+def _strip_fence_body_indent(line: str, indent_width: int) -> str:
+    leading_spaces = len(line) - len(line.lstrip(" "))
+    return line[min(indent_width, leading_spaces) :]
 
 
 def _assert_snippet_syntax(fence: MarkdownFence) -> None:
