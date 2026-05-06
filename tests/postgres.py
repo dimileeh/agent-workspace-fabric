@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -15,6 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from awf.db.base import Base
 from awf.db.session import make_engine, make_session_factory
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-Unix platforms do not run AWF CI.
+    fcntl = None  # type: ignore[assignment]
 
 DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 _TEST_CONNECT_ARGS: dict[str, object] = {"timeout": 2}
@@ -45,6 +52,22 @@ def _schema_url(database_url: str, schema: str, *, null_pool: bool = False) -> s
     return parsed_url.set(query=query).render_as_string(hide_password=False)
 
 
+@contextmanager
+def _postgres_ddl_lock() -> Iterator[None]:
+    if fcntl is None:
+        yield
+        return
+
+    run_uid = os.environ.get("PYTEST_XDIST_TESTRUNUID", "local")
+    lock_path = Path(tempfile.gettempdir()) / f"awf-pytest-postgres-ddl-{run_uid}.lock"
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 @asynccontextmanager
 async def postgres_test_engine() -> AsyncIterator[AsyncEngine]:
     """Yield an isolated PostgreSQL schema with ORM metadata created."""
@@ -56,17 +79,21 @@ async def postgres_test_engine() -> AsyncIterator[AsyncEngine]:
     schema_database_url = _schema_url(database_url, schema)
     engine = _make_test_engine(schema_database_url)
     try:
-        await _with_connect_retry(
-            "create schema",
-            schema,
-            lambda: _create_schema(admin_engine, quoted_schema),
-        )
-        await _with_connect_retry("create metadata", schema, lambda: _create_metadata(engine))
+        with _postgres_ddl_lock():
+            await _with_connect_retry(
+                "create schema",
+                schema,
+                lambda: _create_schema(admin_engine, quoted_schema),
+            )
+            await _with_connect_retry("create metadata", schema, lambda: _create_metadata(engine))
         yield engine
     finally:
         await engine.dispose()
         try:
-            await _with_connect_retry("drop schema", schema, lambda: _drop_schema(admin_engine, schema))
+            with _postgres_ddl_lock():
+                await _with_connect_retry(
+                    "drop schema", schema, lambda: _drop_schema(admin_engine, schema)
+                )
         finally:
             await admin_engine.dispose()
 
@@ -94,6 +121,7 @@ async def _with_connect_retry[T](
                 ) from exc
             await asyncio.sleep(0.1 * attempt)
             attempt += 1
+
 
 def _is_connect_failure(exc: BaseException) -> bool:
     if isinstance(exc, TimeoutError | OSError):
@@ -132,12 +160,13 @@ async def create_postgres_test_engine() -> AsyncEngine:
     admin_engine = _make_test_engine(database_url)
     engine = _make_test_engine(_schema_url(database_url, schema, null_pool=True))
     try:
-        await _with_connect_retry(
-            "create schema",
-            schema,
-            lambda: _create_schema(admin_engine, quoted_schema),
-        )
-        await _with_connect_retry("create metadata", schema, lambda: _create_metadata(engine))
+        with _postgres_ddl_lock():
+            await _with_connect_retry(
+                "create schema",
+                schema,
+                lambda: _create_schema(admin_engine, quoted_schema),
+            )
+            await _with_connect_retry("create metadata", schema, lambda: _create_metadata(engine))
     finally:
         await admin_engine.dispose()
     return engine
@@ -151,20 +180,24 @@ async def postgres_test_url() -> AsyncIterator[str]:
     schema = f"awf_test_{uuid.uuid4().hex}"
     quoted_schema = _quote_identifier(schema)
     admin_engine = _make_test_engine(database_url)
-    schema_database_url = _schema_url(database_url, schema)
+    schema_database_url = _schema_url(database_url, schema, null_pool=True)
     engine = _make_test_engine(schema_database_url)
     try:
-        await _with_connect_retry(
-            "create schema",
-            schema,
-            lambda: _create_schema(admin_engine, quoted_schema),
-        )
-        await _with_connect_retry("create metadata", schema, lambda: _create_metadata(engine))
+        with _postgres_ddl_lock():
+            await _with_connect_retry(
+                "create schema",
+                schema,
+                lambda: _create_schema(admin_engine, quoted_schema),
+            )
+            await _with_connect_retry("create metadata", schema, lambda: _create_metadata(engine))
         yield schema_database_url
     finally:
         await engine.dispose()
         try:
-            await _with_connect_retry("drop schema", schema, lambda: _drop_schema(admin_engine, schema))
+            with _postgres_ddl_lock():
+                await _with_connect_retry(
+                    "drop schema", schema, lambda: _drop_schema(admin_engine, schema)
+                )
         finally:
             await admin_engine.dispose()
 
@@ -182,12 +215,15 @@ def postgres_test_url_sync() -> Iterator[str]:
         schema_database_url = _schema_url(database_url, schema, null_pool=True)
         engine = _make_test_engine(schema_database_url)
         try:
-            await _with_connect_retry(
-                "create schema",
-                schema,
-                lambda: _create_schema(admin_engine, quoted_schema),
-            )
-            await _with_connect_retry("create metadata", schema, lambda: _create_metadata(engine))
+            with _postgres_ddl_lock():
+                await _with_connect_retry(
+                    "create schema",
+                    schema,
+                    lambda: _create_schema(admin_engine, quoted_schema),
+                )
+                await _with_connect_retry(
+                    "create metadata", schema, lambda: _create_metadata(engine)
+                )
         finally:
             await admin_engine.dispose()
             await engine.dispose()
@@ -196,7 +232,10 @@ def postgres_test_url_sync() -> Iterator[str]:
     async def _cleanup() -> None:
         admin_engine = _make_test_engine(database_url)
         try:
-            await _with_connect_retry("drop schema", schema, lambda: _drop_schema(admin_engine, schema))
+            with _postgres_ddl_lock():
+                await _with_connect_retry(
+                    "drop schema", schema, lambda: _drop_schema(admin_engine, schema)
+                )
         finally:
             await admin_engine.dispose()
 
@@ -216,15 +255,19 @@ async def postgres_empty_test_url() -> AsyncIterator[str]:
     quoted_schema = _quote_identifier(schema)
     admin_engine = _make_test_engine(database_url)
     try:
-        await _with_connect_retry(
-            "create schema",
-            schema,
-            lambda: _create_schema(admin_engine, quoted_schema),
-        )
+        with _postgres_ddl_lock():
+            await _with_connect_retry(
+                "create schema",
+                schema,
+                lambda: _create_schema(admin_engine, quoted_schema),
+            )
         yield _schema_url(database_url, schema)
     finally:
         try:
-            await _with_connect_retry("drop schema", schema, lambda: _drop_schema(admin_engine, schema))
+            with _postgres_ddl_lock():
+                await _with_connect_retry(
+                    "drop schema", schema, lambda: _drop_schema(admin_engine, schema)
+                )
         finally:
             await admin_engine.dispose()
 

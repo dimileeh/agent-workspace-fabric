@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
 
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
@@ -27,6 +29,7 @@ from awf.service.pr_monitor_adoption import (
 from awf.service.secret_leases import _ensure_utc
 from awf.service.status import _utc_datetime
 from awf.service.worker import _merge_coordinator_for_database_url
+from tests import postgres as postgres_helpers
 from tests.postgres import _drop_schema
 
 
@@ -92,6 +95,62 @@ async def test_drop_schema_uses_single_cascade_drop() -> None:
     await _drop_schema(engine, "awf_test")
 
     assert engine.statements == [('DROP SCHEMA IF EXISTS "awf_test" CASCADE', None)]
+
+
+@pytest.mark.unit
+def test_postgres_ddl_lock_uses_xdist_run_scoped_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[int, int]] = []
+    expected_lock = tmp_path / "awf-pytest-postgres-ddl-run-123.lock"
+
+    def _flock(fd: int, operation: int) -> None:
+        calls.append((fd, operation))
+
+    monkeypatch.setattr(
+        postgres_helpers, "fcntl", SimpleNamespace(LOCK_EX=1, LOCK_UN=2, flock=_flock)
+    )
+    monkeypatch.setattr(postgres_helpers.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-123")
+
+    with postgres_helpers._postgres_ddl_lock():
+        assert expected_lock.exists()
+
+    assert [operation for _, operation in calls] == [1, 2]
+
+
+@pytest.mark.unit
+async def test_postgres_test_url_marks_yielded_url_null_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    async def _noop_retry(operation: str, schema: str, action: Any) -> None:
+        del operation, schema
+        await action()
+
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        postgres_helpers,
+        "postgres_test_database_url",
+        lambda: "postgresql+asyncpg://awf:pw@localhost:5433/awf",
+    )
+    monkeypatch.setattr(postgres_helpers, "_make_test_engine", lambda _url: _Engine())
+    monkeypatch.setattr(postgres_helpers, "_with_connect_retry", _noop_retry)
+    monkeypatch.setattr(postgres_helpers, "_create_schema", _noop)
+    monkeypatch.setattr(postgres_helpers, "_create_metadata", _noop)
+    monkeypatch.setattr(postgres_helpers, "_drop_schema", _noop)
+
+    async with postgres_helpers.postgres_test_url() as database_url:
+        parsed = make_url(database_url)
+
+    assert parsed.query["awf_search_path"].startswith("awf_test_")
+    assert parsed.query["awf_null_pool"] == "1"
 
 
 @pytest.mark.unit
