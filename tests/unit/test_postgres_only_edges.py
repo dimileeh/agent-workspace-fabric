@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -55,6 +56,16 @@ class _FakeSchemaEngine:
 
     def begin(self) -> _FakeSchemaBegin:
         return _FakeSchemaBegin(self._schemas)
+
+
+class _FakeDisposableEngine:
+    def __init__(self) -> None:
+        self.disposed = False
+        self.dispose_count = 0
+
+    async def dispose(self) -> None:
+        self.dispose_count += 1
+        self.disposed = True
 
 
 @pytest.mark.unit
@@ -123,6 +134,55 @@ async def test_stale_postgres_schema_listing_skips_active_and_unowned_schemas(
 
     assert schemas == [inactive_schema]
     assert seen_namespaces == [inactive_namespace, active_namespace]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("helper_name", ["postgres_test_engine", "postgres_test_url"])
+async def test_postgres_context_helpers_drop_schema_before_disposing_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    schema = f"awf_test_{'1' * 16}_{'a' * 32}"
+    quoted_schema = postgres_mod._quote_identifier(schema)
+    engine = _FakeDisposableEngine()
+    events: list[tuple[str, bool]] = []
+
+    monkeypatch.setattr(postgres_mod, "postgres_test_database_url", lambda: database_url)
+    monkeypatch.setattr(postgres_mod, "_ensure_postgres_test_run_active", lambda _url: None)
+    monkeypatch.setattr(postgres_mod, "_new_postgres_test_schema", lambda: schema)
+    monkeypatch.setattr(postgres_mod, "_make_test_engine", lambda _url: engine)
+    monkeypatch.setattr(postgres_mod, "_postgres_ddl_lock", lambda _url: nullcontext())
+
+    async def _create_schema_and_metadata(
+        engine_arg: _FakeDisposableEngine,
+        schema_arg: str,
+    ) -> None:
+        assert engine_arg is engine
+        assert schema_arg == quoted_schema
+        events.append(("create", engine_arg.disposed))
+
+    async def _drop_schema(engine_arg: _FakeDisposableEngine, schema_arg: str) -> None:
+        assert engine_arg is engine
+        assert schema_arg == quoted_schema
+        events.append(("drop", engine_arg.disposed))
+        assert engine_arg.disposed is False
+
+    monkeypatch.setattr(postgres_mod, "_create_schema_and_metadata", _create_schema_and_metadata)
+    monkeypatch.setattr(postgres_mod, "_drop_schema", _drop_schema)
+
+    manager = getattr(postgres_mod, helper_name)()
+    async with manager as yielded:
+        if helper_name == "postgres_test_engine":
+            assert yielded is engine
+        else:
+            assert isinstance(yielded, str)
+        assert engine.disposed is False
+
+    assert engine.disposed is True
+    assert engine.dispose_count == 1
+    assert events == [("create", False), ("drop", False)]
 
 
 @pytest.mark.unit

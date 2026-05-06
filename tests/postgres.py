@@ -308,7 +308,6 @@ async def postgres_test_engine() -> AsyncIterator[AsyncEngine]:
             )
         yield engine
     finally:
-        await engine.dispose()
         try:
             with _postgres_ddl_lock(database_url):
                 await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
@@ -369,7 +368,6 @@ async def postgres_test_url() -> AsyncIterator[str]:
             )
         yield schema_database_url
     finally:
-        await engine.dispose()
         try:
             with _postgres_ddl_lock(database_url):
                 await _with_postgres_connection_retry(lambda: _drop_schema(engine, quoted_schema))
