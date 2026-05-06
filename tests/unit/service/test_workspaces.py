@@ -66,7 +66,9 @@ async def _workspace_with_runtime_health_event(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     payload: dict[str, object],
+    event_type: str = RUNTIME_STRANDED_EVENT_TYPE,
     reason_code: str = "STRANDED_WORKSPACE",
+    status: WorkspaceStatus = WorkspaceStatus.failed,
 ) -> str:
     async with session_factory() as session:
         repo = WorkspaceRepository(session)
@@ -78,11 +80,12 @@ async def _workspace_with_runtime_health_event(
             agent="codex",
             test_commands=[],
         )
-        workspace.status = WorkspaceStatus.failed.value
-        workspace.failure_reason = "infrastructure_failure"
+        workspace.status = status.value
+        if status == WorkspaceStatus.failed:
+            workspace.failure_reason = "infrastructure_failure"
         await repo.add_event(
             workspace,
-            event_type=RUNTIME_STRANDED_EVENT_TYPE,
+            event_type=event_type,
             reason_code=reason_code,
             payload=payload,
         )
@@ -351,6 +354,37 @@ async def test_workspace_detail_exposes_persisted_preserved_runtime_health(
 
 
 @pytest.mark.unit
+async def test_workspace_detail_ignores_persisted_preserved_runtime_health_after_cancel(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _workspace_with_runtime_health_event(
+        session_factory,
+        status=WorkspaceStatus.cancelled,
+        event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+        reason_code=PRESERVED_EXECUTION_REASON_CODE,
+        payload={
+            "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+            "decision": "preserve_runtime",
+            "message": "Live agent runtime was preserved after worker restart.",
+            "runtime": {
+                "services": [
+                    {
+                        "name": "agent",
+                        "state": "running",
+                        "container_id": "agent",
+                    }
+                ]
+            },
+        },
+    )
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is None
+
+
+@pytest.mark.unit
 async def test_runtime_detail_uses_preserved_health_when_live_snapshot_is_healthy(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -415,6 +449,54 @@ async def test_runtime_detail_uses_preserved_health_when_live_snapshot_is_health
     assert runtime.runtime_health.status == "ok"
     assert runtime.runtime_health.reason_code == PRESERVED_EXECUTION_REASON_CODE
     assert runtime.runtime_health.decision == "preserve_runtime"
+
+
+@pytest.mark.unit
+async def test_runtime_detail_ignores_preserved_health_for_stopped_terminal_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.cancelled,
+        compose_project_name="awf_cancelled_preserved_runtime",
+    )
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.add_event(
+            workspace,
+            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            payload={
+                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "decision": "preserve_runtime",
+                "message": "Live agent runtime was preserved after worker restart.",
+                "runtime": {
+                    "services": [
+                        {
+                            "name": "agent",
+                            "state": "running",
+                            "container_id": "agent",
+                        }
+                    ]
+                },
+            },
+        )
+        await session.commit()
+
+    inspector = _RuntimeInspector(
+        {"awf_cancelled_preserved_runtime": RuntimeSnapshot(stack_state="stopped")}
+    )
+
+    runtime = await WorkspaceService(
+        session_factory,
+        runtime_inspector=inspector,
+    ).get_runtime(workspace_id)
+
+    assert runtime is not None
+    assert runtime.stack_state == "stopped"
+    assert runtime.runtime_health is None
 
 
 @pytest.mark.unit

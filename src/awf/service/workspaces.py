@@ -135,6 +135,7 @@ from awf.service.workspace_observability import (
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+    ACTIVE_RUNTIME_HEALTH_STATUSES,
     RUNTIME_STRANDED_EVENT_TYPE,
     classify_runtime_snapshot,
     runtime_workspace_from_workspace,
@@ -1856,6 +1857,8 @@ def _workspace_runtime_health_from_events(
         if reason_code == "RUNTIME_INSPECTION_UNAVAILABLE":
             status = "unavailable"
         if reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE:
+            if workspace.status not in ACTIVE_RUNTIME_HEALTH_STATUSES:
+                return None
             status = "ok"
         return WorkspaceRuntimeHealthResponse(
             status=cast(Any, status),
