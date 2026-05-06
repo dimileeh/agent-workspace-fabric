@@ -3,7 +3,9 @@
 Two responsibilities:
 
 1. ``git -C <worktree> push -u origin <branch>`` — uploads the commits the
-   coding CLI just made to the remote.
+   coding CLI just made to the remote. When updating an adopted fork PR through
+   an explicit push URL, AWF omits ``-u`` so credentialed URLs are not persisted
+   in branch upstream config.
 2. ``gh pr create --base <base> --head <branch> --title ... --body ...`` —
    opens the PR on GitHub when one does not already exist. We capture stdout
    which contains the PR URL.
@@ -132,7 +134,7 @@ class PullRequestCreator:
                 "-C",
                 str(worktree_path),
                 "push",
-                "-u",
+                *(["-u"] if remote_url is None else []),
                 push_remote,
                 push_ref,
             ],

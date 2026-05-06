@@ -1321,7 +1321,8 @@ async def test_sync_feature_pr_validate_only_recovery_pushes_fork_head_repo(
     ]
     assert len(push_calls) == 1
     push_index = push_calls[0].index("push")
-    assert push_calls[0][push_index + 2] == "git@github.com:contributor/aira-agent.git"
+    assert "-u" not in push_calls[0]
+    assert push_calls[0][push_index + 1] == "git@github.com:contributor/aira-agent.git"
     assert "HEAD:refs/heads/feature/existing-pr" in push_calls[0]
     assert "origin" not in push_calls[0][push_index + 1 :]
     assert f"feature-sync/{ws_id}" not in push_calls[0]

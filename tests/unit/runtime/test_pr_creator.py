@@ -156,10 +156,34 @@ class TestPushAndOpen:
         push_index = push_args.index("push")
         assert result.url == "https://github.com/base/aira-agent/pull/42"
         assert result.branch == "fix/fork-review"
-        assert push_args[push_index + 2] == "git@github.com:contributor/aira-agent.git"
+        assert push_args[push_index + 1] == "git@github.com:contributor/aira-agent.git"
         assert "HEAD:refs/heads/fix/fork-review" in push_args
         assert "origin" not in push_args[push_index + 1 :]
         assert all(call.args[:3] != ["gh", "pr", "create"] for call in runner.calls)
+
+    @pytest.mark.unit
+    async def test_explicit_remote_url_push_does_not_set_upstream(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        creator = PullRequestCreator(runner)
+        await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="feature-sync/ws_local",
+            base_branch="development",
+            title="Update adopted fork PR",
+            body="Existing fork PR update.",
+            existing_pr_url="https://github.com/base/aira-agent/pull/42",
+            remote_branch_name="fix/fork-review",
+            remote_url="https://user:token@github.com/contributor/aira-agent.git",
+        )
+
+        push_args = runner.calls[3].args
+        assert "-u" not in push_args
+        assert "--set-upstream" not in push_args
+        assert "https://user:token@github.com/contributor/aira-agent.git" in push_args
+        assert "HEAD:refs/heads/fix/fork-review" in push_args
 
     @pytest.mark.unit
     async def test_extracts_pr_url_even_with_leading_noise(self) -> None:
