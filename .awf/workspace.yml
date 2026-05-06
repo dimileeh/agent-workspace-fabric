@@ -32,7 +32,7 @@ awf:
       final_gate: coverage
       reuse_evidence: true
       freshness_max_age_seconds: 86400
-      full_gate_concurrency: 1
+      full_gate_concurrency: 0
     coverage:
       minimum_percent: 99
       enforce: true

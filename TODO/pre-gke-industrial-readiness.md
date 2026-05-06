@@ -77,13 +77,8 @@ Status values:
 | --- | --- | --- | --- | --- | --- |
 | P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_657b484a622544b6aee70924` | [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing the destroyed monitor `ws_941096a4dc4942dcb877656a`; AWF owns conflict, validation, comment, and merge monitoring. |
 | P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_3b90c8728f0c4862a28d82cc` | [#212](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/212) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing cancelled workspace `ws_7e7f6d54bc924c47a5723621`; AWF owns validation, comment, and merge monitoring. |
-| P0 Reliability, Cleanup, And SLOs | Readiness retained worktree and service GC root alignment | `ws_e9562a751e4c4cd599a66856` | [#213](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/213) | monitoring_pr | Dedicated branch `codex/readyz-retained-worktree-gc-root`; AWF PR monitor attached 2026-05-06 with auto-merge enabled. Fixes retained terminal worktrees incorrectly failing `/readyz` and local service GC resolving the repo `.awf` path instead of the service work root. |
-| P1 MCP And Project Onboarding Client Parity | Docs/status consistency test for the parity matrix | `ws_aeec0296eee64c869d328ae2` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 with narrow TDD scope for parity-matrix implemented/partial/backlog status consistency across REST, CLI, MCP, and contract-test evidence. |
-| P1 Developer Experience And Public Core Surface | First-run troubleshooting guide by symptom | `ws_4f44c108a58f46d092f4e411` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to add the symptom-organized first-run troubleshooting guide and docs drift coverage for diagnostic and safe recovery commands. |
-| P1 Developer Experience And Public Core Surface | Public docs search and readability checks | `ws_0bc1d8f718bc480998d0a08d` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to add docs-status checks for public guide discoverability, CLI command existence, and copy-paste snippet validity. |
-| P1 Operator Console Completion | Live workspace activity signals | `ws_681eec29b3e44a0daa4a0264` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to reconcile/complete `last_activity_at`, `last_log_at`, active subphase, and stale-running warnings across backend/API/console with TDD. |
 | P1 MCP And Project Onboarding Client Parity | PR adoption terminal idempotency hardening | `ws_e5b86a598da842e0aaf50d1f` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to harden first-class PR adoption after the destroyed-row idempotency edge case found while reattaching PR #206. |
-| P1 Control-Plane Restart Recovery Hardening | Adopt or preserve active executions after worker restart | `ws_13dd6ba7165141c285bd771e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to prevent worker restarts from killing live `running` / `validating` / `pushing` agent runtimes when only the in-memory task map was lost. |
+| P0 Control-Plane Restart Recovery Hardening | Adopt or preserve active executions after worker restart | `ws_13dd6ba7165141c285bd771e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to prevent worker restarts or transient control-loop loss from killing live `running` / `validating` / `pushing` agent runtimes when only the in-memory task map was lost. Escalated to P0 after `ws_4f44c108a58f46d092f4e411` was failed as `STALE_ACTIVE_EXECUTION` despite no API/worker Docker restart. |
 | P1 API Contract Completion | REST CLI MCP contract parity tests | `ws_3a9bb03983e343e28f462e3e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to make REST, CLI, and MCP request/response/reason/idempotency/auth/error parity executable through contract tests. |
 | P1 Developer Experience And Public Core Surface | Document and demo existing PR monitor adoption | `ws_e332a1d013c54928863320f0` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to document and demo the supported existing-PR adoption path across CLI, REST, MCP, and console inspection surfaces. |
 
@@ -97,11 +92,16 @@ not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
+| P1 Developer Experience And Public Core Surface | First-run troubleshooting guide by symptom | `ws_4f44c108a58f46d092f4e411` | branch `awf/ws_4f44c108a58f46d092f4e411`, no PR | reschedule_required | Attempt produced local docs commits, but final coverage hit `13` pytest/xdist errors despite 99.02% coverage; AWF then misclassified the terminal state as `STALE_ACTIVE_EXECUTION` after repeated asyncpg `connection is closed` worker failures. Do not count this slice as done; reschedule after DB connection resilience, active-execution adoption, and validation failure-causality fixes land. |
+| P1 Operator Console Completion | Live workspace activity signals | `ws_681eec29b3e44a0daa4a0264` | branch `awf/ws_681eec29b3e44a0daa4a0264`, no PR | reschedule_required | Attempt produced local implementation commits, but AWF failed it as `PLAN_CONFORMANCE_UNSATISFIED` because conformance required AWF-owned validation evidence and there was no orchestration handoff into the validation phase. Terminal runtime resources were also left running. Do not count this slice as done; reschedule after conformance-to-validation handoff and terminal failed-runtime cleanup fixes land. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Developer Experience And Public Core Surface | Public docs search and readability checks | `ws_0bc1d8f718bc480998d0a08d` | [#217](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/217) | merged | Codex `gpt-5.5`; completed 2026-05-06 and adds public docs discoverability/readability checks for guide links, CLI command references, and copy-paste snippet validity. |
+| P1 MCP And Project Onboarding Client Parity | Docs/status consistency test for the parity matrix | `ws_aeec0296eee64c869d328ae2` | [#215](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/215) | merged | Codex `gpt-5.5`; completed 2026-05-06 and adds executable consistency checks tying parity-matrix implemented/partial/backlog statuses to real REST, CLI, MCP, and contract-test evidence. |
+| P0 Reliability, Cleanup, And SLOs | Readiness retained worktree and service GC root alignment | `ws_e9562a751e4c4cd599a66856` | [#213](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/213) | merged | Dedicated branch `codex/readyz-retained-worktree-gc-root`; completed 2026-05-06 and fixes retained terminal worktrees incorrectly failing `/readyz` plus local service GC resolving the repo `.awf` path instead of the service work root. |
 | P1 Validation Runtime Performance | Safe parallel final coverage support | _local_ | commit `9763bd9` | merged | Reconciled 2026-05-05: `pytest-xdist` is in the dev/test runtime, profiles accept `validation.coverage.parallel_workers`, `.awf/workspace.yml` opts AWF self-dogfood into `parallel_workers: 3`, coverage commands inject bounded `pytest -n <workers> --dist=loadscope`, worker policy is capped by CPU/profile limits, and validation identity includes the parallel-worker policy. |
 | P1 Local Packaging And Upgrade Path | Auto-prune completed and merged workspace worktrees | `ws_e90d1b2cf47a45cf920f01a0` | [#203](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/203) | merged | OpenCode/Ollama `glm-5.1:cloud`; merged 2026-05-04 and adds policy-safe completed/merged workspace worktree pruning with retention safeguards. |
 | P1 Developer Experience And Public Core Surface | Redacted first-time support bundle | `ws_02a6a86cac9a492c8562d164` | [#202](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/202) | merged | OpenCode/Ollama `kimi-k2.6:cloud`; merged 2026-05-04 and adds telemetry-free redacted doctor/support-bundle evidence for first-time evaluator issue reports. |
@@ -290,6 +290,31 @@ not listed here.
 - [x] Add recovery for active PR workspaces after AWF service restart.
 - [x] Add console controls for safe remonitor/refresh/revalidate once API semantics are stable.
 - [x] Classify unsatisfied plan conformance failures with structured gaps, retry carry-forward, and salvage hints.
+- [ ] Preserve primary failure causality across stale callbacks and recovery
+  paths. Regression source: `ws_4f44c108a58f46d092f4e411` hit a real final
+  coverage pytest failure (`13` errors with 99.02% coverage) and then AWF
+  overwrote the actionable validation failure with generic
+  `STALE_ACTIVE_EXECUTION`. Acceptance: once a workspace has durable validation
+  failure evidence, later stale-active, cleanup, callback, or lease-expiry paths
+  must preserve the original failure reason, failing command, failing node IDs,
+  coverage percent/threshold, and recovery guidance; secondary infrastructure
+  faults should be appended as events/diagnostics rather than replacing the
+  root cause. Add tests for validation-failed -> stale scan,
+  validation-failed -> cleanup failure, and validation-failed -> worker
+  reconnect scenarios.
+- [ ] Add an AWF-owned conformance-to-validation handoff. Regression source:
+  `ws_681eec29b3e44a0daa4a0264` was failed as
+  `PLAN_CONFORMANCE_UNSATISFIED` even though conformance reported that the
+  implementation appeared complete and only AWF-owned validation evidence was
+  missing. Acceptance: if conformance gaps are limited to missing/stale AWF
+  validation evidence, AWF must transition to validation, run the required
+  profile gates, persist validation provenance/log streams, then rerun
+  conformance against that evidence instead of asking the agent to run
+  validation during the conformance phase. Deterministic plan/API gaps should
+  still go back to the agent. Add reason codes and tests for
+  `CONFORMANCE_REQUIRES_AWF_VALIDATION`, validation success -> conformance
+  success, validation failure -> validation recovery, and real plan gap ->
+  agent iteration.
 
 ## P0: Planning Phase Scope Enforcement
 
@@ -316,6 +341,36 @@ not listed here.
 - [x] Make cleanup idempotent and safe after partial Docker failures.
 - [x] Add SLO-style API and console indicators for local AWF health.
 - [x] Keep local disk pressure and admission blocking actionable in service status.
+- [ ] Harden Postgres/asyncpg connection resilience for long-running local
+  control planes. Regression source: during the `ws_4f44c108a58f46d092f4e411`
+  / `ws_681eec29b3e44a0daa4a0264` run, the worker and API repeatedly hit
+  `InterfaceError: connection is closed`, while the API/worker containers had
+  not restarted. Acceptance: configure the async SQLAlchemy engine with
+  connection liveness checks such as `pool_pre_ping`, sensible recycle/timeout
+  behavior, and bounded retry/invalidation around transient closed-connection
+  failures in worker and API read paths. The worker must continue polling
+  without losing active execution ownership, and closed DB connections must be
+  reported as service-health diagnostics without turning unrelated workspaces
+  terminal. Add regression tests around worker `run_once`, scheduler reads,
+  stale-active scans, and API list/detail calls after a simulated closed
+  connection.
+- [ ] Stop and release terminal failed runtime resources without destroying
+  salvage evidence. Regression source: `ws_681eec29b3e44a0daa4a0264` reached
+  terminal `failed` but its agent container and network remained running,
+  leaving `/readyz` blocked by orphan terminal resources. Acceptance: when a
+  workspace reaches terminal `failed` / `cancelled` / `completed` states, AWF
+  must release reservations and stop containers/networks according to retention
+  policy while preserving logs, artifacts, worktree/branch salvage metadata, and
+  failure diagnostics. `/readyz`, orphan-resource status, and cleanup dry-runs
+  should explain retained evidence separately from leaked live resources. Add
+  tests for conformance failure, validation failure, stale-active failure,
+  cleanup failure, and preserved-worktree salvage paths.
+- [x] Keep readiness and service GC aligned with retained terminal worktree
+  policy. Evidence: `ws_e9562a751e4c4cd599a66856` / PR
+  [#213](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/213)
+  completed 2026-05-06 and fixed retained terminal worktrees incorrectly
+  failing `/readyz` plus local service GC resolving the repo `.awf` path instead
+  of the service work root.
 
 ## P0: Test Coverage And Quality Gates
 
@@ -327,6 +382,16 @@ not listed here.
 - [x] Add integration tests for Alembic multi-head detection and automatic merge revision generation.
 - [x] Add integration tests for Dockerized project profiles with sidecar services.
 - [x] Forbid empty tests, fake assertions, and broad monkeypatching that skips behavior under test.
+- [ ] Make AWF self-dogfood parallel final coverage deterministic inside the
+  workspace runtime. Regression source: `ws_4f44c108a58f46d092f4e411` ran
+  `pytest -n 3 --dist=loadscope --cov=awf --cov-report=term-missing`, reached
+  99.02% coverage, but still produced `13` pytest errors/timeouts. Acceptance:
+  xdist-unsafe tests must be fixed, isolated with explicit serial grouping, or
+  given deterministic fixture cleanup; no hidden skips. When coverage meets the
+  threshold but pytest fails, AWF must classify the result as a validation test
+  failure with failing node IDs and route it through validation recovery, not
+  collapse into infra/stale execution. Add workspace-runtime regression coverage
+  for `parallel_workers: 3` and local stress coverage for the self-profile.
 
 ## P1: Validation Runtime Performance
 
@@ -490,15 +555,20 @@ not listed here.
   attempts inherit validation, owned paths, profile, auto-merge, and monitor
   policy correctly.
 
-## P1: Control-Plane Restart Recovery Hardening
+## P0: Control-Plane Restart Recovery Hardening
 
 - [x] When a restarted worker recovers a persisted `monitoring_pr` workspace,
   clear or expire irrelevant stale execution claims from the previous worker,
   preserve the active monitor claim, emit an explicit recovery event, and prove
   with regression tests that PR monitoring continues without duplicate monitor
   loops or misleading execution-capacity reservations.
-- [ ] Adopt or safely preserve running agent executions after worker restart.
-  Acceptance: if the control-plane worker restarts while a workspace is in
+- [ ] Adopt or safely preserve running agent executions after worker restart
+  or transient control-loop loss. Regression source:
+  `ws_4f44c108a58f46d092f4e411` was failed as `STALE_ACTIVE_EXECUTION` even
+  though the API and worker Docker containers had not restarted; the immediate
+  control-plane symptom was repeated closed asyncpg connections and a missing
+  in-memory execution task. Acceptance: if the control-plane worker restarts or
+  temporarily loses DB/control-loop continuity while a workspace is in
   `running`/`validating`/`pushing` and Docker still has a live agent runtime,
   AWF must not automatically `compose down` that runtime as stale-active. It
   should either reattach/adopt the running execution with durable ownership and
@@ -682,7 +752,9 @@ coding agent in any project to use AWF for a feature.
   rows. Validation: targeted parity/registry pytest, ruff on touched parity and
   contract helpers, and the full `tests/unit/contracts` suite passed on
   2026-05-05; evidence attached in
-  `docs/awf-plans/ws_aeec0296eee64c869d328ae2.validation.txt`.
+  `docs/awf-plans/ws_aeec0296eee64c869d328ae2.validation.txt`; PR
+  [#215](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/215)
+  completed 2026-05-06.
 - [x] Add `docs/PROJECT_ONBOARDING.md` for Codex, Claude Code, Gemini, OpenCode, OpenClaw, and human operators.
 - [x] Add `awf project init` or `awf profile init` to inspect a repository and generate a draft `.awf/workspace.yml`.
 - [x] Add profile templates for common project shapes: generic, Python, Node/Next.js, Docker Compose, Python+Postgres, Node+browser/Playwright, and multi-service app.
@@ -759,7 +831,9 @@ without reading the whole repo.
 - [x] Add docs search/readability checks for public docs. Acceptance: CI or a
   docs-status test confirms every public guide is linked from the docs index,
   key commands still exist in CLI help, and snippets marked copy-paste are
-  syntactically valid.
+  syntactically valid. Evidence: `ws_0bc1d8f718bc480998d0a08d` / PR
+  [#217](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/217)
+  completed 2026-05-06.
 - [x] Add a "first-time evaluator" telemetry-free feedback loop for local Core,
   such as a generated `awf doctor --bundle` redacted support artifact or a
   GitHub issue template path from failed readiness output. Acceptance: no
