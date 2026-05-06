@@ -41,32 +41,47 @@ def make_engine(
         raise ValueError("AWF requires a postgresql+asyncpg:// database URL.")
     resolved_connect_args = dict(connect_args or {})
     query = dict(parsed_url.query)
-    search_path = query.pop("awf_search_path", None)
-    null_pool = query.pop("awf_null_pool", None)
-    connect_timeout = query.pop("awf_connect_timeout", None)
-    connect_attempts = query.pop("awf_connect_attempts", None)
+    raw_search_path = query.pop("awf_search_path", None)
+    raw_null_pool = query.pop("awf_null_pool", None)
+    raw_connect_timeout = query.pop("awf_connect_timeout", None)
+    raw_connect_attempts = query.pop("awf_connect_attempts", None)
+    raw_connect_retries = query.pop("awf_connect_retries", None)
     engine_options: dict[str, object] = {}
-    if search_path is not None:
-        if isinstance(search_path, tuple):
-            search_path = search_path[0]
+    if raw_search_path is not None:
+        search_path = _single_query_value(raw_search_path)
         existing_server_settings = resolved_connect_args.get("server_settings")
         server_settings = (
             dict(existing_server_settings) if isinstance(existing_server_settings, dict) else {}
         )
         server_settings.setdefault("search_path", str(search_path))
         resolved_connect_args["server_settings"] = server_settings
-    if null_pool is not None:
-        if isinstance(null_pool, tuple):
-            null_pool = null_pool[0]
+    if raw_null_pool is not None:
+        null_pool = _single_query_value(raw_null_pool)
         if str(null_pool).lower() in {"1", "true", "yes"}:
             engine_options["poolclass"] = NullPool
-    retry_attempts = _positive_int_query_value(connect_attempts, default=1)
-    if connect_timeout is not None:
+    if raw_connect_timeout is not None:
         resolved_connect_args.setdefault(
             "timeout",
-            _positive_float_query_value(connect_timeout, name="awf_connect_timeout"),
+            _positive_float_query_value(raw_connect_timeout, name="awf_connect_timeout"),
         )
-    if search_path is not None or null_pool is not None or connect_timeout is not None or connect_attempts is not None:
+    retry_attempts = _positive_int_query_value(
+        raw_connect_attempts,
+        name="awf_connect_attempts",
+        default=1,
+    )
+    if raw_connect_retries is not None:
+        retry_attempts = _positive_int_query_value(
+            raw_connect_retries,
+            name="awf_connect_retries",
+            default=retry_attempts,
+        )
+    if (
+        raw_search_path is not None
+        or raw_null_pool is not None
+        or raw_connect_timeout is not None
+        or raw_connect_attempts is not None
+        or raw_connect_retries is not None
+    ):
         parsed_url = parsed_url.set(query=query)
     if retry_attempts > 1:
         engine_options["async_creator"] = _asyncpg_retrying_creator(
@@ -105,16 +120,16 @@ def _positive_float_query_value(value: object, *, name: str) -> float:
     return parsed
 
 
-def _positive_int_query_value(value: object | None, *, default: int) -> int:
+def _positive_int_query_value(value: object | None, *, name: str, default: int) -> int:
     text = _single_query_value(value)
     if text is None:
         return default
     try:
         parsed = int(text)
     except ValueError as exc:
-        raise ValueError("awf_connect_attempts must be a positive integer.") from exc
+        raise ValueError(f"{name} must be a positive integer.") from exc
     if parsed <= 0:
-        raise ValueError("awf_connect_attempts must be a positive integer.")
+        raise ValueError(f"{name} must be a positive integer.")
     return parsed
 
 

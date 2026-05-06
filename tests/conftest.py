@@ -31,6 +31,46 @@ try:
 except ImportError:  # pragma: no cover - Windows does not run AWF Docker CI.
     fcntl = None  # type: ignore[assignment]
 
+_POSTGRES_TEST_TIMEOUT_SECONDS = 120
+_POSTGRES_FIXTURE_NAMES = frozenset({"client", "engine"})
+_POSTGRES_SOURCE_SENTINELS = (
+    "tests.postgres",
+    "postgres_test_",
+    "create_postgres_test_engine",
+)
+
+
+def _test_source_uses_postgres(path: Path, cache: dict[Path, bool]) -> bool:
+    cached = cache.get(path)
+    if cached is not None:
+        return cached
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        cache[path] = False
+        return False
+    uses_postgres = any(sentinel in source for sentinel in _POSTGRES_SOURCE_SENTINELS)
+    cache[path] = uses_postgres
+    return uses_postgres
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    del config
+    source_cache: dict[Path, bool] = {}
+    for item in items:
+        if item.get_closest_marker("timeout") is not None:
+            continue
+        fixture_names = set(getattr(item, "fixturenames", ()))
+        if fixture_names.isdisjoint(_POSTGRES_FIXTURE_NAMES) and not _test_source_uses_postgres(
+            item.path,
+            source_cache,
+        ):
+            continue
+        item.add_marker(pytest.mark.timeout(_POSTGRES_TEST_TIMEOUT_SECONDS))
+
 
 def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
     threshold = settings.min_free_disk_bytes

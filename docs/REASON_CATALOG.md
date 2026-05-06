@@ -121,6 +121,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#local_config_invalid](#local_config_invalid)
 
+### MCP_EGRESS_AUDIT_ERROR
+**Problem:** The MCP egress audit evidence tool could not read workspace audit evidence.
+**Likely Cause:** The workspace lookup failed or the control-plane database was unavailable.
+**Operator Fix:** Verify the workspace id and AWF database health, then retry the MCP call.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#mcp_egress_audit_error](#mcp_egress_audit_error)
+
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.
 **Likely Cause:** Workspaces were started with --network=open.

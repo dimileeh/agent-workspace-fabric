@@ -12,6 +12,7 @@ import yaml
 
 from awf.common.config import DEFAULT_MIN_FREE_DISK_BYTES, Settings
 from awf.service.config import (
+    DEFAULT_LOCAL_SERVICE_WORK_DIR,
     _redact_database_url,
     local_service_environ,
     resolve_service_settings,
@@ -100,6 +101,75 @@ def test_min_free_disk_threshold_flows_from_settings_to_service_settings() -> No
     settings = resolve_service_settings(base, environ={"AWF_MIN_FREE_DISK_BYTES": "123456"})
 
     assert settings.min_free_disk_bytes == 123456
+
+
+@pytest.mark.unit
+def test_local_service_work_dir_defaults_to_compose_host_state_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_work_dir = tmp_path / "awf-service"
+    monkeypatch.delenv("AWF_WORK_DIR", raising=False)
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"HOME": str(tmp_path), "AWF_HOST_WORK_DIR": str(host_work_dir)},
+    )
+
+    assert DEFAULT_LOCAL_SERVICE_WORK_DIR == "~/.awf/service"
+    assert settings.work_dir == str(host_work_dir)
+
+
+@pytest.mark.unit
+def test_local_service_ignores_project_default_awf_work_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AWF_WORK_DIR", ".awf")
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"HOME": str(tmp_path), "AWF_WORK_DIR": ".awf"},
+    )
+
+    assert settings.work_dir == str(tmp_path / ".awf" / "service")
+
+
+@pytest.mark.unit
+def test_compose_host_work_dir_takes_precedence_over_shell_awf_work_dir(
+    tmp_path: Path,
+) -> None:
+    shell_work_dir = tmp_path / "project"
+    host_work_dir = tmp_path / "compose-default"
+
+    settings = resolve_service_settings(
+        Settings(_env_file=None, work_dir=str(shell_work_dir)),
+        environ={
+            "AWF_WORK_DIR": str(shell_work_dir),
+            "AWF_HOST_WORK_DIR": str(host_work_dir),
+        },
+    )
+
+    assert settings.work_dir == str(host_work_dir)
+
+
+@pytest.mark.unit
+def test_local_service_work_dir_resolves_from_compose_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_work_dir = tmp_path / "compose-service-state"
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AWF_WORK_DIR", raising=False)
+    monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
+
+    settings = resolve_service_settings(Settings(_env_file=None))
+
+    assert settings.work_dir == str(host_work_dir)
 
 
 @pytest.mark.unit

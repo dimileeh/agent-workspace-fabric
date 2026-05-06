@@ -63,7 +63,8 @@ async def run_migrations_online() -> None:
     search_path = query.pop("awf_search_path", None)
     null_pool = query.pop("awf_null_pool", None)
     connect_timeout = query.pop("awf_connect_timeout", None)
-    query.pop("awf_connect_attempts", None)
+    connect_attempts = query.pop("awf_connect_attempts", None)
+    connect_retries = query.pop("awf_connect_retries", None)
     connect_args = {}
     if search_path is not None:
         if isinstance(search_path, tuple):
@@ -77,6 +78,8 @@ async def run_migrations_online() -> None:
         search_path is not None
         or null_pool is not None
         or connect_timeout is not None
+        or connect_attempts is not None
+        or connect_retries is not None
     ):
         parsed_url = parsed_url.set(query=query)
 

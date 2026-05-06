@@ -72,3 +72,7 @@ def new_stale_reason_id() -> str:
 
 def new_policy_finding_id() -> str:
     return f"pf_{uuid4().hex[:24]}"
+
+
+def new_egress_audit_record_id() -> str:
+    return f"ear_{uuid4().hex[:24]}"

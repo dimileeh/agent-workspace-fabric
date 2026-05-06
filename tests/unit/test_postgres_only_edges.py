@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -52,16 +53,8 @@ class _RecordingConnection:
     async def execute(self, statement: object, params: object | None = None) -> None:
         self._statements.append((str(statement), params))
 
-
-class _SchemaDropEngine:
-    def __init__(self) -> None:
-        self.statements: list[tuple[str, object | None]] = []
-
-    def begin(self) -> _AsyncConnectionContext:
-        return _AsyncConnectionContext(_RecordingConnection(self.statements))
-
-    def connect(self) -> _AsyncConnectionContext:
-        raise AssertionError("_drop_schema should rely on DROP SCHEMA CASCADE")
+    async def commit(self) -> None:
+        return None
 
 
 @pytest.mark.unit
@@ -244,35 +237,32 @@ async def test_test_retry_async_creator_reraises_after_configured_attempts(
 
 
 @pytest.mark.unit
-async def test_drop_schema_uses_single_cascade_drop() -> None:
-    engine = _SchemaDropEngine()
+async def test_drop_schema_terminates_lock_holders_before_cascade_drop() -> None:
+    statements: list[tuple[str, object | None]] = []
+    conn = _RecordingConnection(statements)
 
-    await _drop_schema(engine, "awf_test")
+    await _drop_schema(conn, "awf_test", '"awf_test"')
 
-    assert engine.statements == [('DROP SCHEMA IF EXISTS "awf_test" CASCADE', None)]
+    assert "pg_terminate_backend" in statements[0][0]
+    assert statements[0][1] == {"schema": "awf_test"}
+    assert statements[1] == ("SET LOCAL lock_timeout = '5s'", None)
+    assert statements[2] == ('DROP SCHEMA IF EXISTS "awf_test" CASCADE', None)
 
 
 @pytest.mark.unit
-def test_postgres_ddl_lock_uses_xdist_run_scoped_file(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    calls: list[tuple[int, int]] = []
-    expected_lock = tmp_path / "awf-pytest-postgres-ddl-run-123.lock"
+async def test_postgres_schema_ddl_lock_uses_database_advisory_lock() -> None:
+    statements: list[tuple[str, object | None]] = []
+    conn = _RecordingConnection(statements)
+    engine = SimpleNamespace(connect=lambda: _AsyncConnectionContext(conn))
 
-    def _flock(fd: int, operation: int) -> None:
-        calls.append((fd, operation))
+    async with postgres_helpers._postgres_schema_ddl_lock(engine):
+        statements.append(("inside", None))
 
-    monkeypatch.setattr(
-        postgres_helpers, "fcntl", SimpleNamespace(LOCK_EX=1, LOCK_UN=2, flock=_flock)
-    )
-    monkeypatch.setattr(postgres_helpers.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-123")
-
-    with postgres_helpers._postgres_ddl_lock():
-        assert expected_lock.exists()
-
-    assert [operation for _, operation in calls] == [1, 2]
+    assert "pg_advisory_lock" in statements[0][0]
+    assert statements[0][1] == {"namespace": 0x415746, "key": 0x54455354}
+    assert statements[1] == ("inside", None)
+    assert "pg_advisory_unlock" in statements[2][0]
+    assert statements[2][1] == {"namespace": 0x415746, "key": 0x54455354}
 
 
 @pytest.mark.unit
@@ -283,12 +273,15 @@ async def test_postgres_test_url_marks_yielded_url_null_pool(
         async def dispose(self) -> None:
             return None
 
-    async def _noop_retry(operation: str, schema: str, action: Any) -> None:
-        del operation, schema
-        await action()
+    @asynccontextmanager
+    async def _fake_lock(engine: _Engine) -> AsyncIterator[_Engine]:
+        yield engine
 
     async def _noop(*_args: Any, **_kwargs: Any) -> None:
         return None
+
+    async def _metadata_engine(_url: str) -> _Engine:
+        return _Engine()
 
     monkeypatch.setattr(
         postgres_helpers,
@@ -296,18 +289,18 @@ async def test_postgres_test_url_marks_yielded_url_null_pool(
         lambda: "postgresql+asyncpg://awf:pw@localhost:5433/awf",
     )
     monkeypatch.setattr(postgres_helpers, "_make_test_engine", lambda _url: _Engine())
-    monkeypatch.setattr(postgres_helpers, "_with_connect_retry", _noop_retry)
+    monkeypatch.setattr(postgres_helpers, "_postgres_schema_ddl_lock", _fake_lock)
     monkeypatch.setattr(postgres_helpers, "_create_schema", _noop)
-    monkeypatch.setattr(postgres_helpers, "_create_metadata", _noop)
+    monkeypatch.setattr(postgres_helpers, "_create_metadata_engine", _metadata_engine)
     monkeypatch.setattr(postgres_helpers, "_drop_schema", _noop)
 
     async with postgres_helpers.postgres_test_url() as database_url:
         parsed = make_url(database_url)
 
-    assert parsed.query["awf_search_path"].startswith("awf_test_")
+    assert parsed.query["awf_search_path"].strip('"').startswith("awf_test_")
     assert parsed.query["awf_null_pool"] == "1"
-    assert parsed.query["awf_connect_timeout"] == "2"
-    assert parsed.query["awf_connect_attempts"] == "5"
+    assert parsed.query["awf_connect_timeout"] == "10"
+    assert parsed.query["awf_connect_retries"] == "3"
 
 
 @pytest.mark.unit

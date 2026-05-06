@@ -17,7 +17,7 @@ import asyncio
 import inspect
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -33,6 +33,7 @@ from awf.api.app import configure_database, create_app
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import EgressAuditRepository
 from awf.db.session import make_session_factory
 from awf.service.readiness import CoreReadinessCheck, CoreReadinessReport
 from tests.unit.helpers import create_workspace
@@ -203,7 +204,11 @@ async def ready_app_and_client(
         monkeypatch.delenv(key, raising=False)
     original_get_settings = health_route.get_settings
     original_get_settings.cache_clear()
-    test_settings = Settings(_env_file=None, host_home=str(tmp_path / "home"))
+    test_settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        work_dir=str(tmp_path / "work"),
+    )
     monkeypatch.setattr(health_route, "get_settings", lambda: test_settings)
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
@@ -255,6 +260,7 @@ async def test_readyz_response_shape_matches_contract(
         "docker_compose",
         "agent_runtime_image",
         "orphan_resources",
+        "egress_audit",
     }
     for name, check in checks.items():
         assert check["ok"] is True, f"{name} should be ok"
@@ -263,6 +269,9 @@ async def test_readyz_response_shape_matches_contract(
             assert check["reason"] == "NO_ORPHANS"
             assert check["orphan_count"] == 0
             assert check["cleanup_readiness"]["ready"] is True
+        elif name == "egress_audit":
+            assert check["status"] == "ok"
+            assert check["reason"] is not None
         else:
             assert check["status"] == "ok"
             assert check.get("reason") is None
@@ -278,6 +287,128 @@ async def test_readyz_response_shape_matches_contract(
     assert body["agent_readiness"]["security"]["status"] == "warning"
     assert "DOCKER_HOST_BROAD_CONTROL" in body["agent_readiness"]["security"]["reason_codes"]
     assert body["agent_readiness"]["providers"]["github"]["reason"] == ("GITHUB_TOKEN_ENV_MISSING")
+
+
+@pytest.mark.unit
+async def test_readyz_egress_audit_returns_posture_counts(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    now = datetime.now(UTC)
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        for posture, decision, destination in (
+            ("open", "allow", "public_internet"),
+            ("restricted", "deferred", "allowlisted_public"),
+            ("offline", "deny", "internal_only"),
+        ):
+            workspace_id = await create_workspace(
+                factory,
+                status=WorkspaceStatus.running,
+                updated_at=now,
+                task_title=f"{posture} egress audited",
+            )
+            await EgressAuditRepository(session).create(
+                workspace_id=workspace_id,
+                attempt_id=None,
+                policy_posture=posture,
+                decision=decision,
+                destination_category=destination,
+                reason_code=f"LOCAL_EGRESS_{posture.upper()}_TEST",
+                details={},
+            )
+        await session.commit()
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    egress_audit = body["checks"]["egress_audit"]
+    assert egress_audit["resource_count"] == 3
+    assert egress_audit["egress_posture_counts"] == {
+        "offline": 1,
+        "open": 1,
+        "restricted": 1,
+    }
+
+
+@pytest.mark.unit
+async def test_readyz_egress_audit_timeout_is_degraded_not_failure(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    class _TimeoutEgressAuditRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            raise TimeoutError("egress audit timed out")
+
+    import awf.db.repositories as repositories
+
+    monkeypatch.setattr(repositories, "EgressAuditRepository", _TimeoutEgressAuditRepository)
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    egress_audit = body["checks"]["egress_audit"]
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unknown"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_TIMEOUT"
+
+
+@pytest.mark.unit
+async def test_readyz_egress_audit_error_is_degraded_not_failure(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    class _FailingEgressAuditRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            raise RuntimeError(
+                "could not connect to "
+                "postgresql+asyncpg://awf:db_password@db.internal:5432/awf; "
+                "Authorization: Bearer ghp_secret1234567890; "
+                f"{'x' * 400}"
+            )
+
+    import awf.db.repositories as repositories
+
+    monkeypatch.setattr(repositories, "EgressAuditRepository", _FailingEgressAuditRepository)
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    egress_audit = body["checks"]["egress_audit"]
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unknown"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_UNAVAILABLE"
+    assert len(egress_audit["detail"]) <= 240
+    assert "db_password" not in egress_audit["detail"]
+    assert "ghp_secret1234567890" not in egress_audit["detail"]
+    assert "postgresql+asyncpg://[redacted]@db.internal:5432/awf" in egress_audit["detail"]
+    assert "Authorization: Bearer [redacted]" in egress_audit["detail"]
 
 
 @pytest.mark.unit
@@ -457,6 +588,35 @@ def test_readyz_does_not_force_task_scheduling_with_zero_sleep() -> None:
     ]
 
     assert not zero_sleep_yields, "readyz should schedule top-level checks before awaiting"
+
+
+@pytest.mark.unit
+def test_readyz_retention_defaults_use_gc_retention_constant() -> None:
+    source = inspect.getsource(health_route)
+    tree = ast.parse(source)
+    expected_default_name = "DEFAULT_MIN_AGE_HOURS"
+    expected_functions = {
+        "_workspace_view_for_readyz",
+        "_check_orphan_resources",
+    }
+
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in expected_functions
+    }
+
+    assert set(functions) == expected_functions
+    for function in functions.values():
+        defaults_by_name = dict(
+            zip(
+                [arg.arg for arg in function.args.kwonlyargs],
+                function.args.kw_defaults,
+                strict=True,
+            )
+        )
+        assert isinstance(defaults_by_name["min_retention_hours"], ast.Name)
+        assert defaults_by_name["min_retention_hours"].id == expected_default_name
 
 
 @pytest.mark.unit
@@ -814,7 +974,7 @@ async def test_readyz_orphan_resources_present_returns_503(
     workspace_id = await create_workspace(
         engine,
         status=WorkspaceStatus.completed,
-        updated_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC) - timedelta(hours=200),
     )
     runner = FakeCommandRunner()
     _queue_all_ok(runner)
@@ -846,6 +1006,37 @@ async def test_readyz_orphan_resources_present_returns_503(
     assert orphan_check["orphan_count"] == 1
     assert orphan_check["cleanup_readiness"]["dry_run_only"] is True
     assert orphan_check["examples"][0]["workspace_id"] == workspace_id
+
+
+@pytest.mark.unit
+async def test_readyz_retains_recent_terminal_worktree_without_failing(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = ready_app_and_client
+    workspace_id = await create_workspace(
+        engine,
+        status=WorkspaceStatus.completed,
+        updated_at=datetime.now(UTC),
+    )
+    settings = health_route.get_settings()
+    worktree = Path(settings.work_dir) / "git" / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    orphan_check = body["checks"]["orphan_resources"]
+    assert orphan_check["ok"] is True
+    assert orphan_check["reason"] == "NO_ORPHANS"
+    assert orphan_check["orphan_count"] == 0
+    assert orphan_check["expected_count"] == 1
 
 
 @pytest.mark.unit
