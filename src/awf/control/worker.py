@@ -712,6 +712,8 @@ class ControlWorker:
         self,
         candidate: _ActiveExecutionCandidate,
     ) -> None:
+        if await self._has_current_preserved_active_execution(candidate):
+            return
         try:
             snapshot = await self._runtime_inspector.inspect(candidate.compose_project_name)
         except Exception as exc:  # pragma: no cover - defensive around Docker tooling
@@ -902,6 +904,30 @@ class ControlWorker:
             compose_project_name=candidate.compose_project_name,
             reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
         )
+
+    async def _has_current_preserved_active_execution(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
+            return False
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
+            return await self._has_preserved_active_execution_event(
+                session,
+                candidate.workspace_id,
+                candidate.status,
+                event_floor=event_floor,
+            )
 
     async def _has_preserved_active_execution_event(
         self,

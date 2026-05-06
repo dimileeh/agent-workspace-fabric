@@ -4033,10 +4033,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
         assert len(preserved_events) == 1
         assert cleanup_failed_events == []
-        assert inspector.calls == [
-            "awf_preserved_live_idempotent",
-            "awf_preserved_live_idempotent",
-        ]
+        assert inspector.calls == ["awf_preserved_live_idempotent"]
         assert cleaner.calls == []
 
     @pytest.mark.unit
@@ -4364,7 +4361,81 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 event_type=PRESERVED_EXECUTION_EVENT_TYPE,
             )
             assert len(preserved_events) == 1
-        assert inspector.calls == ["awf_pushing_running", "awf_pushing_running"]
+        assert inspector.calls == ["awf_pushing_running"]
+        assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_preserved_runtime_exit_before_operator_recovery_is_not_failed_by_scan(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserved_then_exited"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-then-exited",
+            WorkspaceStatus.pushing,
+            compose_project_name=compose_project,
+        )
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: _live_agent_snapshot(container_id="agent-preserved")}
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        inspector._snapshots[compose_project] = RuntimeSnapshot(  # noqa: SLF001
+            stack_state="stopped",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-preserved",
+                    image="awf-agent:latest",
+                    state="exited",
+                    status="Exited (0) 1 minute ago",
+                )
+            ],
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.pushing.value
+            assert ws.subphase == PRESERVED_EXECUTION_SUBPHASE
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            stranded_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert len(preserved_events) == 1
+        assert stranded_events == []
+        assert stale_events == []
+        assert inspector.calls == [compose_project]
         assert cleaner.calls == []
 
     @pytest.mark.unit
@@ -4423,7 +4494,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         current_time = 1_060.0
 
         assert await worker.run_once() == 0
-        assert inspector.calls == ["awf_throttled_running", "awf_throttled_running"]
+        assert inspector.calls == ["awf_throttled_running"]
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
             assert ws is not None
