@@ -1371,7 +1371,7 @@ class TestMcpOperatorSurfaceParity:
         mcp = await _call(
             operator_stack.mcp,
             "awf_list_workspace_overview",
-            {"workspace_status": "running"},
+            {"status": "running"},
         )
 
         assert mcp == rest

@@ -458,10 +458,14 @@ class TestToolRegistration:
         assert merge_props["limit"]["minimum"] == 1
         assert merge_props["limit"]["maximum"] == 500
         assert _optional_string_schema(merge_props["cursor"])["maxLength"] == 128
+        assert "status" in merge_props
+        assert "workspace_status" not in merge_props
 
         overview_props = tools["awf_list_workspace_overview"].inputSchema["properties"]
         assert overview_props["limit"]["default"] == 50
         assert _optional_string_schema(overview_props["cursor"])["maxLength"] == 128
+        assert "status" in overview_props
+        assert "workspace_status" not in overview_props
 
         operations_props = tools["awf_list_operations"].inputSchema["properties"]
         assert "type" in operations_props
@@ -506,6 +510,8 @@ class TestToolRegistration:
         assert locks_props["limit"]["default"] == 50
         assert locks_props["limit"]["minimum"] == 1
         assert locks_props["limit"]["maximum"] == 500
+        assert "status" in locks_props
+        assert "workspace_status" not in locks_props
         cursor_schema = _optional_string_schema(locks_props["cursor"])
         assert cursor_schema["maxLength"] == 256
 

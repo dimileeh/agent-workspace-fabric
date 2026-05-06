@@ -47,6 +47,11 @@ FORBIDDEN_MCP_INPUTS = {
 
 CREATE_V2_FULL_PARITY_FIELDS = frozenset({"resources", "priority", "human_boost"})
 CREATE_V2_FULL_PARITY_BACKLOG = "TODO§P1-mcp-create-v2-full-parity"
+STATUS_FILTER_PARITY_CAPABILITIES = (
+    "workspace_overview",
+    "merge_queue",
+    "locks",
+)
 
 
 @pytest.mark.unit
@@ -94,6 +99,19 @@ def test_rest_query_metadata_uses_public_aliases() -> None:
         "limit",
     }
     assert "operation_type" not in routes[("GET", "/v1/operations")].query_fields
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", STATUS_FILTER_PARITY_CAPABILITIES)
+def test_implemented_mcp_status_filter_names_match_rest_alias(
+    capability_name: str,
+) -> None:
+    capability = CAPABILITIES_BY_NAME[capability_name]
+
+    assert capability.is_mcp_implemented
+    assert "status" in capability.rest_query_fields
+    assert "status" in capability.mcp_request_fields
+    assert "workspace_status" not in capability.mcp_request_fields
 
 
 @pytest.mark.unit

@@ -628,7 +628,7 @@ _CAPABILITIES += (
         supports_if_match=False,
         rest_response_model="WorkspaceOverviewListResponse",
         rest_query_fields=frozenset({"status", "agent", "repo_url", "limit", "cursor"}),
-        mcp_request_fields=frozenset({"workspace_status", "agent", "repo_url", "limit", "cursor"}),
+        mcp_request_fields=frozenset({"status", "agent", "repo_url", "limit", "cursor"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
     ),
     ContractCapability(
@@ -645,7 +645,7 @@ _CAPABILITIES += (
         rest_response_model="MergeQueueListResponse",
         rest_query_fields=frozenset({"repo_url", "base_branch", "status", "limit", "cursor"}),
         mcp_request_fields=frozenset(
-            {"repo_url", "base_branch", "workspace_status", "limit", "cursor"}
+            {"repo_url", "base_branch", "status", "limit", "cursor"}
         ),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
     ),
@@ -828,7 +828,7 @@ _CAPABILITIES += (
         rest_response_model="WorkspaceLockListResponse",
         rest_query_fields=frozenset({"repo_url", "task_class", "status", "limit", "cursor"}),
         mcp_request_fields=frozenset(
-            {"repo_url", "task_class", "workspace_status", "limit", "cursor"}
+            {"repo_url", "task_class", "status", "limit", "cursor"}
         ),
         cli_options=frozenset({"--repo-url", "--task-class", "--status", "--limit", "--api-token"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),

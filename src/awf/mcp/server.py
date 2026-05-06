@@ -639,7 +639,7 @@ def build_mcp_server(
     async def awf_list_merge_queue(
         repo_url: str | None = Field(default=None, min_length=1, max_length=512),
         base_branch: str | None = Field(default=None, min_length=1, max_length=256),
-        workspace_status: WorkspaceStatus | None = Field(default=None),
+        status: WorkspaceStatus | None = Field(default=None),
         limit: int = Field(default=50, ge=1, le=500),
         cursor: str | None = Field(default=None, max_length=128),
     ) -> StructuredToolResult:
@@ -650,7 +650,7 @@ def build_mcp_server(
                     session,
                     repo_url=repo_url,
                     base_branch=base_branch,
-                    workspace_status=workspace_status,
+                    workspace_status=status,
                     limit=limit,
                     cursor=cursor,
                 )
@@ -660,7 +660,7 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_list_workspace_overview")
     async def awf_list_workspace_overview(
-        workspace_status: WorkspaceStatus | None = Field(default=None),
+        status: WorkspaceStatus | None = Field(default=None),
         agent: AgentRuntime | None = Field(default=None),
         repo_url: str | None = Field(default=None, min_length=1, max_length=512),
         limit: int = Field(default=50, ge=1, le=500),
@@ -671,7 +671,7 @@ def build_mcp_server(
             try:
                 response = await list_workspace_overview_response(
                     session,
-                    workspace_status=workspace_status,
+                    workspace_status=status,
                     agent=agent,
                     repo_url=repo_url,
                     limit=limit,
@@ -1003,7 +1003,7 @@ def build_mcp_server(
             default=None,
             description="Optional task class filter.",
         ),
-        workspace_status: WorkspaceStatus | None = Field(
+        status: WorkspaceStatus | None = Field(
             default=None,
             description="Optional workspace status filter.",
         ),
@@ -1021,7 +1021,7 @@ def build_mcp_server(
                     session,
                     repo_url=repo_url,
                     task_class=task_class,
-                    status=workspace_status,
+                    status=status,
                     limit=limit,
                     cursor=cursor,
                 )
