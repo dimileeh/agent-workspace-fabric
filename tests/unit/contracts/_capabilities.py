@@ -72,7 +72,7 @@ class ContractCapability:
     @property
     def requires_idempotency_key(self) -> bool:
         """Whether this operator action requires an idempotency key at the client boundary."""
-        return self.supports_idempotency_key and self.supports_if_match
+        return self.supports_idempotency_key
 
     @property
     def is_safe_read(self) -> bool:

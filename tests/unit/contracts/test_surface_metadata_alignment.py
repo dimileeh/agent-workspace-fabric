@@ -123,7 +123,7 @@ async def test_mcp_tool_schema_matches_registry(capability_name: str) -> None:
 
     assert capability.mcp_request_fields <= tool.properties
     assert capability.mcp_required_fields <= tool.required
-    if capability.requires_idempotency_key:
+    if "idempotency_key" in capability.mcp_request_fields:
         assert "idempotency_key" in tool.properties
         assert "idempotency_key" in tool.required
     if capability.supports_if_match:
@@ -142,6 +142,23 @@ async def test_mcp_surface_stays_inside_operator_safety_boundary() -> None:
         assert forbidden_prefix is None, f"{tool_name}: forbidden unsafe MCP tool prefix"
         forbidden_inputs = FORBIDDEN_MCP_INPUTS & set(tool.properties)
         assert not forbidden_inputs, f"{tool_name}: forbidden unsafe inputs {sorted(forbidden_inputs)}"
+
+
+@pytest.mark.unit
+def test_idempotency_key_requirement_does_not_depend_on_if_match() -> None:
+    idempotent_capabilities = {
+        capability.name
+        for capability in all_capabilities()
+        if capability.requires_idempotency_key
+    }
+
+    assert idempotent_capabilities == {
+        capability.name
+        for capability in all_capabilities()
+        if capability.supports_idempotency_key
+    }
+    assert CAPABILITIES_BY_NAME["create_workspace_v1"].requires_idempotency_key is True
+    assert CAPABILITIES_BY_NAME["create_workspace_v2"].requires_idempotency_key is True
 
 
 @pytest.mark.unit
