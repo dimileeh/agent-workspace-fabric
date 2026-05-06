@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from awf import __version__
+from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
 from awf.service.config import resolve_service_settings
@@ -158,6 +159,10 @@ def _truncate(value: str, *, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 1] + "…"
+
+
+def _redacted_check_detail(exc: Exception, *, limit: int = 240) -> str:
+    return _truncate(redact_audit_text(f"{type(exc).__name__}: {exc}"), limit=limit)
 
 
 async def _check_db(factory: Any) -> CheckResult:
@@ -482,7 +487,7 @@ async def readyz(
                 ok=True,
                 status="unknown",
                 reason="EGRESS_AUDIT_UNAVAILABLE",
-                detail=str(exc),
+                detail=_redacted_check_detail(exc),
                 resource_count=0,
                 egress_posture_counts={},
             )

@@ -380,7 +380,12 @@ async def test_readyz_egress_audit_error_is_degraded_not_failure(
             pass
 
         async def summary_counts_by_posture(self) -> dict[str, int]:
-            raise RuntimeError("pool exhausted")
+            raise RuntimeError(
+                "could not connect to "
+                "postgresql+asyncpg://awf:db_password@db.internal:5432/awf; "
+                "Authorization: Bearer ghp_secret1234567890; "
+                f"{'x' * 400}"
+            )
 
     import awf.db.repositories as repositories
 
@@ -395,6 +400,11 @@ async def test_readyz_egress_audit_error_is_degraded_not_failure(
     assert egress_audit["ok"] is True
     assert egress_audit["status"] == "unknown"
     assert egress_audit["reason"] == "EGRESS_AUDIT_UNAVAILABLE"
+    assert len(egress_audit["detail"]) <= 240
+    assert "db_password" not in egress_audit["detail"]
+    assert "ghp_secret1234567890" not in egress_audit["detail"]
+    assert "postgresql+asyncpg://[redacted]@db.internal:5432/awf" in egress_audit["detail"]
+    assert "Authorization: Bearer [redacted]" in egress_audit["detail"]
 
 
 @pytest.mark.unit

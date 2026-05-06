@@ -58,6 +58,7 @@ def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usa
         "github_token": "ghp_should_not_persist",
         "authorization": "Bearer secret-secret-secret",
         "remote": "https://user:ghp_should_not_persist@github.com/org/repo",
+        "database_url": "postgresql+asyncpg://awf:db_password@db.internal/awf",
         "github_error": f"GitHub API rejected JWT {github_app_jwt}",
         "message": "GITHUB_TOKEN=ghp_should_not_persist " + ("x" * 1200),
         "usage": {
@@ -80,6 +81,7 @@ def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usa
     assert redacted["github_token"] == "[redacted]"
     assert redacted["authorization"] == "[redacted]"
     assert redacted["remote"] == "https://[redacted]@github.com/org/repo"
+    assert redacted["database_url"] == "postgresql+asyncpg://[redacted]@db.internal/awf"
     assert redacted["github_error"] == "GitHub API rejected JWT [redacted]"
     assert redacted["message"].startswith("GITHUB_TOKEN=[redacted] ")
     assert redacted["message"].endswith("...[truncated]")
@@ -99,3 +101,4 @@ def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usa
     assert "ghp_should_not_persist" not in repr(redacted)
     assert github_app_jwt not in repr(redacted)
     assert "secret-secret-secret" not in repr(redacted)
+    assert "db_password" not in repr(redacted)
