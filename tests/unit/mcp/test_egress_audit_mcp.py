@@ -186,17 +186,36 @@ async def test_mcp_egress_audit_never_exposes_tokens(
 
 
 @pytest.mark.unit
-async def test_mcp_egress_audit_requires_workspace_id(
+async def test_mcp_get_egress_audit_evidence_without_workspace_filter_returns_all_records(
     factory: async_sessionmaker[AsyncSession],
     mcp,
 ) -> None:
-    """The tool requires ``workspace_id`` and must fail gracefully without it."""
+    """Omitted or blank ``workspace_id`` means list all audit evidence."""
+    first_wid = await _workspace_with_audit(factory)
+    second_wid = await _workspace_with_audit(factory)
+
     result = await mcp.call_tool(
         "awf_get_egress_audit_evidence",
         {},
     )
     assert isinstance(result, CallToolResult)
-    assert result.isError is True
+    assert result.isError is False
+    assert result.structuredContent is not None
+    assert result.structuredContent["workspace_id"] is None
+    evidence = result.structuredContent["evidence"]
+    assert isinstance(evidence, list)
+    assert {record["workspace_id"] for record in evidence} == {first_wid, second_wid}
+
+    blank_result = await mcp.call_tool(
+        "awf_get_egress_audit_evidence",
+        {"workspace_id": "  "},
+    )
+    assert isinstance(blank_result, CallToolResult)
+    assert blank_result.isError is False
+    assert blank_result.structuredContent is not None
+    blank_evidence = blank_result.structuredContent["evidence"]
+    assert isinstance(blank_evidence, list)
+    assert {record["workspace_id"] for record in blank_evidence} == {first_wid, second_wid}
 
 
 @pytest.mark.unit

@@ -1979,6 +1979,15 @@ class EgressAuditRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_all(self) -> list[EgressAuditRecord]:
+        stmt = select(EgressAuditRecord).order_by(
+            EgressAuditRecord.enforced_at.desc(),
+            EgressAuditRecord.created_at.desc(),
+            EgressAuditRecord.id.desc(),
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars())
+
     async def summary_counts_by_posture(self) -> dict[str, int]:
         latest_ranked = (
             select(

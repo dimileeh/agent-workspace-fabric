@@ -469,8 +469,20 @@ class WorkspaceService:
                 egress_audit=egress_audit,
             )
 
-    async def get_egress_audit_evidence(self, workspace_id: str) -> dict[str, Any] | None:
+    async def get_egress_audit_evidence(
+        self,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
         async with self._factory() as s:
+            workspace_id = workspace_id.strip() if workspace_id is not None else None
+            if not workspace_id:
+                records = await EgressAuditRepository(s).list_all()
+                return [
+                    EgressAuditRecordResponse.model_validate(
+                        _egress_audit_response(record)
+                    ).model_dump(mode="json")
+                    for record in records
+                ]
             if not await WorkspaceRepository(s).exists(workspace_id):
                 return None
             audit_record = await EgressAuditRepository(s).get_latest_for_workspace(workspace_id)

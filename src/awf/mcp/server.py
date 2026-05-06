@@ -1233,18 +1233,15 @@ def build_mcp_server(
         workspace_id: str | None = Field(
             default=None,
             max_length=256,
-            description="Workspace ID for egress audit evidence.",
+            description="Optional workspace ID filter for egress audit evidence.",
         ),
     ) -> StructuredToolResult:
-        """Read-only: return the latest outbound egress audit evidence for a workspace."""
-        if workspace_id is None or not workspace_id.strip():
-            return _safe_result(
-                {"error_code": "INVALID_REQUEST", "message": "workspace_id is required"},
-                is_error=True,
-            )
+        """Read-only: return outbound egress audit evidence."""
+        workspace_filter = workspace_id.strip() if workspace_id is not None else None
+        workspace_filter = workspace_filter or None
         try:
-            evidence = await service.get_egress_audit_evidence(workspace_id)
-            return _safe_result({"workspace_id": workspace_id, "evidence": evidence})
+            evidence = await service.get_egress_audit_evidence(workspace_filter)
+            return _safe_result({"workspace_id": workspace_filter, "evidence": evidence})
         except Exception as exc:
             return _safe_result(
                 {"error_code": "MCP_EGRESS_AUDIT_ERROR", "message": redact_audit_text(str(exc))},
