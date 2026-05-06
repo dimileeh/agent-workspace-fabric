@@ -54,6 +54,16 @@ _CONTROL_TOOLS_WITH_EXPECTED_VERSION = [
     "awf_rebase_workspace",
 ]
 
+_IDEMPOTENCY_CONTROL_TOOLS = [
+    "awf_cancel_workspace",
+    "awf_stop_workspace",
+    "awf_destroy_workspace",
+    "awf_remonitor_workspace",
+    "awf_request_workspace_validation",
+    "awf_refresh_workspace",
+    "awf_rebase_workspace",
+]
+
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
@@ -538,6 +548,24 @@ class TestSuccessPaths:
 
 @pytest.mark.unit
 class TestErrorMapping:
+    @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
+    async def test_omitted_idempotency_key_returns_structured_mcp_error(
+        self, tool_name: str
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        result = await _call_result(mcp, tool_name, {"workspace_id": "ws_x"})
+
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        assert (
+            result.structuredContent["message"]
+            == "Idempotency-Key header is required for this endpoint."
+        )
+        assert service.calls == []
+
     @pytest.mark.parametrize(
         "tool_name",
         [

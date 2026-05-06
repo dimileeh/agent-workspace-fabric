@@ -238,8 +238,9 @@ class TestToolRegistration:
         cancel_required = tools["awf_cancel_workspace"].inputSchema.get("required", [])
         assert cancel_props["reason"]["default"] is None
         assert cancel_props["stop_stack"]["default"] is True
-        assert "idempotency_key" in cancel_required
-        assert cancel_props["idempotency_key"]["minLength"] == 1
+        assert "idempotency_key" not in cancel_required
+        assert cancel_props["idempotency_key"]["default"] is None
+        assert _optional_string_schema(cancel_props["idempotency_key"])["minLength"] == 1
         assert cancel_props["expected_version"]["default"] is None
         assert "expected_version" not in cancel_required
 
@@ -247,8 +248,9 @@ class TestToolRegistration:
         stop_required = tools["awf_stop_workspace"].inputSchema.get("required", [])
         assert stop_props["reason"]["default"] is None
         assert "stop_stack" not in stop_props
-        assert "idempotency_key" in stop_required
-        assert stop_props["idempotency_key"]["minLength"] == 1
+        assert "idempotency_key" not in stop_required
+        assert stop_props["idempotency_key"]["default"] is None
+        assert _optional_string_schema(stop_props["idempotency_key"])["minLength"] == 1
         assert stop_props["expected_version"]["default"] is None
 
         destroy_props = tools["awf_destroy_workspace"].inputSchema["properties"]
@@ -256,34 +258,41 @@ class TestToolRegistration:
         assert destroy_props["force"]["default"] is False
         assert destroy_props["remove_volumes"]["default"] is True
         assert destroy_props["remove_worktree"]["default"] is True
-        assert "idempotency_key" in destroy_required
-        assert destroy_props["idempotency_key"]["minLength"] == 1
+        assert "idempotency_key" not in destroy_required
+        assert destroy_props["idempotency_key"]["default"] is None
+        assert _optional_string_schema(destroy_props["idempotency_key"])["minLength"] == 1
         assert destroy_props["expected_version"]["default"] is None
 
         remonitor_props = tools["awf_remonitor_workspace"].inputSchema["properties"]
         remonitor_required = tools["awf_remonitor_workspace"].inputSchema.get("required", [])
-        assert "idempotency_key" in remonitor_required
-        assert remonitor_props["idempotency_key"]["minLength"] == 1
+        assert "idempotency_key" not in remonitor_required
+        assert remonitor_props["idempotency_key"]["default"] is None
+        assert _optional_string_schema(remonitor_props["idempotency_key"])["minLength"] == 1
         assert remonitor_props["expected_version"]["default"] is None
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
         validate_required = tools["awf_request_workspace_validation"].inputSchema.get(
             "required", []
         )
-        assert "idempotency_key" in validate_required
-        assert validate_props["idempotency_key"]["minLength"] == 1
+        assert "idempotency_key" not in validate_required
+        assert validate_props["idempotency_key"]["default"] is None
+        assert _optional_string_schema(validate_props["idempotency_key"])["minLength"] == 1
         assert validate_props["expected_version"]["default"] is None
 
         refresh_props = tools["awf_refresh_workspace"].inputSchema["properties"]
         assert "idempotency_key" in refresh_props
         refresh_required = tools["awf_refresh_workspace"].inputSchema.get("required", [])
-        assert "idempotency_key" in refresh_required
+        assert "idempotency_key" not in refresh_required
+        assert refresh_props["idempotency_key"]["default"] is None
+        assert _optional_string_schema(refresh_props["idempotency_key"])["minLength"] == 1
         assert refresh_props["expected_version"]["default"] is None
 
         rebase_props = tools["awf_rebase_workspace"].inputSchema["properties"]
         assert "idempotency_key" in rebase_props
         rebase_required = tools["awf_rebase_workspace"].inputSchema.get("required", [])
-        assert "idempotency_key" in rebase_required
+        assert "idempotency_key" not in rebase_required
+        assert rebase_props["idempotency_key"]["default"] is None
+        assert _optional_string_schema(rebase_props["idempotency_key"])["minLength"] == 1
         assert rebase_props["expected_version"]["default"] is None
 
     @pytest.mark.unit
@@ -479,8 +488,9 @@ class TestToolRegistration:
         assert "workspace_id" in remonitor_required
         assert remonitor_props["reason"]["default"] is None
         assert "idempotency_key" in remonitor_props
-        assert "idempotency_key" in remonitor_required
-        assert remonitor_props["idempotency_key"]["minLength"] == 1
+        assert "idempotency_key" not in remonitor_required
+        assert remonitor_props["idempotency_key"]["default"] is None
+        assert _optional_string_schema(remonitor_props["idempotency_key"])["minLength"] == 1
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
         assert "workspace_id" in validate_props
@@ -491,8 +501,9 @@ class TestToolRegistration:
         assert validate_props["reason"]["default"] is None
         assert validate_props["requested_tier"]["default"] is None
         assert "idempotency_key" in validate_props
-        assert "idempotency_key" in validate_required
-        assert validate_props["idempotency_key"]["minLength"] == 1
+        assert "idempotency_key" not in validate_required
+        assert validate_props["idempotency_key"]["default"] is None
+        assert _optional_string_schema(validate_props["idempotency_key"])["minLength"] == 1
 
 
 class TestOperationTools:
