@@ -736,7 +736,8 @@ class GitHubClient:
         # ── Top-level PR comments ──────────────────────────────────────
         # Review bots sometimes report feedback as top-level issue comments
         # instead of review objects. AWF only filters its own bookkeeping;
-        # all current external comments are handed to the coding agent.
+        # code-fixable comments go to the agent, while external checklist
+        # blockers stay visible to the merge gate.
         issue_comment_nodes = await self._fetch_paginated_pr_connection_nodes(
             repo=repo,
             pr_number=pr_number,
@@ -757,7 +758,7 @@ class GitHubClient:
                     body_excerpt=body[:400],
                     author=author,
                     is_resolved=False,
-                    blocks_merge=False,
+                    blocks_merge=_is_merge_blocking_issue_comment(body),
                     body=body,
                     url=_clean_optional_str(node.get("url")),
                     created_at=_parse_github_datetime(node.get("createdAt")),
@@ -1229,6 +1230,17 @@ def _is_awf_status_issue_comment(body: str) -> bool:
         or "all 5 awf gates are green" in lower
         or "after the blocker is cleared or a new commit lands, awf will re-verify" in lower
         or _is_awf_resolution_issue_comment(lower)
+    )
+
+
+def _is_merge_blocking_issue_comment(body: str) -> bool:
+    lower = " ".join(body.lower().split())
+    if "trigger review" not in lower and "auto reviews are disabled" not in lower:
+        return False
+    return (
+        "review skipped" in lower
+        or "required review" in lower
+        or "auto reviews are disabled" in lower
     )
 
 

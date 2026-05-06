@@ -1065,7 +1065,7 @@ class TestFetchPrStatus:
         assert check.completed_at.isoformat() == "2026-04-26T12:34:56+00:00"
 
     @pytest.mark.unit
-    async def test_routes_review_disabled_issue_comment_to_agent_feedback(self) -> None:
+    async def test_preserves_review_disabled_issue_comment_as_merge_blocker(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1092,10 +1092,10 @@ class TestFetchPrStatus:
         )
         assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
         assert "Auto reviews are disabled" in status.unresolved_review_comments[0].body_excerpt
-        assert status.unresolved_review_comments[0].blocks_merge is False
+        assert status.unresolved_review_comments[0].blocks_merge is True
 
     @pytest.mark.unit
-    async def test_parses_trigger_review_issue_comment_as_agent_feedback(self) -> None:
+    async def test_parses_trigger_review_issue_comment_as_merge_blocker(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1124,7 +1124,7 @@ class TestFetchPrStatus:
         assert c.comment_id == "issue:77"
         assert c.author == "coderabbitai"
         assert "Review skipped" in c.body_excerpt
-        assert c.blocks_merge is False
+        assert c.blocks_merge is True
 
     @pytest.mark.unit
     async def test_routes_bot_issue_summary_to_agent_feedback(self) -> None:
