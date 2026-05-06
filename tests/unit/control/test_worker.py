@@ -3552,6 +3552,65 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    async def test_restart_recovery_records_preservation_once_per_active_phase(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserve_phase_change"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserve-phase-change",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: _live_agent_snapshot(container_id="agent-phase")}
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="TEST_ADVANCE")
+            await s.commit()
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        assert len(preserved_events) == 2
+        assert {event.payload["workspace_status"] for event in preserved_events} == {
+            WorkspaceStatus.running.value,
+            WorkspaceStatus.validating.value,
+        }
+        assert len(operations) == 2
+        assert {operation.payload["workspace_status"] for operation in operations} == {
+            WorkspaceStatus.running.value,
+            WorkspaceStatus.validating.value,
+        }
+        assert inspector.calls == [compose_project, compose_project]
+
+    @pytest.mark.unit
     async def test_restart_recovery_serializes_concurrent_preservation_recording(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -3586,6 +3645,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             self: ControlWorker,
             session: AsyncSession,
             workspace_id: str,
+            status: WorkspaceStatus,
         ) -> bool:
             nonlocal call_count, selected_count
             async with count_lock:
@@ -3602,7 +3662,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             else:
                 await first_checked.wait()
 
-            has_event = await original_has_event(self, session, workspace_id)
+            has_event = await original_has_event(self, session, workspace_id, status)
             async with count_lock:
                 selected_count += 1
                 if selected_count == 2:

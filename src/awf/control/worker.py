@@ -847,6 +847,7 @@ class ControlWorker:
             if await self._has_preserved_active_execution_event(
                 session,
                 candidate.workspace_id,
+                candidate.status,
             ):
                 return
 
@@ -903,6 +904,7 @@ class ControlWorker:
         self,
         session: AsyncSession,
         workspace_id: str,
+        status: WorkspaceStatus,
     ) -> bool:
         stmt = (
             select(WorkspaceEvent.id)
@@ -910,6 +912,7 @@ class ControlWorker:
                 WorkspaceEvent.workspace_id == workspace_id,
                 WorkspaceEvent.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
                 WorkspaceEvent.reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+                WorkspaceEvent.payload["workspace_status"].as_string() == status.value,
             )
             .limit(1)
         )
@@ -970,6 +973,7 @@ class ControlWorker:
             if await self._has_preserved_active_execution_event(
                 session,
                 candidate.workspace_id,
+                candidate.status,
             ):
                 return False
             return await self._has_stale_active_execution_event(
