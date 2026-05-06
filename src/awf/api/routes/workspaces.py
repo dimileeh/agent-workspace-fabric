@@ -79,6 +79,7 @@ from awf.service.workspaces import (
     create_workspace_v2_row,
     owned_path_overlap_warnings,
     retry_workspace_row,
+    workspace_create_payload_matches,
     workspace_create_v2_payload_matches,
     workspace_provider_readiness_preflight,
     workspace_response,
@@ -552,15 +553,7 @@ def _payloads_match(existing: Workspace, payload: WorkspaceCreateRequest) -> boo
     branch_name, etc.) are expected to differ between the initial accept and
     any later replay.
     """
-    return (
-        existing.repo_url == payload.repo_url
-        and existing.branch_base == payload.branch_base
-        and existing.task_title == payload.task_title
-        and existing.task_prompt == payload.task_prompt
-        and existing.agent == payload.agent.value
-        and list(existing.test_commands) == list(payload.test_commands)
-        and existing.requires_database == payload.requires_database
-    )
+    return workspace_create_payload_matches(existing, payload)
 
 
 def _payloads_match_v2(

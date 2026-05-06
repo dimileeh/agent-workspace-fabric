@@ -204,3 +204,59 @@ class TestPayloadsMatch:
             requires_database=False,
         )
         assert _payloads_match(ws, _payload(repo_url="r2")) is False
+
+    @pytest.mark.unit
+    async def test_mismatch_on_task_external_id(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="r",
+            branch_base="b",
+            task_title="t",
+            task_prompt="p",
+            task_external_id="TASK-1",
+            agent="codex",
+            test_commands=[],
+            requires_database=False,
+        )
+        assert (
+            _payloads_match(
+                ws,
+                _payload(
+                    repo_url="r",
+                    branch_base="b",
+                    task_title="t",
+                    task_prompt="p",
+                    task_external_id="TASK-2",
+                    test_commands=[],
+                ),
+            )
+            is False
+        )
+
+    @pytest.mark.unit
+    async def test_mismatch_on_env_profile(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="r",
+            branch_base="b",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            env_profile="profile-a",
+            test_commands=[],
+            requires_database=False,
+        )
+        assert (
+            _payloads_match(
+                ws,
+                _payload(
+                    repo_url="r",
+                    branch_base="b",
+                    task_title="t",
+                    task_prompt="p",
+                    env_profile="profile-b",
+                    test_commands=[],
+                ),
+            )
+            is False
+        )
