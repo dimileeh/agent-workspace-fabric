@@ -124,6 +124,7 @@ async def test_mcp_tool_schema_matches_registry(capability_name: str) -> None:
     assert capability.mcp_request_fields <= tool.properties
     assert capability.mcp_required_fields <= tool.required
     if capability.requires_idempotency_key:
+        assert "idempotency_key" in tool.properties
         assert "idempotency_key" in tool.required
     if capability.supports_if_match:
         assert "expected_version" in tool.properties

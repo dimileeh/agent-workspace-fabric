@@ -195,8 +195,8 @@ def test_mcp_control_idempotency_migration_note_is_published() -> None:
 
     assert "MCP control migration note" in parity_doc
     assert "MCP control migration note" in mcp_ref
-    assert "required `idempotency_key`" in combined
-    assert "Existing MCP clients" in combined
+    assert "required `idempotency_key` argument" in combined
+    assert "existing mcp clients" in combined.lower()
     assert "REST `Idempotency-Key`" in combined
 
     for tool_name in IDEMPOTENT_MCP_CONTROL_TOOLS:

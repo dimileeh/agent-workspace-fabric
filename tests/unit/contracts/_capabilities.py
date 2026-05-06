@@ -86,7 +86,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_method="POST",
         rest_path="/v1/workspaces/{workspace_id}/cancel",
         mcp_tool="awf_cancel_workspace",
-        cli_tokens=None,
+        cli_tokens=("workspace", "cancel"),
         parity_status="MCP implemented",
         parity_backlog_slice="—",
         supports_idempotency_key=True,
@@ -100,6 +100,16 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             {"workspace_id", "reason", "stop_stack", "idempotency_key", "expected_version"}
         ),
         mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        cli_options=frozenset(
+            {
+                "--reason",
+                "--stop-stack/--no-stop-stack",
+                "--idempotency-key",
+                "--if-match",
+                "--api-token",
+            }
+        ),
+        cli_arguments=frozenset({"workspace_id"}),
         response_fields=frozenset(
             {"workspace_id", "operation_id", "operation_status", "status", "message"}
         ),
@@ -111,7 +121,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_method="POST",
         rest_path="/v1/workspaces/{workspace_id}/stop",
         mcp_tool="awf_stop_workspace",
-        cli_tokens=None,
+        cli_tokens=("workspace", "stop"),
         parity_status="MCP implemented",
         parity_backlog_slice="—",
         supports_idempotency_key=True,
@@ -127,6 +137,8 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             {"workspace_id", "reason", "idempotency_key", "expected_version"}
         ),
         mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        cli_options=frozenset({"--reason", "--idempotency-key", "--if-match", "--api-token"}),
+        cli_arguments=frozenset({"workspace_id"}),
         response_fields=frozenset(
             {"workspace_id", "operation_id", "operation_status", "status", "message"}
         ),
@@ -138,7 +150,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_method="DELETE",
         rest_path="/v1/workspaces/{workspace_id}",
         mcp_tool="awf_destroy_workspace",
-        cli_tokens=None,
+        cli_tokens=("workspace", "destroy"),
         parity_status="MCP implemented",
         parity_backlog_slice="—",
         supports_idempotency_key=True,
@@ -167,6 +179,17 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             }
         ),
         mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        cli_options=frozenset(
+            {
+                "--force",
+                "--remove-volumes/--no-remove-volumes",
+                "--remove-worktree/--no-remove-worktree",
+                "--idempotency-key",
+                "--if-match",
+                "--api-token",
+            }
+        ),
+        cli_arguments=frozenset({"workspace_id"}),
         response_fields=frozenset(
             {"workspace_id", "operation_id", "operation_status", "status", "message"}
         ),
@@ -213,7 +236,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_method="POST",
         rest_path="/v1/workspaces/{workspace_id}/validate",
         mcp_tool="awf_request_workspace_validation",
-        cli_tokens=None,
+        cli_tokens=("workspace", "validate"),
         parity_status="MCP implemented",
         parity_backlog_slice="—",
         supports_idempotency_key=True,
@@ -235,6 +258,10 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             {"workspace_id", "reason", "requested_tier", "idempotency_key", "expected_version"}
         ),
         mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        cli_options=frozenset(
+            {"--reason", "--requested-tier", "--idempotency-key", "--if-match", "--api-token"}
+        ),
+        cli_arguments=frozenset({"workspace_id"}),
         response_fields=frozenset({"id", "workspace_id", "type", "status"}),
         auth_required=True,
     ),
@@ -244,7 +271,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_method="POST",
         rest_path="/v1/workspaces/{workspace_id}/refresh",
         mcp_tool="awf_refresh_workspace",
-        cli_tokens=None,
+        cli_tokens=("workspace", "refresh"),
         parity_status="MCP implemented",
         parity_backlog_slice="—",
         supports_idempotency_key=True,
@@ -265,6 +292,8 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             {"workspace_id", "reason", "idempotency_key", "expected_version"}
         ),
         mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        cli_options=frozenset({"--reason", "--idempotency-key", "--if-match", "--api-token"}),
+        cli_arguments=frozenset({"workspace_id"}),
         response_fields=frozenset({"id", "workspace_id", "type", "status"}),
         auth_required=True,
     ),
@@ -274,7 +303,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_method="POST",
         rest_path="/v1/workspaces/{workspace_id}/rebase",
         mcp_tool="awf_rebase_workspace",
-        cli_tokens=None,
+        cli_tokens=("workspace", "rebase"),
         parity_status="MCP implemented",
         parity_backlog_slice="—",
         supports_idempotency_key=True,
@@ -298,6 +327,8 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             {"workspace_id", "reason", "idempotency_key", "expected_version"}
         ),
         mcp_required_fields=frozenset({"workspace_id", "idempotency_key"}),
+        cli_options=frozenset({"--reason", "--idempotency-key", "--if-match", "--api-token"}),
+        cli_arguments=frozenset({"workspace_id"}),
         response_fields=frozenset({"id", "workspace_id", "type", "status"}),
         auth_required=True,
     ),
@@ -912,17 +943,17 @@ _CAPABILITIES += (
         rest_path="/v1/workspaces/{workspace_id}/operations",
         mcp_tool="awf_list_workspace_operations",
         cli_tokens=("workspace", "operations"),
-        parity_status="MCP implemented",
-        parity_backlog_slice="—",
+        parity_status="MCP partial",
+        parity_backlog_slice="TODO§P1-operation-read-auth",
         supports_idempotency_key=False,
         supports_if_match=False,
         rest_response_model="OperationListResponse",
         rest_path_fields=frozenset({"workspace_id"}),
-        rest_query_fields=frozenset({"status", "operation_type", "limit"}),
-        mcp_request_fields=frozenset({"workspace_id", "limit"}),
+        rest_query_fields=frozenset({"status", "operation_type", "limit", "cursor"}),
+        mcp_request_fields=frozenset({"workspace_id", "status", "type", "limit", "cursor"}),
         mcp_required_fields=frozenset({"workspace_id"}),
         cli_arguments=frozenset({"workspace_id"}),
-        cli_options=frozenset({"--limit", "--status", "--type", "--api-token"}),
+        cli_options=frozenset({"--limit", "--status", "--type", "--cursor", "--api-token"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
     ),
     ContractCapability(
@@ -931,14 +962,19 @@ _CAPABILITIES += (
         rest_method="GET",
         rest_path="/v1/operations",
         mcp_tool="awf_list_operations",
-        cli_tokens=None,
-        parity_status="MCP implemented",
-        parity_backlog_slice="—",
+        cli_tokens=("operations", "list"),
+        parity_status="MCP partial",
+        parity_backlog_slice="TODO§P1-operation-read-auth",
         supports_idempotency_key=False,
         supports_if_match=False,
         rest_response_model="OperationListResponse",
-        rest_query_fields=frozenset({"workspace_id", "status", "operation_type", "limit"}),
-        mcp_request_fields=frozenset({"workspace_id", "status", "operation_type", "limit"}),
+        rest_query_fields=frozenset(
+            {"workspace_id", "status", "operation_type", "limit", "cursor"}
+        ),
+        mcp_request_fields=frozenset({"workspace_id", "status", "type", "limit", "cursor"}),
+        cli_options=frozenset(
+            {"--workspace-id", "--status", "--type", "--limit", "--cursor", "--api-token"}
+        ),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
     ),
     ContractCapability(
@@ -947,15 +983,17 @@ _CAPABILITIES += (
         rest_method="GET",
         rest_path="/v1/operations/{operation_id}",
         mcp_tool="awf_get_operation",
-        cli_tokens=None,
-        parity_status="MCP implemented",
-        parity_backlog_slice="—",
+        cli_tokens=("operations", "show"),
+        parity_status="MCP partial",
+        parity_backlog_slice="TODO§P1-operation-read-auth",
         supports_idempotency_key=False,
         supports_if_match=False,
         rest_response_model="OperationResponse",
         rest_path_fields=frozenset({"operation_id"}),
         mcp_request_fields=frozenset({"operation_id"}),
         mcp_required_fields=frozenset({"operation_id"}),
+        cli_arguments=frozenset({"operation_id"}),
+        cli_options=frozenset({"--api-token"}),
         response_fields=frozenset({"id", "workspace_id", "type", "status"}),
     ),
     ContractCapability(

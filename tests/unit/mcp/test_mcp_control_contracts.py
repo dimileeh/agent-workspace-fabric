@@ -686,6 +686,43 @@ class TestErrorMapping:
             "awf_rebase_workspace",
         ],
     )
+    @pytest.mark.parametrize(
+        "args",
+        [
+            {"workspace_id": "ws_x", "idempotency_key": None},
+            {"workspace_id": "ws_x", "idempotency_key": "   "},
+        ],
+    )
+    async def test_missing_idempotency_key_returns_structured_invalid_request(
+        self,
+        tool_name: str,
+        args: dict[str, object],
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        result = await _call_result(mcp, tool_name, args)
+
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "INVALID_REQUEST",
+            "message": "Idempotency-Key header is required for this endpoint.",
+            "detail": None,
+        }
+        assert service.calls == []
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "awf_cancel_workspace",
+            "awf_stop_workspace",
+            "awf_destroy_workspace",
+            "awf_remonitor_workspace",
+            "awf_request_workspace_validation",
+            "awf_refresh_workspace",
+            "awf_rebase_workspace",
+        ],
+    )
     async def test_workspace_control_error_returns_structured_mcp_error(self, tool_name: str) -> None:
         service = _FailingMockService()
         mcp = build_mcp_server(service=service)
