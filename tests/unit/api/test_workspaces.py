@@ -1984,6 +1984,44 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("field", "first_value", "replay_value"),
+        [
+            ("priority", 25, 26),
+            ("human_boost", 2, 3),
+        ],
+    )
+    async def test_idempotency_conflicts_when_scheduler_policy_changes(
+        self,
+        client: AsyncClient,
+        field: str,
+        first_value: int,
+        replay_value: int,
+    ) -> None:
+        headers = {"Idempotency-Key": f"scheduler-policy-{field}-key"}
+        first_payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                field: first_value,
+            },
+        }
+        replay_payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                field: replay_value,
+            },
+        }
+
+        first = await client.post("/v2/workspaces", json=first_payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 409
+        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
     async def test_accepts_task_out_of_scope_change_policy_metadata(
         self,
         client: AsyncClient,

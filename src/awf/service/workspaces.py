@@ -1068,6 +1068,7 @@ def workspace_create_v2_payload_matches(
         == _requested_task_out_of_scope_policy(payload)
         and _stored_task_provider_recovery_policy(existing)
         == _requested_task_provider_recovery_policy(payload)
+        and _stored_task_scheduler_policy(existing) == _requested_task_scheduler_policy(payload)
         and existing.auto_merge == payload.task.auto_merge
         and (
             existing.initial_review_grace_period_seconds
@@ -1177,6 +1178,18 @@ def _stored_task_provider_recovery_policy(
 ) -> dict[str, object] | None:
     provider_recovery = existing.task_policy.get("provider_recovery")
     return provider_recovery if isinstance(provider_recovery, dict) else None
+
+
+def _requested_task_scheduler_policy(
+    payload: WorkspaceCreateV2Request,
+) -> dict[str, object] | None:
+    scheduler_policy = v2_task_policy_snapshot(payload).get(SCHEDULER_POLICY_KEY)
+    return scheduler_policy if isinstance(scheduler_policy, dict) else None
+
+
+def _stored_task_scheduler_policy(existing: Workspace) -> dict[str, object] | None:
+    scheduler_policy = existing.task_policy.get(SCHEDULER_POLICY_KEY)
+    return scheduler_policy if isinstance(scheduler_policy, dict) else None
 
 
 def _stored_task_agent_model(existing: Workspace) -> str | None:
