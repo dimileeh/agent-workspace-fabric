@@ -9,6 +9,7 @@ concurrency, so end-to-end is the most useful test.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -3549,6 +3550,113 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert inspector.calls == ["awf_preserve_live_running"]
         assert executor.calls == []
         assert cleaner.calls == []
+
+    @pytest.mark.unit
+    async def test_restart_recovery_serializes_concurrent_preservation_recording(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compose_project = "awf_preserve_race"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserve-live-race",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+            node_id="node-a",
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            repo_url=str(origin_repo),
+            compose_project_name=compose_project,
+        )
+        snapshot = _live_agent_snapshot(container_id="agent-race")
+        first_checked = asyncio.Event()
+        second_checked = asyncio.Event()
+        both_selected = asyncio.Event()
+        call_count = 0
+        selected_count = 0
+        count_lock = asyncio.Lock()
+        original_has_event = ControlWorker._has_preserved_active_execution_event
+
+        async def _racing_has_preserved_event(
+            self: ControlWorker,
+            session: AsyncSession,
+            workspace_id: str,
+        ) -> bool:
+            nonlocal call_count, selected_count
+            async with count_lock:
+                call_count += 1
+                call_number = call_count
+                if call_number == 1:
+                    first_checked.set()
+                elif call_number == 2:
+                    second_checked.set()
+
+            if call_number == 1:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(second_checked.wait(), timeout=0.2)
+            else:
+                await first_checked.wait()
+
+            has_event = await original_has_event(self, session, workspace_id)
+            async with count_lock:
+                selected_count += 1
+                if selected_count == 2:
+                    both_selected.set()
+            if not has_event:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(both_selected.wait(), timeout=0.2)
+            return has_event
+
+        monkeypatch.setattr(
+            ControlWorker,
+            "_has_preserved_active_execution_event",
+            _racing_has_preserved_event,
+        )
+        workers = [
+            ControlWorker(
+                session_factory=session_factory,
+                provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+                executor=_RecordingExecutor(),
+                runtime_inspector=_RecordingRuntimeInspector({compose_project: snapshot}),
+                runtime_cleaner=_RecordingRuntimeCleaner(),
+                config=WorkerConfig(
+                    poll_interval_seconds=0.01,
+                    max_concurrent_executions=0,
+                    node_id="node-a",
+                ),
+            )
+            for _ in range(2)
+        ]
+
+        await asyncio.gather(
+            *(
+                worker._record_preserved_active_execution_after_restart(  # noqa: SLF001
+                    candidate,
+                    snapshot,
+                )
+                for worker in workers
+            )
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        assert ws is not None
+        assert ws.subphase == PRESERVED_EXECUTION_SUBPHASE
+        assert len(preserved_events) == 1
+        assert len(operations) == 1
+        assert preserved_events[0].payload is not None
+        assert preserved_events[0].payload["operation_id"] == operations[0].id
 
     @pytest.mark.unit
     @pytest.mark.parametrize("status", [WorkspaceStatus.validating, WorkspaceStatus.pushing])
