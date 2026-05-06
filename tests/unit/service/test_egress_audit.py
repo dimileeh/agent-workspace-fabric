@@ -509,6 +509,50 @@ async def test_workspace_response_includes_egress_audit(
 
 
 @pytest.mark.unit
+async def test_workspace_response_redacts_untrusted_egress_audit_details(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """``WorkspaceResponse`` must not trust stored audit details to be pre-redacted."""
+    wid = await _workspace(session_factory, network_posture="restricted")
+
+    async with session_factory() as session:
+        record = EgressAuditRecord(
+            id=new_egress_audit_record_id(),
+            workspace_id=wid,
+            policy_posture="restricted",
+            decision=EgressDecision.deferred.value,
+            destination_category="allowlisted_public_internet",
+            reason_code="LOCAL_EGRESS_RESTRICTED_ALLOWLISTED",
+            details={
+                "safe_field": "normal_value",
+                "token": "ghp_secret123456789012345678",
+                "nested": {
+                    "api_key": "sk-ant-something-secret-with-manychars",
+                    "url": "https://user:password123456@github.com/org/repo",
+                    "usage": {"total_tokens": 42},
+                },
+            },
+        )
+        session.add(record)
+        await session.commit()
+
+    detail = await WorkspaceService(session_factory).get(wid)
+
+    assert detail is not None
+    egress_audit = detail.model_dump().get("egress_audit")
+    assert egress_audit is not None
+    response_details = egress_audit["details"]
+    serialized = json.dumps(response_details)
+    assert response_details["safe_field"] == "normal_value"
+    assert response_details["token"] == REDACTION_MARKER
+    assert response_details["nested"]["api_key"] == REDACTION_MARKER
+    assert response_details["nested"]["usage"]["total_tokens"] == 42
+    assert "ghp_" not in serialized
+    assert "sk-ant-" not in serialized
+    assert "password123456" not in serialized
+
+
+@pytest.mark.unit
 async def test_workspace_response_egress_audit_null_when_no_record(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

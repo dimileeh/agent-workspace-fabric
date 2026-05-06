@@ -37,6 +37,7 @@ from awf.api.schemas import (
     WorkspaceRuntimeResponse,
     WorkspaceWarningResponse,
 )
+from awf.common.audit import redact_audit_value
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
@@ -1407,6 +1408,7 @@ def _console_safe_profile_snapshot(raw_profile: object) -> dict[str, Any] | None
 
 
 def _egress_audit_response(record: EgressAuditRecord) -> dict[str, Any]:
+    details = redact_audit_value(record.details)
     return {
         "id": record.id,
         "workspace_id": record.workspace_id,
@@ -1415,7 +1417,7 @@ def _egress_audit_response(record: EgressAuditRecord) -> dict[str, Any]:
         "decision": record.decision,
         "destination_category": record.destination_category,
         "reason_code": record.reason_code,
-        "details": record.details,
+        "details": details if isinstance(details, dict) else {},
         "enforced_at": record.enforced_at,
         "created_at": record.created_at,
     }
