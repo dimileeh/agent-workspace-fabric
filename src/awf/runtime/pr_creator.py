@@ -94,6 +94,7 @@ class PullRequestCreator:
         body: str,
         existing_pr_url: str | None = None,
         remote_branch_name: str | None = None,
+        remote_url: str | None = None,
     ) -> PullRequestResult:
         push_target_branch = (
             remote_branch_name if existing_pr_url and remote_branch_name else branch_name
@@ -103,6 +104,7 @@ class PullRequestCreator:
             if existing_pr_url and remote_branch_name
             else branch_name
         )
+        push_remote = remote_url or "origin"
         # Step 0: capture the worktree's view of the branch state so we
         # can diagnose post-validation push failures. T39 (ws_eb8c2bd5)
         # hit ``gh pr create: No commits between development and
@@ -127,7 +129,7 @@ class PullRequestCreator:
                 str(worktree_path),
                 "push",
                 "-u",
-                "origin",
+                push_remote,
                 push_ref,
             ],
         )
@@ -142,6 +144,7 @@ class PullRequestCreator:
         _log.info(
             "pr_creator.push_output",
             branch=push_target_branch,
+            remote=_redact_credentials(push_remote),
             returncode=push.returncode,
             stdout=_redact_credentials(push.stdout.strip())[:500],
             stderr=_redact_credentials(push.stderr.strip())[:500],

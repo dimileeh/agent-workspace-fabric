@@ -218,6 +218,7 @@ async def _seed_sync_feature_pr_ready_workspace_with_recovery(
     *,
     pr_url: str = "https://github.com/x/y/pull/206",
     pr_number: int = 206,
+    head_repo_slug: str | None = None,
     source_head_sha: str = "d" * 40,
     source_base_sha: str = "a" * 40,
 ) -> str:
@@ -225,6 +226,18 @@ async def _seed_sync_feature_pr_ready_workspace_with_recovery(
     async with factory() as s:
         repo = WorkspaceRepository(s)
         branch_name = "feature/existing-pr"
+        adoption = {
+            "repo_slug": "x/y",
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "head_ref": branch_name,
+            "base_ref": "development",
+            "head_sha": source_head_sha,
+            "base_sha": source_base_sha,
+            "source": "existing_github_pr",
+        }
+        if head_repo_slug is not None:
+            adoption["head_repo_slug"] = head_repo_slug
         ws = await repo.create(
             repo_url="git@github.com:dimileeh/aira-agent.git",
             branch_base="development",
@@ -236,16 +249,7 @@ async def _seed_sync_feature_pr_ready_workspace_with_recovery(
             task_kind="sync_feature_pr",
             remote_push_branch=branch_name,
             task_policy={
-                "pr_adoption": {
-                    "repo_slug": "x/y",
-                    "pr_number": pr_number,
-                    "pr_url": pr_url,
-                    "head_ref": branch_name,
-                    "base_ref": "development",
-                    "head_sha": source_head_sha,
-                    "base_sha": source_base_sha,
-                    "source": "existing_github_pr",
-                }
+                "pr_adoption": adoption,
             },
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
@@ -1268,6 +1272,61 @@ async def test_sync_feature_pr_validate_only_recovery_pushes_adopted_pr_head(
         and event.payload["branch_name"] == f"feature-sync/{ws_id}"
         for event in events
     )
+
+
+@pytest.mark.unit
+async def test_sync_feature_pr_validate_only_recovery_pushes_fork_head_repo(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Adopted fork PR recovery must update the fork branch, not origin."""
+    monitor_calls: list[str] = []
+
+    class _FakeMonitor:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+            del compose_project, compose_file
+            monitor_calls.append(workspace_id)
+
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        max_fix_passes=1,
+        pr_monitor_factory=lambda *_args, **_kwargs: _FakeMonitor(),
+    )
+    source_head = "d" * 40
+    fixed_head = "e" * 40
+    ws_id = await _seed_sync_feature_pr_ready_workspace_with_recovery(
+        factory,
+        pr_number=207,
+        head_repo_slug="contributor/aira-agent",
+        source_head_sha=source_head,
+    )
+
+    _queue_validation_head(fake, head=source_head)
+    fake.queue_result(returncode=1, stderr="pytest: failed")  # initial validation fails
+    fake.queue_result(returncode=0)  # adapter.run (fix pass)
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/awf/runtime/pr_creator.py\n")
+    fake.queue_result(returncode=0)  # git commit
+    _queue_validation_head(fake, head=fixed_head)
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation passes after fix
+    _queue_existing_pr_push(fake, head=fixed_head)
+
+    await executor.execute(ws_id)
+
+    push_calls = [
+        call for call in _all_push_and_pr_create_calls(fake) if call[0] == "git" and "push" in call
+    ]
+    assert len(push_calls) == 1
+    push_index = push_calls[0].index("push")
+    assert push_calls[0][push_index + 2] == "git@github.com:contributor/aira-agent.git"
+    assert "HEAD:refs/heads/feature/existing-pr" in push_calls[0]
+    assert "origin" not in push_calls[0][push_index + 1 :]
+    assert f"feature-sync/{ws_id}" not in push_calls[0]
+    assert not any(call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake))
+    assert monitor_calls == [ws_id]
 
 
 @pytest.mark.unit

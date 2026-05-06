@@ -49,6 +49,7 @@ from awf.common.compose_exec import (
     cleanup_failure_message,
 )
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
+from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
@@ -119,6 +120,7 @@ from awf.runtime.pr_monitor_operations import (
     finish_monitor_operation,
     monitor_operation_idempotency_key,
 )
+from awf.runtime.pr_push_remote import remote_push_url_for_workspace
 from awf.runtime.validation import (
     DATABASE_GENERATED_SETUP_TIMEOUT,
     DATABASE_REFRESH_TIMEOUT,
@@ -2508,6 +2510,7 @@ class WorkspaceExecutor:
         pr_body = _build_pr_body(ws, defaults=defaults)
         push_branch_name = ws.branch_name or f"awf/{workspace_id}"
         existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None
+        existing_pr_remote_url = _existing_pr_remote_push_url(ws) if ws.pr_url else None
 
         try:
             pr = await self._pr_creator.push_and_open(
@@ -2518,6 +2521,7 @@ class WorkspaceExecutor:
                 body=pr_body,
                 existing_pr_url=ws.pr_url,
                 remote_branch_name=existing_pr_remote_branch,
+                remote_url=existing_pr_remote_url,
             )
         except PullRequestError as exc:
             _log.error(
@@ -5126,6 +5130,16 @@ def _sync_feature_pr_adoption_metadata(ws: Workspace) -> Mapping[str, object]:
     policy = ws.task_policy if isinstance(ws.task_policy, Mapping) else {}
     adoption = policy.get("pr_adoption")
     return adoption if isinstance(adoption, Mapping) else {}
+
+
+def _existing_pr_remote_push_url(ws: Workspace) -> str | None:
+    if ws.task_kind != "sync_feature_pr":
+        return None
+    try:
+        base_repo = RepoRef.from_url(ws.repo_url)
+    except ValueError:
+        return None
+    return remote_push_url_for_workspace(ws, base_repo=base_repo)
 
 
 def _missing_sync_feature_pr_adoption_metadata(

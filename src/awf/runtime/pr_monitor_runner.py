@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
-from urllib.parse import urlsplit
 
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -104,6 +103,9 @@ from awf.runtime.pr_monitor_operations import (
     monitor_operation_idempotency_key,
     record_monitor_state_operation,
     retryable_monitor_operation_idempotency_key,
+)
+from awf.runtime.pr_push_remote import (
+    remote_push_url_for_workspace as _remote_push_url_for_workspace,
 )
 from awf.service.gc import run_workspace_filesystem_gc
 from awf.service.merge_queue import (
@@ -5250,41 +5252,6 @@ def _collect_defer_items(
             }
         )
     return bot_items, human_items
-
-
-def _remote_push_url_for_workspace(ws: Workspace, *, base_repo: RepoRef) -> str | None:
-    if ws.task_kind != "sync_feature_pr":
-        return None
-    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
-    adoption = policy.get("pr_adoption")
-    if not isinstance(adoption, Mapping):
-        return None
-    head_repo_value = adoption.get("head_repo_slug") or adoption.get("head_repo_url")
-    if not isinstance(head_repo_value, str) or not head_repo_value.strip():
-        return None
-    try:
-        head_repo = RepoRef.from_url(head_repo_value)
-    except ValueError:
-        return None
-    if head_repo.slug().lower() == base_repo.slug().lower():
-        return None
-    return _github_repo_url_like(ws.repo_url, head_repo)
-
-
-def _github_repo_url_like(repo_url: str, repo: RepoRef) -> str:
-    stripped = repo_url.strip()
-    if stripped.startswith("git@github.com:") or stripped.startswith("ssh://git@github.com/"):
-        return f"git@github.com:{repo.owner}/{repo.name}.git"
-    parsed = urlsplit(stripped)
-    if (
-        parsed.scheme in {"http", "https"}
-        and parsed.hostname is not None
-        and parsed.hostname.lower() == "github.com"
-    ):
-        userinfo, sep, _host = parsed.netloc.rpartition("@")
-        if sep and userinfo:
-            return f"https://{userinfo}@github.com/{repo.owner}/{repo.name}.git"
-    return repo.https_url()
 
 
 def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
