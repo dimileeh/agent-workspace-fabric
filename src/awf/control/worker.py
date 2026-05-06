@@ -767,7 +767,11 @@ class ControlWorker:
         if finding is not None and finding.decision == "defer_retry_policy":
             await self._record_recoverable_runtime_stranding(candidate, snapshot, finding)
             return
-        if candidate.status in _ACTIVE_EXECUTION_STATUSES and _has_running_agent_runtime(snapshot):
+        if (
+            candidate.status in _ACTIVE_EXECUTION_STATUSES
+            and _has_running_agent_runtime(snapshot)
+            and not await self._has_operator_refresh_after_latest_preservation(candidate)
+        ):
             await self._record_preserved_active_execution_after_restart(candidate, snapshot)
             return
         if candidate.compose_project_name and snapshot.stack_state == "running":
@@ -907,6 +911,26 @@ class ControlWorker:
             reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
         )
 
+    async def _has_operator_refresh_after_latest_preservation(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        async with self._session_factory() as session:
+            latest_preservation = await self._latest_preserved_active_execution_at(
+                session,
+                candidate.workspace_id,
+                candidate.status,
+            )
+            if latest_preservation is None:
+                return False
+            latest_refresh = await self._latest_operator_refresh_requested_at(
+                session,
+                candidate.workspace_id,
+            )
+            if latest_refresh is None:
+                return False
+            return _utc_datetime(latest_refresh) >= _utc_datetime(latest_preservation)
+
     async def _has_current_preserved_active_execution(
         self,
         candidate: _ActiveExecutionCandidate,
@@ -953,6 +977,42 @@ class ControlWorker:
             stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
         return (await session.execute(stmt)).scalar_one_or_none() is not None
 
+    async def _latest_preserved_active_execution_at(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        status: WorkspaceStatus,
+    ) -> datetime | None:
+        stmt = (
+            select(WorkspaceEvent.occurred_at)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+                WorkspaceEvent.reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+                WorkspaceEvent.payload["workspace_status"].as_string() == status.value,
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def _latest_operator_refresh_requested_at(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+    ) -> datetime | None:
+        stmt = (
+            select(WorkspaceEvent.occurred_at)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == _OPERATOR_REFRESH_EVENT_TYPE,
+                WorkspaceEvent.reason_code == _OPERATOR_REFRESH_REASON_CODE,
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
+
     async def _active_execution_preservation_event_floor(
         self,
         session: AsyncSession,
@@ -979,17 +1039,10 @@ class ControlWorker:
 
         # An operator refresh is an explicit recovery request for preserved runtime.
         # Preservation evidence older than that request must not keep scans skipped.
-        stmt = (
-            select(WorkspaceEvent.occurred_at)
-            .where(
-                WorkspaceEvent.workspace_id == workspace.id,
-                WorkspaceEvent.event_type == _OPERATOR_REFRESH_EVENT_TYPE,
-                WorkspaceEvent.reason_code == _OPERATOR_REFRESH_REASON_CODE,
-            )
-            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
-            .limit(1)
+        refresh_requested_at = await self._latest_operator_refresh_requested_at(
+            session,
+            workspace.id,
         )
-        refresh_requested_at = (await session.execute(stmt)).scalar_one_or_none()
         if refresh_requested_at is not None:
             floors.append(_utc_datetime(refresh_requested_at))
 

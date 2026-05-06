@@ -4519,6 +4519,83 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    async def test_operator_refresh_of_live_preserved_runtime_does_not_represerve(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserved_refresh_live"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-refresh-live",
+            WorkspaceStatus.pushing,
+            compose_project_name=compose_project,
+        )
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: _live_agent_snapshot(container_id="agent-preserved-refresh-live")}
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            await WorkspaceControlService(
+                s,
+                project_stopper=_noop_project_stop,
+                cleaner_factory=_unexpected_cleaner_factory,
+            ).request_refresh_workspace(
+                workspace_id,
+                reason="operator recovery",
+                idempotency_key="refresh-preserved-live-runtime",
+            )
+            await s.commit()
+
+        assert await worker.run_once() == 0
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert len(preserved_events) == 1
+        assert len(stale_events) == 1
+        assert cleaner.calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": str(origin_repo),
+                "compose_project_name": compose_project,
+                "compose_file_path": Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+                "worktree_host_path": None,
+                "remove_volumes": True,
+                "remove_worktree": False,
+            }
+        ]
+        assert inspector.calls == [compose_project, compose_project, compose_project]
+
+    @pytest.mark.unit
     async def test_stale_active_execution_scan_is_throttled_between_intervals(
         self,
         monkeypatch: pytest.MonkeyPatch,
