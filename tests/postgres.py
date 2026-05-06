@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import hashlib
 import os
+import re
 import tempfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from typing import TextIO
 
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -26,7 +29,12 @@ RETRYABLE_POSTGRES_ERROR_NAMES = {
     "ConnectionDoesNotExistError",
     "InternalClientError",
 }
-_STALE_SCHEMA_CLEANUP_DONE = False
+_POSTGRES_TEST_LOCAL_RUN_UID = uuid.uuid4().hex
+_POSTGRES_TEST_SCHEMA_RE = re.compile(
+    r"^awf_test_(?P<namespace>[0-9a-f]{16})_[0-9a-f]{32}$"
+)
+_POSTGRES_TEST_ACTIVE_RUN_LOCKS: dict[tuple[str, str], TextIO] = {}
+_STALE_SCHEMA_CLEANUP_DONE_KEYS: set[tuple[str, str]] = set()
 
 try:
     import fcntl
@@ -47,6 +55,34 @@ def postgres_test_database_url() -> str:
 
 def _quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
+
+
+def _postgres_database_key(database_url: str) -> str:
+    return hashlib.sha256(database_url.encode("utf-8")).hexdigest()[:16]
+
+
+def _postgres_test_run_uid() -> str:
+    return (
+        os.environ.get("PYTEST_XDIST_TESTRUNUID")
+        or os.environ.get("AWF_EXEC_INVOCATION_ID")
+        or os.environ.get("AWF_POSTGRES_TEST_RUN_UID")
+        or _POSTGRES_TEST_LOCAL_RUN_UID
+    )
+
+
+def _postgres_test_schema_namespace() -> str:
+    return hashlib.sha256(_postgres_test_run_uid().encode("utf-8")).hexdigest()[:16]
+
+
+def _new_postgres_test_schema() -> str:
+    return f"awf_test_{_postgres_test_schema_namespace()}_{uuid.uuid4().hex}"
+
+
+def _postgres_test_schema_namespace_from_schema(schema: str) -> str | None:
+    match = _POSTGRES_TEST_SCHEMA_RE.fullmatch(schema)
+    if match is None:
+        return None
+    return match.group("namespace")
 
 
 def _schema_url(database_url: str, schema: str, *, null_pool: bool = False) -> str:
@@ -96,7 +132,7 @@ def _postgres_ddl_lock(database_url: str) -> Iterator[None]:
         yield
         return
 
-    lock_key = hashlib.sha256(database_url.encode("utf-8")).hexdigest()[:16]
+    lock_key = _postgres_database_key(database_url)
     lock_path = Path(tempfile.gettempdir()) / f"awf-pytest-postgres-ddl-{lock_key}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as lock_file:
@@ -107,20 +143,80 @@ def _postgres_ddl_lock(database_url: str) -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _postgres_test_run_lock_path(database_url: str, namespace: str) -> Path:
+    database_key = _postgres_database_key(database_url)
+    return Path(tempfile.gettempdir()) / (
+        f"awf-pytest-postgres-active-{database_key}-{namespace}.lock"
+    )
+
+
+def _ensure_postgres_test_run_active(database_url: str) -> None:
+    if fcntl is None:
+        return
+
+    namespace = _postgres_test_schema_namespace()
+    key = (_postgres_database_key(database_url), namespace)
+    if key in _POSTGRES_TEST_ACTIVE_RUN_LOCKS:
+        return
+
+    lock_path = _postgres_test_run_lock_path(database_url, namespace)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+    except BaseException:
+        lock_file.close()
+        raise
+    _POSTGRES_TEST_ACTIVE_RUN_LOCKS[key] = lock_file
+
+
+def _release_postgres_test_run_locks() -> None:
+    if fcntl is None:
+        return
+
+    for key, lock_file in list(_POSTGRES_TEST_ACTIVE_RUN_LOCKS.items()):
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+        del _POSTGRES_TEST_ACTIVE_RUN_LOCKS[key]
+
+
+atexit.register(_release_postgres_test_run_locks)
+
+
+def _is_postgres_test_schema_namespace_active(database_url: str, namespace: str) -> bool:
+    if fcntl is None:
+        return True
+
+    lock_path = _postgres_test_run_lock_path(database_url, namespace)
+    if not lock_path.exists():
+        return False
+
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    return False
+
+
 def cleanup_stale_postgres_test_schemas() -> None:
     """Drop leftover per-test schemas once before DB-backed pytest selections run."""
 
-    global _STALE_SCHEMA_CLEANUP_DONE
-    if _STALE_SCHEMA_CLEANUP_DONE:
+    database_url = postgres_test_database_url()
+    namespace = _postgres_test_schema_namespace()
+    cleanup_key = (_postgres_database_key(database_url), namespace)
+    if cleanup_key in _STALE_SCHEMA_CLEANUP_DONE_KEYS:
+        _ensure_postgres_test_run_active(database_url)
         return
 
-    run_uid = (
-        os.environ.get("PYTEST_XDIST_TESTRUNUID")
-        or os.environ.get("AWF_EXEC_INVOCATION_ID")
-        or "local"
+    database_key, namespace = cleanup_key
+    lock_path = Path(tempfile.gettempdir()) / (
+        f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.lock"
     )
-    lock_path = Path(tempfile.gettempdir()) / f"awf-pytest-postgres-cleanup-{run_uid}.lock"
-    marker_path = Path(tempfile.gettempdir()) / f"awf-pytest-postgres-cleanup-{run_uid}.done"
+    marker_path = Path(tempfile.gettempdir()) / (
+        f"awf-pytest-postgres-cleanup-{database_key}-{namespace}.done"
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     with lock_path.open("w", encoding="utf-8") as lock_file:
@@ -128,18 +224,20 @@ def cleanup_stale_postgres_test_schemas() -> None:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             if marker_path.exists():
-                _STALE_SCHEMA_CLEANUP_DONE = True
+                _ensure_postgres_test_run_active(database_url)
+                _STALE_SCHEMA_CLEANUP_DONE_KEYS.add(cleanup_key)
                 return
-            asyncio.run(_drop_stale_postgres_test_schemas())
+            asyncio.run(_drop_stale_postgres_test_schemas(database_url))
             marker_path.touch()
-            _STALE_SCHEMA_CLEANUP_DONE = True
+            _ensure_postgres_test_run_active(database_url)
+            _STALE_SCHEMA_CLEANUP_DONE_KEYS.add(cleanup_key)
         finally:
             if fcntl is not None:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-async def _drop_stale_postgres_test_schemas() -> None:
-    database_url = postgres_test_database_url()
+async def _drop_stale_postgres_test_schemas(database_url: str | None = None) -> None:
+    database_url = database_url or postgres_test_database_url()
     schemas = await _with_postgres_connection_retry(
         lambda: _list_stale_postgres_test_schemas_for_url(database_url)
     )
@@ -152,7 +250,7 @@ async def _drop_stale_postgres_test_schemas() -> None:
 async def _list_stale_postgres_test_schemas_for_url(database_url: str) -> list[str]:
     engine = _make_test_engine(database_url)
     try:
-        return await _list_stale_postgres_test_schemas(engine)
+        return await _list_stale_postgres_test_schemas(engine, database_url)
     finally:
         await engine.dispose()
 
@@ -165,18 +263,32 @@ async def _drop_stale_postgres_test_schema(database_url: str, schema: str) -> No
         await engine.dispose()
 
 
-async def _list_stale_postgres_test_schemas(engine: AsyncEngine) -> list[str]:
+async def _list_stale_postgres_test_schemas(
+    engine: AsyncEngine,
+    database_url: str,
+) -> list[str]:
     async with engine.begin() as conn:
         result = await conn.execute(
             text(
                 """
                 SELECT schema_name
                 FROM information_schema.schemata
-                WHERE schema_name LIKE 'awf_test_%'
+                WHERE schema_name LIKE :pattern ESCAPE '\\'
                 """
-            )
+            ),
+            {"pattern": r"awf\_test\_%"},
         )
-        return sorted(str(row[0]) for row in result)
+        schemas = sorted(str(row[0]) for row in result)
+
+    stale_schemas: list[str] = []
+    for schema in schemas:
+        namespace = _postgres_test_schema_namespace_from_schema(schema)
+        if namespace is None:
+            continue
+        if _is_postgres_test_schema_namespace_active(database_url, namespace):
+            continue
+        stale_schemas.append(schema)
+    return stale_schemas
 
 
 @asynccontextmanager
@@ -184,7 +296,8 @@ async def postgres_test_engine() -> AsyncIterator[AsyncEngine]:
     """Yield an isolated PostgreSQL schema with ORM metadata created."""
 
     database_url = postgres_test_database_url()
-    schema = f"awf_test_{uuid.uuid4().hex}"
+    _ensure_postgres_test_run_active(database_url)
+    schema = _new_postgres_test_schema()
     quoted_schema = _quote_identifier(schema)
     schema_database_url = _schema_url(database_url, quoted_schema)
     engine = _make_test_engine(schema_database_url)
@@ -228,7 +341,8 @@ async def create_postgres_test_engine() -> AsyncEngine:
     """
 
     database_url = postgres_test_database_url()
-    schema = f"awf_test_{uuid.uuid4().hex}"
+    _ensure_postgres_test_run_active(database_url)
+    schema = _new_postgres_test_schema()
     quoted_schema = _quote_identifier(schema)
     engine = _make_test_engine(_schema_url(database_url, quoted_schema, null_pool=True))
     with _postgres_ddl_lock(database_url):
@@ -243,7 +357,8 @@ async def postgres_test_url() -> AsyncIterator[str]:
     """Yield a PostgreSQL URL bound to an isolated schema with metadata."""
 
     database_url = postgres_test_database_url()
-    schema = f"awf_test_{uuid.uuid4().hex}"
+    _ensure_postgres_test_run_active(database_url)
+    schema = _new_postgres_test_schema()
     quoted_schema = _quote_identifier(schema)
     schema_database_url = _schema_url(database_url, quoted_schema)
     engine = _make_test_engine(schema_database_url)
@@ -267,7 +382,8 @@ def postgres_test_url_sync() -> Iterator[str]:
     """Synchronous wrapper for tests that exercise sync CLIs."""
 
     database_url = postgres_test_database_url()
-    schema = f"awf_test_{uuid.uuid4().hex}"
+    _ensure_postgres_test_run_active(database_url)
+    schema = _new_postgres_test_schema()
     quoted_schema = _quote_identifier(schema)
 
     async def _setup() -> str:
@@ -302,7 +418,8 @@ async def postgres_empty_test_url() -> AsyncIterator[str]:
     """Yield a PostgreSQL URL bound to an empty isolated schema."""
 
     database_url = postgres_test_database_url()
-    schema = f"awf_test_{uuid.uuid4().hex}"
+    _ensure_postgres_test_run_active(database_url)
+    schema = _new_postgres_test_schema()
     quoted_schema = _quote_identifier(schema)
     engine = _make_test_engine(_schema_url(database_url, quoted_schema, null_pool=True))
     try:

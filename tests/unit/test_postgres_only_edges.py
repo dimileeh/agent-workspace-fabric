@@ -27,6 +27,34 @@ from awf.service.pr_monitor_adoption import (
 from awf.service.secret_leases import _ensure_utc
 from awf.service.status import _utc_datetime
 from awf.service.worker import _merge_coordinator_for_database_url
+from tests import postgres as postgres_mod
+
+
+class _FakeSchemaConnection:
+    def __init__(self, schemas: list[str]) -> None:
+        self._schemas = schemas
+
+    async def execute(self, _statement: object, _parameters: object = None) -> list[tuple[str]]:
+        return [(schema,) for schema in self._schemas]
+
+
+class _FakeSchemaBegin:
+    def __init__(self, schemas: list[str]) -> None:
+        self._schemas = schemas
+
+    async def __aenter__(self) -> _FakeSchemaConnection:
+        return _FakeSchemaConnection(self._schemas)
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        return None
+
+
+class _FakeSchemaEngine:
+    def __init__(self, schemas: list[str]) -> None:
+        self._schemas = schemas
+
+    def begin(self) -> _FakeSchemaBegin:
+        return _FakeSchemaBegin(self._schemas)
 
 
 @pytest.mark.unit
@@ -52,6 +80,49 @@ def test_make_engine_strips_test_url_options_and_enables_null_pool(
     assert captured["url"] == "postgresql+asyncpg://awf:pw@localhost:5433/awf"
     assert captured["kwargs"]["connect_args"]["server_settings"]["search_path"] == "first"
     assert captured["kwargs"]["poolclass"] is NullPool
+
+
+@pytest.mark.unit
+def test_postgres_test_schema_name_is_scoped_to_current_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "ci-shard-a")
+
+    namespace = postgres_mod._postgres_test_schema_namespace()
+    schema = postgres_mod._new_postgres_test_schema()
+
+    assert len(namespace) == 16
+    assert schema.startswith(f"awf_test_{namespace}_")
+    assert len(schema) == len("awf_test_") + 16 + 1 + 32
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stale_postgres_schema_listing_skips_active_and_unowned_schemas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    inactive_namespace = "1" * 16
+    active_namespace = "2" * 16
+    inactive_schema = f"awf_test_{inactive_namespace}_{'a' * 32}"
+    active_schema = f"awf_test_{active_namespace}_{'b' * 32}"
+    legacy_unowned_schema = f"awf_test_{'c' * 32}"
+    seen_namespaces: list[str] = []
+
+    def _is_active(url: str, namespace: str) -> bool:
+        assert url == database_url
+        seen_namespaces.append(namespace)
+        return namespace == active_namespace
+
+    monkeypatch.setattr(postgres_mod, "_is_postgres_test_schema_namespace_active", _is_active)
+
+    schemas = await postgres_mod._list_stale_postgres_test_schemas(
+        _FakeSchemaEngine([active_schema, legacy_unowned_schema, inactive_schema]),  # type: ignore[arg-type]
+        database_url,
+    )
+
+    assert schemas == [inactive_schema]
+    assert seen_namespaces == [inactive_namespace, active_namespace]
 
 
 @pytest.mark.unit
