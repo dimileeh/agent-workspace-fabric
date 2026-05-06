@@ -66,8 +66,11 @@ def test_rest_route_metadata_matches_registry(capability_name: str) -> None:
     assert route.query_fields == capability.rest_query_fields
     assert route.header_fields == capability.rest_header_fields
     assert route.body_fields == capability.rest_body_fields
-    if capability.auth_required:
-        assert "require_api_token" in route.dependencies
+    has_auth_dependency = "require_api_token" in route.dependencies
+    assert capability.auth_required is has_auth_dependency, (
+        f"{capability.name}: registry auth_required={capability.auth_required} "
+        f"but REST dependencies are {sorted(route.dependencies)}"
+    )
 
 
 @pytest.mark.unit
