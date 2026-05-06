@@ -867,6 +867,7 @@ class TestPullRequestMonitorAdoptionService:
             assert fresh_task is not None
             assert old_workspace.idempotency_key is None
             assert old_task.idempotency_key == logical_key
+            assert fresh_workspace.idempotency_key == logical_key
             assert fresh_workspace.task_external_id == f"{logical_task_external_id}:g1"
             assert fresh_task.external_id == fresh_workspace.task_external_id
             assert fresh_task.idempotency_key == f"{logical_key}:g1"

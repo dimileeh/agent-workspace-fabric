@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
@@ -547,9 +547,12 @@ async def _next_adoption_workspace_idempotency_key(
     workspace_repo: WorkspaceRepository,
     *,
     logical_idempotency_key: str,
+    reserved_idempotency_keys: Iterable[str] = (),
+    require_generation: bool = False,
 ) -> str:
     existing_keys = set(await workspace_repo.list_idempotency_key_family(logical_idempotency_key))
-    if logical_idempotency_key not in existing_keys:
+    existing_keys.update(reserved_idempotency_keys)
+    if not existing_keys and not require_generation:
         return logical_idempotency_key
 
     for generation in range(1, 1000):
@@ -557,6 +560,26 @@ async def _next_adoption_workspace_idempotency_key(
         if candidate not in existing_keys:
             return candidate
     raise RuntimeError("Could not allocate a fresh PR adoption workspace idempotency key.")
+
+
+async def _task_idempotency_key_family(
+    session: AsyncSession,
+    *,
+    logical_idempotency_key: str,
+) -> list[str]:
+    generation_pattern = f"{_escape_like_pattern(logical_idempotency_key)}:g%"
+    stmt = (
+        select(Task.idempotency_key)
+        .where(
+            or_(
+                Task.idempotency_key == logical_idempotency_key,
+                Task.idempotency_key.like(generation_pattern, escape="\\"),
+            )
+        )
+        .order_by(Task.idempotency_key.asc())
+    )
+    keys = (await session.execute(stmt)).scalars().all()
+    return [key for key in keys if key is not None]
 
 
 async def _terminal_adoption_lineage(
@@ -781,6 +804,10 @@ def _adoption_generation_suffix(
     if workspace_idempotency_key.startswith(prefix):
         return workspace_idempotency_key[len(prefix) :]
     return "g1"
+
+
+def _escape_like_pattern(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _adoption_repo_url(*, request: PullRequestMonitorAdoptionRequest, repo: RepoRef) -> str:
