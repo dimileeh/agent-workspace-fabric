@@ -270,7 +270,7 @@ def test_stale_postgres_cleanup_ignores_persistent_done_marker_for_reused_namesp
 
 
 @pytest.mark.unit
-def test_stale_postgres_cleanup_marks_run_active_before_drop(
+def test_stale_postgres_cleanup_marks_run_active_after_drop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -295,7 +295,7 @@ def test_stale_postgres_cleanup_marks_run_active_before_drop(
     finally:
         postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
 
-    assert events == [("active", database_url), ("drop", database_url)]
+    assert events == [("drop", database_url), ("active", database_url)]
 
 
 @pytest.mark.unit

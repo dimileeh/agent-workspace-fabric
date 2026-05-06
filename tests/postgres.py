@@ -249,14 +249,15 @@ def cleanup_stale_postgres_test_schemas() -> None:
     )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Serialize concurrent workers and mark this run active before scanning so
-    # stale cleanup cannot drop schemas allocated by another live worker.
+    # Serialize concurrent workers while cleanup scans before this process marks
+    # its reused namespace active; otherwise leftovers from a crashed run using
+    # the same fixed UID would be skipped as live schemas.
     with lock_path.open("w", encoding="utf-8") as lock_file:
         if fcntl is not None:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            _ensure_postgres_test_run_active(database_url)
             asyncio.run(_drop_stale_postgres_test_schemas(database_url))
+            _ensure_postgres_test_run_active(database_url)
             _STALE_SCHEMA_CLEANUP_DONE_KEYS.add(cleanup_key)
         finally:
             if fcntl is not None:
