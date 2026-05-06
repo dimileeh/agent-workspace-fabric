@@ -377,8 +377,14 @@ def _sample_pr_payload(
     check_contexts: list[dict] | None = None,
     check_contexts_has_next_page: bool = False,
     threads: list[dict] | None = None,
+    threads_has_next_page: bool = False,
+    threads_end_cursor: str | None = None,
     reviews: list[dict] | None = None,
+    reviews_has_next_page: bool = False,
+    reviews_end_cursor: str | None = None,
     comments: list[dict] | None = None,
+    comments_has_next_page: bool = False,
+    comments_end_cursor: str | None = None,
     files: list[dict] | None = None,
     files_has_next_page: bool = False,
     files_end_cursor: str | None = None,
@@ -415,9 +421,27 @@ def _sample_pr_payload(
                                 }
                             ]
                         },
-                        "reviewThreads": {"nodes": threads or []},
-                        "reviews": {"nodes": reviews or []},
-                        "comments": {"nodes": comments or []},
+                        "reviewThreads": {
+                            "nodes": threads or [],
+                            "pageInfo": {
+                                "hasNextPage": threads_has_next_page,
+                                "endCursor": threads_end_cursor,
+                            },
+                        },
+                        "reviews": {
+                            "nodes": reviews or [],
+                            "pageInfo": {
+                                "hasNextPage": reviews_has_next_page,
+                                "endCursor": reviews_end_cursor,
+                            },
+                        },
+                        "comments": {
+                            "nodes": comments or [],
+                            "pageInfo": {
+                                "hasNextPage": comments_has_next_page,
+                                "endCursor": comments_end_cursor,
+                            },
+                        },
                         "files": {
                             "nodes": files or [],
                             "pageInfo": {
@@ -486,6 +510,329 @@ class TestFetchPrStatus:
         assert c.comment_id == "9001"
         assert c.body_excerpt == "Summary with suggestions"
         assert c.blocks_merge is False
+
+    @pytest.mark.unit
+    async def test_preserves_full_unresolved_review_thread_comment_history(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "T_multi",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/awf/runtime/pr_monitor_runner.py",
+                        "line": 940,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 101,
+                                    "bodyText": "Preserve the retry counter per action.",
+                                    "author": {"login": "chatgpt-codex-connector[bot]"},
+                                    "createdAt": "2026-05-06T10:11:12Z",
+                                    "url": "https://github.example/review/101",
+                                },
+                                {
+                                    "databaseId": 102,
+                                    "bodyText": "Still applies after the latest fix.",
+                                    "author": {"login": "dimileeh"},
+                                    "createdAt": "2026-05-06T10:15:12Z",
+                                    "url": "https://github.example/review/102",
+                                },
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert len(status.unresolved_inline_threads) == 1
+        thread = status.unresolved_inline_threads[0]
+        assert thread.body_excerpt == "Preserve the retry counter per action."
+        assert thread.author == "chatgpt-codex-connector[bot]"
+        assert thread.url == "https://github.example/review/101"
+        assert thread.is_outdated is False
+        assert [(c.comment_id, c.author, c.body) for c in thread.comments] == [
+            (
+                "101",
+                "chatgpt-codex-connector[bot]",
+                "Preserve the retry counter per action.",
+            ),
+            ("102", "dimileeh", "Still applies after the latest fix."),
+        ]
+        assert thread.comments[0].created_at is not None
+        assert thread.comments[0].created_at.isoformat() == "2026-05-06T10:11:12+00:00"
+        assert thread.comments[1].url == "https://github.example/review/102"
+
+    @pytest.mark.unit
+    async def test_paginates_review_thread_comment_history(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "T_paginated",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/x.py",
+                        "line": 7,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 201,
+                                    "bodyText": "first page comment",
+                                    "author": {"login": "reviewer-a"},
+                                    "createdAt": "2026-05-06T12:00:00Z",
+                                    "url": "https://github.example/review/201",
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                        },
+                    }
+                ],
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "node": {
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "databaseId": 202,
+                                        "bodyText": "second page comment",
+                                        "author": {"login": "reviewer-b"},
+                                        "createdAt": "2026-05-06T12:01:00Z",
+                                        "url": "https://github.example/review/202",
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.body for c in status.unresolved_inline_threads[0].comments] == [
+            "first page comment",
+            "second page comment",
+        ]
+        assert len(fake.calls) == 2
+        assert "threadId=T_paginated" in fake.calls[1].args
+        assert "cursor=cursor-1" in fake.calls[1].args
+
+    @pytest.mark.unit
+    async def test_skips_sparse_review_thread_nodes_without_id(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/missing.py",
+                        "line": 1,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 199,
+                                    "bodyText": "malformed thread from GitHub",
+                                    "author": {"login": "reviewer"},
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    },
+                    {
+                        "id": "T_valid",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/valid.py",
+                        "line": 2,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 200,
+                                    "bodyText": "valid thread",
+                                    "author": {"login": "reviewer"},
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    },
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [thread.thread_id for thread in status.unresolved_inline_threads] == ["T_valid"]
+        assert status.unresolved_inline_threads[0].body_excerpt == "valid thread"
+
+    @pytest.mark.unit
+    async def test_paginates_review_and_issue_comment_connections(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 301,
+                        "body": "first review",
+                        "state": "COMMENTED",
+                        "author": {"login": "reviewer-a"},
+                    }
+                ],
+                reviews_has_next_page=True,
+                reviews_end_cursor="reviews-1",
+                comments=[
+                    {
+                        "databaseId": 401,
+                        "body": "first issue comment",
+                        "isMinimized": False,
+                        "author": {"login": "reviewer-c"},
+                    }
+                ],
+                comments_has_next_page=True,
+                comments_end_cursor="comments-1",
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviews": {
+                                    "nodes": [
+                                        {
+                                            "databaseId": 302,
+                                            "body": "second review",
+                                            "state": "COMMENTED",
+                                            "author": {"login": "reviewer-b"},
+                                        }
+                                    ],
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "comments": {
+                                    "nodes": [
+                                        {
+                                            "databaseId": 402,
+                                            "body": "second issue comment",
+                                            "isMinimized": False,
+                                            "author": {"login": "reviewer-d"},
+                                        }
+                                    ],
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == [
+            "301",
+            "302",
+            "issue:401",
+            "issue:402",
+        ]
+        assert "cursor=reviews-1" in fake.calls[1].args
+        assert "cursor=comments-1" in fake.calls[2].args
+
+    @pytest.mark.unit
+    async def test_preserves_review_and_issue_comment_metadata_without_bot_semantic_filtering(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 7801,
+                        "body": "I have no feedback to provide.",
+                        "state": "COMMENTED",
+                        "author": {"login": "gemini-code-assist[bot]"},
+                        "submittedAt": "2026-05-06T11:00:00Z",
+                        "url": "https://github.example/review/7801",
+                    }
+                ],
+                comments=[
+                    {
+                        "databaseId": 7802,
+                        "body": "Finishing touches and review summary.",
+                        "isMinimized": False,
+                        "author": {"login": "coderabbitai"},
+                        "createdAt": "2026-05-06T11:05:00Z",
+                        "url": "https://github.example/comment/7802",
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == [
+            "7801",
+            "issue:7802",
+        ]
+        review, issue = status.unresolved_review_comments
+        assert review.body == "I have no feedback to provide."
+        assert review.source_kind == "review"
+        assert review.state == "COMMENTED"
+        assert review.url == "https://github.example/review/7801"
+        assert review.created_at is not None
+        assert review.created_at.isoformat() == "2026-05-06T11:00:00+00:00"
+        assert issue.body == "Finishing touches and review summary."
+        assert issue.source_kind == "issue"
+        assert issue.blocks_merge is False
+        assert issue.url == "https://github.example/comment/7802"
+        assert issue.created_at is not None
+        assert issue.created_at.isoformat() == "2026-05-06T11:05:00+00:00"
 
     @pytest.mark.unit
     async def test_parses_check_timing_metadata_from_rollup_contexts(self) -> None:
@@ -718,7 +1065,7 @@ class TestFetchPrStatus:
         assert check.completed_at.isoformat() == "2026-04-26T12:34:56+00:00"
 
     @pytest.mark.unit
-    async def test_ignores_non_actionable_review_disabled_issue_comment(self) -> None:
+    async def test_routes_review_disabled_issue_comment_to_agent_feedback(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -743,10 +1090,12 @@ class TestFetchPrStatus:
         status = await client.fetch_pr_status(
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
-        assert status.unresolved_review_comments == ()
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
+        assert "Auto reviews are disabled" in status.unresolved_review_comments[0].body_excerpt
+        assert status.unresolved_review_comments[0].blocks_merge is False
 
     @pytest.mark.unit
-    async def test_parses_actionable_trigger_review_issue_comment_as_blocking(self) -> None:
+    async def test_parses_trigger_review_issue_comment_as_agent_feedback(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -775,10 +1124,10 @@ class TestFetchPrStatus:
         assert c.comment_id == "issue:77"
         assert c.author == "coderabbitai"
         assert "Review skipped" in c.body_excerpt
-        assert c.blocks_merge is True
+        assert c.blocks_merge is False
 
     @pytest.mark.unit
-    async def test_ignores_non_blocking_bot_issue_comments(self) -> None:
+    async def test_routes_bot_issue_summary_to_agent_feedback(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -797,7 +1146,8 @@ class TestFetchPrStatus:
         status = await client.fetch_pr_status(
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
-        assert status.unresolved_review_comments == ()
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:78"]
+        assert "Finishing touches" in status.unresolved_review_comments[0].body_excerpt
 
     @pytest.mark.unit
     async def test_parses_actionable_codex_issue_comment_as_review_comment(self) -> None:
@@ -896,7 +1246,8 @@ class TestFetchPrStatus:
         assert "Keep tier-1 deferred coverage stale" in (
             status.unresolved_inline_threads[0].body_excerpt
         )
-        assert status.unresolved_review_comments == ()
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["4236551690"]
+        assert "Codex Review" in status.unresolved_review_comments[0].body_excerpt
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -911,7 +1262,7 @@ class TestFetchPrStatus:
             ),
         ],
     )
-    async def test_ignores_non_actionable_bot_review_summaries(self, body: str) -> None:
+    async def test_routes_bot_review_summaries_to_agent_feedback(self, body: str) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -930,10 +1281,11 @@ class TestFetchPrStatus:
         status = await client.fetch_pr_status(
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
-        assert status.unresolved_review_comments == ()
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["7801"]
+        assert status.unresolved_review_comments[0].body == body
 
     @pytest.mark.unit
-    async def test_ignores_codex_review_envelope_when_inline_thread_is_actionable(
+    async def test_codex_review_envelope_is_preserved_alongside_actionable_thread(
         self,
     ) -> None:
         fake = FakeCommandRunner()
@@ -990,7 +1342,7 @@ class TestFetchPrStatus:
         )
 
         assert [t.thread_id for t in status.unresolved_inline_threads] == ["PRRT_kwDOSJAM6s5_H5DV"]
-        assert status.unresolved_review_comments == ()
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["4215124378"]
 
     @pytest.mark.unit
     async def test_keeps_actionable_bot_review_body(self) -> None:

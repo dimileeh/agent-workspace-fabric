@@ -392,7 +392,7 @@ class TestMonitorActionLogging:
             assert ws.status == WorkspaceStatus.completed.value
 
     @pytest.mark.unit
-    async def test_policy_blocker_waits_alive_and_addresses_later_comments(
+    async def test_bot_issue_feedback_stays_alive_and_addresses_later_comments(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -415,12 +415,18 @@ class TestMonitorActionLogging:
             author="gemini-code-assist",
             body="new review feedback after AWF notified human",
         )
-        # Poll 1: only a non-code policy blocker exists, so AWF notifies.
+        # Poll 1: a review-bot issue comment is routed to the agent instead
+        # of being semantically classified by AWF.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
-        cmd.queue_result(returncode=0)  # gh pr comment
-        # Poll 2: actionable comments arrive after the notification.
+        adapter.queue(stdout="FALSE POSITIVE: trigger-review status only")
+        cmd.queue_result(
+            returncode=0,
+            stdout=pr_payload(comments=[blocking_comment]),
+        )  # settle fetch
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
+        # Poll 2: later actionable comments are still handled.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(
@@ -428,7 +434,7 @@ class TestMonitorActionLogging:
             stdout=pr_payload(comments=[blocking_comment], threads=[late_thread]),
         )
         adapter.queue(stdout="fixed")
-        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
         cmd.queue_result(returncode=0)  # resolveReviewThread
@@ -452,12 +458,13 @@ class TestMonitorActionLogging:
             )
 
         actions = [e["action"] for e in _action_entries(captured)]
-        assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
-        assert len(adapter.calls) == 1
-        assert "new review feedback after AWF notified human" in adapter.calls[0]
+        assert actions == ["AddressComments", "AddressComments", "ShortCircuitCompleted"]
+        assert len(adapter.calls) == 2
+        assert "Trigger review before merging" in adapter.calls[0]
+        assert "new review feedback after AWF notified human" in adapter.calls[1]
 
     @pytest.mark.unit
-    async def test_non_actionable_review_disabled_comment_waits_for_initial_grace(
+    async def test_review_disabled_comment_routes_to_agent_before_merge(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -478,8 +485,11 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[disabled_review_comment]))
-        # Keep the test finite by simulating an external merge while AWF waits
-        # out the initial review grace window.
+        adapter.queue(stdout="FALSE POSITIVE: disabled-review status only")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
+        # Keep the test finite by simulating an external merge after AWF
+        # packages the comment for the agent.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
@@ -501,10 +511,12 @@ class TestMonitorActionLogging:
             )
 
         actions = [e["action"] for e in _action_entries(captured)]
-        assert actions == ["Merge", "ShortCircuitCompleted"]
-        assert sleep_fn.calls == [60]
+        assert actions == ["AddressComments", "ShortCircuitCompleted"]
+        assert sleep_fn.calls == [30]
         assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
         assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+        assert len(adapter.calls) == 1
+        assert "Auto reviews are disabled" in adapter.calls[0]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
@@ -808,13 +820,16 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload())
-        # Final quiet-window recheck sees late bot/checklist feedback.
+        # Final quiet-window recheck sees late bot feedback, which is
+        # routed to the agent instead of human notification.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
-        cmd.queue_result(returncode=0)  # gh pr comment from NotifyHuman
-        # The monitor stays alive after NotifyHuman; finish by observing an
-        # external merge on the next poll.
+        adapter.queue(stdout="FALSE POSITIVE: trigger-review status only")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
+        # The monitor stays alive after the review-comment fix cycle; finish
+        # by observing an external merge on the next poll.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
@@ -835,21 +850,16 @@ class TestMonitorActionLogging:
                 compose_file=tmp_path / "compose.yml",
             )
 
-        assert sleep_fn.calls == [90, 60]
+        assert sleep_fn.calls == [90, 30]
         assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
         actions = [e["action"] for e in _action_entries(captured)]
-        assert actions == ["Merge", "NotifyHuman", "ShortCircuitCompleted"]
-        comment_calls = [
-            call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]
-        ]
-        assert len(comment_calls) == 1
-        body = comment_calls[0][comment_calls[0].index("--body") + 1]
-        assert "needs human attention" in body
-        assert "review was skipped" in body
-        assert "All 5 AWF gates are green" not in body
+        assert actions == ["Merge", "AddressComments", "ShortCircuitCompleted"]
+        assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+        assert len(adapter.calls) == 1
+        assert "Trigger review before merging" in adapter.calls[0]
         assert any(
             r.get("event") == "monitor.pre_merge_recheck_changed_action"
-            and r.get("fresh_action") == "NotifyHuman"
+            and r.get("fresh_action") == "AddressComments"
             for r in captured
         )
 

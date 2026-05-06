@@ -89,11 +89,29 @@ DEFAULT_NON_CHECK_REVIEWER_LOGINS: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class ReviewThreadComment:
+    """One comment inside an inline review thread.
+
+    PR review threads can contain the original bot finding plus follow-up
+    replies from humans, bots, or AWF itself. The monitor sends this full
+    conversation to the coding agent as evidence instead of deciding locally
+    which reply is semantically important.
+    """
+
+    comment_id: str | None
+    body: str
+    author: str | None = None
+    created_at: datetime | None = None
+    url: str | None = None
+
+
+@dataclass(frozen=True)
 class ReviewThread:
     """An inline (file + line) review thread.
 
     The GraphQL id is the node ID used with ``resolveReviewThread``.
-    ``body_excerpt`` is short (~400 chars) so prompts stay small.
+    ``body_excerpt`` is short (~400 chars) for legacy call sites; prompts
+    prefer ``comments`` when GitHub supplied the full thread history.
     """
 
     thread_id: str
@@ -102,6 +120,9 @@ class ReviewThread:
     body_excerpt: str
     author: str | None = None
     is_resolved: bool = False
+    comments: tuple[ReviewThreadComment, ...] = ()
+    url: str | None = None
+    is_outdated: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +141,11 @@ class ReviewComment:
     """True for policy/checklist comments that the coding CLI cannot
     resolve by editing code, for example a bot saying review was skipped
     and exposing an unchecked "trigger review" task."""
+    body: str | None = None
+    url: str | None = None
+    created_at: datetime | None = None
+    state: str | None = None
+    source_kind: str = "review"
 
 
 @dataclass(frozen=True)

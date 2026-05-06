@@ -698,7 +698,7 @@ async def test_manual_merge_unresolved_comments_route_to_address_comments_before
 
 
 @pytest.mark.unit
-async def test_manual_merge_policy_blocker_notifies_and_later_comments_still_addressable(
+async def test_manual_merge_bot_issue_feedback_and_later_comments_still_addressable(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
@@ -716,7 +716,9 @@ async def test_manual_merge_policy_blocker_notifies_and_later_comments_still_add
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(comments=[policy_comment]))
-    cmd.queue_result(returncode=0)  # gh pr comment
+    adapter.queue(stdout="FALSE POSITIVE: trigger-review checklist status only")
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[late_thread]))
@@ -745,13 +747,13 @@ async def test_manual_merge_policy_blocker_notifies_and_later_comments_still_add
         )
 
     actions = [entry["action"] for entry in _action_entries(captured)]
-    assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
-    assert len(_calls(cmd, _is_pr_comment)) == 1
-    assert adapter.workspace_ids == [ws_id]
+    assert actions == ["AddressComments", "AddressComments", "ShortCircuitCompleted"]
+    assert len(_calls(cmd, _is_pr_comment)) == 0
+    assert adapter.workspace_ids == [ws_id, ws_id]
     assert _has_call(cmd, _is_git_push)
     assert _has_call(cmd, _is_resolve_thread)
     assert not _has_call(cmd, _is_pr_merge)
-    assert sleep_fn.calls == [60, 30]
+    assert sleep_fn.calls == [30, 30]
 
 
 @pytest.mark.unit
