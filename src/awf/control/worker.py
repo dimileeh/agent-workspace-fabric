@@ -95,6 +95,8 @@ _ACTIVE_EXECUTION_PRESERVED_CLAIM_CLEARED_REASON_CODE = (
 _ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE = (
     "NO_EXECUTION_CLAIM_DURING_ACTIVE_EXECUTION_PRESERVATION"
 )
+_OPERATOR_REFRESH_EVENT_TYPE = "workspace.refresh_requested"
+_OPERATOR_REFRESH_REASON_CODE = "OPERATOR_REFRESH"
 _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
@@ -974,6 +976,22 @@ class ControlWorker:
         status_started_at = (await session.execute(stmt)).scalar_one_or_none()
         if status_started_at is not None:
             floors.append(_utc_datetime(status_started_at))
+
+        # An operator refresh is an explicit recovery request for preserved runtime.
+        # Preservation evidence older than that request must not keep scans skipped.
+        stmt = (
+            select(WorkspaceEvent.occurred_at)
+            .where(
+                WorkspaceEvent.workspace_id == workspace.id,
+                WorkspaceEvent.event_type == _OPERATOR_REFRESH_EVENT_TYPE,
+                WorkspaceEvent.reason_code == _OPERATOR_REFRESH_REASON_CODE,
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        refresh_requested_at = (await session.execute(stmt)).scalar_one_or_none()
+        if refresh_requested_at is not None:
+            floors.append(_utc_datetime(refresh_requested_at))
 
         return max(floors) if floors else None
 
