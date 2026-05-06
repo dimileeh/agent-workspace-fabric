@@ -12,6 +12,8 @@ from awf.db.enums import AgentRuntime
 from awf.db.models import Workspace
 from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.profiles.models import DockerMode, ProfileDocker, ProfileResolution, WorkspaceProfile
+from awf.service import workspaces
 from awf.service.workspaces import WorkspaceCreateIdempotencyConflictError, WorkspaceService
 from tests.postgres import postgres_test_engine
 
@@ -194,3 +196,46 @@ async def test_create_v2_replay_ignores_absent_disk_request(
     )
 
     assert replayed.id == created.id
+
+
+@pytest.mark.unit
+async def test_create_v2_named_profile_replay_preserves_stored_dind_mode(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_mode = DockerMode.dind
+
+    def resolve_mutable_profile(**_: object) -> ProfileResolution:
+        return ProfileResolution(
+            profile=WorkspaceProfile(
+                name="mutable-docker-mode",
+                source=f"test:{profile_mode.value}",
+                docker=ProfileDocker(mode=profile_mode),
+            ),
+            network_posture="restricted",
+            reason="test profile fixture",
+            candidates_considered=["registry:mutable-docker-mode"],
+        )
+
+    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_mutable_profile)
+    data = _v2_request().model_dump(mode="python")
+    data["workspace"] = {"profile_ref": "mutable-docker-mode", "profile": None}
+    request = WorkspaceCreateV2Request.model_validate(data)
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-named-profile-dind-replay",
+    )
+    profile_mode = DockerMode.none
+
+    replayed = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-named-profile-dind-replay",
+    )
+
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(created.id)
+
+    assert replayed.id == created.id
+    assert reservations[0].dind_slots == 1

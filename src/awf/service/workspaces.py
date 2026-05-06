@@ -1111,13 +1111,13 @@ def _stored_resource_reservation_matches(
     if reservation is None:
         return True
     requested_values = _requested_resource_reservation_values(payload)
-    requested_dind_slots = _requested_resource_dind_slots(payload)
+    stored_dind_slots = _stored_resource_dind_slots(existing, payload)
     stored_values = _stored_resource_reservation_request_values(existing)
     if stored_values is not None:
         return (
             stored_values == requested_values
             and _resource_reservation_matches_request_values(reservation, requested_values)
-            and reservation.dind_slots == requested_dind_slots
+            and reservation.dind_slots == stored_dind_slots
         )
 
     plan = resource_reservation_plan(payload, settings=settings or get_settings())
@@ -1132,7 +1132,7 @@ def _stored_resource_reservation_matches(
         return True
     return (
         _resource_reservation_matches_request_values(reservation, requested_values)
-        and reservation.dind_slots == requested_dind_slots
+        and reservation.dind_slots == stored_dind_slots
     )
 
 
@@ -1166,6 +1166,15 @@ def _requested_resource_reservation_values(
 def _requested_resource_dind_slots(payload: WorkspaceCreateV2Request) -> int:
     _, resolved_profile = v2_profile_snapshots(payload)
     return 1 if _dind_mode_from_profile_snapshot(resolved_profile) == "dind" else 0
+
+
+def _stored_resource_dind_slots(
+    existing: Workspace,
+    payload: WorkspaceCreateV2Request,
+) -> int:
+    if isinstance(existing.resolved_profile, Mapping):
+        return 1 if _dind_mode_from_profile_snapshot(existing.resolved_profile) == "dind" else 0
+    return _requested_resource_dind_slots(payload)
 
 
 def _stored_resource_reservation_request_values(
