@@ -93,7 +93,16 @@ class PullRequestCreator:
         title: str,
         body: str,
         existing_pr_url: str | None = None,
+        remote_branch_name: str | None = None,
     ) -> PullRequestResult:
+        push_target_branch = (
+            remote_branch_name if existing_pr_url and remote_branch_name else branch_name
+        )
+        push_ref = (
+            f"HEAD:refs/heads/{push_target_branch}"
+            if existing_pr_url and remote_branch_name
+            else branch_name
+        )
         # Step 0: capture the worktree's view of the branch state so we
         # can diagnose post-validation push failures. T39 (ws_eb8c2bd5)
         # hit ``gh pr create: No commits between development and
@@ -105,7 +114,7 @@ class PullRequestCreator:
         # logs answer all three questions:
         head_sha = await self._log_pre_push_diagnostics(
             worktree_path=worktree_path,
-            branch_name=branch_name,
+            branch_name=push_target_branch,
             base_branch=base_branch,
         )
 
@@ -119,7 +128,7 @@ class PullRequestCreator:
                 "push",
                 "-u",
                 "origin",
-                branch_name,
+                push_ref,
             ],
         )
         # Log the verbatim push output BEFORE the ok check. If the push
@@ -132,7 +141,7 @@ class PullRequestCreator:
         # and embedded credentials must not hit log storage.
         _log.info(
             "pr_creator.push_output",
-            branch=branch_name,
+            branch=push_target_branch,
             returncode=push.returncode,
             stdout=_redact_credentials(push.stdout.strip())[:500],
             stderr=_redact_credentials(push.stderr.strip())[:500],
@@ -146,8 +155,12 @@ class PullRequestCreator:
             )
 
         if existing_pr_url:
-            _log.info("pr.reused", branch=branch_name, url=existing_pr_url)
-            return PullRequestResult(url=existing_pr_url, branch=branch_name, head_sha=head_sha)
+            _log.info("pr.reused", branch=push_target_branch, url=existing_pr_url)
+            return PullRequestResult(
+                url=existing_pr_url,
+                branch=push_target_branch,
+                head_sha=head_sha,
+            )
 
         # Step 2: open the PR. gh reads auth from ~/.config/gh by default.
         pr = await self._runner.run(

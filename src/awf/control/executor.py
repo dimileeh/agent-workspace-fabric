@@ -2502,6 +2502,7 @@ class WorkspaceExecutor:
         pr_title = ws.task_title
         pr_body = _build_pr_body(ws, defaults=defaults)
         push_branch_name = ws.branch_name or f"awf/{workspace_id}"
+        existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None
 
         try:
             pr = await self._pr_creator.push_and_open(
@@ -2511,6 +2512,7 @@ class WorkspaceExecutor:
                 title=pr_title,
                 body=pr_body,
                 existing_pr_url=ws.pr_url,
+                remote_branch_name=existing_pr_remote_branch,
             )
         except PullRequestError as exc:
             _log.error(

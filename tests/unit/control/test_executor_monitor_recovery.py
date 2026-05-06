@@ -1198,6 +1198,79 @@ async def test_validate_only_recovery_pushes_existing_pr_after_fix_commit(
 
 
 @pytest.mark.unit
+async def test_sync_feature_pr_validate_only_recovery_pushes_adopted_pr_head(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Adopted PR recovery must update the real PR head, not the local
+    feature-sync branch used only inside the workspace."""
+    monitor_calls: list[str] = []
+
+    class _FakeMonitor:
+        async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+            del compose_project, compose_file
+            monitor_calls.append(workspace_id)
+
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        max_fix_passes=1,
+        pr_monitor_factory=lambda *_args, **_kwargs: _FakeMonitor(),
+    )
+    source_head = "d" * 40
+    fixed_head = "e" * 40
+    ws_id = await _seed_sync_feature_pr_ready_workspace_with_recovery(
+        factory,
+        pr_number=206,
+        source_head_sha=source_head,
+    )
+
+    _queue_validation_head(fake, head=source_head)
+    fake.queue_result(returncode=1, stderr="pytest: failed")  # initial validation fails
+    fake.queue_result(returncode=0)  # adapter.run (fix pass)
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="tests/integration/test_alembic_postgres.py\n")
+    fake.queue_result(returncode=0)  # git commit
+    _queue_validation_head(fake, head=fixed_head)
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation passes after fix
+    _queue_existing_pr_push(fake, head=fixed_head)
+
+    await executor.execute(ws_id)
+
+    push_calls = [
+        call for call in _all_push_and_pr_create_calls(fake) if call[0] == "git" and "push" in call
+    ]
+    assert len(push_calls) == 1
+    assert "HEAD:refs/heads/feature/existing-pr" in push_calls[0]
+    assert f"feature-sync/{ws_id}" not in push_calls[0]
+    assert not any(call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake))
+    assert monitor_calls == [ws_id]
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.monitoring_pr.value
+    assert ws.branch_name == f"feature-sync/{ws_id}"
+    assert ws.remote_push_branch == "feature/existing-pr"
+    assert ws.monitor_last_commit_sha == fixed_head
+    assert runs[-1].workspace_head_sha == fixed_head
+    assert runs[-1].target_head_sha == fixed_head
+    assert any(
+        event.event_type == "workspace.audit.git_push"
+        and event.reason_code == "PR_UPDATED"
+        and event.payload
+        and event.payload["remote_branch"] == "feature/existing-pr"
+        and event.payload["branch_name"] == f"feature-sync/{ws_id}"
+        for event in events
+    )
+
+
+@pytest.mark.unit
 async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
