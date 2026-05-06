@@ -37,9 +37,15 @@ test.describe("Dashboard Workspace Inspector", () => {
       llm_usage: null,
       recovery: null,
     };
+    const otherWorkspace = {
+      ...mockWorkspace,
+      workspace_id: "ws_other456",
+      title: "Other Workspace",
+      status: "completed",
+    };
 
     await page.route("/api/awf/workspaces/overview*", async (route) => {
-      await route.fulfill({ json: { items: [mockWorkspace], has_more: false } });
+      await route.fulfill({ json: { items: [mockWorkspace, otherWorkspace], has_more: false } });
     });
 
     await page.route("/api/awf/workspaces/ws_mock123", async (route) => {
@@ -58,8 +64,37 @@ test.describe("Dashboard Workspace Inspector", () => {
       await route.fulfill({ json: { items: [], has_more: false } });
     });
 
+    await page.route("/api/awf/workspaces/ws_other456/logs", async (route) => {
+      await route.fulfill({ json: { items: [workspaceLogStream("ws_other456")], has_more: false } });
+    });
+
     await page.route("/api/awf/workspaces/ws_mock123/logs", async (route) => {
-      await route.fulfill({ json: { items: [], has_more: false } });
+      await route.fulfill({ json: { items: [workspaceLogStream("ws_mock123")], has_more: false } });
+    });
+
+    await page.route("/api/awf/workspaces/*/logs/agent.stdout*", async (route) => {
+      const workspaceId = route.request().url().includes("ws_other456") ? "ws_other456" : "ws_mock123";
+      await route.fulfill({
+        json: {
+          stream_id: "agent.stdout",
+          offset: 0,
+          next_offset: 24,
+          eof: true,
+          data: `${workspaceId} agent output\n`,
+        },
+      });
+    });
+
+    await page.route("/api/awf/workspaces/*/stream*", async (route) => {
+      const workspaceId = route.request().url().includes("ws_other456") ? "ws_other456" : "ws_mock123";
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
     });
   });
 
@@ -109,6 +144,29 @@ test.describe("Dashboard Workspace Inspector", () => {
     // Wait for inspector to be visible (translate-x-0)
     await expect(page.locator(".fixed.inset-y-0.right-0").first()).toHaveClass(/translate-x-0/);
     await expect(page.locator("h2", { hasText: "Mock Workspace" }).first()).toBeVisible();
+  });
+
+  test("Inspector fullscreen logs always use the currently inspected workspace", async ({ page }) => {
+    await page.goto("/");
+
+    await page
+      .getByTestId("workspace-card-ws_other456")
+      .getByRole("button", { name: "Logs" })
+      .click();
+    await expect(page.getByRole("heading", { name: "Logs" }).first()).toBeVisible();
+    await expect(page.locator(".fixed.inset-0.z-50").getByRole("heading", { name: "Other Workspace" })).toBeVisible();
+    await page.locator(".fixed.inset-0.z-50").getByRole("button", { name: "Close" }).click();
+    await expect(page.locator(".fixed.inset-0.z-50")).not.toBeVisible();
+
+    await page.getByTestId("workspace-card-ws_mock123").getByText("Mock Workspace").click();
+    await expect(page.locator("h2", { hasText: "Mock Workspace" }).first()).toBeVisible();
+    await expect(page.getByText("ws_mock123 agent output").first()).toBeVisible();
+
+    await page.getByRole("button", { name: "Fullscreen" }).click();
+
+    await expect(page.getByRole("heading", { name: "Logs" }).first()).toBeVisible();
+    await expect(page.locator(".fixed.inset-0.z-50").getByRole("heading", { name: "Mock Workspace" })).toBeVisible();
+    await expect(page.locator(".fixed.inset-0.z-50").getByRole("heading", { name: "Other Workspace" })).not.toBeVisible();
   });
 
   test("Responsive layout verification", async ({ page }) => {
@@ -169,3 +227,17 @@ test.describe("Dashboard Workspace Inspector", () => {
     await expect(inspectorDrawer).toHaveClass(/w-full/);
   });
 });
+
+function workspaceLogStream(workspaceId: string) {
+  return {
+    stream_id: "agent.stdout",
+    source: "agent",
+    name: `${workspaceId} stdout`,
+    kind: "stdout",
+    path: `/tmp/${workspaceId}.log`,
+    byte_count: 24,
+    line_count: 1,
+    opened_at: new Date().toISOString(),
+    closed_at: null,
+  };
+}

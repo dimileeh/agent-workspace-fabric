@@ -948,6 +948,13 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
     },
     [selectedId, setSelectedId],
   );
+  const openCurrentWorkspaceLogs = useCallback(() => {
+    if (!selectedId) {
+      return;
+    }
+    setFullscreenWorkspaceIds([selectedId]);
+    setLogsFullscreen(true);
+  }, [selectedId]);
   const openSelectedWorkspaceLogs = useCallback(() => {
     if (workspaceLogSelection.length === 0) {
       return;
@@ -1115,7 +1122,7 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
                   onSelectAll={() => setSelectedStreams(detail.streams.map((stream) => stream.stream_id))}
                   onClear={() => setSelectedStreams([])}
                   onReload={reloadSelectedLogs}
-                  onOpenFullscreen={() => setLogsFullscreen(true)}
+                  onOpenFullscreen={openCurrentWorkspaceLogs}
                   onToggleSortDirection={() =>
                     setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
                   }
