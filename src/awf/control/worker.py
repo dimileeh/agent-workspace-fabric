@@ -916,9 +916,20 @@ class ControlWorker:
         candidate: _ActiveExecutionCandidate,
     ) -> bool:
         async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+                include_operator_refresh=False,
+            )
             latest_refresh = await self._latest_operator_refresh_requested_at(
                 session,
                 candidate.workspace_id,
+                event_floor=event_floor,
             )
             if latest_refresh is None:
                 return False
@@ -926,6 +937,7 @@ class ControlWorker:
                 session,
                 candidate.workspace_id,
                 candidate.status,
+                event_floor=event_floor,
             )
             if latest_preservation is None:
                 return True
@@ -982,6 +994,8 @@ class ControlWorker:
         session: AsyncSession,
         workspace_id: str,
         status: WorkspaceStatus,
+        *,
+        event_floor: datetime | None = None,
     ) -> datetime | None:
         stmt = (
             select(WorkspaceEvent.occurred_at)
@@ -994,12 +1008,16 @@ class ControlWorker:
             .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
             .limit(1)
         )
+        if event_floor is not None:
+            stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
         return (await session.execute(stmt)).scalar_one_or_none()
 
     async def _latest_operator_refresh_requested_at(
         self,
         session: AsyncSession,
         workspace_id: str,
+        *,
+        event_floor: datetime | None = None,
     ) -> datetime | None:
         stmt = (
             select(WorkspaceEvent.occurred_at)
@@ -1011,6 +1029,8 @@ class ControlWorker:
             .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
             .limit(1)
         )
+        if event_floor is not None:
+            stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
         return (await session.execute(stmt)).scalar_one_or_none()
 
     async def _active_execution_preservation_event_floor(
@@ -1018,6 +1038,8 @@ class ControlWorker:
         session: AsyncSession,
         workspace: Workspace,
         status: WorkspaceStatus,
+        *,
+        include_operator_refresh: bool = True,
     ) -> datetime | None:
         floors: list[datetime] = []
         if workspace.execution_claim_expires_at is not None:
@@ -1039,12 +1061,13 @@ class ControlWorker:
 
         # An operator refresh is an explicit recovery request for preserved runtime.
         # Preservation evidence older than that request must not keep scans skipped.
-        refresh_requested_at = await self._latest_operator_refresh_requested_at(
-            session,
-            workspace.id,
-        )
-        if refresh_requested_at is not None:
-            floors.append(_utc_datetime(refresh_requested_at))
+        if include_operator_refresh:
+            refresh_requested_at = await self._latest_operator_refresh_requested_at(
+                session,
+                workspace.id,
+            )
+            if refresh_requested_at is not None:
+                floors.append(_utc_datetime(refresh_requested_at))
 
         return max(floors) if floors else None
 

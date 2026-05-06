@@ -3689,6 +3689,92 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert inspector.calls == [compose_project]
 
     @pytest.mark.unit
+    async def test_operator_refresh_from_old_cycle_does_not_block_fresh_preservation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserve_after_old_refresh"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserve-after-old-refresh",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        old_preservation_time = datetime.now(UTC) - timedelta(days=1)
+        old_refresh_time = old_preservation_time + timedelta(minutes=5)
+        new_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            old_preserved = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            old_preserved.occurred_at = old_preservation_time
+            old_refresh = await repo.add_event(
+                ws,
+                event_type="workspace.refresh_requested",
+                reason_code="OPERATOR_REFRESH",
+                payload={"reason": "operator recovery"},
+            )
+            old_refresh.occurred_at = old_refresh_time
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="TEST_ADVANCE")
+            await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="TEST_ADVANCE")
+            await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="TEST_REQUEUE")
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="TEST_REEXECUTE")
+            ws.execution_claimed_by = "fresh-dead-worker"
+            ws.execution_claim_expires_at = new_claim_expires_at
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: _live_agent_snapshot(container_id="agent-fresh-after-refresh")}
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+        assert len(preserved_events) == 2
+        assert preserved_events[0].occurred_at > old_refresh_time
+        assert preserved_events[0].payload is not None
+        assert preserved_events[0].payload["workspace_status"] == WorkspaceStatus.running.value
+        assert stale_events == []
+        assert len(operations) == 1
+        assert operations[0].payload["runtime"]["services"][0]["container_id"] == (
+            "agent-fresh-after-refresh"
+        )
+        assert inspector.calls == [compose_project]
+
+    @pytest.mark.unit
     async def test_restart_recovery_serializes_concurrent_preservation_recording(
         self,
         session_factory: async_sessionmaker[AsyncSession],
