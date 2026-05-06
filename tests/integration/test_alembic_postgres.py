@@ -90,30 +90,33 @@ def test_postgres_database_url_reads_repo_dotenv_database_url(
     )
 
 
-def _asyncpg_url(url: URL) -> str:
-    return url.set(drivername="postgresql").render_as_string(hide_password=False)
-
-
 def _quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
+def _asyncpg_url(url: URL) -> str:
+    query = dict(url.query)
+    query.pop("awf_search_path", None)
+    query.pop("awf_null_pool", None)
+    return url.set(drivername="postgresql", query=query).render_as_string(hide_password=False)
+
+
 def _schema_database_url(url: URL, schema_name: str) -> URL:
     query = dict(url.query)
-    query["awf_search_path"] = schema_name
+    query["awf_search_path"] = _quote_identifier(schema_name)
     return url.set(query=query)
 
 
-async def _create_schema(database_url: URL, schema_name: str) -> None:
-    conn = await asyncpg.connect(dsn=_asyncpg_url(database_url))
+async def _create_schema(url: URL, schema_name: str) -> None:
+    conn = await asyncpg.connect(dsn=_asyncpg_url(url))
     try:
         await conn.execute(f"CREATE SCHEMA {_quote_identifier(schema_name)}")
     finally:
         await conn.close()
 
 
-async def _drop_schema(database_url: URL, schema_name: str) -> None:
-    conn = await asyncpg.connect(dsn=_asyncpg_url(database_url))
+async def _drop_schema(url: URL, schema_name: str) -> None:
+    conn = await asyncpg.connect(dsn=_asyncpg_url(url))
     try:
         await conn.execute(f"DROP SCHEMA IF EXISTS {_quote_identifier(schema_name)} CASCADE")
     finally:
