@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
 from awf.db.enums import AgentRuntime
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.workspaces import WorkspaceCreateIdempotencyConflictError, WorkspaceService
 from tests.postgres import postgres_test_engine
@@ -171,3 +171,26 @@ async def test_create_v2_replay_conflicts_when_resources_change(
             ),
             idempotency_key="service-create-v2-resources",
         )
+
+
+@pytest.mark.unit
+async def test_create_v2_replay_ignores_absent_disk_request(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        _v2_request(),
+        idempotency_key="service-create-v2-absent-disk",
+    )
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(created.id)
+        reservations[0].disk_mb = 2048
+        await session.commit()
+
+    replayed = await service.create_v2(
+        _v2_request(),
+        idempotency_key="service-create-v2-absent-disk",
+    )
+
+    assert replayed.id == created.id

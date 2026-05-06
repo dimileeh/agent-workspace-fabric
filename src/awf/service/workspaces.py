@@ -1206,7 +1206,8 @@ def _resource_reservation_matches_request_values(
         value = requested_values.get(field)
         if value is not None and getattr(reservation, field) != value:
             return False
-    return reservation.disk_mb == requested_values.get("disk_mb")
+    requested_disk_mb = requested_values.get("disk_mb")
+    return requested_disk_mb is None or reservation.disk_mb == requested_disk_mb
 
 
 def _latest_workspace_resource_reservation(existing: Workspace) -> ResourceReservation | None:
