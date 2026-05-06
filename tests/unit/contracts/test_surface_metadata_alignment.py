@@ -77,6 +77,26 @@ def test_rest_route_metadata_matches_registry(capability_name: str) -> None:
 
 
 @pytest.mark.unit
+def test_rest_query_metadata_uses_public_aliases() -> None:
+    routes = rest_routes()
+
+    assert routes[("GET", "/v1/workspaces")].query_fields >= {
+        "status",
+        "agent",
+        "repo_url",
+        "limit",
+    }
+    assert "workspace_status" not in routes[("GET", "/v1/workspaces")].query_fields
+    assert routes[("GET", "/v1/operations")].query_fields >= {
+        "workspace_id",
+        "status",
+        "type",
+        "limit",
+    }
+    assert "operation_type" not in routes[("GET", "/v1/operations")].query_fields
+
+
+@pytest.mark.unit
 def test_cli_surface_presence_is_explicit_per_parity_row() -> None:
     """Rows with CLI commands must register one; CLI-absent rows must register none."""
     rows = {capability.parity_capability for capability in implemented_surface_capabilities()}

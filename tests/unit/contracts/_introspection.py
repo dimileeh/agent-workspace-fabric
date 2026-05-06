@@ -56,7 +56,9 @@ def rest_routes() -> dict[tuple[str, str], RestRouteInfo]:
                 path=route.path,
                 response_model=_model_name(route.response_model),
                 path_fields=frozenset(param.name for param in route.dependant.path_params),
-                query_fields=frozenset(param.name for param in route.dependant.query_params),
+                query_fields=frozenset(
+                    param.alias or param.name for param in route.dependant.query_params
+                ),
                 header_fields=frozenset(param.alias for param in route.dependant.header_params),
                 body_fields=_body_fields(route),
                 dependencies=frozenset(
