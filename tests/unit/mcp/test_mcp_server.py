@@ -439,8 +439,9 @@ class TestToolRegistration:
         assert list_workspaces_props["limit"]["default"] == 50
         assert list_workspaces_props["limit"]["minimum"] == 1
         assert list_workspaces_props["limit"]["maximum"] == 500
-        assert "workspace_status" in list_workspaces_props
-        assert list_workspaces_props["workspace_status"]["default"] is None
+        assert "status" in list_workspaces_props
+        assert list_workspaces_props["status"]["default"] is None
+        assert "workspace_status" not in list_workspaces_props
         assert "agent" in list_workspaces_props
         assert list_workspaces_props["agent"]["default"] is None
         repo_url_schema = _optional_string_schema(list_workspaces_props["repo_url"])
@@ -1598,7 +1599,7 @@ class TestGetAndList:
             mcp,
             "awf_list_workspaces",
             {
-                "workspace_status": "ready",
+                "status": "ready",
                 "agent": "gemini",
                 "repo_url": repo_url,
                 "limit": 10,

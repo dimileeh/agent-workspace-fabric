@@ -593,7 +593,7 @@ _CAPABILITIES += (
         supports_if_match=False,
         rest_response_model="list[WorkspaceResponse]",
         rest_query_fields=frozenset({"status", "agent", "repo_url", "limit"}),
-        mcp_request_fields=frozenset({"workspace_status", "agent", "repo_url", "limit"}),
+        mcp_request_fields=frozenset({"status", "agent", "repo_url", "limit"}),
         cli_options=frozenset({"--status", "--agent", "--repo-url", "--limit"}),
     ),
     ContractCapability(

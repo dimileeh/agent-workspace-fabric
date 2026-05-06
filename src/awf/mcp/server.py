@@ -388,7 +388,7 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_list_workspaces")
     async def awf_list_workspaces(
-        workspace_status: WorkspaceStatus | None = Field(
+        status: WorkspaceStatus | None = Field(
             default=None,
             description="Optional workspace status filter.",
         ),
@@ -406,7 +406,7 @@ def build_mcp_server(
     ) -> list[dict[str, Any]]:
         """List workspaces, newest first."""
         rows = await service.list(
-            workspace_status=workspace_status,
+            workspace_status=status,
             agent=agent,
             repo_url=repo_url,
             limit=limit,
