@@ -468,6 +468,12 @@ def _is_bot_review_thread(thread: ReviewThread) -> bool:
     return all(_is_bot_author(author) for author in authors)
 
 
+def _agent_can_triage_review_comment(comment: ReviewComment) -> bool:
+    if not comment.blocks_merge:
+        return True
+    return comment.source_kind == "issue" and _is_bot_author(comment.author)
+
+
 def sync_base_no_progress_signature(status: PRStatus) -> str:
     """Stable identity for a SyncBase snapshot that made no local progress."""
 
@@ -510,8 +516,10 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
-        Policy/checklist blockers are excluded from this batch because
-        the coding CLI cannot fix them.
+        Policy/checklist blockers stay visible to the merge gate. Known
+        review-bot issue blockers are still routed to the coding agent
+        once so it can record a fix, false-positive, or defer verdict
+        against the current evidence before the merge gate blocks.
     3.  Policy/checklist blockers that cannot be code-fixed →
         NotifyHuman.
     4.  CI FAILURE → ReportCiFailure.
@@ -553,7 +561,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     new_reviews = tuple(
         c
         for c in status.unresolved_review_comments
-        if not c.blocks_merge
+        if _agent_can_triage_review_comment(c)
         and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
     )
 
@@ -593,9 +601,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return SyncBase()
 
     # 2. Unresolved comments, filtered to those we haven't handled yet.
-    # Policy/checklist blockers remain visible to the merge gate, but are
-    # not sent to the coding CLI: no code edit can click a review-bot
-    # "Trigger review" checkbox or change organization review settings.
+    # Policy/checklist blockers remain visible to the merge gate. Known
+    # review-bot issue comments get one agent pass before that gate so the
+    # monitor records whether the agent fixed, rejected, or deferred them.
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 

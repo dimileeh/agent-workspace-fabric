@@ -92,6 +92,7 @@ from awf.runtime.pr_monitor import (
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    _agent_can_triage_review_comment,
     _is_bot_author,
     _is_bot_review_thread,
     _mark_review_thread_addressed,
@@ -3292,7 +3293,8 @@ class PullRequestMonitorRunner:
             new_reviews = [
                 c
                 for c in status.unresolved_review_comments
-                if not c.blocks_merge and _review_comment_needs_attention(state, c)
+                if _agent_can_triage_review_comment(c)
+                and _review_comment_needs_attention(state, c)
             ]
             if not new_threads and not new_reviews:
                 break  # burst settled
