@@ -154,35 +154,39 @@ def test_postgres_test_schema_name_is_scoped_to_current_run(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_stale_postgres_schema_listing_scans_only_current_namespace(
+async def test_stale_postgres_schema_listing_scans_all_test_namespaces(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
     monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "current-run")
     current_namespace = postgres_mod._postgres_test_schema_namespace()
     other_namespace = "1" * 16
+    active_namespace = "2" * 16
     current_schema = f"awf_test_{current_namespace}_{'a' * 32}"
     other_schema = f"awf_test_{other_namespace}_{'b' * 32}"
+    active_schema = f"awf_test_{active_namespace}_{'d' * 32}"
     legacy_unowned_schema = f"awf_test_{'c' * 32}"
     seen_namespaces: list[str] = []
 
     def _is_active(url: str, namespace: str) -> bool:
         assert url == database_url
         seen_namespaces.append(namespace)
-        return False
+        return namespace == active_namespace
 
     monkeypatch.setattr(postgres_mod, "_is_postgres_test_schema_namespace_active", _is_active)
-    engine = _FakeSchemaEngine([other_schema, legacy_unowned_schema, current_schema])
+    engine = _FakeSchemaEngine(
+        [other_schema, legacy_unowned_schema, active_schema, current_schema]
+    )
 
     schemas = await postgres_mod._list_stale_postgres_test_schemas(
         engine,  # type: ignore[arg-type]
         database_url,
     )
 
-    assert schemas == [current_schema]
-    assert seen_namespaces == [current_namespace]
+    assert schemas == sorted([current_schema, other_schema])
+    assert set(seen_namespaces) == {current_namespace, other_namespace, active_namespace}
     assert engine.parameters == [
-        {"pattern": f"awf\\_test\\_{current_namespace}\\_%"},
+        {"pattern": "awf\\_test\\_%"},
     ]
 
 
@@ -220,6 +224,7 @@ async def test_stale_postgres_cleanup_reuses_one_engine_for_all_drops(
     assert engine.begin_count == 2
     assert engine.statements[0].count("information_schema.schemata") == 1
     assert engine.statements[1:] == [
+        f'DROP SCHEMA IF EXISTS "{other_schema}" CASCADE',
         f'DROP SCHEMA IF EXISTS "{first_schema}" CASCADE',
         f'DROP SCHEMA IF EXISTS "{second_schema}" CASCADE',
     ]
