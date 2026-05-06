@@ -746,6 +746,10 @@ coding agent in any project to use AWF for a feature.
   must require an explicit matrix/backlog status instead of silently skipping
   it. Any real drift discovered by the tests should be fixed in the smallest
   compatible way.
+- [ ] TODO§P1-operation-read-auth: Close REST auth parity for workspace and
+  global operation read endpoints, or keep the parity matrix operation rows
+  explicitly marked `MCP partial` until those REST surfaces require the same
+  token boundary as the MCP tools.
 - [ ] TODO§P1-artifact-download: Add a bounded MCP artifact content/download
   tool, or keep the matrix entry explicitly marked `MCP missing/backlog` until
   REST-compatible path validation, authorization, size limits, and error
