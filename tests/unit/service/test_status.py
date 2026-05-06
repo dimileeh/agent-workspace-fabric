@@ -38,6 +38,7 @@ from awf.service.status import (
     _truncate,
     _workspace_id_from_project,
     check_database,
+    collect_egress_audit_status,
     collect_service_status,
     collect_workspace_cleanup_status,
 )
@@ -370,6 +371,32 @@ async def test_service_status_includes_egress_audit_posture_counts(tmp_path: Pat
     assert egress_audit["reason"] == "EGRESS_AUDIT_AVAILABLE"
     assert egress_audit["resource_count"] == 1
     assert egress_audit["egress_posture_counts"] == {"restricted": 1}
+
+
+@pytest.mark.unit
+async def test_egress_audit_status_redacts_unavailable_detail() -> None:
+    async def _failing_lookup(_database_url: str) -> dict[str, int]:
+        raise RuntimeError(
+            "could not connect to "
+            "postgresql+asyncpg://awf:db_password@db.internal:5432/awf; "
+            "Authorization: Bearer ghp_secret1234567890; "
+            f"{'x' * 400}"
+        )
+
+    egress_audit = await collect_egress_audit_status(
+        "postgresql+asyncpg://awf:db_password@db.internal:5432/awf",
+        summary_lookup=_failing_lookup,
+    )
+
+    detail = str(egress_audit["detail"])
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unavailable"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_UNAVAILABLE"
+    assert len(detail) <= 240
+    assert "db_password" not in detail
+    assert "ghp_secret1234567890" not in detail
+    assert "postgresql+asyncpg://[redacted]@db.internal:5432/awf" in detail
+    assert "Authorization: Bearer [redacted]" in detail
 
 
 @pytest.mark.unit

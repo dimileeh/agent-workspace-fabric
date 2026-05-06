@@ -15,6 +15,7 @@ from typing import Any, Literal, Protocol, cast
 import httpx
 from sqlalchemy import select, text
 
+from awf.common.audit import redact_audit_text
 from awf.db.models import Workspace
 from awf.db.repositories import EgressAuditRepository
 from awf.db.session import make_engine, make_session_factory
@@ -245,7 +246,7 @@ async def collect_egress_audit_status(
             "ok": True,
             "status": "unavailable",
             "reason": "EGRESS_AUDIT_UNAVAILABLE",
-            "detail": _truncate(f"{type(exc).__name__}: {exc}"),
+            "detail": _redacted_truncated_exception_detail(exc),
             "resource_count": 0,
             "egress_posture_counts": {},
         }
@@ -780,3 +781,7 @@ def _truncate(value: str, *, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 1] + "…"
+
+
+def _redacted_truncated_exception_detail(exc: Exception, *, limit: int = 240) -> str:
+    return _truncate(redact_audit_text(f"{type(exc).__name__}: {exc}"), limit=limit)
