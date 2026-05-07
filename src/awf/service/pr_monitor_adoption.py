@@ -121,6 +121,8 @@ class PullRequestMonitorAdoptionService:
             if not _allows_fresh_adoption(existing):
                 _raise_if_policy_conflicts(existing, request, repo=repo)
                 return await self._response(existing, attached_existing=True)
+
+            metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
             await self._archive_terminal_adoption_key(
                 workspace_repo=workspace_repo,
                 workspace=existing,
@@ -128,8 +130,9 @@ class PullRequestMonitorAdoptionService:
                 repo=repo,
                 pr_number=pr_number,
             )
+        else:
+            metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
 
-        metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
         workspace = await self._create_adoption_workspace(
             request=request,
             repo=repo,
