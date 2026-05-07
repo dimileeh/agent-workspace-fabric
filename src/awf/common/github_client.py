@@ -1250,12 +1250,14 @@ def _is_awf_status_issue_comment(body: str) -> bool:
 def _coderabbit_review_evidence_times(
     *,
     review_nodes: list[dict[str, Any]],
-) -> tuple[datetime | None, ...]:
-    times: list[datetime | None] = []
+) -> tuple[datetime, ...]:
+    times: list[datetime] = []
     for node in review_nodes:
         author = _dig(node, "author", "login")
         if _is_coderabbit_author(author):
-            times.append(_parse_github_datetime(node.get("submittedAt")))
+            submitted_at = _parse_github_datetime(node.get("submittedAt"))
+            if submitted_at is not None:
+                times.append(submitted_at)
     return tuple(times)
 
 
@@ -1264,18 +1266,15 @@ def _is_superseded_coderabbit_skip_issue_comment(
     *,
     author: str | None,
     created_at: datetime | None,
-    review_evidence_times: tuple[datetime | None, ...],
+    review_evidence_times: tuple[datetime, ...],
 ) -> bool:
     if not _is_coderabbit_author(author) or not _is_merge_blocking_issue_comment(body):
         return False
     if not review_evidence_times:
         return False
     if created_at is None:
-        return True
-    return any(
-        evidence_at is not None and evidence_at > created_at
-        for evidence_at in review_evidence_times
-    )
+        return False
+    return any(evidence_at > created_at for evidence_at in review_evidence_times)
 
 
 def _is_coderabbit_author(author: str | None) -> bool:
