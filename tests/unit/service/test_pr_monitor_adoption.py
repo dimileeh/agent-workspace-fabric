@@ -786,6 +786,63 @@ class TestPullRequestMonitorAdoptionService:
             assert new.task_policy["pr_adoption"]["head_sha"] == "d" * 40
 
     @pytest.mark.unit
+    async def test_terminal_non_adoption_key_conflicts_without_superseding(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        canonical_key = _canonical_key()
+        fetcher = _MetadataFetcher(_metadata(head_ref="feature/current"))
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="https://github.com/dimileeh/aira-web.git",
+                branch_base="development",
+                task_title="ordinary workspace",
+                task_prompt="This is not a PR adoption.",
+                agent="codex",
+                test_commands=[],
+                idempotency_key=canonical_key,
+                task_policy={},
+                profile_ref="auto",
+            )
+            workspace_id = workspace.id
+            await _transition_adoption(session, workspace_id, WorkspaceStatus.cancelled)
+            await session.commit()
+
+        async with factory() as session:
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await PullRequestMonitorAdoptionService(
+                    session,
+                    metadata_fetcher=fetcher,
+                ).adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": workspace_id,
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "existing_task_kind": "feature_branch_pr",
+            "existing_pr_adoption_repo_slug": None,
+            "existing_pr_adoption_pr_number": None,
+        }
+        assert fetcher.calls == []
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            assert workspace.idempotency_key == canonical_key
+            assert workspace.task_policy == {}
+            assert await _count(session, Workspace) == 1
+            assert not any(
+                event.event_type == "workspace.pr_monitor_adoption_superseded"
+                for event in workspace.events
+            )
+
+    @pytest.mark.unit
     async def test_superseded_terminal_row_remains_auditable(
         self,
         factory: async_sessionmaker[AsyncSession],

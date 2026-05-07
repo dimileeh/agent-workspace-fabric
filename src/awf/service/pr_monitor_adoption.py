@@ -120,6 +120,11 @@ class PullRequestMonitorAdoptionService:
         # the race attaches here instead of surfacing the unique constraint.
         existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
+            _raise_if_existing_workspace_is_not_requested_adoption(
+                existing,
+                repo=repo,
+                pr_number=pr_number,
+            )
             if _adoption_workspace_is_resumable(existing):
                 _raise_if_policy_conflicts(existing, request, repo=repo)
                 return await self._response(existing, attached_existing=True)
@@ -605,6 +610,39 @@ def _adoption_workspace_is_resumable(workspace: Workspace) -> bool:
     return status not in _NON_RESUMABLE_ADOPTION_STATUSES
 
 
+def _raise_if_existing_workspace_is_not_requested_adoption(
+    workspace: Workspace,
+    *,
+    repo: RepoRef,
+    pr_number: int,
+) -> None:
+    adoption = _adoption_policy(workspace)
+    existing_repo_slug = _optional_str(adoption.get("repo_slug"))
+    existing_pr_number = _optional_int(adoption.get("pr_number"))
+    if (
+        existing_repo_slug is not None
+        and existing_repo_slug.lower() == repo.slug().lower()
+        and existing_pr_number == pr_number
+    ):
+        return
+
+    raise PRMonitorAdoptionError(
+        error_code="PR_ADOPTION_POLICY_CONFLICT",
+        message=(
+            "Canonical PR adoption idempotency key is already owned by a workspace "
+            "for a different or missing PR adoption identity."
+        ),
+        detail={
+            "workspace_id": workspace.id,
+            "repo_slug": repo.slug(),
+            "pr_number": pr_number,
+            "existing_task_kind": workspace.task_kind,
+            "existing_pr_adoption_repo_slug": existing_repo_slug,
+            "existing_pr_adoption_pr_number": existing_pr_number,
+        },
+    )
+
+
 def _raise_if_policy_conflicts(
     workspace: Workspace,
     request: PullRequestMonitorAdoptionRequest,
@@ -705,6 +743,19 @@ def _adoption_policy(workspace: Workspace) -> Mapping[str, Any]:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _redacted_optional_text(value: str | None) -> str | None:
