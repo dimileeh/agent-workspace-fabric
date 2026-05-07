@@ -1282,9 +1282,33 @@ def _is_coderabbit_author(author: str | None) -> bool:
     return (author or "").lower() in {"coderabbitai", "coderabbitai[bot]"}
 
 
+_REVIEW_BOT_TRIGGER_COMMAND_RE = re.compile(r"(?<![\w@])@coderabbitai (?:full )?review(?![\w])")
+_REVIEW_BOT_TRIGGER_COMMAND_FILLER_WORDS = frozenset(
+    {
+        "can",
+        "could",
+        "do",
+        "now",
+        "please",
+        "proceed",
+        "run",
+        "thank",
+        "thanks",
+        "trigger",
+        "you",
+    }
+)
+
+
 def _is_review_bot_trigger_command_issue_comment(body: str) -> bool:
     lower = " ".join(body.lower().split())
-    return lower in {"@coderabbitai review", "@coderabbitai full review"}
+    if not _REVIEW_BOT_TRIGGER_COMMAND_RE.search(lower):
+        return False
+
+    # Keep this narrow: a prose comment that mentions the command is feedback.
+    remainder = _REVIEW_BOT_TRIGGER_COMMAND_RE.sub(" ", lower)
+    remainder_words = set(re.findall(r"[a-z0-9']+", remainder))
+    return remainder_words <= _REVIEW_BOT_TRIGGER_COMMAND_FILLER_WORDS
 
 
 def _is_coderabbit_review_trigger_ack_issue_comment(body: str, *, author: str | None) -> bool:

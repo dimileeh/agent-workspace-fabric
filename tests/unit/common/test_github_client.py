@@ -1179,6 +1179,68 @@ class TestFetchPrStatus:
         assert status.unresolved_review_comments[0].blocks_merge is True
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "Please do: @coderabbitai review",
+            "@coderabbitai review\n\nPlease proceed.",
+        ],
+    )
+    async def test_ignores_coderabbit_trigger_commands_with_surrounding_text(
+        self, body: str
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 78,
+                        "body": body,
+                        "isMinimized": False,
+                        "author": {"login": "dimileeh"},
+                    },
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_review_comments == ()
+
+    @pytest.mark.unit
+    async def test_preserves_issue_comment_that_mentions_coderabbit_trigger_command(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 78,
+                        "body": (
+                            "The monitor should keep feedback that mentions "
+                            "@coderabbitai review in prose."
+                        ),
+                        "isMinimized": False,
+                        "author": {"login": "dimileeh"},
+                    },
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:78"]
+
+    @pytest.mark.unit
     async def test_missing_skip_timestamp_still_preserves_skip_without_submitted_review(
         self,
     ) -> None:
