@@ -8,6 +8,7 @@ Destroy, refresh, validate, and rebase.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -397,13 +398,15 @@ def test_control_commands_emit_expected_request_shape_and_output(case: _ControlC
 
 
 @pytest.mark.parametrize("case", _CONTROL_CASES)
-def test_control_commands_require_idempotency_key(case: _ControlCase) -> None:
+def test_control_commands_generate_idempotency_key_when_omitted(case: _ControlCase) -> None:
     args = _build_case_args(case, idempotency_key=None)
-    with patch("awf.cli.main.httpx.request") as mock:
+    response = _mock_response(status_code=case.success_status, payload=case.response_payload)
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
         result = _RUNNER.invoke(app, args)
 
-    assert result.exit_code != 0, result.output
-    mock.assert_not_called()
+    assert result.exit_code == 0, result.output
+    generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
+    assert re.fullmatch(rf"awf-cli-{case.command}-[0-9a-f]{{32}}", generated_key)
 
 
 @pytest.mark.parametrize("case", _CONTROL_CASES)

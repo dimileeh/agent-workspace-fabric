@@ -8,6 +8,7 @@ End-to-end testing against a real server lives in tests/e2e/ (future).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -364,12 +365,14 @@ class TestWorkspaceRemonitor:
         }
 
     @pytest.mark.unit
-    def test_remonitor_cli_requires_idempotency_key_before_http_call(self) -> None:
-        with patch("awf.cli.main.httpx.request") as mock:
+    def test_remonitor_cli_generates_idempotency_key_before_http_call(self) -> None:
+        response = _mock_response(status_code=202, payload={"ok": True})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(app, ["workspace", "remonitor", "ws_monitor"])
 
-        assert result.exit_code != 0
-        mock.assert_not_called()
+        assert result.exit_code == 0, result.output
+        generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
+        assert re.fullmatch(r"awf-cli-remonitor-[0-9a-f]{32}", generated_key)
 
 
 class TestWorkspaceControlCommandsPresence:
@@ -394,12 +397,17 @@ class TestWorkspaceControlCommandsPresence:
         ("rebase", ["ws_rebase", "--reason", "recover merge conflicts"]),
     ],
 )
-def test_workspace_control_commands_require_idempotency_key(command: str, args: list[str]) -> None:
-    with patch("awf.cli.main.httpx.request") as mock:
+def test_workspace_control_commands_generate_idempotency_key_when_omitted(
+    command: str,
+    args: list[str],
+) -> None:
+    response = _mock_response(status_code=202, payload={"ok": True})
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
         result = _runner.invoke(app, ["workspace", command, *args])
 
-    assert result.exit_code != 0
-    mock.assert_not_called()
+    assert result.exit_code == 0, result.output
+    generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
+    assert re.fullmatch(rf"awf-cli-{command}-[0-9a-f]{{32}}", generated_key)
 
 
 @pytest.mark.unit
