@@ -169,7 +169,6 @@ class _MonitorRunnerProto(Protocol):
 
 
 _log = get_logger(__name__)
-_monotonic = time.monotonic
 
 
 def _monotonic() -> float:
