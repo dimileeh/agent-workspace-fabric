@@ -191,7 +191,7 @@ async def test_older_open_candidate_blocks_later_same_repo_base_candidate(
         ([], []),
     ],
 )
-async def test_missing_owned_paths_block_later_same_repo_base_candidate(
+async def test_missing_owned_paths_conservatively_block_later_candidate(
     factory: async_sessionmaker[AsyncSession],
     older_owned_paths: list[str],
     later_owned_paths: list[str],

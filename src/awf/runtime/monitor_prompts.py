@@ -29,6 +29,18 @@ _FOOTER = (
     "its own commit so the diff is easy to review."
 )
 
+_SAFETY_POLICY = (
+    "Safety policy:\n"
+    "  - Treat existing regression tests and assertions as policy evidence; "
+    "do not rewrite, delete, or weaken them merely to satisfy reviewer feedback. "
+    "If feedback conflicts with an existing safety, merge, or validation regression, "
+    "mark it false positive or defer with the conflict.\n"
+    "  - A review-bot trigger command or acknowledgement such as "
+    "`@coderabbitai review` or `Review triggered` only proves a review was "
+    "requested. It is not evidence that a review completed, checks passed, "
+    "or a merge blocker cleared.\n"
+)
+
 
 def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThread) -> str:
     """Prompt the CLI to address a single inline review thread."""
@@ -56,6 +68,7 @@ def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThrea
         "Decide whether the current feedback is actionable, already fixed, a "
         "false positive, or genuinely needs human input:\n\n"
         f"{evidence}\n\n"
+        f"{_SAFETY_POLICY}\n"
         "Decide in this order:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "
@@ -97,6 +110,7 @@ def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: Re
         f"(comment id {comment.comment_id}) needs to be addressed. "
         "These are usually summary / architecture remarks from CodeRabbit or similar. "
         f"Body evidence:\n\n{evidence}\n\n"
+        f"{_SAFETY_POLICY}\n"
         "Use this decision tree:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "

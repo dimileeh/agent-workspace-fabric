@@ -1127,9 +1127,7 @@ class TestFetchPrStatus:
         assert c.blocks_merge is True
 
     @pytest.mark.unit
-    async def test_drops_coderabbit_skip_after_later_trigger_ack_without_review(
-        self,
-    ) -> None:
+    async def test_preserves_coderabbit_skip_after_trigger_ack_without_review(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -1177,7 +1175,8 @@ class TestFetchPrStatus:
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
 
-        assert status.unresolved_review_comments == ()
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
+        assert status.unresolved_review_comments[0].blocks_merge is True
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

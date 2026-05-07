@@ -748,7 +748,6 @@ class GitHubClient:
             query=_GQL_PR_ISSUE_COMMENTS_PAGE,
         )
         coderabbit_review_evidence_times = _coderabbit_review_evidence_times(
-            issue_comment_nodes=issue_comment_nodes,
             review_nodes=review_nodes,
         )
         for node in issue_comment_nodes:
@@ -1253,17 +1252,12 @@ def _is_awf_status_issue_comment(body: str) -> bool:
 
 def _coderabbit_review_evidence_times(
     *,
-    issue_comment_nodes: list[dict[str, Any]],
     review_nodes: list[dict[str, Any]],
 ) -> tuple[datetime, ...]:
+    # Intentionally use submitted review objects only. CodeRabbit "Review
+    # triggered" acknowledgements prove a review request was queued, not that
+    # the review completed or that an earlier skip blocker is obsolete.
     times: list[datetime] = []
-    for node in issue_comment_nodes:
-        author = _dig(node, "author", "login")
-        body = node.get("body") or ""
-        if _is_coderabbit_review_trigger_ack_issue_comment(body, author=author):
-            created_at = _parse_github_datetime(node.get("createdAt"))
-            if created_at is not None:
-                times.append(created_at)
     for node in review_nodes:
         author = _dig(node, "author", "login")
         if _is_coderabbit_author(author):
