@@ -2360,6 +2360,27 @@ class TestPullRequestMonitorAdoptionService:
         assert repo.calls == ["pr-adopt:logical"]
 
     @pytest.mark.unit
+    async def test_adoption_workspace_idempotency_key_ignores_task_reservations_without_generation(
+        self,
+    ) -> None:
+        class _WorkspaceRepo:
+            async def list_idempotency_key_family(self, logical_key: str) -> list[str]:
+                assert logical_key == "pr-adopt:logical"
+                return []
+
+        key = await adoption_module._next_adoption_workspace_idempotency_key(
+            _WorkspaceRepo(),  # type: ignore[arg-type]
+            logical_idempotency_key="pr-adopt:logical",
+            reserved_idempotency_keys=[
+                "pr-adopt:logical",
+                "pr-adopt:logical:g1",
+            ],
+            require_generation=False,
+        )
+
+        assert key == "pr-adopt:logical"
+
+    @pytest.mark.unit
     async def test_adoption_workspace_idempotency_key_exhaustion_is_explicit(self) -> None:
         class _ExhaustedWorkspaceRepo:
             async def list_idempotency_key_family(self, logical_key: str) -> list[str]:
