@@ -439,32 +439,32 @@ async def test_mcp_destroy_invokes_service_with_canonical_kwargs(
             {"reason": "operator recovery", "stop_stack": False},
             "stop_workspace",
             None,
-            200,
+            422,
         ),
         (
             "/v1/workspaces/ws_canonical/remonitor",
             {"reason": "operator recovery", "stop_stack": False},
             "remonitor_workspace",
             None,
-            200,
+            422,
         ),
         (
             "/v1/workspaces/ws_canonical/refresh",
             {"reason": "operator recovery", "requested_tier": 2},
             "request_refresh_workspace",
             OperationType.refresh,
-            202,
+            422,
         ),
         (
             "/v1/workspaces/ws_canonical/rebase",
             {"reason": "operator recovery", "requested_tier": 2},
             "request_rebase_workspace",
             OperationType.rebase,
-            202,
+            422,
         ),
     ],
 )
-async def test_rest_controls_accept_legacy_body_fields_without_forwarding(
+async def test_rest_controls_reject_unsupported_body_fields(
     contract_stack: ContractStack,
     monkeypatch: pytest.MonkeyPatch,
     path: str,
@@ -473,7 +473,7 @@ async def test_rest_controls_accept_legacy_body_fields_without_forwarding(
     operation_type: OperationType | None,
     expected_status: int,
 ) -> None:
-    """REST keeps previously accepted fields but normalizes only active backend args."""
+    """REST rejects fields that are not implemented by the backend contract."""
     from awf.service import controls as controls_module
 
     calls: list[dict[str, Any]] = []
@@ -511,14 +511,7 @@ async def test_rest_controls_accept_legacy_body_fields_without_forwarding(
     )
 
     assert response.status_code == expected_status, response.text
-    assert calls == [
-        {
-            "workspace_id": "ws_canonical",
-            "reason": "operator recovery",
-            "idempotency_key": "ignored-field",
-            "expected_version": 5,
-        }
-    ]
+    assert calls == []
 
 
 @pytest.mark.unit

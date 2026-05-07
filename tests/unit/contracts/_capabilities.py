@@ -135,7 +135,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_response_model="WorkspaceControlResponse",
         rest_path_fields=frozenset({"workspace_id"}),
         rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
-        rest_body_fields=frozenset({"reason", "stop_stack"}),
+        rest_body_fields=frozenset({"reason"}),
         mcp_request_fields=frozenset(
             {"workspace_id", "reason", "idempotency_key", "expected_version"}
         ),
@@ -223,7 +223,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_response_model="WorkspaceControlResponse",
         rest_path_fields=frozenset({"workspace_id"}),
         rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
-        rest_body_fields=frozenset({"reason", "stop_stack"}),
+        rest_body_fields=frozenset({"reason"}),
         mcp_request_fields=frozenset(
             {"workspace_id", "reason", "idempotency_key", "expected_version"}
         ),
@@ -294,7 +294,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_response_model="OperationResponse",
         rest_path_fields=frozenset({"workspace_id"}),
         rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
-        rest_body_fields=frozenset({"reason", "requested_tier"}),
+        rest_body_fields=frozenset({"reason"}),
         mcp_request_fields=frozenset(
             {"workspace_id", "reason", "idempotency_key", "expected_version"}
         ),
@@ -330,7 +330,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         rest_response_model="OperationResponse",
         rest_path_fields=frozenset({"workspace_id"}),
         rest_header_fields=frozenset({"Idempotency-Key", "If-Match"}),
-        rest_body_fields=frozenset({"reason", "requested_tier"}),
+        rest_body_fields=frozenset({"reason"}),
         mcp_request_fields=frozenset(
             {"workspace_id", "reason", "idempotency_key", "expected_version"}
         ),
