@@ -688,7 +688,7 @@ coding agent in any project to use AWF for a feature.
   tools with bounded list inputs; `tests/unit/mcp/test_mcp_operator_surfaces.py`
   covers populated and empty REST-vs-MCP parity, structured error/null states,
   secret redaction, artifact metadata-only behavior, and route-handler bypass.
-- [x] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics. Evidence: `src/awf/mcp/server.py` registers `awf_refresh_workspace`, `awf_rebase_workspace`, requires `idempotency_key` on all 7 mutating control tools, and exposes optional `expected_version` (If-Match parity); `src/awf/service/workspaces.py` exposes `request_refresh_workspace` and `request_rebase_workspace` façade methods; contract tests in `tests/unit/mcp/test_mcp_control_contracts.py` cover success paths, replay/idempotency, version conflict, invalid-state errors, and structured error mapping; `tests/unit/mcp/test_mcp_server.py` covers schema contracts.
+- [x] Add MCP tools for safe operator actions already present in the API: retry plus remonitor, refresh, validate, rebase, cancel, stop, and destroy. Remonitor, refresh, validate, rebase, cancel, stop, and destroy share the idempotency/concurrency contract; retry is intentionally handled differently in the MCP schema/docs as a fresh-attempt operation without the same idempotency/versioning semantics. Evidence: `src/awf/mcp/server.py` registers `awf_retry_workspace`, `awf_refresh_workspace`, and `awf_rebase_workspace`, requires `idempotency_key` on the 7 idempotent/versioned control tools, and exposes optional `expected_version` (If-Match parity) on that set; `src/awf/service/workspaces.py` exposes `request_refresh_workspace` and `request_rebase_workspace` façade methods; contract tests in `tests/unit/mcp/test_mcp_control_contracts.py` cover success paths, replay/idempotency, version conflict, invalid-state errors, and structured error mapping; `tests/unit/mcp/test_mcp_server.py` covers schema contracts.
 - [x] Add first-class AWF PR monitor adoption for existing GitHub PRs. Acceptance:
   an operator can provide `repo_url`/repo slug plus PR number or URL, and AWF
   creates or attaches a service-managed workspace/merge candidate in
@@ -754,7 +754,7 @@ coding agent in any project to use AWF for a feature.
   fields, reason codes, idempotency, If-Match/version behavior, auth failure
   shape, structured errors, explicit CLI absence, and MCP safety boundaries.
   The tests exposed MCP control idempotency drift, fixed by requiring
-  `idempotency_key` on all seven MCP mutating control tools. Validation:
+  `idempotency_key` on all seven idempotent/versioned MCP control tools. Validation:
   `pytest tests/unit/contracts -q` passed 189 tests and the focused
   API/CLI/MCP parity suite passed 343 tests.
 - [ ] TODO§P1-operation-read-auth: Close REST auth parity for workspace and
