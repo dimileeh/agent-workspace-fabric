@@ -389,6 +389,57 @@ async def test_workspace_detail_ignores_preserved_health_from_prior_active_statu
 
 
 @pytest.mark.unit
+async def test_workspace_detail_falls_back_to_stranded_health_after_mismatched_preserved_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="persisted mismatched preserved runtime",
+            task_prompt="show earlier stranded runtime finding",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.validating.value
+        base = datetime.now(UTC)
+        stranded = await repo.add_event(
+            workspace,
+            event_type=RUNTIME_STRANDED_EVENT_TYPE,
+            reason_code="AGENT_CONTAINER_EXITED",
+            payload={
+                "reason_code": "AGENT_CONTAINER_EXITED",
+                "decision": "fail_workspace",
+                "message": "Workspace agent container is not running.",
+            },
+        )
+        stranded.occurred_at = base
+        preserved = await repo.add_event(
+            workspace,
+            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            payload={
+                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.running.value,
+                "message": "Live agent runtime was preserved after worker restart.",
+            },
+        )
+        preserved.occurred_at = base + timedelta(seconds=1)
+        await session.commit()
+        workspace_id = workspace.id
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is not None
+    assert detail.runtime_health.status == "stranded"
+    assert detail.runtime_health.reason_code == "AGENT_CONTAINER_EXITED"
+    assert detail.runtime_health.decision == "fail_workspace"
+
+
+@pytest.mark.unit
 async def test_preserved_runtime_health_is_scoped_to_current_status_cycle(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
