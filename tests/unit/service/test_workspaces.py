@@ -734,15 +734,20 @@ async def test_preserved_runtime_health_ignores_operator_refresh_from_prior_stat
             agent="codex",
             test_commands=[],
         )
-        workspace.status = WorkspaceStatus.running.value
+        workspace.status = WorkspaceStatus.ready.value
         base = datetime.now(UTC)
-        running = await repo.add_event(
+        refresh = await repo.add_event(
             workspace,
-            event_type="workspace.state_changed",
+            event_type=REFRESH_REQUESTED_EVENT_TYPE,
+            reason_code=REFRESH_REQUESTED_REASON_CODE,
+        )
+        refresh.occurred_at = base + timedelta(seconds=2)
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.running,
             reason_code="WORKSPACE_RUNNING",
         )
-        running.old_state = WorkspaceStatus.ready.value
-        running.new_state = WorkspaceStatus.running.value
+        running = workspace.events[-1]
         running.occurred_at = base
         preserved = await repo.add_event(
             workspace,
@@ -756,14 +761,6 @@ async def test_preserved_runtime_health_ignores_operator_refresh_from_prior_stat
             },
         )
         preserved.occurred_at = base + timedelta(seconds=1)
-        refresh = await repo.add_event(
-            workspace,
-            event_type=REFRESH_REQUESTED_EVENT_TYPE,
-            reason_code=REFRESH_REQUESTED_REASON_CODE,
-        )
-        refresh.old_state = WorkspaceStatus.validating.value
-        refresh.new_state = WorkspaceStatus.validating.value
-        refresh.occurred_at = base + timedelta(seconds=2)
         await session.commit()
         workspace_id = workspace.id
 
