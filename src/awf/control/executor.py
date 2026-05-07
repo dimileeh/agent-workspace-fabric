@@ -1406,8 +1406,7 @@ class WorkspaceExecutor:
         # reaches ``ready`` — if it's missing here something went wrong
         # upstream and every ``rev-list``/``merge-base`` below would
         # inject the literal string "None" into a git command. Fail
-        # cleanly instead of passing "None..HEAD" to git
-        # (review feedback on #2: gemini, coderabbit).
+        # cleanly instead of passing "None..HEAD" to git.
         if ws.base_commit is None:
             await self._mark_failed(
                 workspace_id=workspace_id,

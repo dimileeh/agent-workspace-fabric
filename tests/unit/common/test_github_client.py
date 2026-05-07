@@ -472,7 +472,7 @@ class TestFetchPrStatus:
                         "line": 10,
                         "comments": {
                             "nodes": [
-                                {"bodyText": "rename this", "author": {"login": "coderabbit"}}
+                                {"bodyText": "rename this", "author": {"login": "reviewer-bot"}}
                             ]
                         },
                     }
@@ -482,7 +482,7 @@ class TestFetchPrStatus:
                         "databaseId": 9001,
                         "body": "Summary with suggestions",
                         "state": "COMMENTED",
-                        "author": {"login": "coderabbit"},
+                        "author": {"login": "reviewer-bot"},
                     }
                 ],
             ),
@@ -504,7 +504,7 @@ class TestFetchPrStatus:
         assert t.path == "src/x.ts"
         assert t.line == 10
         assert t.body_excerpt == "rename this"
-        assert t.author == "coderabbit"
+        assert t.author == "reviewer-bot"
         assert len(status.unresolved_review_comments) == 1
         c = status.unresolved_review_comments[0]
         assert c.comment_id == "9001"
@@ -538,7 +538,7 @@ class TestFetchPrStatus:
                                     "databaseId": 102,
                                     "bodyText": "Still applies after the latest fix.",
                                     "author": {"login": "dimileeh"},
-                                    "viewerDidAuthor": True,
+                                    "viewerDidAuthor": False,
                                     "createdAt": "2026-05-06T10:15:12Z",
                                     "url": "https://github.example/review/102",
                                 },
@@ -572,7 +572,7 @@ class TestFetchPrStatus:
         assert thread.comments[0].created_at is not None
         assert thread.comments[0].created_at.isoformat() == "2026-05-06T10:11:12+00:00"
         assert thread.comments[1].url == "https://github.example/review/102"
-        assert [c.viewer_did_author for c in thread.comments] == [False, True]
+        assert [c.viewer_did_author for c in thread.comments] == [False, False]
 
     @pytest.mark.unit
     async def test_paginates_review_thread_comment_history(self) -> None:
@@ -639,6 +639,9 @@ class TestFetchPrStatus:
         assert len(fake.calls) == 2
         assert "threadId=T_paginated" in fake.calls[1].args
         assert "cursor=cursor-1" in fake.calls[1].args
+        assert any(
+            a.startswith("query=") and "viewerDidAuthor" in a for a in fake.calls[1].args
+        )
 
     @pytest.mark.unit
     async def test_skips_sparse_review_thread_nodes_without_id(self) -> None:
@@ -782,6 +785,12 @@ class TestFetchPrStatus:
         ]
         assert "cursor=reviews-1" in fake.calls[1].args
         assert "cursor=comments-1" in fake.calls[2].args
+        assert any(
+            a.startswith("query=") and "viewerDidAuthor" in a for a in fake.calls[1].args
+        )
+        assert any(
+            a.startswith("query=") and "viewerDidAuthor" in a for a in fake.calls[2].args
+        )
 
     @pytest.mark.unit
     async def test_preserves_review_and_issue_comment_metadata_without_bot_semantic_filtering(
@@ -806,7 +815,7 @@ class TestFetchPrStatus:
                         "databaseId": 7802,
                         "body": "Finishing touches and review summary.",
                         "isMinimized": False,
-                        "author": {"login": "coderabbitai"},
+                        "author": {"login": "reviewer-bot"},
                         "createdAt": "2026-05-06T11:05:00Z",
                         "url": "https://github.example/comment/7802",
                     }
@@ -836,6 +845,117 @@ class TestFetchPrStatus:
         assert issue.url == "https://github.example/comment/7802"
         assert issue.created_at is not None
         assert issue.created_at.isoformat() == "2026-05-06T11:05:00+00:00"
+
+    @pytest.mark.unit
+    async def test_ignores_viewer_authored_pr_feedback_without_body_matching(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "T1",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/x.py",
+                        "line": 10,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 101,
+                                    "bodyText": "Reviewer feedback that still matters.",
+                                    "author": {"login": "reviewer"},
+                                    "viewerDidAuthor": False,
+                                },
+                                {
+                                    "databaseId": 102,
+                                    "bodyText": "Any AWF bookkeeping text, no magic prefix needed.",
+                                    "author": {"login": "token-owner"},
+                                    "viewerDidAuthor": True,
+                                },
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    },
+                    {
+                        "id": "T_self",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/y.py",
+                        "line": 20,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": 201,
+                                    "bodyText": "Self-authored thread should not be fed back.",
+                                    "author": {"login": "token-owner"},
+                                    "viewerDidAuthor": True,
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    },
+                ],
+                reviews=[
+                    {
+                        "databaseId": 301,
+                        "body": "Self-authored review body with arbitrary words.",
+                        "state": "COMMENTED",
+                        "author": {"login": "token-owner"},
+                        "viewerDidAuthor": True,
+                    }
+                ],
+                comments=[
+                    {
+                        "databaseId": 401,
+                        "body": "Self-authored issue comment with arbitrary words.",
+                        "isMinimized": False,
+                        "author": {"login": "token-owner"},
+                        "viewerDidAuthor": True,
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [thread.thread_id for thread in status.unresolved_inline_threads] == ["T1"]
+        thread = status.unresolved_inline_threads[0]
+        assert [comment.comment_id for comment in thread.comments] == ["101"]
+        assert thread.body_excerpt == "Reviewer feedback that still matters."
+        assert status.unresolved_review_comments == ()
+
+    @pytest.mark.unit
+    async def test_preserves_non_viewer_comments_even_when_body_looks_like_awf_bookkeeping(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 402,
+                        "body": "A reviewer comment that resembles bookkeeping still matters.",
+                        "isMinimized": False,
+                        "author": {"login": "reviewer"},
+                        "viewerDidAuthor": False,
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [comment.comment_id for comment in status.unresolved_review_comments] == [
+            "issue:402"
+        ]
 
     @pytest.mark.unit
     async def test_parses_check_timing_metadata_from_rollup_contexts(self) -> None:
@@ -1068,546 +1188,6 @@ class TestFetchPrStatus:
         assert check.completed_at.isoformat() == "2026-04-26T12:34:56+00:00"
 
     @pytest.mark.unit
-    async def test_preserves_review_disabled_issue_comment_as_merge_blocker(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Auto reviews are disabled on base/target branches "
-                            "other than the configured development branch.\n\n"
-                            "- [ ] Trigger review"
-                        ),
-                        "isMinimized": False,
-                        "author": {"login": "coderabbitai"},
-                    }
-                ]
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
-        assert "Auto reviews are disabled" in status.unresolved_review_comments[0].body_excerpt
-        assert status.unresolved_review_comments[0].blocks_merge is True
-
-    @pytest.mark.unit
-    async def test_parses_trigger_review_issue_comment_as_merge_blocker(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Required review was skipped. Trigger review before merging.\n\n"
-                            "- [ ] Trigger review"
-                        ),
-                        "isMinimized": False,
-                        "author": {"login": "coderabbitai"},
-                    }
-                ]
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-        assert len(status.unresolved_review_comments) == 1
-        c = status.unresolved_review_comments[0]
-        assert c.comment_id == "issue:77"
-        assert c.author == "coderabbitai"
-        assert "Review skipped" in c.body_excerpt
-        assert c.blocks_merge is True
-
-    @pytest.mark.unit
-    async def test_preserves_coderabbit_skip_after_trigger_ack_without_review(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "<!-- skip review by coderabbit.ai -->\n"
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Auto reviews are disabled on base/target branches "
-                            "other than the configured development branch.\n\n"
-                            "- [ ] Trigger review"
-                        ),
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:00:00Z",
-                        "author": {"login": "coderabbitai"},
-                    },
-                    {
-                        "databaseId": 78,
-                        "body": "@coderabbitai review",
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:05:00Z",
-                        "author": {"login": "dimileeh"},
-                    },
-                    {
-                        "databaseId": 79,
-                        "body": (
-                            "<!-- This is an auto-generated reply by CodeRabbit -->\n"
-                            "<details>\n"
-                            "<summary>Actions performed</summary>\n\n"
-                            "Review triggered.\n"
-                            "</details>"
-                        ),
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:05:10Z",
-                        "author": {"login": "coderabbitai"},
-                    },
-                ]
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
-        assert status.unresolved_review_comments[0].blocks_merge is True
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "body",
-        [
-            "Please do: @coderabbitai review",
-            "@coderabbitai review\n\nPlease proceed.",
-        ],
-    )
-    async def test_ignores_coderabbit_trigger_commands_with_surrounding_text(
-        self, body: str
-    ) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                comments=[
-                    {
-                        "databaseId": 78,
-                        "body": body,
-                        "isMinimized": False,
-                        "author": {"login": "dimileeh"},
-                    },
-                ]
-            ),
-        )
-        client = GitHubClient(fake)
-
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert status.unresolved_review_comments == ()
-
-    @pytest.mark.unit
-    async def test_preserves_issue_comment_that_mentions_coderabbit_trigger_command(
-        self,
-    ) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                comments=[
-                    {
-                        "databaseId": 78,
-                        "body": (
-                            "The monitor should keep feedback that mentions "
-                            "@coderabbitai review in prose."
-                        ),
-                        "isMinimized": False,
-                        "author": {"login": "dimileeh"},
-                    },
-                ]
-            ),
-        )
-        client = GitHubClient(fake)
-
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:78"]
-
-    @pytest.mark.unit
-    async def test_missing_skip_timestamp_still_preserves_skip_without_submitted_review(
-        self,
-    ) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Auto reviews are disabled on this base branch.\n\n"
-                            "- [ ] Trigger review"
-                        ),
-                        "isMinimized": False,
-                        "author": {"login": "coderabbitai"},
-                    },
-                    {
-                        "databaseId": 79,
-                        "body": "Review triggered.",
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:05:10Z",
-                        "author": {"login": "coderabbitai"},
-                    },
-                ]
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
-        assert status.unresolved_review_comments[0].blocks_merge is True
-
-    @pytest.mark.unit
-    async def test_drops_superseded_coderabbit_skip_after_later_coderabbit_review(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                reviews=[
-                    {
-                        "databaseId": 88,
-                        "body": "**Actionable comments posted: 5**",
-                        "state": "COMMENTED",
-                        "submittedAt": "2026-05-07T09:09:31Z",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "<!-- skip review by coderabbit.ai -->\n"
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Required review was skipped. Trigger review before merging."
-                        ),
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:00:00Z",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["88"]
-        assert status.unresolved_review_comments[0].author == "coderabbitai"
-        assert status.unresolved_review_comments[0].blocks_merge is False
-
-    @pytest.mark.unit
-    async def test_preserves_coderabbit_skip_when_comment_updated_after_review(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                head_sha="current-head",
-                reviews=[
-                    {
-                        "databaseId": 88,
-                        "body": "",
-                        "state": "COMMENTED",
-                        "submittedAt": "2026-05-07T09:09:31Z",
-                        "commit": {"oid": "old-head"},
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "<!-- skip review by coderabbit.ai -->\n"
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Required review was skipped. Trigger review before merging."
-                        ),
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:00:00Z",
-                        "updatedAt": "2026-05-07T09:12:00Z",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
-        assert status.unresolved_review_comments[0].blocks_merge is True
-
-    @pytest.mark.unit
-    async def test_preserves_coderabbit_skip_when_later_review_targets_old_head(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                head_sha="current-head",
-                reviews=[
-                    {
-                        "databaseId": 88,
-                        "body": "",
-                        "state": "COMMENTED",
-                        "submittedAt": "2026-05-07T09:13:00Z",
-                        "commit": {"oid": "old-head"},
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "<!-- skip review by coderabbit.ai -->\n"
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Required review was skipped. Trigger review before merging."
-                        ),
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:00:00Z",
-                        "updatedAt": "2026-05-07T09:12:00Z",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
-        assert status.unresolved_review_comments[0].blocks_merge is True
-
-    @pytest.mark.unit
-    async def test_drops_coderabbit_skip_updated_after_current_head_review(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                head_sha="current-head",
-                reviews=[
-                    {
-                        "databaseId": 88,
-                        "body": "",
-                        "state": "COMMENTED",
-                        "submittedAt": "2026-05-07T09:09:31Z",
-                        "commit": {"oid": "current-head"},
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "<!-- skip review by coderabbit.ai -->\n"
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Required review was skipped. Trigger review before merging."
-                        ),
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:00:00Z",
-                        "updatedAt": "2026-05-07T09:12:00Z",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert status.unresolved_review_comments == ()
-
-    @pytest.mark.unit
-    async def test_preserves_coderabbit_skip_when_review_timestamp_is_unknown(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                reviews=[
-                    {
-                        "databaseId": 88,
-                        "body": "",
-                        "state": "COMMENTED",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "<!-- skip review by coderabbit.ai -->\n"
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Required review was skipped. Trigger review before merging."
-                        ),
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:00:00Z",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
-        assert status.unresolved_review_comments[0].blocks_merge is True
-
-    @pytest.mark.unit
-    async def test_preserves_coderabbit_skip_for_pending_current_head_review(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                head_sha="current-head",
-                reviews=[
-                    {
-                        "databaseId": 88,
-                        "body": "",
-                        "state": "PENDING",
-                        "submittedAt": None,
-                        "commit": {"oid": "current-head"},
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "<!-- skip review by coderabbit.ai -->\n"
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Required review was skipped. Trigger review before merging."
-                        ),
-                        "isMinimized": False,
-                        "createdAt": "2026-05-07T08:00:00Z",
-                        "updatedAt": "2026-05-07T09:12:00Z",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
-        assert status.unresolved_review_comments[0].blocks_merge is True
-
-    @pytest.mark.unit
-    async def test_preserves_coderabbit_skip_when_skip_timestamp_is_unknown(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                reviews=[
-                    {
-                        "databaseId": 88,
-                        "body": "**Actionable comments posted: 5**",
-                        "state": "COMMENTED",
-                        "submittedAt": "2026-05-07T09:09:31Z",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "<!-- skip review by coderabbit.ai -->\n"
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Required review was skipped. Trigger review before merging."
-                        ),
-                        "isMinimized": False,
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == [
-            "88",
-            "issue:77",
-        ]
-        assert status.unresolved_review_comments[1].blocks_merge is True
-
-    @pytest.mark.unit
-    async def test_preserves_coderabbit_skip_when_all_review_evidence_timestamps_are_invalid(
-        self,
-    ) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                reviews=[
-                    {
-                        "databaseId": 88,
-                        "body": "",
-                        "state": "COMMENTED",
-                        "submittedAt": "not-a-date",
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-                comments=[
-                    {
-                        "databaseId": 77,
-                        "body": (
-                            "<!-- skip review by coderabbit.ai -->\n"
-                            "> [!IMPORTANT]\n"
-                            "> ## Review skipped\n\n"
-                            "Required review was skipped. Trigger review before merging."
-                        ),
-                        "isMinimized": False,
-                        "author": {"login": "coderabbitai"},
-                    }
-                ],
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-
-        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
-        assert status.unresolved_review_comments[0].blocks_merge is True
-
-    @pytest.mark.unit
     async def test_routes_bot_issue_summary_to_agent_feedback(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
@@ -1618,7 +1198,7 @@ class TestFetchPrStatus:
                         "databaseId": 78,
                         "body": "Finishing touches and review summary.",
                         "isMinimized": False,
-                        "author": {"login": "coderabbitai"},
+                        "author": {"login": "reviewer-bot"},
                     }
                 ]
             ),
@@ -1848,78 +1428,6 @@ class TestFetchPrStatus:
         assert [c.comment_id for c in status.unresolved_review_comments] == ["7802"]
 
     @pytest.mark.unit
-    async def test_ignores_awf_status_issue_comments(self) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                comments=[
-                    {
-                        "databaseId": 780,
-                        "body": (
-                            "PR #18 needs human attention at commit `abc123`.\n\n"
-                            "AWF did not auto-merge because a review bot reported "
-                            "that review was skipped or left a trigger-review "
-                            "checklist unresolved.\n\n"
-                            "After the blocker is cleared or a new commit lands, "
-                            "AWF will re-verify the PR before taking any merge action."
-                        ),
-                        "isMinimized": False,
-                        "author": {"login": "dimileeh"},
-                    }
-                ]
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-        assert status.unresolved_review_comments == ()
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "body",
-        [
-            "fixed in commit 831a9ff17936915968882306dd6ee32b47cc909f",
-            "FALSE POSITIVE: the reviewer was looking at pre-refactor code.",
-            (
-                "FALSE POSITIVE on comment 4355744677: The hardcoded "
-                "`agent_readiness` was already replaced by commit 579cf6d. "
-                "The current code dynamically computes agent readiness."
-            ),
-            (
-                "Review-level comment 4207199736 confirmed resolved: the weak "
-                "`-> Any` return type was tightened to `-> Operation` in commit 2421e80."
-            ),
-            (
-                "No further action required. The sole actionable item from review "
-                "4207859399 was already fixed in commit 8bfd188d0f."
-            ),
-            "DEFER: needs maintainer input before changing API behavior.",
-        ],
-    )
-    async def test_ignores_awf_resolution_issue_comments(self, body: str) -> None:
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                comments=[
-                    {
-                        "databaseId": 781,
-                        "body": body,
-                        "isMinimized": False,
-                        "author": {"login": "dimileeh"},
-                    }
-                ]
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-        assert status.unresolved_review_comments == ()
-
-    @pytest.mark.unit
     async def test_parses_human_issue_comment_as_review_comment(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
@@ -2110,6 +1618,7 @@ class TestFetchPrStatus:
         assert any(
             a.startswith("query=") and "pageInfo { hasNextPage endCursor }" in a for a in args
         )
+        assert any(a.startswith("query=") and "viewerDidAuthor" in a for a in args)
         assert "number=123" in args and "-F" in args
         assert "owner=dimileeh" in args and "repo=aira-web" in args
 

@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -130,7 +129,7 @@ class ReviewThread:
 
 @dataclass(frozen=True)
 class ReviewComment:
-    """A review-level (outside-diff) comment — CodeRabbit summary, etc.
+    """A review-level (outside-diff) comment.
 
     No file/line anchor. Still must be resolved under the review-comment
     gate unless it represents a policy blocker.
@@ -141,14 +140,13 @@ class ReviewComment:
     author: str | None = None
     is_resolved: bool = False
     blocks_merge: bool = False
-    """True for policy/checklist comments that the coding CLI cannot
-    resolve by editing code, for example a bot saying review was skipped
-    and exposing an unchecked "trigger review" task."""
+    """Reserved for non-textual policy blockers supplied by future providers."""
     body: str | None = None
     url: str | None = None
     created_at: datetime | None = None
     state: str | None = None
     source_kind: str = "review"
+    viewer_did_author: bool = False
 
 
 @dataclass(frozen=True)
@@ -381,7 +379,6 @@ MonitorAction = (
 BOT_REVIEWER_LOGINS = frozenset(
     {
         "greptile-apps",
-        "coderabbitai",
         "gemini-code-assist",
         "chatgpt-codex-connector",
         "cursor",
@@ -414,23 +411,8 @@ def _review_thread_body_state_key(thread_id: str) -> str:
     return f"__review_thread_body_hash__:{thread_id}"
 
 
-_INLINE_RESOLUTION_REPLY_RE = re.compile(
-    r"^\s*(?:fixed\s+in\s+commit\b|false\s+positive\s*:|defer\s*:)",
-    re.IGNORECASE,
-)
-
-
-def _is_inline_resolution_reply(comment: ReviewThreadComment) -> bool:
-    return comment.viewer_did_author and bool(_INLINE_RESOLUTION_REPLY_RE.match(comment.body))
-
-
 def _review_thread_resolution_body(thread: ReviewThread) -> str:
     if thread.comments:
-        comments = [
-            comment for comment in thread.comments if not _is_inline_resolution_reply(comment)
-        ]
-        if not comments:
-            comments = list(thread.comments)
         payload = [
             {
                 "author": comment.author,
@@ -440,7 +422,7 @@ def _review_thread_resolution_body(thread: ReviewThread) -> str:
                     comment.created_at.isoformat() if comment.created_at is not None else None
                 ),
             }
-            for comment in comments
+            for comment in thread.comments
         ]
     else:
         payload = [
@@ -533,12 +515,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
-        Policy/checklist blockers stay visible to the merge gate. Known
-        review-bot issue blockers are still routed to the coding agent
-        once so it can record a fix, false-positive, or defer verdict
-        against the current evidence before the merge gate blocks.
-    3.  Policy/checklist blockers that cannot be code-fixed →
-        NotifyHuman.
+        Review comments are routed to the coding agent so it can record a
+        fix, false-positive, or defer verdict against the current evidence.
+    3.  Reserved policy blockers → NotifyHuman.
     4.  CI FAILURE → ReportCiFailure.
     5.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
@@ -583,8 +562,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     )
 
     # 1. Base-behind / DIRTY check runs BEFORE comments. Rationale: on a
-    # PR with an active bot-review fleet (Greptile/CodeRabbit/Bugbot/
-    # Codex/etc.) every push triggers a new wave of comments —
+    # PR with an active bot-review fleet every push triggers a new wave of comments —
     # AddressComments would fire every single iteration and we'd never
     # integrate base updates, leaving the PR stuck on BEHIND
     # indefinitely. SyncBase only adds a merge commit; the feature work
@@ -618,9 +596,8 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return SyncBase()
 
     # 2. Unresolved comments, filtered to those we haven't handled yet.
-    # Policy/checklist blockers remain visible to the merge gate. Known
-    # review-bot issue comments get one agent pass before that gate so the
-    # monitor records whether the agent fixed, rejected, or deferred them.
+    # Review comments get one agent pass so the monitor records whether the
+    # agent fixed, rejected, or deferred them.
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 
@@ -698,13 +675,11 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # the thread has been addressed. Originally this gate blocked the
     # merge on ANY defer regardless of author, and PR 342 sat for 4
     # hours because Greptile's P1 nit kept returning "defer" on every
-    # iteration. Bot reviewers (Greptile, CodeRabbit, Gemini, Cursor
-    # Bugbot, Codex-connector, etc.) post advisory feedback only —
+    # iteration. Bot reviewers post advisory feedback only —
     # they cannot themselves mark threads resolved, so their deferred
     # nits would linger forever. Humans still block: a maintainer who
     # opens a thread expects their question answered before the merge
-    # fires. Review feedback on PR #2 (CodeRabbit, Major): "Deferred
-    # feedback still disappears from the merge gate".
+    # fires.
     has_human_defer = any(
         state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_review_thread(t)
         for t in status.unresolved_inline_threads
