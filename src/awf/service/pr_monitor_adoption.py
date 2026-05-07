@@ -36,6 +36,7 @@ from awf.db.repositories import (
     TaskRepository,
     ValidationRunRepository,
     WorkspaceRepository,
+    _escape_like_pattern,
 )
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
@@ -56,7 +57,6 @@ _LIVE_ADOPTION_STATUSES = frozenset(
         WorkspaceStatus.validating.value,
         WorkspaceStatus.pushing.value,
         WorkspaceStatus.monitoring_pr.value,
-        WorkspaceStatus.destroying.value,
     }
 )
 # Keep the public adoption error-code contract present in service source so
@@ -548,10 +548,16 @@ async def _next_adoption_workspace_idempotency_key(
     workspace_repo: WorkspaceRepository,
     *,
     logical_idempotency_key: str,
+    known_workspace_keys: Iterable[str] | None = None,
     reserved_idempotency_keys: Iterable[str] = (),
     require_generation: bool = False,
 ) -> str:
-    existing_keys = set(await workspace_repo.list_idempotency_key_family(logical_idempotency_key))
+    if known_workspace_keys is None:
+        existing_keys = set(
+            await workspace_repo.list_idempotency_key_family(logical_idempotency_key)
+        )
+    else:
+        existing_keys = set(known_workspace_keys)
     existing_keys.update(reserved_idempotency_keys)
     if not existing_keys and not require_generation:
         return logical_idempotency_key
@@ -805,10 +811,6 @@ def _adoption_generation_suffix(
     if workspace_idempotency_key.startswith(prefix):
         return workspace_idempotency_key[len(prefix) :]
     return "g1"
-
-
-def _escape_like_pattern(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _adoption_repo_url(*, request: PullRequestMonitorAdoptionRequest, repo: RepoRef) -> str:

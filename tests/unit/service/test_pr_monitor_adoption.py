@@ -562,7 +562,6 @@ class TestPullRequestMonitorAdoptionService:
         [
             WorkspaceStatus.requested.value,
             WorkspaceStatus.monitoring_pr.value,
-            WorkspaceStatus.destroying.value,
         ],
     )
     async def test_replay_attaches_to_live_adoption_without_refetching_metadata(
@@ -873,6 +872,65 @@ class TestPullRequestMonitorAdoptionService:
             assert fresh_task.external_id == fresh_workspace.task_external_id
             assert fresh_task.idempotency_key == f"{logical_key}:g1"
             assert fresh_task.title == "feature: retitled"
+
+    @pytest.mark.unit
+    async def test_terminal_prior_reuses_canonical_key_from_loaded_adoption_history(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        logical_key = adoption_module.pr_adoption_idempotency_key(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+        )
+
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert old_workspace is not None
+            old_workspace.status = WorkspaceStatus.destroyed.value
+            await session.commit()
+
+        async def _unexpected_family_lookup(
+            _self: WorkspaceRepository,
+            _logical_key: str,
+        ) -> list[str]:
+            raise AssertionError("adoption history should provide workspace idempotency keys")
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_idempotency_key_family",
+            _unexpected_family_lookup,
+        )
+
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        assert result.attached_existing is False
+        assert result.workspace_id != first.workspace_id
+
+        async with factory() as session:
+            fresh_workspace = await WorkspaceRepository(session).get(result.workspace_id)
+
+        assert fresh_workspace is not None
+        assert fresh_workspace.idempotency_key == logical_key
 
     @pytest.mark.unit
     async def test_concurrent_terminal_history_adoptions_create_one_live_monitor(
@@ -2190,22 +2248,12 @@ class TestPullRequestMonitorAdoptionService:
         assert task_attempt_selects == []
 
     @pytest.mark.unit
-    async def test_adoption_workspace_idempotency_key_prefetches_generation_family(
+    async def test_adoption_workspace_idempotency_key_uses_known_workspace_keys(
         self,
     ) -> None:
         class _WorkspaceRepo:
-            def __init__(self) -> None:
-                self.list_calls: list[str] = []
-
             async def list_idempotency_key_family(self, logical_key: str) -> list[str]:
-                self.list_calls.append(logical_key)
-                return [
-                    logical_key,
-                    f"{logical_key}:g1",
-                    f"{logical_key}:g3",
-                    f"{logical_key}:g1000",
-                    f"{logical_key}:gignored",
-                ]
+                raise AssertionError(f"unexpected generation family lookup for {logical_key}")
 
             async def get_by_idempotency_key(self, key: str) -> object | None:
                 raise AssertionError(f"unexpected per-key lookup for {key}")
@@ -2215,19 +2263,29 @@ class TestPullRequestMonitorAdoptionService:
         key = await adoption_module._next_adoption_workspace_idempotency_key(
             repo,  # type: ignore[arg-type]
             logical_idempotency_key="pr-adopt:logical",
+            known_workspace_keys=[
+                "pr-adopt:logical",
+                "pr-adopt:logical:g1",
+                "pr-adopt:logical:g3",
+                "pr-adopt:logical:g1000",
+                "pr-adopt:logical:gignored",
+            ],
         )
 
         assert key == "pr-adopt:logical:g2"
-        assert repo.list_calls == ["pr-adopt:logical"]
 
     @pytest.mark.unit
     async def test_adoption_workspace_idempotency_key_exhaustion_is_explicit(self) -> None:
         class _ExhaustedWorkspaceRepo:
             async def list_idempotency_key_family(self, logical_key: str) -> list[str]:
-                return [logical_key, *(f"{logical_key}:g{generation}" for generation in range(1, 1000))]
+                raise AssertionError(f"unexpected generation family lookup for {logical_key}")
 
         with pytest.raises(RuntimeError, match="fresh PR adoption workspace idempotency key"):
             await adoption_module._next_adoption_workspace_idempotency_key(
                 _ExhaustedWorkspaceRepo(),  # type: ignore[arg-type]
                 logical_idempotency_key="pr-adopt:exhausted",
+                known_workspace_keys=[
+                    "pr-adopt:exhausted",
+                    *(f"pr-adopt:exhausted:g{generation}" for generation in range(1, 1000)),
+                ],
             )
