@@ -3993,7 +3993,10 @@ def test_notify_human_reason_and_merge_rejection_detail() -> None:
     )
     status = _status_for_helpers(reviews=(blocking_review,))
 
-    assert "review bot reported" in (_notify_human_reason(status, MonitorState()) or "")
+    assert (
+        _notify_human_reason(status, MonitorState())
+        == "an external merge-blocking review policy comment remains unresolved"
+    )
     blocked = _status_for_helpers()
     blocked = PRStatus(
         number=blocked.number,
