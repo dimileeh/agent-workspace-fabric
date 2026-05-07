@@ -13,9 +13,10 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
-
-PRESERVED_EXECUTION_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
-PRESERVED_EXECUTION_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
+from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+)
 
 
 class _RuntimeInspector:
@@ -151,10 +152,10 @@ async def test_runtime_endpoint_surfaces_preserved_live_runtime_health(
         assert workspace is not None
         await WorkspaceRepository(session).add_event(
             workspace,
-            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
-            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+            reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
             payload={
-                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "reason_code": ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
                 "decision": "preserve_runtime",
                 "workspace_status": WorkspaceStatus.running.value,
                 "message": "Live agent runtime was preserved after worker restart.",
@@ -190,7 +191,7 @@ async def test_runtime_endpoint_surfaces_preserved_live_runtime_health(
     assert response.status_code == 200
     assert response.json()["runtime_health"] == {
         "status": "ok",
-        "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+        "reason_code": ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
         "decision": "preserve_runtime",
         "message": "Live agent runtime was preserved after worker restart.",
         "services": [{"name": "agent", "state": "running", "container_id": "agent"}],
