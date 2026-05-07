@@ -1602,7 +1602,7 @@ class TestMcpOperatorSurfaceParity:
             "awf_list_operations",
             {
                 "workspace_id": workspace_id,
-                "operation_type": "validate",
+                "type": "validate",
                 "status": "succeeded",
                 "limit": 10,
             },
@@ -1612,7 +1612,7 @@ class TestMcpOperatorSurfaceParity:
             "awf_list_workspace_operations",
             {
                 "workspace_id": workspace_id,
-                "operation_type": "validate",
+                "type": "validate",
                 "status": "succeeded",
                 "limit": 10,
             },

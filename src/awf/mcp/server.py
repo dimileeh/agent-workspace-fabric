@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.routes import metrics as metrics_routes
@@ -109,6 +109,7 @@ RuntimeHealthSummaryProvider = Callable[
 ]
 
 _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
+_OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 
 
 class ReadinessProvider(Protocol):
@@ -536,13 +537,16 @@ def build_mcp_server(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
         limit: int = Field(default=50, ge=1, le=500),
         status: OperationStatus | None = Field(default=None),
-        operation_type: OperationType | None = Field(default=None),
+        type: OperationType | None = Field(
+            default=None,
+            validation_alias=_OPERATION_TYPE_FILTER_ALIAS,
+        ),
     ) -> CallToolResult:
         """List one workspace's operations using the REST envelope."""
         rows = await service.list_operations(
             workspace_id,
             status=status,
-            operation_type=operation_type,
+            operation_type=type,
             limit=limit + 1,
         )
         if rows is None:
@@ -782,14 +786,17 @@ def build_mcp_server(
     async def awf_list_operations(
         workspace_id: str | None = Field(default=None),
         status: OperationStatus | None = Field(default=None),
-        operation_type: OperationType | None = Field(default=None),
+        type: OperationType | None = Field(
+            default=None,
+            validation_alias=_OPERATION_TYPE_FILTER_ALIAS,
+        ),
         limit: int = Field(default=50, ge=1, le=500),
     ) -> StructuredToolResult:
         """Read-only operator observability: list operations using the REST envelope."""
         rows = await service.list_all_operations(
             workspace_id=workspace_id,
             status=status,
-            operation_type=operation_type,
+            operation_type=type,
             limit=limit + 1,
         )
         response = _operation_list_response(rows, limit=limit)

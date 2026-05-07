@@ -433,6 +433,8 @@ class TestToolRegistration:
         assert _optional_string_schema(overview_props["cursor"])["maxLength"] == 128
 
         operations_props = tools["awf_list_operations"].inputSchema["properties"]
+        assert "type" in operations_props
+        assert "operation_type" not in operations_props
         assert operations_props["limit"]["default"] == 50
         assert operations_props["limit"]["maximum"] == 500
 
@@ -440,7 +442,8 @@ class TestToolRegistration:
             "properties"
         ]
         assert "status" in workspace_operations_props
-        assert "operation_type" in workspace_operations_props
+        assert "type" in workspace_operations_props
+        assert "operation_type" not in workspace_operations_props
         assert workspace_operations_props["limit"]["default"] == 50
         assert workspace_operations_props["limit"]["maximum"] == 500
 
@@ -580,6 +583,50 @@ class TestOperationTools:
 
         assert isinstance(payload, dict)
         assert payload["items"][0]["id"] == operation.id
+
+    @pytest.mark.unit
+    async def test_list_operations_accepts_rest_type_filter(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Filter global operations",
+                task_prompt="List filtered operations.",
+                agent="codex",
+                test_commands=[],
+            )
+            repo = OperationRepository(session)
+            create = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.create,
+                status=OperationStatus.succeeded,
+            )
+            validate = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+            )
+            create.created_at = base
+            validate.created_at = base + timedelta(seconds=1)
+            await session.commit()
+
+        payload = await _call(
+            mcp,
+            "awf_list_operations",
+            {
+                "workspace_id": workspace.id,
+                "type": "validate",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        assert [item["id"] for item in payload["items"]] == [validate.id]
+        assert [item["type"] for item in payload["items"]] == ["validate"]
 
 
 class TestCreateWorkspace:
@@ -1581,6 +1628,11 @@ class TestWorkspaceOperations:
                 operation_type=OperationType.validate,
                 status=OperationStatus.running,
             )
+            running_create = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.create,
+                status=OperationStatus.running,
+            )
             pending_validate = await repo.create(
                 workspace_id=workspace.id,
                 operation_type=OperationType.validate,
@@ -1588,7 +1640,8 @@ class TestWorkspaceOperations:
             )
             create.created_at = base
             running_validate.created_at = base + timedelta(seconds=1)
-            pending_validate.created_at = base + timedelta(seconds=2)
+            running_create.created_at = base + timedelta(seconds=2)
+            pending_validate.created_at = base + timedelta(seconds=3)
             await session.commit()
 
         payload = await _call(
@@ -1597,7 +1650,7 @@ class TestWorkspaceOperations:
             {
                 "workspace_id": workspace.id,
                 "status": "running",
-                "operation_type": "validate",
+                "type": "validate",
             },
         )
 
