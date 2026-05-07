@@ -284,11 +284,17 @@ async def _list_stale_postgres_test_schemas(
         schemas = sorted(str(row[0]) for row in result)
 
     stale_schemas: list[str] = []
+    active_namespaces: dict[str, bool] = {}
     for schema in schemas:
         namespace = _postgres_test_schema_namespace_from_schema(schema)
         if namespace is None:
             continue
-        if _is_postgres_test_schema_namespace_active(database_url, namespace):
+        if namespace not in active_namespaces:
+            active_namespaces[namespace] = _is_postgres_test_schema_namespace_active(
+                database_url,
+                namespace,
+            )
+        if active_namespaces[namespace]:
             continue
         stale_schemas.append(schema)
     return stale_schemas
@@ -372,6 +378,7 @@ async def postgres_test_engine() -> AsyncIterator[AsyncEngine]:
         schema_database_url = _test_schema_url(
             database_url,
             quoted_schema,
+            null_pool=True,
             connect_retries=True,
         )
         engine = await _create_metadata_engine(schema_database_url)

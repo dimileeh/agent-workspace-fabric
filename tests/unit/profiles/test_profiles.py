@@ -78,6 +78,32 @@ def test_awf_self_profile_explicitly_resolves_open_network_posture() -> None:
 
 
 @pytest.mark.unit
+def test_awf_self_profile_uses_workspace_local_postgres_for_tests() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+
+    profile = resolve_workspace_profile(worktree_path=repo_root, profile_ref="auto").profile
+    services = {service.name: service for service in profile.services}
+
+    assert profile.runtime.environment["AWF_DATABASE_URL"] == (
+        "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
+    )
+    assert profile.runtime.environment["AWF_TEST_DATABASE_URL"] == (
+        "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
+    )
+    assert "postgres" in services
+    postgres = services["postgres"]
+    assert postgres.image == "postgres:16-alpine"
+    assert postgres.environment == {
+        "POSTGRES_DB": "awf",
+        "POSTGRES_PASSWORD": "${AWF_POSTGRES_PASSWORD}",
+        "POSTGRES_USER": "awf",
+    }
+    assert postgres.healthcheck_cmd == "pg_isready -U awf -d awf"
+    assert postgres.volumes == [("postgres_data", "/var/lib/postgresql/data")]
+    assert postgres.ports == []
+
+
+@pytest.mark.unit
 def test_validation_error_message_falls_back_when_pydantic_has_no_errors() -> None:
     class EmptyValidationError:
         def errors(self, *, include_input: bool = True) -> list[dict[str, object]]:
@@ -712,7 +738,7 @@ def test_awf_self_profile_uses_targeted_edit_validation_and_final_coverage_gate(
     assert profile.validation.strategy.edit_gate == "targeted"
     assert profile.validation.strategy.final_gate == "coverage"
     assert profile.validation.strategy.reuse_evidence is True
-    assert profile.validation.strategy.full_gate_concurrency == 1
+    assert profile.validation.strategy.full_gate_concurrency == 0
 
 
 @pytest.mark.unit

@@ -40,7 +40,9 @@ from awf.runtime.pr_monitor import (
     ReportCiFailure,
     ReviewComment,
     ReviewThread,
+    ReviewThreadComment,
     SyncBase,
+    _review_thread_body_state_key,
 )
 from awf.runtime.pr_monitor_runner import (
     BaseBehindCountError,
@@ -55,6 +57,7 @@ from awf.runtime.pr_monitor_runner import (
     _collect_defer_items,
     _GitPushResult,
     _has_successful_validation_for_pr_head,
+    _increment_base_fetch_retry_count,
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
     _initial_review_grace_state_for_persistence,
@@ -62,6 +65,8 @@ from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_wait_seconds,
     _initial_review_grace_wall_started_value_from_datetime,
     _is_pending_check,
+    _is_protected_manual_ready_handoff,
+    _is_transient_base_fetch_error,
     _is_transient_github_client_error,
     _merge_rejection_reason,
     _MonitorPolicyBlockedError,
@@ -72,6 +77,7 @@ from awf.runtime.pr_monitor_runner import (
     _notify_human_reason,
     _redact_and_truncate_github_error,
     _remote_push_url_for_workspace,
+    _review_comment_body_state_key,
     _stale_pending_check_warnings,
     _target_reconcile_failure_payload,
     _target_reconcile_payload,
@@ -494,6 +500,23 @@ def test_transient_github_error_classifier_keeps_auth_errors_terminal() -> None:
 
 
 @pytest.mark.unit
+def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> None:
+    assert _is_transient_base_fetch_error(
+        BaseFetchError("git fetch origin development failed: HTTP 500 server error")
+    )
+    assert not _is_transient_base_fetch_error(
+        BaseFetchError("git fetch origin development failed: repository not found")
+    )
+    retry_key = "__awf_base_fetch_retry_count:sync_base"
+    state = MonitorState(threads_addressed_ids={retry_key: "not-an-integer"})
+
+    retry_number = _increment_base_fetch_retry_count(state, "sync_base")
+
+    assert retry_number == 1
+    assert state.threads_addressed_ids[retry_key] == "1"
+
+
+@pytest.mark.unit
 def test_github_error_redaction_covers_app_jwt_and_bearer_tokens() -> None:
     app_token = "gha_11AA22BB33CC44DD"
     jwt_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
@@ -560,7 +583,7 @@ async def test_transient_retry_event_payload_is_structured_and_redacted(
 
 
 @pytest.mark.unit
-async def test_stale_merge_without_auto_merge_aborts_workspace(
+async def test_stale_manual_merge_dispatches_validation_before_handoff(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -589,8 +612,14 @@ async def test_stale_merge_without_auto_merge_aborts_workspace(
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
-        assert ws.status == WorkspaceStatus.failed.value
-        assert ws.failure_message == "monitor: abort (stale)"
+        assert ws.status == WorkspaceStatus.ready.value
+        assert ws.failure_reason is None
+        assert ws.failure_message is None
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+    validate_operations = [op for op in operations if op.type == OperationType.validate.value]
+    assert len(validate_operations) == 1
+    assert validate_operations[0].payload["recovery_mode"] == "validate_only"
+    assert validate_operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
 
 
 @pytest.mark.unit
@@ -1596,6 +1625,7 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(thread,),
         initial_reviews=(),
         state=state,
@@ -1605,7 +1635,8 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     )
 
     assert sleep_fn.calls == [30, 60]
-    assert state.threads_addressed_ids == {"T_retry": "fix_committed"}
+    assert state.threads_addressed_ids["T_retry"] == "fix_committed"
+    assert _review_thread_body_state_key("T_retry") in state.threads_addressed_ids
     assert [call.args[:3] for call in cmd.calls] == [
         ["gh", "api", "graphql"],
         ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
@@ -1656,6 +1687,7 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(thread,),
         initial_reviews=(),
         state=state,
@@ -1729,6 +1761,7 @@ async def test_fix_cycle_reraises_non_transient_settle_poll_error(
             workspace_id="ws_auth",
             repo=RepoRef(owner="dimileeh", name="aira-web"),
             pr_number=42,
+            pr_head_sha="abc1234567890def",
             initial_threads=(thread,),
             initial_reviews=(),
             state=MonitorState(),
@@ -1768,6 +1801,7 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_policy_block(
         workspace_id="ws_supply_thread",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(thread,),
         initial_reviews=(),
         state=MonitorState(),
@@ -1804,12 +1838,13 @@ async def test_fix_cycle_returns_failed_push_when_review_fix_hits_policy_block(
     async def _blocked_review(**_kwargs: object) -> str:
         raise _MonitorPolicyBlockedError("Supply-chain policy blocked review fix.")
 
-    monkeypatch.setattr(runner, "_address_review_comment", _blocked_review)
+    monkeypatch.setattr(runner, "_address_review_comment_result", _blocked_review)
 
     result = await runner._run_fix_cycle(
         workspace_id="ws_supply_review",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(),
         initial_reviews=(review,),
         state=MonitorState(),
@@ -1844,6 +1879,7 @@ async def test_fix_cycle_zero_passes_still_runs_push(
         workspace_id="ws_zero_pass",
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(),
         initial_reviews=(),
         state=MonitorState(),
@@ -2860,6 +2896,7 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
+        pr_head_sha="abc1234567890def",
         initial_threads=(),
         initial_reviews=(first_review,),
         state=state,
@@ -2868,10 +2905,89 @@ async def test_fix_cycle_addresses_new_review_burst_before_push(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert state.threads_addressed_ids == {"1": "false_positive", "2": "false_positive"}
+    assert state.threads_addressed_ids["1"] == "false_positive"
+    assert state.threads_addressed_ids["2"] == "false_positive"
+    assert _review_comment_body_state_key("1") in state.threads_addressed_ids
+    assert _review_comment_body_state_key("2") in state.threads_addressed_ids
     assert len(adapter.calls) == 2
     assert runner._deps.sleep.calls == [30, 30]  # type: ignore[attr-defined]
     assert cmd.calls[-1].args[-2:] == ["origin", "HEAD:refs/heads/awf/ws_review_burst"]
+
+
+@pytest.mark.unit
+async def test_fix_cycle_readdresses_thread_when_history_changes_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="DEFER: bot-only feedback is advisory")
+    adapter.queue(stdout="DEFER: maintainer reply needs human input")
+    changed_thread = {
+        "id": "T_same",
+        "isResolved": False,
+        "isOutdated": False,
+        "path": "src/foo.py",
+        "line": 12,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 101,
+                    "bodyText": "bot-only feedback",
+                    "author": {"login": "chatgpt-codex-connector"},
+                },
+                {
+                    "databaseId": 102,
+                    "bodyText": "maintainer reply needs a second look",
+                    "author": {"login": "dimileeh"},
+                },
+            ]
+        },
+    }
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    initial_thread = ReviewThread(
+        thread_id="T_same",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="bot-only feedback",
+        author="chatgpt-codex-connector",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101",
+                body="bot-only feedback",
+                author="chatgpt-codex-connector",
+            ),
+        ),
+    )
+
+    await runner._run_fix_cycle(
+        workspace_id="ws_thread_history_burst",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(initial_thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_thread_history_burst",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert len(adapter.calls) == 2
+    assert "maintainer reply needs a second look" in adapter.calls[1]
+    assert state.threads_addressed_ids["T_same"] == "defer"
+    assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
+    assert runner._deps.sleep.calls == [30, 30]  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
@@ -3816,6 +3932,29 @@ def test_notify_human_reason_and_merge_rejection_detail() -> None:
     assert _merge_rejection_reason("  protected\n branch  ") == (
         "GitHub rejected the merge attempt: protected branch"
     )
+
+
+@pytest.mark.unit
+def test_protected_manual_ready_handoff_rejects_blocking_review_comments() -> None:
+    blocking_review = ReviewComment(
+        comment_id="C1",
+        body_excerpt="still blocking",
+        author="reviewer",
+        blocks_merge=True,
+    )
+    base = _status_for_helpers(reviews=(blocking_review,))
+    status = PRStatus(
+        number=base.number,
+        head_sha=base.head_sha,
+        mergeable=base.mergeable,
+        check_state=base.check_state,
+        unresolved_inline_threads=base.unresolved_inline_threads,
+        unresolved_review_comments=base.unresolved_review_comments,
+        base_behind_count=base.base_behind_count,
+        merge_state_status=MergeStateStatus.BLOCKED,
+    )
+
+    assert _is_protected_manual_ready_handoff(status, MonitorState()) is False
 
 
 @pytest.mark.unit

@@ -22,9 +22,11 @@ from awf.runtime.pr_monitor import (
     ReportCiFailure,
     ReviewComment,
     ReviewThread,
+    ReviewThreadComment,
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    _mark_review_thread_addressed,
     decide,
 )
 
@@ -855,6 +857,39 @@ class TestDeferredFeedbackGate:
         state = MonitorState(threads_addressed_ids={"T1": "defer"})
         status = _status(inline=(_thread(tid="T1"),))
         action = decide(state=state, status=status, config=MonitorConfig(auto_merge=False))
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_deferred_bot_thread_with_human_reply_blocks_merge(self) -> None:
+        """A human reply in an otherwise bot-authored thread is human input."""
+        thread = ReviewThread(
+            thread_id="T1",
+            path="src/x.py",
+            line=10,
+            body_excerpt="bot nit",
+            author="chatgpt-codex-connector",
+            comments=(
+                ReviewThreadComment(
+                    comment_id="101",
+                    body="bot nit",
+                    author="chatgpt-codex-connector",
+                ),
+                ReviewThreadComment(
+                    comment_id="102",
+                    body="maintainer says this still matters",
+                    author="dimileeh",
+                ),
+            ),
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, thread, "defer")
+
+        action = decide(
+            state=state,
+            status=_status(inline=(thread,)),
+            config=MonitorConfig(auto_merge=True),
+        )
+
         assert isinstance(action, NotifyHuman)
 
 

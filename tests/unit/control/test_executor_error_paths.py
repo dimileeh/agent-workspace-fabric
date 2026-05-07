@@ -137,6 +137,7 @@ class _NoopResumeCompose:
 class _RecordingValidation:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.coverage_calls: list[str | None] = []
 
     async def run_profile_phases(
         self,
@@ -148,7 +149,8 @@ class _RecordingValidation:
         return ValidationResult()
 
     async def run_profile_coverage(self, **_kwargs: Any) -> None:
-        return None
+        phase = _kwargs.get("phase")
+        self.coverage_calls.append(phase if isinstance(phase, str) else None)
 
 
 class _ExplodingValidation:
@@ -2208,6 +2210,88 @@ class TestPullRequestUnexpectedError:
 
         assert pr_creator.called is True
         assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
+
+    @pytest.mark.unit
+    async def test_fresh_pr_workspace_defers_final_coverage_to_pr_monitor(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingPrCreator:
+            async def push_and_open(self, *, branch_name: str, **_kwargs: Any) -> PullRequestResult:
+                return PullRequestResult(
+                    url="https://github.com/x/y/pull/123",
+                    branch=branch_name,
+                    head_sha="b" * 40,
+                )
+
+        class _Monitor:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                self.calls.append(workspace_id)
+
+        monitor = _Monitor()
+        profile = WorkspaceProfile(
+            name="defer-final-coverage",
+            source="test",
+            phases={"validate": ["pytest tests/unit/cli -q"]},
+            validation={
+                "strategy": {
+                    "baseline_coverage": "skip",
+                    "edit_gate": "targeted",
+                    "final_gate": "coverage",
+                },
+                "coverage": {
+                    "minimum_percent": 99,
+                    "enforce": True,
+                    "provider": "python",
+                    "command": "pytest --cov=awf --cov-report=term-missing",
+                },
+            },
+        )
+        ws_id = await _seed_ready(factory, resolved_profile=profile.model_dump(mode="json"))
+        validation = _RecordingValidation()
+
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="src/awf/runtime/pr_monitor_runner.py\n")
+        fake.queue_result(returncode=0)  # commit staged implementation output
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="validated-head\n")  # pre-validation HEAD
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_RecordingPrCreator(),
+            pr_monitor_factory=lambda *_args: monitor,
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+
+        assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
+        assert validation.coverage_calls == []
+        assert monitor.calls == [ws_id]
+        assert len(runs) == 1
+        coverage_commands = [cmd for cmd in runs[0].commands if cmd.get("phase") == "coverage"]
+        assert coverage_commands
+        assert coverage_commands[0]["evidence_status"] == "skipped_by_policy"
+        assert coverage_commands[0]["evidence_reason_code"] == "TARGETED_EDIT_GATE"
 
     @pytest.mark.unit
     async def test_unexpected_pr_creation_error_marks_failed(

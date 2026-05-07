@@ -38,7 +38,7 @@ from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
-    _initial_review_grace_started_key,
+    _non_check_reviewer_settle_started_key,
 )
 from tests.postgres import postgres_test_engine
 
@@ -179,9 +179,11 @@ async def _seed_monitoring_workspace(
         ws.pr_number = pr_number
         ws.auto_merge = True
         # Mark the initial-review grace window as already elapsed so the
-        # monitor proceeds straight to recovery dispatch.
+        # monitor proceeds straight to recovery dispatch in tests that are
+        # specifically about recovery handoff rather than review quieting.
         ws.monitor_threads_addressed = {
             "__awf_initial_review_grace_done__:42": "elapsed",
+            "__awf_non_check_reviewer_settle_done__:42:abc1234567890def": "elapsed",
         }
         for target in (
             WorkspaceStatus.provisioning,
@@ -287,15 +289,15 @@ async def test_recovery_round_trip_does_not_rewrite_plan_files(
 
 
 @pytest.mark.unit
-async def test_grace_window_keeps_workspace_in_monitoring_pr(
+async def test_review_quiet_window_keeps_workspace_in_monitoring_pr(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """When grace is still active and the PR is otherwise merge-ready,
-    the runner sleeps and stays in monitoring_pr — no recovery
-    operation is created."""
+    """When review quieting is active and the PR is otherwise merge-ready,
+    the runner sleeps and stays in monitoring_pr — no recovery operation
+    is created."""
     workspace_id = await _seed_monitoring_workspace(factory)
-    # Reset grace state so it appears active.
+    # Reset monitor state so the review quiet window appears active.
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -336,29 +338,35 @@ async def test_grace_window_keeps_workspace_in_monitoring_pr(
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
         # Workspace stayed in monitoring_pr (max_outer_iterations=1
-        # so the grace defer ran once, then loop exited via the iter cap).
+        # so the quiet defer ran once, then loop exited via the iter cap).
         assert ws.status in {
             WorkspaceStatus.monitoring_pr.value,
             WorkspaceStatus.failed.value,  # iter cap fail is acceptable
         }
         ops = await OperationRepository(s).list_all(workspace_id=workspace_id)
-        # No recovery operation was created during the grace window.
+        # No recovery operation was created during the review quiet window.
         pr_monitor_ops = [
             op
             for op in ops
             if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
         ]
         assert [(op.type, op.payload.get("action")) for op in pr_monitor_ops] == [
-            (OperationType.monitor_state.value, "grace_wait")
+            (OperationType.monitor_state.value, "reviewer_settle_wait")
         ]
-        grace_op = pr_monitor_ops[0]
-        assert grace_op.status == OperationStatus.succeeded.value
-        assert grace_op.payload["reason_code"] == "INITIAL_REVIEW_GRACE"
-        assert grace_op.payload["requested_action"] == "validate"
-        # The grace started key is persisted so it doesn't restart on the
-        # next iteration after the runner restarts.
+        settle_op = pr_monitor_ops[0]
+        assert settle_op.status == OperationStatus.succeeded.value
+        assert settle_op.payload["reason_code"] == "NON_CHECK_REVIEWER_SETTLE"
+        assert settle_op.payload["requested_action"] == "validate"
+        # The quiet-window started key is persisted so it doesn't restart on
+        # the next iteration after the runner restarts.
         threads = ws.monitor_threads_addressed or {}
-        assert _initial_review_grace_started_key(42) in threads
+        assert (
+            _non_check_reviewer_settle_started_key(
+                pr_number=42,
+                head_sha="abc1234567890def",
+            )
+            in threads
+        )
 
-    # The runner slept for the grace remainder (capped to poll_interval=60).
+    # The runner slept for the quiet-window remainder (capped to poll_interval=60).
     assert sleep_fn.calls and sleep_fn.calls[0] == 60

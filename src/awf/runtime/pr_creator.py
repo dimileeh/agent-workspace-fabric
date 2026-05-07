@@ -3,7 +3,9 @@
 Two responsibilities:
 
 1. ``git -C <worktree> push -u origin <branch>`` — uploads the commits the
-   coding CLI just made to the remote.
+   coding CLI just made to the remote. When updating an adopted fork PR through
+   an explicit push URL, AWF omits ``-u`` so credentialed URLs are not persisted
+   in branch upstream config.
 2. ``gh pr create --base <base> --head <branch> --title ... --body ...`` —
    opens the PR on GitHub when one does not already exist. We capture stdout
    which contains the PR URL.
@@ -43,12 +45,18 @@ _URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/@\s]+(?::[^/@\s]+)?@")
 # workstreams) would otherwise emit an unbounded list that could
 # exceed log-backend payload limits.
 _MAX_DIAGNOSTIC_COMMITS = 50
+_HEADS_REF_PREFIX = "refs/heads/"
 
 
 def _redact_credentials(text: str) -> str:
     """Replace ``https://user[:pwd]@host`` patterns with ``https://***@host``
     so push/pr-create stderr can be safely logged."""
     return _URL_CREDENTIAL_PATTERN.sub(r"\1***@", text)
+
+
+def _short_branch_name(branch_name: str) -> str:
+    """Return the branch name without a leading ``refs/heads/`` prefix."""
+    return branch_name.removeprefix(_HEADS_REF_PREFIX)
 
 
 @dataclass(frozen=True)
@@ -93,7 +101,16 @@ class PullRequestCreator:
         title: str,
         body: str,
         existing_pr_url: str | None = None,
+        remote_branch_name: str | None = None,
+        remote_url: str | None = None,
     ) -> PullRequestResult:
+        if existing_pr_url and remote_branch_name:
+            push_target_branch = _short_branch_name(remote_branch_name)
+            push_ref = f"HEAD:{_HEADS_REF_PREFIX}{push_target_branch}"
+        else:
+            push_target_branch = branch_name
+            push_ref = branch_name
+        push_remote = remote_url or "origin"
         # Step 0: capture the worktree's view of the branch state so we
         # can diagnose post-validation push failures. T39 (ws_eb8c2bd5)
         # hit ``gh pr create: No commits between development and
@@ -105,7 +122,7 @@ class PullRequestCreator:
         # logs answer all three questions:
         head_sha = await self._log_pre_push_diagnostics(
             worktree_path=worktree_path,
-            branch_name=branch_name,
+            branch_name=push_target_branch,
             base_branch=base_branch,
         )
 
@@ -117,9 +134,9 @@ class PullRequestCreator:
                 "-C",
                 str(worktree_path),
                 "push",
-                "-u",
-                "origin",
-                branch_name,
+                *(["-u"] if remote_url is None else []),
+                push_remote,
+                push_ref,
             ],
         )
         # Log the verbatim push output BEFORE the ok check. If the push
@@ -132,7 +149,8 @@ class PullRequestCreator:
         # and embedded credentials must not hit log storage.
         _log.info(
             "pr_creator.push_output",
-            branch=branch_name,
+            branch=push_target_branch,
+            remote=_redact_credentials(push_remote),
             returncode=push.returncode,
             stdout=_redact_credentials(push.stdout.strip())[:500],
             stderr=_redact_credentials(push.stderr.strip())[:500],
@@ -146,8 +164,12 @@ class PullRequestCreator:
             )
 
         if existing_pr_url:
-            _log.info("pr.reused", branch=branch_name, url=existing_pr_url)
-            return PullRequestResult(url=existing_pr_url, branch=branch_name, head_sha=head_sha)
+            _log.info("pr.reused", branch=push_target_branch, url=existing_pr_url)
+            return PullRequestResult(
+                url=existing_pr_url,
+                branch=push_target_branch,
+                head_sha=head_sha,
+            )
 
         # Step 2: open the PR. gh reads auth from ~/.config/gh by default.
         pr = await self._runner.run(

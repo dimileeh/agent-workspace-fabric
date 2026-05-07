@@ -49,6 +49,7 @@ from awf.common.compose_exec import (
     cleanup_failure_message,
 )
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
+from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
@@ -119,6 +120,7 @@ from awf.runtime.pr_monitor_operations import (
     finish_monitor_operation,
     monitor_operation_idempotency_key,
 )
+from awf.runtime.pr_push_remote import remote_push_url_for_workspace
 from awf.runtime.validation import (
     DATABASE_GENERATED_SETUP_TIMEOUT,
     DATABASE_REFRESH_TIMEOUT,
@@ -167,6 +169,11 @@ class _MonitorRunnerProto(Protocol):
 
 
 _log = get_logger(__name__)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
 
 WORKTREE_MISSING_REASON_CODE = "WORKTREE_MISSING"
 PR_REEXECUTION_GUARD_REASON_CODE = "PR_REEXECUTION_GUARD"
@@ -1884,6 +1891,11 @@ class WorkspaceExecutor:
                 profile.validation.strategy.edit_gate == "targeted"
                 and profile.validation.strategy.final_gate == "coverage"
             )
+            defer_final_coverage_to_pr_monitor = _defer_final_coverage_to_pr_monitor(
+                recovery=recovery,
+                has_pr_monitor=self._pr_monitor is not None or self._pr_monitor_factory is not None,
+                profile=profile,
+            )
             coverage_evidence = _CoverageEvidenceResult(
                 coverage=None,
                 evidence_status=(
@@ -1921,6 +1933,7 @@ class WorkspaceExecutor:
                     not run_coverage_during_edit_gate
                     and val_result.all_passed
                     and profile.validation.strategy.final_gate == "coverage"
+                    and not defer_final_coverage_to_pr_monitor
                 ):
                     coverage_evidence = await self._run_final_coverage_gate(
                         workspace_id=workspace_id,
@@ -2502,6 +2515,9 @@ class WorkspaceExecutor:
         pr_title = ws.task_title
         pr_body = _build_pr_body(ws, defaults=defaults)
         push_branch_name = ws.branch_name or f"awf/{workspace_id}"
+        existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None
+        existing_pr_remote_url = _existing_pr_remote_push_url(ws) if ws.pr_url else None
+        audit_remote_branch = existing_pr_remote_branch or push_branch_name
 
         try:
             pr = await self._pr_creator.push_and_open(
@@ -2511,6 +2527,8 @@ class WorkspaceExecutor:
                 title=pr_title,
                 body=pr_body,
                 existing_pr_url=ws.pr_url,
+                remote_branch_name=existing_pr_remote_branch,
+                remote_url=existing_pr_remote_url,
             )
         except PullRequestError as exc:
             _log.error(
@@ -2527,7 +2545,7 @@ class WorkspaceExecutor:
                     outcome="succeeded",
                     reason_code="PR_UPDATED" if ws.pr_url else "PR_OPENED",
                     branch_name=push_branch_name,
-                    remote_branch=push_branch_name,
+                    remote_branch=audit_remote_branch,
                     pr_number=_extract_pr_number(ws.pr_url) if ws.pr_url else None,
                     pr_url=ws.pr_url,
                     source_head_sha=exc.head_sha,
@@ -2547,7 +2565,7 @@ class WorkspaceExecutor:
                     else _PR_CREATE_FAILED_REASON_CODE
                 ),
                 branch_name=push_branch_name,
-                remote_branch=push_branch_name,
+                remote_branch=audit_remote_branch,
                 pr_number=_extract_pr_number(ws.pr_url) if ws.pr_url else None,
                 pr_url=ws.pr_url,
                 source_head_sha=exc.head_sha,
@@ -3524,7 +3542,7 @@ class WorkspaceExecutor:
             # compare call produced it.
             before_report_text = _read_text_if_present(worktree_path / report_path)
             before_report_digest = _digest_text(before_report_text) if before_report_text else None
-            iteration_started_at = time.monotonic()
+            iteration_started_at = _monotonic()
             compare_error: AgentRunError | None = None
             compare_result = None
             try:
@@ -3556,7 +3574,7 @@ class WorkspaceExecutor:
                     stderr=exc.result.stderr,
                 )
 
-            elapsed_seconds = time.monotonic() - iteration_started_at
+            elapsed_seconds = _monotonic() - iteration_started_at
             # Compute after_compare on both success and timeout paths so the
             # scope check runs uniformly. Otherwise an idle/timeout that still
             # leaves a satisfied report could write files outside report_path
@@ -5121,6 +5139,16 @@ def _sync_feature_pr_adoption_metadata(ws: Workspace) -> Mapping[str, object]:
     return adoption if isinstance(adoption, Mapping) else {}
 
 
+def _existing_pr_remote_push_url(ws: Workspace) -> str | None:
+    if ws.task_kind != "sync_feature_pr":
+        return None
+    try:
+        base_repo = RepoRef.from_url(ws.repo_url)
+    except ValueError:
+        return None
+    return remote_push_url_for_workspace(ws, base_repo=base_repo)
+
+
 def _missing_sync_feature_pr_adoption_metadata(
     ws: Workspace,
     metadata: Mapping[str, object],
@@ -5495,6 +5523,21 @@ def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfi
     }:
         task_class_tier = 2
     return max(profile_tier, task_class_tier)
+
+
+def _defer_final_coverage_to_pr_monitor(
+    *,
+    recovery: Mapping[str, Any] | None,
+    has_pr_monitor: bool,
+    profile: WorkspaceProfile,
+) -> bool:
+    return (
+        recovery is None
+        and has_pr_monitor
+        and profile.validation.strategy.edit_gate == "targeted"
+        and profile.validation.strategy.final_gate == "coverage"
+        and profile.validation.coverage.command is not None
+    )
 
 
 def _validation_run_log_stream_refs(

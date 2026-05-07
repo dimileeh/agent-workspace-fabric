@@ -93,6 +93,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `gh auth login`
 **Docs Link:** [docs/REASON_CATALOG.md#github_token_env_missing](#github_token_env_missing)
 
+### GIT_BASE_FETCH_TRANSIENT_RETRY
+**Problem:** The PR monitor hit a transient GitHub or network error while refreshing the target branch and is retrying.
+**Likely Cause:** GitHub returned a temporary 5xx response, timed out, or reset the connection during `git fetch`.
+**Operator Fix:** No immediate action required. AWF will retry with bounded exponential backoff; inspect monitor logs if retries keep recurring.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#git_base_fetch_transient_retry](#git_base_fetch_transient_retry)
+
+### GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED
+**Problem:** The PR monitor exhausted retries for transient target-branch fetch failures.
+**Likely Cause:** GitHub or network access remained unavailable past the configured retry budget.
+**Operator Fix:** Verify GitHub/network availability, then remonitor the workspace once the remote is reachable.
+**Related Command:** `awf workspace remonitor <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#git_base_fetch_transient_retry_exhausted](#git_base_fetch_transient_retry_exhausted)
+
 ### GIT_FETCH_BASE_FAILED
 **Problem:** The PR monitor could not refresh the target branch ref for a workspace.
 **Likely Cause:** The shared git mirror has a broken AWF ref, network access to the remote failed, or the target branch no longer exists.

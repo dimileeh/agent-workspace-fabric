@@ -36,6 +36,7 @@ from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON, Operation, Work
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    PRFeedbackResolutionRepository,
     ProviderModelCircuitBreakerRepository,
     StaleReasonCreate,
     StaleReasonRepository,
@@ -58,9 +59,12 @@ from awf.runtime.pr_monitor import (
     ReportCiFailure,
     ReviewComment,
     ReviewThread,
+    ReviewThreadComment,
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    _mark_review_thread_addressed,
+    _review_thread_body_state_key,
 )
 from awf.runtime.pr_monitor_runner import (
     BaseBehindCountError,
@@ -69,8 +73,11 @@ from awf.runtime.pr_monitor_runner import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
+    VerdictResult,
     _as_utc,
     _collect_defer_items,
+    _drop_stale_review_comment_addressed_state,
+    _drop_stale_review_thread_addressed_state,
     _GitPushResult,
     _infer_service_work_dir,
     _initial_review_grace_done_key,
@@ -81,10 +88,15 @@ from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_wall_seconds,
     _initial_review_grace_wall_started_value_from_datetime,
     _is_pending_check,
+    _mark_review_comment_addressed,
     _merge_rejection_reason,
+    _MergeGateResult,
+    _monitor_state_verdict,
     _non_check_reviewer_settle_started_key,
     _notify_human_reason,
     _parse_verdict,
+    _parse_verdict_result,
+    _review_comment_body_state_key,
     _stale_pending_check_warning_key,
     _stale_pending_check_warnings,
     _target_reconcile_payload,
@@ -533,6 +545,69 @@ async def test_auto_merge_dispatches_validation_recovery_before_merge(
 
 
 @pytest.mark.unit
+async def test_auto_merge_waits_for_reviewer_settle_before_validation_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 811
+    head_sha = "8" * 40
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    await _mark_refactor_task(factory, workspace_id)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=900,
+    )
+    state = MonitorState(started_at=1000.0)
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=pr_number,
+        status=_green_status(pr_number=pr_number, head_sha=head_sha),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert not [op for op in operations if op.type == OperationType.validate.value]
+    settle_operations = [
+        op
+        for op in operations
+        if op.type == OperationType.monitor_state.value
+        and op.payload.get("reason_code") == "NON_CHECK_REVIEWER_SETTLE"
+    ]
+    assert len(settle_operations) == 1
+    assert (
+        _non_check_reviewer_settle_started_key(pr_number=pr_number, head_sha=head_sha)
+        in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
 async def test_auto_merge_dispatches_active_stale_recovery_before_merge(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -864,6 +939,150 @@ async def test_pre_merge_recheck_blocks_when_check_becomes_pending(
 
 
 @pytest.mark.unit
+async def test_pre_merge_recheck_requeues_changed_thread_history_before_deciding(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="DEFER: maintainer reply needs human input")
+    cmd.queue_result(returncode=0)  # git fetch origin development
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    changed_thread = {
+        "id": "T_handled",
+        "isResolved": False,
+        "isOutdated": False,
+        "path": "src/awf/runtime/pr_monitor_runner.py",
+        "line": 1904,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 101,
+                    "bodyText": "bot finding",
+                    "author": {"login": "chatgpt-codex-connector"},
+                },
+                {
+                    "databaseId": 102,
+                    "bodyText": "maintainer reply needs human input",
+                    "author": {"login": "dimileeh"},
+                },
+            ]
+        },
+    }
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # fix-cycle settle poll
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push no-op
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        pre_merge_settle_seconds=5,
+    )
+    original_thread = ReviewThread(
+        thread_id="T_handled",
+        path="src/awf/runtime/pr_monitor_runner.py",
+        line=1904,
+        body_excerpt="bot finding",
+        author="chatgpt-codex-connector",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101",
+                body="bot finding",
+                author="chatgpt-codex-connector",
+            ),
+        ),
+    )
+    state = MonitorState(started_at=0.0)
+    _mark_review_thread_addressed(state, original_thread, "false_positive")
+    initial_status = replace(_green_status(), unresolved_inline_threads=(original_thread,))
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=initial_status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [5, 30]
+    assert _gh_pr_merge_calls(cmd) == []
+    assert len(adapter.calls) == 1
+    assert "maintainer reply needs human input" in adapter.calls[0]
+    assert state.threads_addressed_ids["T_handled"] == "defer"
+    assert _review_thread_body_state_key("T_handled") in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_pre_merge_recheck_transient_base_fetch_exhaustion_is_terminal_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    transient_stderr = (
+        "remote: Internal Server Error\n"
+        "fatal: unable to access 'https://github.com/example/repo.git/': "
+        "The requested URL returned error: 500"
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr=transient_stderr)
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        pre_merge_settle_seconds=5,
+    )
+    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 0)
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert sleep_fn.calls == [5]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        failed_transitions = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+        ]
+        assert failed_transitions[-1].reason_code == (
+            "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+        )
+
+
+@pytest.mark.unit
 async def test_clean_pr_merges_only_after_pre_merge_recheck_passes(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -889,7 +1108,10 @@ async def test_clean_pr_merges_only_after_pre_merge_recheck_passes(
     )
     state = MonitorState(
         started_at=0.0,
-        threads_addressed_ids={_initial_review_grace_done_key(42): "elapsed"},
+        threads_addressed_ids={
+            _initial_review_grace_done_key(42): "elapsed",
+            "__awf_base_fetch_retry_count:pre_merge_recheck": "2",
+        },
     )
     status = replace(
         _green_status(),
@@ -931,6 +1153,7 @@ async def test_clean_pr_merges_only_after_pre_merge_recheck_passes(
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.completed.value
     assert workspace.pr_merge_sha == "MERGESHA"
+    assert "__awf_base_fetch_retry_count:pre_merge_recheck" not in state.threads_addressed_ids
     assert candidate is not None
     assert candidate.status == "merged"
     monitor_operations = [op for op in operations if op.type == "monitor_state"]
@@ -1079,7 +1302,7 @@ async def test_address_review_comment_passes_quoted_evidence_prompt_to_adapter(
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
-    adapter.queue(stdout="FALSE POSITIVE: existing policy still applies")
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: existing policy still applies")
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
@@ -1109,6 +1332,8 @@ async def test_address_review_comment_passes_quoted_evidence_prompt_to_adapter(
     assert len(adapter.calls) == 1
     prompt = adapter.calls[0]
     assert "UNTRUSTED EXTERNAL EVIDENCE" in prompt
+    assert "gh pr comment" not in prompt
+    assert "AWF-VERDICT:" in prompt
     assert "source_kind: github_pr_review_comment" in prompt
     assert "source_id: issue:9001" in prompt
     assert "comment_kind: issue-style PR comment" in prompt
@@ -1117,6 +1342,540 @@ async def test_address_review_comment_passes_quoted_evidence_prompt_to_adapter(
         assert [prompt_line for prompt_line in prompt.splitlines() if line in prompt_line] == [
             f"AWF-EVIDENCE> {line}"
         ]
+
+
+@pytest.mark.unit
+async def test_review_comment_false_positive_is_recorded_by_pr_identity(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: automated review wrapper only")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    comment = ReviewComment(
+        comment_id="issue:4391271818",
+        body="Codex automated review wrapper",
+        body_excerpt="Codex automated review wrapper",
+        author="chatgpt-codex-connector[bot]",
+        url="https://github.example/comment/4391271818",
+    )
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(),
+        initial_reviews=(comment,),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as session:
+        rows = await PRFeedbackResolutionRepository(session).list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.feedback_kind == "review_comment"
+    assert row.feedback_id == "issue:4391271818"
+    assert row.head_sha == "abc1234567890def"
+    assert row.verdict == "false_positive"
+    assert row.reason == "automated review wrapper only"
+    assert row.source_workspace_id == workspace_id
+
+
+@pytest.mark.unit
+async def test_review_comment_fix_committed_is_recorded_against_pushed_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="AWF-VERDICT: FIXED: committed repair")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0, stderr="pushed")
+    cmd.queue_result(returncode=0, stdout="new-head-after-repair-push\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    comment = ReviewComment(
+        comment_id="issue:4391271818",
+        body="Review-level feedback fixed by a repair commit",
+        body_excerpt="Review-level feedback fixed by a repair commit",
+        author="chatgpt-codex-connector[bot]",
+        url="https://github.example/comment/4391271818",
+    )
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="old-head-before-repair-push",
+        initial_threads=(),
+        initial_reviews=(comment,),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as session:
+        rows = await PRFeedbackResolutionRepository(session).list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.feedback_kind == "review_comment"
+    assert row.feedback_id == "issue:4391271818"
+    assert row.head_sha == "new-head-after-repair-push"
+    assert row.verdict == "fix_committed"
+    assert row.reason == "committed repair"
+    assert row.source_workspace_id == workspace_id
+    assert state.last_push_sha == "new-head-after-repair-push"
+
+
+@pytest.mark.unit
+async def test_new_workspace_inherits_review_comment_verdicts_across_pr_head_changes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    old_workspace_id = await seed_monitoring_workspace(factory)
+    new_workspace_id = await seed_monitoring_workspace(factory)
+    comment = ReviewComment(
+        comment_id="issue:4391271818",
+        body="Codex automated review wrapper",
+        body_excerpt="Codex automated review wrapper",
+        author="chatgpt-codex-connector[bot]",
+    )
+    async with factory() as session:
+        await PRFeedbackResolutionRepository(session).record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="old-head-before-repair-push",
+            feedback_kind="review_comment",
+            feedback_id=comment.comment_id,
+            feedback_body=comment.body or comment.body_excerpt,
+            feedback_author=comment.author,
+            feedback_url=comment.url,
+            verdict="false_positive",
+            reason="automated review wrapper only",
+            source_workspace_id=old_workspace_id,
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    status = PRStatus(
+        number=42,
+        head_sha="new-head-after-repair-push",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(comment,),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    await runner._apply_pr_feedback_resolution_state(
+        workspace_id=new_workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+    )
+
+    assert state.threads_addressed_ids["issue:4391271818"] == "false_positive"
+    assert _review_comment_body_state_key("issue:4391271818") in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_pr_feedback_resolution_upsert_updates_same_comment_across_head_changes(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    comment_body = "Codex review wrapper for already-handled non-actionable feedback"
+    async with factory() as session:
+        repo = PRFeedbackResolutionRepository(session)
+        await repo.record_resolution(
+            scm_provider="GitHub",
+            repository_key="Dimileeh/Aira-Web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="old-head-before-repair-push",
+            feedback_kind="REVIEW_COMMENT",
+            feedback_id="issue:4391271818",
+            feedback_body=comment_body,
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="false_positive",
+            reason="first monitor handled it privately",
+            source_workspace_id=workspace_id,
+            source_operation_id="op-old",
+        )
+        await session.commit()
+
+        updated = await repo.record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="new-head-after-repair-push",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body=comment_body,
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="false_positive",
+            reason="second monitor saw the inherited no-op verdict",
+            source_workspace_id=workspace_id,
+            source_operation_id="op-new",
+        )
+        await session.commit()
+
+        rows = await repo.list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+        fetched = await repo.get(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body_hash=updated.feedback_body_hash,
+        )
+
+    assert len(rows) == 1
+    assert fetched is not None
+    assert rows[0].head_sha == "new-head-after-repair-push"
+    assert rows[0].source_operation_id == "op-new"
+    assert rows[0].reason == "second monitor saw the inherited no-op verdict"
+    assert fetched.head_sha == "new-head-after-repair-push"
+
+
+@pytest.mark.unit
+async def test_pr_feedback_resolution_body_change_creates_new_comment_identity(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        repo = PRFeedbackResolutionRepository(session)
+        await repo.record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="old-head",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body="old body",
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="false_positive",
+            reason="old comment body",
+            source_workspace_id=workspace_id,
+        )
+        await repo.record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="new-head",
+            feedback_kind="review_comment",
+            feedback_id="issue:4391271818",
+            feedback_body="new body with new actionable content",
+            feedback_author="chatgpt-codex-connector[bot]",
+            feedback_url="https://github.example/comment/4391271818",
+            verdict="defer",
+            reason="body changed, so the monitor must re-evaluate it",
+            source_workspace_id=workspace_id,
+        )
+        await session.commit()
+
+        rows = await repo.list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert len(rows) == 2
+    assert {row.reason for row in rows} == {
+        "old comment body",
+        "body changed, so the monitor must re-evaluate it",
+    }
+
+
+@pytest.mark.unit
+async def test_pr_feedback_resolution_requires_postgresql_dialect(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        repo = PRFeedbackResolutionRepository(session, dialect_name="mysql")
+
+        with pytest.raises(RuntimeError, match="requires PostgreSQL"):
+            await repo.record_resolution(
+                scm_provider="github",
+                repository_key="dimileeh/aira-web",
+                pull_request_key="42",
+                pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+                head_sha="abc1234567890def",
+                feedback_kind="review_comment",
+                feedback_id="issue:4391271818",
+                feedback_body="body",
+                feedback_author="reviewer",
+                feedback_url=None,
+                verdict="false_positive",
+                reason="postgres-only persistence guard",
+                source_workspace_id=workspace_id,
+            )
+
+
+@pytest.mark.unit
+async def test_agent_failed_review_verdict_is_not_recorded_as_handled(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._record_pr_feedback_resolution(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        comment=ReviewComment(
+            comment_id="issue:4391271818",
+            body_excerpt="The agent failed before reaching a comment verdict.",
+            body="The agent failed before reaching a comment verdict.",
+            author="reviewer",
+        ),
+        verdict_result=VerdictResult(verdict="agent_failed", reason="adapter crashed"),
+        operation_id="op-failed",
+    )
+
+    async with factory() as session:
+        rows = await PRFeedbackResolutionRepository(session).list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert rows == []
+
+
+@pytest.mark.unit
+async def test_pr_feedback_resolution_state_ignores_absent_or_already_current_comments(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        await PRFeedbackResolutionRepository(session).record_resolution(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
+            head_sha="abc1234567890def",
+            feedback_kind="review_comment",
+            feedback_id="issue:handled",
+            feedback_body="old body",
+            feedback_author="reviewer",
+            feedback_url=None,
+            verdict="false_positive",
+            reason="already handled",
+            source_workspace_id=workspace_id,
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    _mark_review_comment_addressed(
+        state,
+        ReviewComment(
+            comment_id="issue:handled",
+            body_excerpt="old body",
+            body="old body",
+            author="reviewer",
+        ),
+        "false_positive",
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="new-head-after-repair-push",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(
+            ReviewComment(
+                comment_id="issue:handled",
+                body_excerpt="old body",
+                body="old body",
+                author="reviewer",
+            ),
+            ReviewComment(
+                comment_id="issue:unknown",
+                body_excerpt="unseen body",
+                body="unseen body",
+                author="reviewer",
+            ),
+        ),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    changed = await runner._apply_pr_feedback_resolution_state(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+    )
+
+    assert changed is False
+    assert state.threads_addressed_ids["issue:handled"] == "false_positive"
+    assert _review_comment_body_state_key("issue:handled") in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_changed_review_comment_body_requeues_private_verdict() -> None:
+    state = MonitorState()
+    _mark_review_comment_addressed(
+        state,
+        ReviewComment(
+            comment_id="issue:handled",
+            body_excerpt="old body",
+            body="old body",
+            author="reviewer",
+        ),
+        "false_positive",
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="new-head-after-review-edit",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(
+            ReviewComment(
+                comment_id="issue:handled",
+                body_excerpt="new body that must be evaluated again",
+                body="new body that must be evaluated again",
+                author="reviewer",
+            ),
+        ),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    changed = _drop_stale_review_comment_addressed_state(status, state)
+
+    assert changed is True
+    assert "issue:handled" not in state.threads_addressed_ids
+    assert _review_comment_body_state_key("issue:handled") not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+def test_changed_review_thread_history_requeues_private_verdict() -> None:
+    state = MonitorState()
+    original = ReviewThread(
+        thread_id="T_handled",
+        path="src/awf/runtime/pr_monitor_runner.py",
+        line=698,
+        body_excerpt="bot finding",
+        author="chatgpt-codex-connector",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101",
+                body="bot finding",
+                author="chatgpt-codex-connector",
+            ),
+        ),
+    )
+    _mark_review_thread_addressed(state, original, "false_positive")
+    status = PRStatus(
+        number=42,
+        head_sha="new-head-after-thread-reply",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(
+            ReviewThread(
+                thread_id="T_handled",
+                path="src/awf/runtime/pr_monitor_runner.py",
+                line=698,
+                body_excerpt="bot finding",
+                author="chatgpt-codex-connector",
+                comments=(
+                    ReviewThreadComment(
+                        comment_id="101",
+                        body="bot finding",
+                        author="chatgpt-codex-connector",
+                    ),
+                    ReviewThreadComment(
+                        comment_id="102",
+                        body="maintainer says this still needs a fix",
+                        author="dimileeh",
+                    ),
+                ),
+            ),
+        ),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    changed = _drop_stale_review_thread_addressed_state(status, state)
+
+    assert changed is True
+    assert "T_handled" not in state.threads_addressed_ids
+    assert _review_thread_body_state_key("T_handled") not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -1419,6 +2178,192 @@ async def test_run_fails_workspace_when_base_fetch_cannot_be_refreshed(
 
 
 @pytest.mark.unit
+async def test_run_retries_transient_base_fetch_500_and_completes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    cmd.queue_result(
+        returncode=128,
+        stderr=(
+            "remote: Internal Server Error\n"
+            "fatal: unable to access 'https://github.com/example/repo.git/': "
+            "The requested URL returned error: 500"
+        ),
+    )
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=0, stdout=pr_payload(closed=True, merged=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.gh = _CapturingGH(  # type: ignore[assignment]
+        status=replace(
+            _green_status(),
+            closed=True,
+            merged=True,
+            merge_commit_sha="mergecommit1234567890",
+        )
+    )
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [5.0]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.completed.value
+        assert any(
+            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY"
+            for event in workspace.events
+        )
+
+
+@pytest.mark.unit
+async def test_run_fails_after_transient_base_fetch_retry_budget_is_exhausted(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    transient_stderr = (
+        "remote: Internal Server Error\n"
+        "fatal: unable to access 'https://github.com/example/repo.git/': "
+        "The requested URL returned error: 500"
+    )
+    cmd.queue_result(returncode=128, stderr=transient_stderr)
+    cmd.queue_result(returncode=128, stderr=transient_stderr)
+    cmd.queue_result(returncode=128, stderr=transient_stderr)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 2)
+    object.__setattr__(
+        runner._runner_config,
+        "transient_base_fetch_initial_backoff_seconds",
+        3.0,
+    )
+    object.__setattr__(
+        runner._runner_config,
+        "transient_base_fetch_max_backoff_seconds",
+        10.0,
+    )
+    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [3.0, 6.0]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == "infrastructure_failure"
+        assert workspace.failure_message is not None
+        assert "could not refresh base branch" in workspace.failure_message
+        assert any(
+            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+            for event in workspace.events
+        )
+        failed_transitions = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+        ]
+        assert failed_transitions[-1].reason_code == (
+            "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+        )
+
+
+@pytest.mark.unit
+async def test_sync_base_transient_base_fetch_retry_budget_survives_status_refresh(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    transient_stderr = (
+        "remote: Internal Server Error\n"
+        "fatal: unable to access 'https://github.com/example/repo.git/': "
+        "The requested URL returned error: 500"
+    )
+    for _ in range(3):
+        cmd.queue_result(returncode=0)  # top-of-loop git fetch origin development
+        cmd.queue_result(returncode=0, stdout="1\n")  # base branch is still ahead
+        cmd.queue_result(returncode=0)  # sync_base merge --abort
+        cmd.queue_result(returncode=128, stderr=transient_stderr)  # sync_base fetch
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        max_outer_iterations=3,
+    )
+    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 2)
+    object.__setattr__(
+        runner._runner_config,
+        "transient_base_fetch_initial_backoff_seconds",
+        5.0,
+    )
+    object.__setattr__(
+        runner._runner_config,
+        "transient_base_fetch_max_backoff_seconds",
+        30.0,
+    )
+    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [5.0, 10.0]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == "infrastructure_failure"
+        assert workspace.failure_message is not None
+        assert "could not refresh base branch" in workspace.failure_message
+        assert any(
+            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+            and event.payload.get("context") == "sync_base"
+            for event in workspace.events
+        )
+        failed_transitions = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+        ]
+        assert failed_transitions[-1].reason_code == (
+            "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+        )
+
+
+@pytest.mark.unit
 async def test_base_behind_count_failure_is_explicit_not_zero(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1489,7 +2434,8 @@ async def test_execute_sync_base_records_no_progress_noop(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    state = MonitorState()
+    sync_base_retry_key = "__awf_base_fetch_retry_count:sync_base"
+    state = MonitorState(threads_addressed_ids={sync_base_retry_key: "2"})
 
     terminal = await runner._execute(
         action=SyncBase(),
@@ -1515,6 +2461,7 @@ async def test_execute_sync_base_records_no_progress_noop(
         "abc1234567890def|CONFLICTING|DIRTY|base_behind=0"
     )
     assert state.sync_base_no_progress_count == 1
+    assert sync_base_retry_key not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -1678,6 +2625,55 @@ async def test_execute_sync_base_base_fetch_failure_finishes_operation_and_fails
     assert "broken mirror" in workspace.failure_message
     assert operations[0].status == OperationStatus.failed.value
     assert operations[0].error_code == "GIT_FETCH_BASE_FAILED"
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_transient_exhaustion_records_terminal_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 0)
+
+    async def _raise_transient_base_fetch_error(**_kwargs: object) -> object:
+        raise BaseFetchError("git fetch base failed: HTTP 500 server error")
+
+    mocker.patch.object(runner, "_run_sync_base", _raise_transient_base_fetch_error)
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status(merge_state_status=MergeStateStatus.DIRTY),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    assert terminal is True
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+    assert operations[0].result["reason_code"] == (
+        "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+    )
 
 
 @pytest.mark.unit
@@ -2031,6 +3027,27 @@ class TestParseVerdict:
         assert _parse_verdict("FALSE POSITIVE: reviewer misread the diff") == "false_positive"
 
     @pytest.mark.unit
+    def test_private_awf_verdict_false_positive_marker(self) -> None:
+        assert (
+            _parse_verdict("AWF-VERDICT: FALSE POSITIVE: stale review boilerplate")
+            == "false_positive"
+        )
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_defer_marker_preserves_reason(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: NEEDS_HUMAN: maintainer decision")
+
+        assert result.verdict == "defer"
+        assert result.reason == "maintainer decision"
+
+    @pytest.mark.unit
+    def test_private_awf_verdict_fixed_marker_preserves_reason(self) -> None:
+        result = _parse_verdict_result("AWF-VERDICT: FIXED: pushed regression test")
+
+        assert result.verdict == "fix_committed"
+        assert result.reason == "pushed regression test"
+
+    @pytest.mark.unit
     def test_false_positive_case_insensitive(self) -> None:
         assert _parse_verdict("false positive: minor") == "false_positive"
 
@@ -2047,6 +3064,13 @@ class TestParseVerdict:
         # Scanner checks FALSE POSITIVE first.
         reply = "FALSE POSITIVE: not a real issue. (not DEFER:)"
         assert _parse_verdict(reply) == "false_positive"
+
+    @pytest.mark.unit
+    def test_monitor_state_verdict_normalizes_persisted_private_verdicts(self) -> None:
+        assert _monitor_state_verdict("NEEDS_HUMAN") == "defer"
+        assert _monitor_state_verdict("defer") == "defer"
+        assert _monitor_state_verdict("agent_failed") == "agent_failed"
+        assert _monitor_state_verdict("fixed") == "fix_committed"
 
 
 class TestCollectDeferItems:
@@ -2668,6 +3692,79 @@ async def test_validation_recovery_dispatch_is_idempotent_for_duplicate_tick_rep
         "slept_seconds": 60,
     }
     assert len(recovery_events) == 1
+
+
+@pytest.mark.unit
+async def test_late_validation_recovery_callback_records_stale_ready_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 79
+    head_sha = "f" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    await _mark_refactor_task(factory, workspace_id)
+    async with factory() as session:
+        workspace_repo = WorkspaceRepository(session)
+        workspace = await workspace_repo.get(workspace_id)
+        assert workspace is not None
+        await workspace_repo.transition(
+            workspace,
+            to=WorkspaceStatus.ready,
+            reason_code="TEST_READY_AFTER_RECOVERY_DISPATCH",
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+    terminal = await runner._handle_merge_gate_blocker(
+        gate=_MergeGateResult(
+            workspace=workspace,
+            stale_reason="validation_insufficient_tier",
+            req_action="validate",
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=pr_number,
+        status=_green_status(pr_number=pr_number, head_sha=head_sha),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        stale_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert len(stale_events) == 1
+    assert stale_events[0].reason_code == "STALE_CALLBACK_IGNORED"
+    assert stale_events[0].payload["callback_action"] == "recovery_dispatch"
+    assert stale_events[0].payload["actual_status"] == WorkspaceStatus.ready.value
+    assert [op for op in operations if op.type == OperationType.validate.value] == []
 
 
 @pytest.mark.unit

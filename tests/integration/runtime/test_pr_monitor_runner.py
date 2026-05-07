@@ -28,7 +28,12 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import MonitorConfig, MonitorState
+from awf.runtime.pr_monitor import (
+    MonitorConfig,
+    MonitorState,
+    ReviewThread,
+    _mark_review_thread_addressed,
+)
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
@@ -1366,7 +1371,18 @@ class TestStatePersistence:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            ws.monitor_threads_addressed = {"T1": "fix_committed"}
+            state = MonitorState()
+            _mark_review_thread_addressed(
+                state,
+                ReviewThread(
+                    thread_id="T1",
+                    path="a",
+                    line=1,
+                    body_excerpt="",
+                ),
+                "fix_committed",
+            )
+            ws.monitor_threads_addressed = dict(state.threads_addressed_ids)
             await s.commit()
         thread = {
             "id": "T1",

@@ -18,10 +18,9 @@ Design notes:
   ignores ``state.iter_count`` entirely — the counter exists for
   structured-log context, not as a terminal gate. Bumping happens in
   the runner after an action executes.
-* **Thread dedup is the caller's problem**. ``decide`` returns a
-  ``batch`` of threads on ``AddressComments`` consisting *only* of threads
-  whose IDs are absent from ``state.threads_addressed_ids``. If every
-  thread is already addressed, ``decide`` skips to the other gates.
+* **Thread dedup is the caller's problem**. The runner drops stale
+  addressed-state when fetched review-thread/comment evidence changes,
+  then ``decide`` skips only the still-current addressed items.
 * **Release-PR variant** (``task_kind="monitor_release_pr"``) differs in
   exactly one place: when all 5 gates are green it returns
   ``NotifyHuman`` instead of ``Merge``. The runner treats that as a live
@@ -31,6 +30,8 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -89,11 +90,29 @@ DEFAULT_NON_CHECK_REVIEWER_LOGINS: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class ReviewThreadComment:
+    """One comment inside an inline review thread.
+
+    PR review threads can contain the original bot finding plus follow-up
+    replies from humans, bots, or AWF itself. The monitor sends this full
+    conversation to the coding agent as evidence instead of deciding locally
+    which reply is semantically important.
+    """
+
+    comment_id: str | None
+    body: str
+    author: str | None = None
+    created_at: datetime | None = None
+    url: str | None = None
+
+
+@dataclass(frozen=True)
 class ReviewThread:
     """An inline (file + line) review thread.
 
     The GraphQL id is the node ID used with ``resolveReviewThread``.
-    ``body_excerpt`` is short (~400 chars) so prompts stay small.
+    ``body_excerpt`` is short (~400 chars) for legacy call sites; prompts
+    prefer ``comments`` when GitHub supplied the full thread history.
     """
 
     thread_id: str
@@ -102,6 +121,9 @@ class ReviewThread:
     body_excerpt: str
     author: str | None = None
     is_resolved: bool = False
+    comments: tuple[ReviewThreadComment, ...] = ()
+    url: str | None = None
+    is_outdated: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +142,11 @@ class ReviewComment:
     """True for policy/checklist comments that the coding CLI cannot
     resolve by editing code, for example a bot saying review was skipped
     and exposing an unchecked "trigger review" task."""
+    body: str | None = None
+    url: str | None = None
+    created_at: datetime | None = None
+    state: str | None = None
+    source_kind: str = "review"
 
 
 @dataclass(frozen=True)
@@ -192,8 +219,9 @@ class MonitorState:
     last_push_sha: str | None = None  # SHA at the time of last push
     sync_base_no_progress_signature: str | None = None
     sync_base_no_progress_count: int = 0
-    # thread_id → one of:
-    # "fix_committed" / "false_positive" / "defer" / "agent_failed"
+    # thread/comment id → one of:
+    # "fix_committed" / "false_positive" / "defer" / "agent_failed";
+    # reserved "__review_*_body_hash__:<id>" keys track addressed evidence.
     threads_addressed_ids: dict[str, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.monotonic)
 
@@ -380,6 +408,72 @@ def _needs_comment_attention(verdict: str | None) -> bool:
     return verdict is None or verdict == "agent_failed"
 
 
+def _review_thread_body_state_key(thread_id: str) -> str:
+    return f"__review_thread_body_hash__:{thread_id}"
+
+
+def _review_thread_resolution_body(thread: ReviewThread) -> str:
+    if thread.comments:
+        payload = [
+            {
+                "author": comment.author,
+                "body": comment.body,
+                "comment_id": comment.comment_id,
+                "created_at": (
+                    comment.created_at.isoformat() if comment.created_at is not None else None
+                ),
+            }
+            for comment in thread.comments
+        ]
+    else:
+        payload = [
+            {
+                "author": thread.author,
+                "body": thread.body_excerpt,
+                "comment_id": None,
+                "created_at": None,
+            }
+        ]
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _review_thread_body_hash(thread: ReviewThread) -> str:
+    return hashlib.sha256(_review_thread_resolution_body(thread).encode("utf-8")).hexdigest()
+
+
+def _mark_review_thread_addressed(
+    state: MonitorState,
+    thread: ReviewThread,
+    verdict: str,
+) -> None:
+    state.mark_addressed(thread.thread_id, verdict)
+    state.mark_addressed(
+        _review_thread_body_state_key(thread.thread_id),
+        _review_thread_body_hash(thread),
+    )
+
+
+def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) -> bool:
+    verdict = state.threads_addressed_ids.get(thread.thread_id)
+    if _needs_comment_attention(verdict):
+        return True
+    return (
+        state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
+        != _review_thread_body_hash(thread)
+    )
+
+
+def _is_bot_review_thread(thread: ReviewThread) -> bool:
+    authors = [comment.author for comment in thread.comments] if thread.comments else [thread.author]
+    return all(_is_bot_author(author) for author in authors)
+
+
+def _agent_can_triage_review_comment(comment: ReviewComment) -> bool:
+    if not comment.blocks_merge:
+        return True
+    return comment.source_kind == "issue" and _is_bot_author(comment.author)
+
+
 def sync_base_no_progress_signature(status: PRStatus) -> str:
     """Stable identity for a SyncBase snapshot that made no local progress."""
 
@@ -422,8 +516,10 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
-        Policy/checklist blockers are excluded from this batch because
-        the coding CLI cannot fix them.
+        Policy/checklist blockers stay visible to the merge gate. Known
+        review-bot issue blockers are still routed to the coding agent
+        once so it can record a fix, false-positive, or defer verdict
+        against the current evidence before the merge gate blocks.
     3.  Policy/checklist blockers that cannot be code-fixed →
         NotifyHuman.
     4.  CI FAILURE → ReportCiFailure.
@@ -465,7 +561,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     new_reviews = tuple(
         c
         for c in status.unresolved_review_comments
-        if not c.blocks_merge
+        if _agent_can_triage_review_comment(c)
         and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
     )
 
@@ -505,9 +601,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return SyncBase()
 
     # 2. Unresolved comments, filtered to those we haven't handled yet.
-    # Policy/checklist blockers remain visible to the merge gate, but are
-    # not sent to the coding CLI: no code edit can click a review-bot
-    # "Trigger review" checkbox or change organization review settings.
+    # Policy/checklist blockers remain visible to the merge gate. Known
+    # review-bot issue comments get one agent pass before that gate so the
+    # monitor records whether the agent fixed, rejected, or deferred them.
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 
@@ -586,7 +682,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # fires. Review feedback on PR #2 (CodeRabbit, Major): "Deferred
     # feedback still disappears from the merge gate".
     has_human_defer = any(
-        state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_author(t.author)
+        state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_review_thread(t)
         for t in status.unresolved_inline_threads
     ) or any(
         state.threads_addressed_ids.get(c.comment_id) == "defer" and not _is_bot_author(c.author)

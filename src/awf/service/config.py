@@ -85,7 +85,7 @@ def resolve_service_settings(
     if not database_url_explicit:
         database_url = DEFAULT_LOCAL_SERVICE_DATABASE_URL
 
-    work_dir = _resolve_service_work_dir(settings, work_dir_env)
+    work_dir = _resolve_service_work_dir(settings, work_dir_env, host_environ=env)
 
     return ServiceSettings(
         service_name=settings.service_name,
@@ -169,7 +169,12 @@ def _env_value(environ: Mapping[str, str], key: str) -> str | None:
     return None
 
 
-def _resolve_service_work_dir(settings: Settings, environ: Mapping[str, str]) -> str:
+def _resolve_service_work_dir(
+    settings: Settings,
+    environ: Mapping[str, str],
+    *,
+    host_environ: Mapping[str, str] | None = None,
+) -> str:
     """Resolve the host state root used by local service Compose.
 
     Docker Compose maps ``AWF_HOST_WORK_DIR`` into the service container as
@@ -178,16 +183,23 @@ def _resolve_service_work_dir(settings: Settings, environ: Mapping[str, str]) ->
     reports from the running service.
     """
 
-    host_work_dir = _env_value(environ, "AWF_HOST_WORK_DIR")
+    host_env = environ if host_environ is None else host_environ
+    host_work_dir = _env_value(host_env, "AWF_HOST_WORK_DIR")
     if host_work_dir:
         return host_work_dir
-    awf_work_dir = _env_value(environ, "AWF_WORK_DIR")
+    awf_work_dir = _env_value(host_env, "AWF_WORK_DIR")
     if awf_work_dir and not _is_project_default_work_dir(awf_work_dir):
         return awf_work_dir
     if "work_dir" in settings.model_fields_set and not _is_project_default_work_dir(
         settings.work_dir
     ):
         return settings.work_dir
+    host_work_dir = _env_value(environ, "AWF_HOST_WORK_DIR")
+    if host_work_dir:
+        return host_work_dir
+    awf_work_dir = _env_value(environ, "AWF_WORK_DIR")
+    if awf_work_dir and not _is_project_default_work_dir(awf_work_dir):
+        return awf_work_dir
     home = _env_value(environ, "HOME") or settings.host_home or "~"
     return str(Path(home).expanduser() / ".awf" / "service")
 

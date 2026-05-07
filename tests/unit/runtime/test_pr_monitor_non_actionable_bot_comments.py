@@ -1,8 +1,9 @@
-"""Regression tests for non-actionable bot review boilerplate.
+"""Regression tests for bot review feedback routing.
 
-CodeRabbit can report "review skipped" / disabled-review status as a
-review-level body rather than a top-level PR comment. AWF must ignore that
-boilerplate without ending the monitor or hiding later actionable feedback.
+AWF should not decide that review-bot text is semantically ignorable. It
+should package current PR feedback for the coding agent and let the agent
+decide whether to fix, mark false-positive, or defer. Only AWF's own
+bookkeeping comments are filtered before the monitor decision loop.
 """
 
 from __future__ import annotations
@@ -11,16 +12,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
-import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.db.enums import OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import Merge, MonitorState, decide
-from awf.runtime.pr_monitor_runner import _initial_review_grace_started_key
+from awf.runtime.pr_monitor import AddressComments, MonitorState, NotifyHuman, decide
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -78,22 +75,24 @@ def _late_actionable_review() -> dict:
     )
 
 
-def _action_entries(records: list[dict]) -> list[dict]:
-    return [record for record in records if record.get("event") == "monitor.action"]
-
-
-async def _workspace_status(
-    factory: async_sessionmaker[AsyncSession],
-    workspace_id: str,
-) -> str:
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        return workspace.status
+def _actionable_codex_issue_comment() -> dict:
+    return issue_comment_node(
+        cid=7804,
+        author="chatgpt-codex-connector[bot]",
+        body=(
+            "\n### Codex Review\n\n"
+            "https://github.com/dimileeh/aira-agent-workspace-fabric/"
+            "blob/49c0c400de80f2b7ffb4f67bb6a76868f4d0e6ae/"
+            "src/awf/runtime/pr_monitor_runner.py#L940-L941\n"
+            "**P2 Preserve action-specific base-fetch retry counts**\n\n"
+            "When `sync_base` keeps hitting a transient `BaseFetchError`, "
+            "clear only the successful context's counter."
+        ),
+    )
 
 
 @pytest.mark.unit
-async def test_only_non_actionable_bot_review_body_does_not_trigger_human_wait(
+async def test_bot_review_boilerplate_routes_to_agent_without_human_wait(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -120,24 +119,23 @@ async def test_only_non_actionable_bot_review_body_does_not_trigger_human_wait(
         initial_review_grace_period_seconds=0,
     )
 
-    with structlog.testing.capture_logs() as captured:
-        await runner.run(
-            workspace_id=workspace_id,
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-        )
+    status = await runner._fetch_status_for_decision(
+        repo=REPO,
+        pr_number=42,
+        workspace_id=workspace_id,
+        base_branch="development",
+    )
+    action = decide(status, MonitorState(), runner._config)
 
-    actions = [entry["action"] for entry in _action_entries(captured)]
-    assert actions == ["Merge"]
+    assert isinstance(action, AddressComments)
+    assert action.threads == ()
+    assert [c.comment_id for c in action.review_comments] == ["7801"]
+    assert action.review_comments[0].blocks_merge is False
     assert adapter.calls == []
-    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
-    async with factory() as session:
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-    assert not any(operation.type == OperationType.human_wait.value for operation in operations)
 
 
 @pytest.mark.unit
-async def test_only_non_actionable_bot_issue_comment_does_not_trigger_human_wait(
+async def test_bot_issue_boilerplate_notifies_human_as_policy_blocker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -164,24 +162,64 @@ async def test_only_non_actionable_bot_issue_comment_does_not_trigger_human_wait
         initial_review_grace_period_seconds=0,
     )
 
-    with structlog.testing.capture_logs() as captured:
-        await runner.run(
-            workspace_id=workspace_id,
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-        )
+    status = await runner._fetch_status_for_decision(
+        repo=REPO,
+        pr_number=42,
+        workspace_id=workspace_id,
+        base_branch="development",
+    )
+    state = MonitorState(threads_addressed_ids={"issue:7803": "defer"})
+    action = decide(status, state, runner._config)
 
-    actions = [entry["action"] for entry in _action_entries(captured)]
-    assert actions == ["Merge"]
+    assert isinstance(action, NotifyHuman)
+    assert status.unresolved_review_comments[0].comment_id == "issue:7803"
+    assert status.unresolved_review_comments[0].blocks_merge is True
     assert adapter.calls == []
-    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
-    async with factory() as session:
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-    assert not any(operation.type == OperationType.human_wait.value for operation in operations)
 
 
 @pytest.mark.unit
-async def test_non_actionable_bot_review_body_during_initial_grace_waits_without_merge(
+async def test_actionable_bot_issue_comment_routes_to_address_comments(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    sleep_fn = RecordedSleep()
+    cmd.queue_result(returncode=0)  # git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(comments=[_actionable_codex_issue_comment()]),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        initial_review_grace_period_seconds=0,
+    )
+
+    status = await runner._fetch_status_for_decision(
+        repo=REPO,
+        pr_number=42,
+        workspace_id=workspace_id,
+        base_branch="development",
+    )
+    action = decide(status, MonitorState(), runner._config)
+
+    assert isinstance(action, AddressComments)
+    assert action.threads == ()
+    assert [c.comment_id for c in action.review_comments] == ["issue:7804"]
+    assert "Preserve action-specific base-fetch retry counts" in (
+        action.review_comments[0].body_excerpt
+    )
+
+
+@pytest.mark.unit
+async def test_bot_review_body_during_initial_grace_routes_to_agent_before_merge(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -212,32 +250,13 @@ async def test_non_actionable_bot_review_body_during_initial_grace_waits_without
     )
     state = MonitorState()
     action = decide(status, state, runner._config)
-    assert isinstance(action, Merge)
-
-    terminal = await runner._execute(
-        action=action,
-        workspace_id=workspace_id,
-        repo_url=REPO_URL,
-        repo=REPO,
-        pr_number=42,
-        status=status,
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert sleep_fn.calls == [60]
-    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    assert _initial_review_grace_started_key(42) in state.threads_addressed_ids
-    assert await _workspace_status(factory, workspace_id) == WorkspaceStatus.monitoring_pr.value
+    assert isinstance(action, AddressComments)
+    assert [c.comment_id for c in action.review_comments] == ["7801"]
+    assert sleep_fn.calls == []
 
 
 @pytest.mark.unit
-async def test_later_actionable_review_after_ignored_boilerplate_routes_to_address_comments(
+async def test_bot_boilerplate_and_later_actionable_review_route_to_address_comments(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -249,17 +268,7 @@ async def test_later_actionable_review_after_ignored_boilerplate_routes_to_addre
     sleep_fn = RecordedSleep()
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-    cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[disabled]))
-    cmd.queue_result(returncode=0)  # git fetch origin <base>
-    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[disabled, actionable]))
-    adapter.queue(stdout="fixed")
-    cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[disabled]))  # settle fetch
-    cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
-    cmd.queue_result(returncode=0)  # git fetch origin <base>
-    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-    cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
-    cmd.queue_result(returncode=0)  # docker compose down
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -270,28 +279,27 @@ async def test_later_actionable_review_after_ignored_boilerplate_routes_to_addre
         initial_review_grace_period_seconds=900,
     )
 
-    with structlog.testing.capture_logs() as captured:
-        await runner.run(
-            workspace_id=workspace_id,
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-        )
+    status = await runner._fetch_status_for_decision(
+        repo=REPO,
+        pr_number=42,
+        workspace_id=workspace_id,
+        base_branch="development",
+    )
+    action = decide(status, MonitorState(), runner._config)
 
-    actions = [entry["action"] for entry in _action_entries(captured)]
-    assert actions == ["Merge", "AddressComments", "ShortCircuitCompleted"]
-    assert len(adapter.calls) == 1
-    assert "late actionable review" in adapter.calls[0]
-    assert "Auto reviews are disabled" not in adapter.calls[0]
-    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+    assert isinstance(action, AddressComments)
+    assert [c.comment_id for c in action.review_comments] == ["7801", "7802"]
+    assert "Auto reviews are disabled" in action.review_comments[0].body_excerpt
+    assert "late actionable review" in action.review_comments[1].body_excerpt
+    assert adapter.calls == []
 
 
 @pytest.mark.unit
-async def test_ignored_boilerplate_does_not_complete_monitor_by_itself(
+async def test_bot_boilerplate_does_not_create_policy_blocker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
-    artifacts_root = tmp_path / "artifacts"
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     sleep_fn = RecordedSleep()
@@ -307,7 +315,7 @@ async def test_ignored_boilerplate_does_not_complete_monitor_by_itself(
         adapter=adapter,
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        artifacts_root=artifacts_root,
+        artifacts_root=tmp_path / "artifacts",
         initial_review_grace_period_seconds=900,
     )
     status = await runner._fetch_status_for_decision(
@@ -318,28 +326,5 @@ async def test_ignored_boilerplate_does_not_complete_monitor_by_itself(
     )
     state = MonitorState()
     action = decide(status, state, runner._config)
-    assert isinstance(action, Merge)
-
-    terminal = await runner._execute(
-        action=action,
-        workspace_id=workspace_id,
-        repo_url=REPO_URL,
-        repo=REPO,
-        pr_number=42,
-        status=status,
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert await _workspace_status(factory, workspace_id) == WorkspaceStatus.monitoring_pr.value
-    assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
-    async with factory() as session:
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-    assert [(operation.type, operation.payload["action"]) for operation in operations] == [
-        (OperationType.monitor_state.value, "grace_wait")
-    ]
+    assert isinstance(action, AddressComments)
+    assert [c.blocks_merge for c in action.review_comments] == [False]

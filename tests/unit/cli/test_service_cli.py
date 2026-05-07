@@ -758,11 +758,14 @@ def test_service_gc_cli_uses_compose_host_work_dir_when_awf_work_dir_unset(
 
 
 @pytest.mark.unit
-def test_service_gc_cli_ignores_project_default_awf_work_dir(
+def test_service_gc_cli_preserves_compose_host_work_dir_with_project_default_awf_work_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    host_default_work_dir = (tmp_path / ".awf" / "service").resolve()
+    host_work_dir = (tmp_path / "compose-service-state").resolve()
+    compose_env_file = tmp_path / "docker" / "compose" / ".env"
+    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.write_text(f"AWF_HOST_WORK_DIR={host_work_dir}\n", encoding="utf-8")
     calls: list[dict[str, object]] = []
 
     class _Engine:
@@ -787,6 +790,7 @@ def test_service_gc_cli_ignores_project_default_awf_work_dir(
     import awf.db.session as db_session
     import awf.service.gc as gc_mod
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("AWF_WORK_DIR", ".awf")
     monkeypatch.delenv("AWF_HOST_WORK_DIR", raising=False)
@@ -798,7 +802,7 @@ def test_service_gc_cli_ignores_project_default_awf_work_dir(
     result = _runner.invoke(app, ["service", "gc"])
 
     assert result.exit_code == 0, result.output
-    assert calls[0]["work_dir"] == host_default_work_dir
+    assert calls[0]["work_dir"] == host_work_dir
 
 
 @pytest.mark.unit

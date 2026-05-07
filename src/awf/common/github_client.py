@@ -41,6 +41,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewComment,
     ReviewThread,
+    ReviewThreadComment,
 )
 
 _log = get_logger(__name__)
@@ -137,29 +138,40 @@ query($owner: String!, $repo: String!, $number: Int!) {
           isOutdated
           path
           line
-          comments(first: 1) {
+          comments(first: 50) {
             nodes {
+              databaseId
               bodyText
               author { login }
+              createdAt
+              url
             }
+            pageInfo { hasNextPage endCursor }
           }
         }
+        pageInfo { hasNextPage endCursor }
       }
       reviews(first: 100) {
         nodes {
           databaseId
           body
           state
+          submittedAt
+          url
           author { login }
         }
+        pageInfo { hasNextPage endCursor }
       }
       comments(first: 100) {
         nodes {
           databaseId
           body
           isMinimized
+          createdAt
+          url
           author { login }
         }
+        pageInfo { hasNextPage endCursor }
       }
       files(first: 100) {
         nodes { path }
@@ -177,6 +189,98 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
     pullRequest(number: $number) {
       files(first: 100, after: $cursor) {
         nodes { path }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+""".strip()
+
+
+_GQL_PR_REVIEW_THREADS_PAGE = """
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: 50) {
+            nodes {
+              databaseId
+              bodyText
+              author { login }
+              createdAt
+              url
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+""".strip()
+
+
+_GQL_REVIEW_THREAD_COMMENTS_PAGE = """
+query($threadId: ID!, $cursor: String!) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 50, after: $cursor) {
+        nodes {
+          databaseId
+          bodyText
+          author { login }
+          createdAt
+          url
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+""".strip()
+
+
+_GQL_PR_REVIEWS_PAGE = """
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviews(first: 100, after: $cursor) {
+        nodes {
+          databaseId
+          body
+          state
+          submittedAt
+          url
+          author { login }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+""".strip()
+
+
+_GQL_PR_ISSUE_COMMENTS_PAGE = """
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      comments(first: 100, after: $cursor) {
+        nodes {
+          databaseId
+          body
+          isMinimized
+          createdAt
+          url
+          author { login }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -559,23 +663,41 @@ class GitHubClient:
 
         # ── Review threads: inline ─────────────────────────────────────
         inline: list[ReviewThread] = []
-        for node in _dig(pr, "reviewThreads", "nodes") or []:
-            if node.get("isResolved") or node.get("isOutdated"):
+        thread_nodes = await self._fetch_paginated_pr_connection_nodes(
+            repo=repo,
+            pr_number=pr_number,
+            first_page=_dig(pr, "reviewThreads"),
+            connection_name="reviewThreads",
+            query=_GQL_PR_REVIEW_THREADS_PAGE,
+        )
+        for node in thread_nodes:
+            thread_id = _clean_optional_str(node.get("id"))
+            if thread_id is None:
                 continue
-            body = ""
-            author = None
-            first_comment = _dig(node, "comments", "nodes", 0)
-            if first_comment:
-                body = (first_comment.get("bodyText") or "")[:400]
-                author = _dig(first_comment, "author", "login")
+            is_resolved = bool(node.get("isResolved"))
+            is_outdated = bool(node.get("isOutdated"))
+            if is_resolved or is_outdated:
+                continue
+            comments = _parse_review_thread_comments(
+                await self._fetch_paginated_review_thread_comment_nodes(
+                    thread_id=thread_id,
+                    first_page=_dig(node, "comments"),
+                )
+            )
+            first_comment = comments[0] if comments else None
+            body = (first_comment.body if first_comment is not None else "")[:400]
+            author = first_comment.author if first_comment is not None else None
             inline.append(
                 ReviewThread(
-                    thread_id=node["id"],
+                    thread_id=thread_id,
                     path=node.get("path"),
                     line=node.get("line"),
                     body_excerpt=body,
                     author=author,
-                    is_resolved=False,
+                    is_resolved=is_resolved,
+                    comments=comments,
+                    url=first_comment.url if first_comment is not None else None,
+                    is_outdated=is_outdated,
                 )
             )
 
@@ -584,53 +706,63 @@ class GitHubClient:
         # body; we treat non-empty bodies as outside-diff comments that
         # need to be addressed too (CodeRabbit posts these).
         reviews: list[ReviewComment] = []
-        for node in _dig(pr, "reviews", "nodes") or []:
+        review_nodes = await self._fetch_paginated_pr_connection_nodes(
+            repo=repo,
+            pr_number=pr_number,
+            first_page=_dig(pr, "reviews"),
+            connection_name="reviews",
+            query=_GQL_PR_REVIEWS_PAGE,
+        )
+        for node in review_nodes:
             body = node.get("body") or ""
             if not body.strip():
                 continue
             author = _dig(node, "author", "login")
             state = (node.get("state") or "").upper()
-            if (
-                state != "CHANGES_REQUESTED"
-                and _is_known_bot_comment_author(author)
-                and _is_non_actionable_bot_review_body(body)
-            ):
-                continue
             reviews.append(
                 ReviewComment(
                     comment_id=str(node["databaseId"]),
                     body_excerpt=body[:400],
                     author=author,
                     is_resolved=False,
+                    body=body,
+                    url=_clean_optional_str(node.get("url")),
+                    created_at=_parse_github_datetime(node.get("submittedAt")),
+                    state=state,
+                    source_kind="review",
                 )
             )
 
         # ── Top-level PR comments ──────────────────────────────────────
-        # Review bots sometimes report gating state as an issue comment
-        # instead of a review object. Actionable trigger-review blockers
-        # still need to gate merge, but non-actionable status comments like
-        # "auto reviews are disabled for this base branch" are ignored.
-        for node in _dig(pr, "comments", "nodes") or []:
+        # Review bots sometimes report feedback as top-level issue comments
+        # instead of review objects. AWF only filters its own bookkeeping;
+        # code-fixable comments go to the agent, while external checklist
+        # blockers stay visible to the merge gate.
+        issue_comment_nodes = await self._fetch_paginated_pr_connection_nodes(
+            repo=repo,
+            pr_number=pr_number,
+            first_page=_dig(pr, "comments"),
+            connection_name="comments",
+            query=_GQL_PR_ISSUE_COMMENTS_PAGE,
+        )
+        for node in issue_comment_nodes:
             body = node.get("body") or ""
             if node.get("isMinimized") or not body.strip():
                 continue
             if _is_awf_status_issue_comment(body):
                 continue
             author = _dig(node, "author", "login")
-            if _is_known_bot_comment_author(author) and _is_non_actionable_review_skip_comment(
-                body
-            ):
-                continue
-            blocks_merge = _is_merge_blocking_issue_comment(body)
-            if not blocks_merge and _is_known_bot_comment_author(author):
-                continue
             reviews.append(
                 ReviewComment(
                     comment_id=f"issue:{node['databaseId']}",
                     body_excerpt=body[:400],
                     author=author,
                     is_resolved=False,
-                    blocks_merge=blocks_merge,
+                    blocks_merge=_is_merge_blocking_issue_comment(body),
+                    body=body,
+                    url=_clean_optional_str(node.get("url")),
+                    created_at=_parse_github_datetime(node.get("createdAt")),
+                    source_kind="issue",
                 )
             )
 
@@ -656,6 +788,54 @@ class GitHubClient:
             merged=bool(pr.get("merged")),
             merge_commit_sha=_clean_optional_str(_dig(pr, "mergeCommit", "oid")),
         )
+
+    async def _fetch_paginated_pr_connection_nodes(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        first_page: Any,
+        connection_name: str,
+        query: str,
+    ) -> list[dict[str, Any]]:
+        nodes = _connection_nodes(first_page)
+        cursor = _clean_optional_str(_dig(first_page, "pageInfo", "endCursor"))
+        has_next = _dig(first_page, "pageInfo", "hasNextPage") is True
+        while has_next and cursor is not None:
+            payload = await self._graphql(
+                query=query,
+                variables={
+                    "owner": repo.owner,
+                    "repo": repo.name,
+                    "number": pr_number,
+                    "cursor": cursor,
+                },
+            )
+            page = _dig(payload, "data", "repository", "pullRequest", connection_name)
+            nodes.extend(_connection_nodes(page))
+            cursor = _clean_optional_str(_dig(page, "pageInfo", "endCursor"))
+            has_next = _dig(page, "pageInfo", "hasNextPage") is True
+        return nodes
+
+    async def _fetch_paginated_review_thread_comment_nodes(
+        self,
+        *,
+        thread_id: str,
+        first_page: Any,
+    ) -> list[dict[str, Any]]:
+        nodes = _connection_nodes(first_page)
+        cursor = _clean_optional_str(_dig(first_page, "pageInfo", "endCursor"))
+        has_next = _dig(first_page, "pageInfo", "hasNextPage") is True
+        while has_next and cursor is not None:
+            payload = await self._graphql(
+                query=_GQL_REVIEW_THREAD_COMMENTS_PAGE,
+                variables={"threadId": thread_id, "cursor": cursor},
+            )
+            page = _dig(payload, "data", "node", "comments")
+            nodes.extend(_connection_nodes(page))
+            cursor = _clean_optional_str(_dig(page, "pageInfo", "endCursor"))
+            has_next = _dig(page, "pageInfo", "hasNextPage") is True
+        return nodes
 
     async def _fetch_changed_paths(
         self,
@@ -958,6 +1138,32 @@ def _parse_check_contexts(rollup: Any) -> tuple[CheckTiming, ...]:
     return tuple(checks)
 
 
+def _parse_review_thread_comments(
+    comment_nodes: list[dict[str, Any]],
+) -> tuple[ReviewThreadComment, ...]:
+    comments: list[ReviewThreadComment] = []
+    for node in comment_nodes:
+        database_id = node.get("databaseId")
+        comments.append(
+            ReviewThreadComment(
+                comment_id=str(database_id) if database_id is not None else None,
+                body=node.get("bodyText") or "",
+                author=_clean_optional_str(_dig(node, "author", "login")),
+                created_at=_parse_github_datetime(node.get("createdAt")),
+                url=_clean_optional_str(node.get("url")),
+            )
+        )
+    return tuple(comments)
+
+
+def _connection_nodes(page: Any) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for node in _dig(page, "nodes") or []:
+        if isinstance(node, dict):
+            nodes.append(node)
+    return nodes
+
+
 def _extract_pr_file_paths(files_page: Any) -> list[str]:
     paths: list[str] = []
     for node in _dig(files_page, "nodes") or []:
@@ -1017,36 +1223,6 @@ def _tail(text: str, n: int) -> str:
     return "…[truncated]…\n" + text[-n:]
 
 
-_KNOWN_BOT_COMMENT_AUTHORS = frozenset(
-    {
-        "coderabbitai",
-        "gemini-code-assist",
-        "greptile-apps",
-        "chatgpt-codex-connector",
-        "github-actions",
-    }
-)
-
-
-def _is_known_bot_comment_author(login: str | None) -> bool:
-    if not login:
-        return False
-    lowered = login.lower()
-    return lowered in _KNOWN_BOT_COMMENT_AUTHORS or lowered.endswith("[bot]")
-
-
-def _is_merge_blocking_issue_comment(body: str) -> bool:
-    lower = body.lower()
-    return "review skipped" in lower and (
-        "trigger review" in lower or "auto reviews are disabled" in lower
-    )
-
-
-def _is_non_actionable_review_skip_comment(body: str) -> bool:
-    lower = " ".join(body.lower().split())
-    return "review skipped" in lower and "auto reviews are disabled" in lower
-
-
 def _is_awf_status_issue_comment(body: str) -> bool:
     lower = " ".join(body.lower().split())
     return (
@@ -1054,6 +1230,17 @@ def _is_awf_status_issue_comment(body: str) -> bool:
         or "all 5 awf gates are green" in lower
         or "after the blocker is cleared or a new commit lands, awf will re-verify" in lower
         or _is_awf_resolution_issue_comment(lower)
+    )
+
+
+def _is_merge_blocking_issue_comment(body: str) -> bool:
+    lower = " ".join(body.lower().split())
+    if "trigger review" not in lower and "auto reviews are disabled" not in lower:
+        return False
+    return (
+        "review skipped" in lower
+        or "required review" in lower
+        or "auto reviews are disabled" in lower
     )
 
 
@@ -1083,20 +1270,3 @@ def _is_awf_resolution_issue_comment(lower_normalized_body: str) -> bool:
         )
         or lower.startswith("defer:")
     )
-
-
-def _is_non_actionable_bot_review_body(body: str) -> bool:
-    lower = " ".join(body.lower().split())
-    if _is_non_actionable_review_skip_comment(body):
-        return True
-    if (
-        "codex review" in lower
-        and "here are some automated review suggestions for this pull request" in lower
-        and "about codex in github" in lower
-    ):
-        return True
-    if "no feedback" in lower or "no actionable feedback" in lower:
-        return True
-    if lower.startswith("## code review") and ("this pull request" in lower or "this pr" in lower):
-        return True
-    return lower.startswith(("this pull request introduces", "this pr introduces"))

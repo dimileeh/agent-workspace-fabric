@@ -6,12 +6,15 @@ TDD suite: these tests must fail before egress audit API wiring lands.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.api.routes.health as health_route
 from awf.common.audit import redact_audit_value
+from awf.common.config import Settings
 from awf.common.ids import new_egress_audit_record_id
 from awf.db.enums import EgressDecision, WorkspaceStatus
 from awf.db.models import EgressAuditRecord
@@ -230,19 +233,31 @@ async def test_workspace_detail_egress_audit_redacts_secrets(
 async def test_readyz_includes_egress_audit_check(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``/readyz`` must include an ``egress_audit`` check key."""
     from awf.common.commands import FakeCommandRunner
     from tests.unit.api.test_health import _queue_all_ok
 
+    original_get_settings = health_route.get_settings
+    original_get_settings.cache_clear()
+    test_settings = Settings(
+        _env_file=None,
+        host_home=str(Path.home()),
+        work_dir=str(tmp_path / "readyz-work"),
+    )
+    monkeypatch.setattr(health_route, "get_settings", lambda: test_settings)
     app = client._transport.app  # noqa: SLF001
     runner = FakeCommandRunner()
     _queue_all_ok(runner)
     app.state.command_runner = runner
 
-    resp = await client.get("/readyz")
-    assert resp.status_code == 200
-    body = resp.json()
+    try:
+        resp = await client.get("/readyz")
+        assert resp.status_code == 200
+        body = resp.json()
 
-    checks = body.get("checks", {})
-    assert "egress_audit" in checks
+        checks = body.get("checks", {})
+        assert "egress_audit" in checks
+    finally:
+        original_get_settings.cache_clear()

@@ -233,7 +233,7 @@ async def test_manual_merge_candidate_stays_open_until_external_merge_is_observe
         repo_url="git@github.com:dimileeh/aira-web.git",
         repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
         pr_number=42,
-        status=_status(),
+        status=_status(head_sha="abc1234567890def"),
         state=MonitorState(),
         base_branch="development",
         remote_branch=f"awf/{workspace_id}",

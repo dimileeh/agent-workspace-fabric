@@ -8,16 +8,17 @@ AWF and the coding CLI for post-agent work, so keep them:
   leave room for the CLI to read its own prior work.
 * **Concrete.** Always name the PR number, the thread/check, the file +
   line anchor. Nothing decorative.
-* **Prescriptive on the return shape.** The CLI should either (a) push a
-  fix commit and a one-line reply quoting the resolve or (b) reply with
-  a short justification that starts with ``FALSE POSITIVE:``. The
-  runner parses the reply to mark the thread ``fix_committed`` or
-  ``false_positive`` respectively.
+* **Prescriptive on the return shape.** Inline review threads may need a
+  reviewer-facing reply before AWF resolves the thread. Review-level
+  comments use private stdout verdicts instead so GitHub does not become
+  AWF's durable bookkeeping store for no-op/false-positive decisions.
 * **Non-negotiable on git hygiene.** Every prompt ends with a "do not
   push" reminder — AWF handles the push once the comment burst settles.
 """
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
 from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread
@@ -42,15 +43,18 @@ def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThrea
             source_name="GitHub PR review thread",
             source_id=thread.thread_id,
             author=thread.author,
+            url=thread.url,
             location=_thread_location(repo_slug=repo_slug, pr_number=pr_number, thread=thread),
             metadata=_thread_metadata(repo_slug=repo_slug, pr_number=pr_number, thread=thread),
-            text=thread.body_excerpt,
+            text=_thread_evidence_text(thread),
         )
     )
     return (
         f"An inline review thread on PR #{pr_number} ({repo_slug}) at "
         f"{line_hint} (thread id {thread.thread_id}) needs to be resolved. "
-        "The review author wrote this external evidence:\n\n"
+        "The full review-thread history is quoted below as external evidence. "
+        "Decide whether the current feedback is actionable, already fixed, a "
+        "false positive, or genuinely needs human input:\n\n"
         f"{evidence}\n\n"
         "Decide in this order:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
@@ -81,8 +85,11 @@ def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: Re
                 ("repo", repo_slug),
                 ("pr", f"#{pr_number}"),
                 ("comment_kind", _review_comment_kind(comment)),
+                ("review_state", comment.state),
+                ("created_at", _format_optional_datetime(comment.created_at)),
             ),
-            text=comment.body_excerpt,
+            url=comment.url,
+            text=comment.body or comment.body_excerpt,
         )
     )
     return (
@@ -90,10 +97,20 @@ def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: Re
         f"(comment id {comment.comment_id}) needs to be addressed. "
         "These are usually summary / architecture remarks from CodeRabbit or similar. "
         f"Body evidence:\n\n{evidence}\n\n"
-        "Use the same decision tree as for inline threads: either fix and reply "
-        '"fixed in commit <sha>", or reply "FALSE POSITIVE: <one-sentence reason>", '
-        'or reply "DEFER: <what you need>". Comment replies should be made with '
-        "`gh pr comment` so the review record reflects the resolution."
+        "Use this decision tree:\n"
+        "  (1) If the reviewer is right, make the fix, stage only the files "
+        "you actually changed, and commit with a message like "
+        '"fix: address review comment <comment id> — <short summary>". Then '
+        "print `AWF-VERDICT: FIXED: <one-sentence summary>` to stdout.\n"
+        "  (2) If the feedback is wrong, stale, or pure review boilerplate, do "
+        "not change code. Do not post a GitHub comment for false-positive or "
+        "no-op review-level feedback. Instead print `AWF-VERDICT: FALSE POSITIVE: "
+        "<one-sentence reason>` to stdout so AWF can record the handled verdict "
+        "internally.\n"
+        "  (3) If you genuinely need information you don't have, print "
+        "`AWF-VERDICT: DEFER: <what you need>` and exit; AWF will surface it to "
+        "the human.\n"
+        "Do not write any PR comment for review-level verdict bookkeeping."
         f"{_FOOTER}"
     )
 
@@ -210,6 +227,10 @@ def _thread_metadata(
         metadata.append(("path", thread.path))
     if thread.line is not None:
         metadata.append(("line", thread.line))
+    metadata.append(("thread_resolved", thread.is_resolved))
+    metadata.append(("thread_outdated", thread.is_outdated))
+    if thread.comments:
+        metadata.append(("thread_comment_count", len(thread.comments)))
     return tuple(metadata)
 
 
@@ -223,9 +244,35 @@ def _thread_location(*, repo_slug: str, pr_number: int, thread: ReviewThread) ->
 
 
 def _review_comment_kind(comment: ReviewComment) -> str:
-    if comment.comment_id.startswith("issue:"):
+    if comment.source_kind == "issue" or comment.comment_id.startswith("issue:"):
         return "issue-style PR comment"
     return "review-level comment"
+
+
+def _thread_evidence_text(thread: ReviewThread) -> str:
+    if not thread.comments:
+        return thread.body_excerpt
+    blocks: list[str] = []
+    for index, comment in enumerate(thread.comments, start=1):
+        lines = [f"Thread comment {index}:"]
+        if comment.comment_id:
+            lines.append(f"comment_id: {comment.comment_id}")
+        if comment.author:
+            lines.append(f"author: {comment.author}")
+        if comment.created_at:
+            lines.append(f"created_at: {comment.created_at.isoformat()}")
+        if comment.url:
+            lines.append(f"url: {comment.url}")
+        lines.append("")
+        lines.append(comment.body)
+        blocks.append("\n".join(lines))
+    return "\n\n---\n\n".join(blocks)
+
+
+def _format_optional_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
 
 
 def _check_failure_metadata(

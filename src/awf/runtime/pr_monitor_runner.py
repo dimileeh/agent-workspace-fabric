@@ -29,11 +29,10 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
-from urllib.parse import urlsplit
 
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -59,9 +58,11 @@ from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
+    PRFeedbackResolutionRepository,
     ProviderModelCircuitBreakerRepository,
     WorkspaceEventCreate,
     WorkspaceRepository,
+    pr_feedback_body_hash,
 )
 from awf.runtime.logs import LogStore, WorkspaceLogSink
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
@@ -91,7 +92,14 @@ from awf.runtime.pr_monitor import (
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    _agent_can_triage_review_comment,
     _is_bot_author,
+    _is_bot_review_thread,
+    _mark_review_thread_addressed,
+    _needs_comment_attention,
+    _review_thread_body_hash,
+    _review_thread_body_state_key,
+    _review_thread_needs_attention,
     decide,
     sync_base_no_progress_signature,
 )
@@ -104,6 +112,9 @@ from awf.runtime.pr_monitor_operations import (
     monitor_operation_idempotency_key,
     record_monitor_state_operation,
     retryable_monitor_operation_idempotency_key,
+)
+from awf.runtime.pr_push_remote import (
+    remote_push_url_for_workspace as _remote_push_url_for_workspace,
 )
 from awf.service.gc import run_workspace_filesystem_gc
 from awf.service.merge_queue import (
@@ -127,6 +138,18 @@ _log = get_logger(__name__)
 Verdict = Literal["fix_committed", "false_positive", "defer", "agent_failed"]
 
 
+@dataclass(frozen=True)
+class VerdictResult:
+    verdict: Verdict
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _BaseFetchHandlingResult:
+    retry: bool
+    reason_code: str
+
+
 class PostMergeTargetReconciler(Protocol):
     """Best-effort target-branch repair hook invoked after a PR is merged."""
 
@@ -147,6 +170,12 @@ class MonitorRunnerConfig:
     max_outer_iterations: int = 10_000
     # Max fix_cycle re-polls inside a single AddressComments action.
     max_fix_cycle_passes: int = 5
+    # Transient GitHub outages can surface through `git fetch`, not only `gh`.
+    # Keep base refresh authoritative, but retry remote 5xx/network failures
+    # before declaring the monitor infrastructure-failed.
+    transient_base_fetch_max_retries: int = 5
+    transient_base_fetch_initial_backoff_seconds: float = 5.0
+    transient_base_fetch_max_backoff_seconds: float = 120.0
 
 
 _NON_TRANSIENT_GITHUB_ERROR_MARKERS = (
@@ -170,6 +199,11 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
     "504 gateway timeout",
     "bad gateway",
     "gateway timeout",
+    "internal server error",
+    "returned error: 500",
+    "returned error: 502",
+    "returned error: 503",
+    "returned error: 504",
     "service unavailable",
     "temporarily unavailable",
     "try again",
@@ -190,10 +224,15 @@ _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
 _GIT_FETCH_BASE_FAILED_REASON = "GIT_FETCH_BASE_FAILED"
+_GIT_BASE_FETCH_TRANSIENT_RETRY_REASON = "GIT_BASE_FETCH_TRANSIENT_RETRY"
+_GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON = (
+    "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
+)
 _GIT_BASE_BEHIND_FAILED_REASON = "GIT_BASE_BEHIND_FAILED"
 _GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
+_VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
 _AUDIT_MERGE_RESULT_EVENT = "workspace.audit.merge_result"
@@ -215,6 +254,7 @@ _TOKEN_RE = re.compile(
     r")(?![A-Za-z0-9])"
 )
 _BROKEN_AWF_REF_RE = re.compile(r"refs/heads/awf/(ws_[A-Za-z0-9_-]+)")
+_BASE_FETCH_RETRY_COUNT_KEY_PREFIX = "__awf_base_fetch_retry_count:"
 _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY = "__awf_sync_base_no_progress_signature"
 _SYNC_BASE_NO_PROGRESS_COUNT_KEY = "__awf_sync_base_no_progress_count"
 _TERMINAL_WORKSPACE_STATUSES = {
@@ -855,19 +895,30 @@ class PullRequestMonitorRunner:
                         base_branch=ws.branch_base,
                     )
                 except BaseFetchError as exc:
+                    base_fetch_result = await self._wait_after_transient_base_fetch_error(
+                        exc,
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        context="fetch_pr_status",
+                        state=state,
+                        monitor_log=monitor_log,
+                    )
+                    if base_fetch_result.retry:
+                        continue
                     await self._write_monitor_log(
                         monitor_log,
                         {
                             "event": "monitor.failed",
                             "workspace_id": workspace_id,
                             "reason": "base_fetch_failed",
+                            "reason_code": base_fetch_result.reason_code,
                             "message": str(exc)[:400],
                         },
                     )
                     await self._terminate_failed(
                         workspace_id,
                         message=f"monitor: could not refresh base branch: {exc}"[:2000],
-                        reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                        reason_code=base_fetch_result.reason_code,
                     )
                     return
                 except BaseBehindCountError as exc:
@@ -909,6 +960,17 @@ class PullRequestMonitorRunner:
                         message=f"monitor: github error: {exc}"[:2000],
                     )
                     return
+                if _clear_transient_base_fetch_retry_state(state, context="fetch_pr_status"):
+                    await self._persist_state(workspace_id, state)
+                feedback_state_changed = await self._refresh_pr_feedback_resolution_state(
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                )
+                if feedback_state_changed:
+                    await self._persist_state(workspace_id, state)
 
                 # Determine the remote push target for this workspace.
                 # ``remote_push_branch`` is the canonical destination.
@@ -1194,6 +1256,7 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                 )
+                _clear_transient_base_fetch_retry_state(state, context="sync_base")
             except ProviderRecoveryRetryError:
                 await self._finish_monitor_operation(
                     operation,
@@ -1223,22 +1286,44 @@ class PullRequestMonitorRunner:
                 )
                 raise
             except BaseFetchError as exc:
+                base_fetch_result = await self._wait_after_transient_base_fetch_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="sync_base",
+                    state=state,
+                    monitor_log=monitor_log,
+                )
+                if base_fetch_result.retry:
+                    await self._finish_monitor_operation(
+                        operation,
+                        status=OperationStatus.failed,
+                        result={
+                            "status": "retrying",
+                            "outcome": "transient_base_fetch_error",
+                            "reason_code": base_fetch_result.reason_code,
+                            "pushed": False,
+                        },
+                        error_code=base_fetch_result.reason_code,
+                        error_message=str(exc),
+                    )
+                    return False
                 await self._finish_monitor_operation(
                     operation,
                     status=OperationStatus.failed,
                     result={
                         "status": "failed",
                         "outcome": "base_fetch_failed",
-                        "reason_code": _GIT_FETCH_BASE_FAILED_REASON,
+                        "reason_code": base_fetch_result.reason_code,
                         "pushed": False,
                     },
-                    error_code=_GIT_FETCH_BASE_FAILED_REASON,
+                    error_code=base_fetch_result.reason_code,
                     error_message=str(exc),
                 )
                 await self._terminate_failed(
                     workspace_id,
                     message=f"monitor: could not refresh base branch: {exc}"[:2000],
-                    reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                    reason_code=base_fetch_result.reason_code,
                 )
                 return True
             except ComposeExecCleanupError as exc:
@@ -1495,6 +1580,7 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
+                    pr_head_sha=status.head_sha,
                     initial_threads=action.threads,
                     initial_reviews=action.review_comments,
                     state=state,
@@ -1588,22 +1674,28 @@ class PullRequestMonitorRunner:
                 workspace_id,
                 current_head_sha=status.head_sha,
             )
-            handled = await self._handle_merge_gate_blocker(
-                gate=merge_gate,
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                monitor_log=monitor_log,
+            pending_validation_gate = (
+                merge_gate if _gate_requires_validation_recovery(merge_gate) else None
             )
-            if handled is not None:
-                return handled
+            if pending_validation_gate is None:
+                handled = await self._handle_merge_gate_blocker(
+                    gate=merge_gate,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                )
+                if handled is not None:
+                    return handled
+            elif await self._recovery_dispatch_status_is_stale(workspace_id):
+                return True
 
             policy_blocked = await self._refresh_scope_policy_for_merge(
                 workspace_id=workspace_id,
@@ -1635,22 +1727,26 @@ class PullRequestMonitorRunner:
                 check_policy=True,
                 current_head_sha=status.head_sha,
             )
-            handled = await self._handle_merge_gate_blocker(
-                gate=merge_gate,
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                monitor_log=monitor_log,
+            pending_validation_gate = (
+                merge_gate if _gate_requires_validation_recovery(merge_gate) else None
             )
-            if handled is not None:
-                return handled
+            if pending_validation_gate is None:
+                handled = await self._handle_merge_gate_blocker(
+                    gate=merge_gate,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                )
+                if handled is not None:
+                    return handled
 
             queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
             if queue_blockers:
@@ -1681,11 +1777,17 @@ class PullRequestMonitorRunner:
                 monitor_log=monitor_log,
             )
             if settle_decision.wait_seconds > 0:
+                requested_action = "validate" if pending_validation_gate is not None else "merge"
                 await self._sleep_with_monitor_state_operation(
                     workspace_id=workspace_id,
                     action="reviewer_settle_wait",
-                    requested_action="merge",
-                    reason="Waiting for configured non-check reviewers to settle.",
+                    requested_action=requested_action,
+                    reason=(
+                        "Waiting for configured non-check reviewers to settle "
+                        "before final validation."
+                        if pending_validation_gate is not None
+                        else "Waiting for configured non-check reviewers to settle."
+                    ),
                     reason_code="NON_CHECK_REVIEWER_SETTLE",
                     pr_number=pr_number,
                     status=status,
@@ -1707,6 +1809,27 @@ class PullRequestMonitorRunner:
                     ),
                 )
                 return False
+
+            if pending_validation_gate is not None:
+                handled = await self._handle_merge_gate_blocker(
+                    gate=pending_validation_gate,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                    skip_initial_review_grace=(
+                        self._config.non_check_reviewer_settle_seconds > 0
+                    ),
+                )
+                if handled is not None:
+                    return handled
 
             await self._record_monitor_state_operation(
                 workspace_id=workspace_id,
@@ -1771,6 +1894,20 @@ class PullRequestMonitorRunner:
                     except BaseBehindCountError as exc:
                         recheck_behind_error = exc
                     else:
+                        pre_merge_state_changed = _clear_transient_base_fetch_retry_state(
+                            state,
+                            context="pre_merge_recheck",
+                        )
+                        if await self._refresh_pr_feedback_resolution_state(
+                            workspace_id=workspace_id,
+                            repo=repo,
+                            pr_number=pr_number,
+                            status=checked_status,
+                            state=state,
+                        ):
+                            pre_merge_state_changed = True
+                        if pre_merge_state_changed:
+                            await self._persist_state(workspace_id, state)
                         checked_action = decide(checked_status, state, self._config)
                         if not isinstance(checked_action, Merge):
                             fresh_action = checked_action
@@ -1944,13 +2081,23 @@ class PullRequestMonitorRunner:
                 return handled
 
             if recheck_base_error is not None:
+                base_fetch_result = await self._wait_after_transient_base_fetch_error(
+                    recheck_base_error,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="pre_merge_recheck",
+                    state=state,
+                    monitor_log=monitor_log,
+                )
+                if base_fetch_result.retry:
+                    return False
                 await self._terminate_failed(
                     workspace_id,
                     message=(
                         f"monitor: could not refresh base branch during pre-merge recheck: "
                         f"{recheck_base_error}"
                     )[:2000],
-                    reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+                    reason_code=base_fetch_result.reason_code,
                 )
                 return True
 
@@ -2071,6 +2218,109 @@ class PullRequestMonitorRunner:
             return True
 
         if isinstance(action, NotifyHuman):
+            if _is_manual_ready_handoff(action, status, state, self._config):
+                policy_blocked = await self._refresh_scope_policy_for_merge(
+                    workspace_id=workspace_id,
+                    changed_paths=status.changed_paths,
+                )
+                if policy_blocked:
+                    action = NotifyHuman(
+                        message=(
+                            "OUT_OF_SCOPE_CHANGE: changed files outside declared "
+                            "owned_paths require an operator scope decision."
+                        )
+                    )
+                else:
+                    queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
+                    if queue_blockers:
+                        await self._wait_for_merge_queue(
+                            blockers=queue_blockers,
+                            workspace_id=workspace_id,
+                            repo_url=repo_url,
+                            base_branch=base_branch,
+                            pr_number=pr_number,
+                            status=status,
+                            state=state,
+                            monitor_log=monitor_log,
+                        )
+                        return False
+
+                    merge_gate = await self._merge_gate_with_legacy_head_support(
+                        workspace_id,
+                        check_policy=True,
+                        current_head_sha=status.head_sha,
+                    )
+                    if _gate_requires_validation_recovery(merge_gate):
+                        settle_config = replace(self._config, auto_merge=True)
+                        settle_decision = _non_check_reviewer_settle_decision(
+                            status,
+                            state,
+                            settle_config,
+                            pr_number=pr_number,
+                            now=time.monotonic(),
+                        )
+                        await self._record_non_check_reviewer_settle_decision(
+                            decision=settle_decision,
+                            workspace_id=workspace_id,
+                            pr_number=pr_number,
+                            status=status,
+                            monitor_log=monitor_log,
+                        )
+                        if settle_decision.wait_seconds > 0:
+                            await self._sleep_with_monitor_state_operation(
+                                workspace_id=workspace_id,
+                                action="reviewer_settle_wait",
+                                requested_action="validate",
+                                reason=(
+                                    "Waiting for configured non-check reviewers to settle "
+                                    "before final validation."
+                                ),
+                                reason_code="NON_CHECK_REVIEWER_SETTLE",
+                                pr_number=pr_number,
+                                status=status,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                wait_seconds=settle_decision.wait_seconds,
+                                monitor_log=monitor_log,
+                                extra_payload={
+                                    "settle_seconds": (
+                                        self._config.non_check_reviewer_settle_seconds
+                                    ),
+                                    "configured_reviewers": list(
+                                        settle_decision.configured_reviewers
+                                    ),
+                                    "missing_reviewers": list(settle_decision.missing_reviewers),
+                                    "visible_reviewers": list(settle_decision.visible_reviewers),
+                                    "elapsed_seconds": settle_decision.elapsed_seconds,
+                                },
+                                extra_identity=(
+                                    *settle_decision.configured_reviewers,
+                                    *settle_decision.missing_reviewers,
+                                    settle_decision.started_at,
+                                ),
+                            )
+                            return False
+
+                        handled = await self._handle_merge_gate_blocker(
+                            gate=merge_gate,
+                            workspace_id=workspace_id,
+                            repo_url=repo_url,
+                            repo=repo,
+                            pr_number=pr_number,
+                            status=status,
+                            state=state,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            monitor_log=monitor_log,
+                            skip_initial_review_grace=(
+                                self._config.non_check_reviewer_settle_seconds > 0
+                            ),
+                        )
+                        if handled is not None:
+                            return handled
+
             operation = await self._begin_monitor_operation(
                 workspace_id=workspace_id,
                 operation_type=OperationType.human_wait,
@@ -2206,6 +2456,40 @@ class PullRequestMonitorRunner:
         if not blocking_codes:
             return None
         return _supply_chain_policy_blocked_message(blocking_codes)
+
+    async def _recovery_dispatch_status_is_stale(self, workspace_id: str) -> bool:
+        from awf.db.repositories import WorkspaceRepository
+
+        async with self._deps.session_factory() as s:
+            workspace_repo = WorkspaceRepository(s)
+            ws = await workspace_repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - destroyed mid-monitor
+                return True
+            if ws.status == WorkspaceStatus.monitoring_pr.value:
+                return False
+            active_recovery = any(
+                op.status
+                in (
+                    OperationStatus.pending.value,
+                    OperationStatus.running.value,
+                )
+                and op.type != OperationType.monitor_state.value
+                and isinstance(op.payload, dict)
+                and op.payload.get("source") == "pr_monitor"
+                for op in ws.operations
+            )
+            if active_recovery:
+                return False
+            await workspace_repo.record_ignored_stale_callback(
+                ws,
+                callback_source="pr_monitor",
+                callback_action="recovery_dispatch",
+                expected_status=WorkspaceStatus.monitoring_pr,
+                requested_status=WorkspaceStatus.ready,
+                reason_code="STALE_CALLBACK_IGNORED",
+            )
+            await s.commit()
+            return True
 
     async def _merge_gate_for_workspace(
         self,
@@ -2406,6 +2690,7 @@ class PullRequestMonitorRunner:
         compose_project: str,
         compose_file: Path,
         monitor_log: WorkspaceLogSink | None,
+        skip_initial_review_grace: bool = False,
     ) -> bool | None:
         stale_reason = gate.stale_reason
         req_action = gate.req_action
@@ -2414,7 +2699,11 @@ class PullRequestMonitorRunner:
         # Manual-merge mode short-circuits to Abort regardless of grace
         # state — operator-driven workspaces never dispatch automated
         # recovery.
-        if stale_reason is not None and not ws.auto_merge:
+        if (
+            stale_reason is not None
+            and not ws.auto_merge
+            and not _gate_requires_validation_recovery(gate)
+        ):
             return await self._execute(
                 action=Abort(AbortReason.stale),
                 workspace_id=workspace_id,
@@ -2474,12 +2763,16 @@ class PullRequestMonitorRunner:
         # workspace would leave ``monitoring_pr`` and re-enter the executor
         # pipeline before slow first-pass reviewers had any chance to
         # comment.
-        grace_wait_seconds = _initial_review_grace_wait_seconds(
-            state,
-            pr_number=pr_number,
-            now=time.monotonic(),
-            grace_seconds=self._config.initial_review_grace_period_seconds,
-            poll_interval_seconds=self._config.poll_interval_seconds,
+        grace_wait_seconds = (
+            0.0
+            if skip_initial_review_grace
+            else _initial_review_grace_wait_seconds(
+                state,
+                pr_number=pr_number,
+                now=time.monotonic(),
+                grace_seconds=self._config.initial_review_grace_period_seconds,
+                poll_interval_seconds=self._config.poll_interval_seconds,
+            )
         )
         if grace_wait_seconds > 0:
             if stale_reason is not None:
@@ -2896,6 +3189,7 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         repo: RepoRef,
         pr_number: int,
+        pr_head_sha: str,
         initial_threads: tuple[ReviewThread, ...],
         initial_reviews: tuple[ReviewComment, ...],
         state: MonitorState,
@@ -2918,6 +3212,7 @@ class PullRequestMonitorRunner:
         """
         threads_to_resolve: list[str] = []
         publish_dependent_ids: list[str] = []
+        fixed_review_comments: list[tuple[ReviewComment, VerdictResult]] = []
         threads = list(initial_threads)
         reviews = list(initial_reviews)
 
@@ -2941,13 +3236,13 @@ class PullRequestMonitorRunner:
                         returncode=1,
                         stderr=str(exc),
                     )
-                state.mark_addressed(t.thread_id, verdict)
+                _mark_review_thread_addressed(state, t, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     threads_to_resolve.append(t.thread_id)
                     publish_dependent_ids.append(t.thread_id)
             for c in reviews:
                 try:
-                    verdict = await self._address_review_comment(
+                    verdict_result = await self._address_review_comment_result(
                         workspace_id=workspace_id,
                         repo=repo,
                         pr_number=pr_number,
@@ -2963,7 +3258,20 @@ class PullRequestMonitorRunner:
                         returncode=1,
                         stderr=str(exc),
                     )
-                state.mark_addressed(c.comment_id, verdict)
+                verdict = verdict_result.verdict
+                _mark_review_comment_addressed(state, c, verdict)
+                if verdict in {"false_positive", "defer"}:
+                    await self._record_pr_feedback_resolution(
+                        workspace_id=workspace_id,
+                        repo=repo,
+                        pr_number=pr_number,
+                        pr_head_sha=pr_head_sha,
+                        comment=c,
+                        verdict_result=verdict_result,
+                        operation_id=operation_id,
+                    )
+                elif verdict == "fix_committed":
+                    fixed_review_comments.append((c, verdict_result))
                 if verdict not in {"defer", "agent_failed"}:
                     publish_dependent_ids.append(c.comment_id)
 
@@ -2986,12 +3294,13 @@ class PullRequestMonitorRunner:
             new_threads = [
                 t
                 for t in status.unresolved_inline_threads
-                if t.thread_id not in state.threads_addressed_ids
+                if _review_thread_needs_attention(state, t)
             ]
             new_reviews = [
                 c
                 for c in status.unresolved_review_comments
-                if not c.blocks_merge and c.comment_id not in state.threads_addressed_ids
+                if _agent_can_triage_review_comment(c)
+                and _review_comment_needs_attention(state, c)
             ]
             if not new_threads and not new_reviews:
                 break  # burst settled
@@ -3011,7 +3320,7 @@ class PullRequestMonitorRunner:
         pushed_head_sha: str | None = None
         if push_result.failed:
             for item_id in publish_dependent_ids:
-                state.threads_addressed_ids.pop(item_id, None)
+                _clear_addressed_state_by_id(state, item_id)
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_GIT_PUSH_EVENT,
@@ -3028,12 +3337,6 @@ class PullRequestMonitorRunner:
                 evidence=push_result.failure_evidence(),
             )
             return push_result
-        if not push_result.pushed:
-            # No local commits — CLI returned "false_positive" for
-            # everything or "defer" for everything. We still want to
-            # resolve the non-defer threads on GitHub.
-            pass
-
         # Record the pushed HEAD before resolving review threads. The
         # pushed commit is local git state; a transient GraphQL resolve
         # failure should not affect the monitor's push bookkeeping.
@@ -3056,6 +3359,18 @@ class PullRequestMonitorRunner:
                 source_head_sha=pushed_head_sha,
             )
 
+        resolution_head_sha = pushed_head_sha or pr_head_sha
+        for comment, verdict_result in fixed_review_comments:
+            await self._record_pr_feedback_resolution(
+                workspace_id=workspace_id,
+                repo=repo,
+                pr_number=pr_number,
+                pr_head_sha=resolution_head_sha,
+                comment=comment,
+                verdict_result=verdict_result,
+                operation_id=operation_id,
+            )
+
         # 4) Resolve threads on GitHub. Only inline threads have IDs we can
         # resolve via the GraphQL mutation; review-level comments are
         # marked addressed in state and the reviewer's re-read usually
@@ -3071,7 +3386,7 @@ class PullRequestMonitorRunner:
                     context="resolve_thread",
                     monitor_log=monitor_log,
                 ):
-                    state.threads_addressed_ids.pop(tid, None)
+                    _clear_addressed_state_by_id(state, tid)
                     await self._record_pr_monitor_audit_event(
                         workspace_id=workspace_id,
                         event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -3104,7 +3419,7 @@ class PullRequestMonitorRunner:
                 # IDs before it returns AddressComments, so retaining a
                 # failed resolve would make the next poll treat an open
                 # GitHub thread as handled forever.
-                state.threads_addressed_ids.pop(tid, None)
+                _clear_addressed_state_by_id(state, tid)
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
                     event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -3180,10 +3495,32 @@ class PullRequestMonitorRunner:
         compose_file: Path,
         state: MonitorState | None = None,
     ) -> Verdict:
+        result = await self._address_review_comment_result(
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            comment=comment,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+        )
+        return result.verdict
+
+    async def _address_review_comment_result(
+        self,
+        *,
+        workspace_id: str,
+        repo: RepoRef,
+        pr_number: int,
+        comment: ReviewComment,
+        compose_project: str,
+        compose_file: Path,
+        state: MonitorState | None = None,
+    ) -> VerdictResult:
         prompt = address_review_comment_prompt(
             pr_number=pr_number, repo_slug=repo.slug(), comment=comment
         )
-        return await self._invoke_cli_for_verdict(
+        return await self._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             prompt=prompt,
             commit_message=f"fix: address PR review comment {comment.comment_id}",
@@ -3202,6 +3539,27 @@ class PullRequestMonitorRunner:
         compose_file: Path,
         state: MonitorState | None = None,
     ) -> Verdict:
+        return (
+            await self._invoke_cli_for_verdict_result(
+                workspace_id=workspace_id,
+                prompt=prompt,
+                commit_message=commit_message,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+            )
+        ).verdict
+
+    async def _invoke_cli_for_verdict_result(
+        self,
+        *,
+        workspace_id: str,
+        prompt: str,
+        commit_message: str,
+        compose_project: str,
+        compose_file: Path,
+        state: MonitorState | None = None,
+    ) -> VerdictResult:
         result_stdout = ""
         cli_failed = False
         command_evidence: list[str] = []
@@ -3249,10 +3607,11 @@ class PullRequestMonitorRunner:
             )
 
         if committed_dirty_changes:
-            return "fix_committed"
+            parsed = _parse_verdict_result(result_stdout)
+            return VerdictResult(verdict="fix_committed", reason=parsed.reason)
         if cli_failed:
-            return "agent_failed"
-        return _parse_verdict(result_stdout)
+            return VerdictResult(verdict="agent_failed")
+        return _parse_verdict_result(result_stdout)
 
     # ── SyncBase ───────────────────────────────────────────────────────────
 
@@ -4043,6 +4402,109 @@ class PullRequestMonitorRunner:
         await self._deps.sleep(wait_seconds)
         return True
 
+    async def _wait_after_transient_base_fetch_error(
+        self,
+        exc: BaseFetchError,
+        *,
+        workspace_id: str,
+        pr_number: int,
+        context: str,
+        state: MonitorState,
+        monitor_log: WorkspaceLogSink | None,
+    ) -> _BaseFetchHandlingResult:
+        if not _is_transient_base_fetch_error(exc):
+            return _BaseFetchHandlingResult(
+                retry=False,
+                reason_code=_GIT_FETCH_BASE_FAILED_REASON,
+            )
+
+        retry_number = _increment_base_fetch_retry_count(state, context)
+        max_retries = max(self._runner_config.transient_base_fetch_max_retries, 0)
+        if retry_number > max_retries:
+            payload = _transient_base_fetch_retry_payload(
+                exc,
+                context=context,
+                pr_number=pr_number,
+                retry_number=retry_number,
+                max_retries=max_retries,
+                wait_seconds=0.0,
+            )
+            _log.warning(
+                "monitor.git_base_fetch_transient_retry_exhausted",
+                workspace_id=workspace_id,
+                **payload,
+            )
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.git_base_fetch_transient_retry_exhausted",
+                    "workspace_id": workspace_id,
+                    "reason_code": _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
+                    **payload,
+                },
+            )
+            await self._append_workspace_events(
+                workspace_id=workspace_id,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="monitor.git_base_fetch_transient_retry_exhausted",
+                        reason_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
+                        payload=payload,
+                    )
+                ],
+            )
+            await self._persist_state(workspace_id, state)
+            return _BaseFetchHandlingResult(
+                retry=False,
+                reason_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
+            )
+
+        wait_seconds = _base_fetch_retry_wait_seconds(
+            retry_number=retry_number,
+            initial_backoff_seconds=(
+                self._runner_config.transient_base_fetch_initial_backoff_seconds
+            ),
+            max_backoff_seconds=self._runner_config.transient_base_fetch_max_backoff_seconds,
+        )
+        payload = _transient_base_fetch_retry_payload(
+            exc,
+            context=context,
+            pr_number=pr_number,
+            retry_number=retry_number,
+            max_retries=max_retries,
+            wait_seconds=wait_seconds,
+        )
+        _log.warning(
+            "monitor.git_base_fetch_transient_retrying",
+            workspace_id=workspace_id,
+            **payload,
+        )
+        await self._write_monitor_log(
+            monitor_log,
+            {
+                "event": "monitor.git_base_fetch_transient_retrying",
+                "workspace_id": workspace_id,
+                "reason_code": _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+                **payload,
+            },
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="monitor.git_base_fetch_transient_retrying",
+                    reason_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+                    payload=payload,
+                )
+            ],
+        )
+        await self._persist_state(workspace_id, state)
+        await self._deps.sleep(wait_seconds)
+        return _BaseFetchHandlingResult(
+            retry=True,
+            reason_code=_GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
+        )
+
     # ── Defer-signal artifact ─────────────────────────────────────────────
 
     def _write_defer_signal(
@@ -4093,6 +4555,100 @@ class PullRequestMonitorRunner:
             )
 
     # ── DB state management ───────────────────────────────────────────────
+
+    async def _record_pr_feedback_resolution(
+        self,
+        *,
+        workspace_id: str,
+        repo: RepoRef,
+        pr_number: int,
+        pr_head_sha: str,
+        comment: ReviewComment,
+        verdict_result: VerdictResult,
+        operation_id: str | None,
+    ) -> None:
+        if verdict_result.verdict == "agent_failed":
+            return
+        async with self._deps.session_factory() as s:
+            await PRFeedbackResolutionRepository(s).record_resolution(
+                scm_provider="github",
+                repository_key=repo.slug(),
+                pull_request_key=str(pr_number),
+                pull_request_url=f"https://github.com/{repo.slug()}/pull/{pr_number}",
+                head_sha=pr_head_sha,
+                feedback_kind="review_comment",
+                feedback_id=comment.comment_id,
+                feedback_body=_review_comment_resolution_body(comment),
+                feedback_author=comment.author,
+                feedback_url=comment.url,
+                verdict=verdict_result.verdict,
+                reason=verdict_result.reason,
+                source_workspace_id=workspace_id,
+                source_operation_id=operation_id,
+            )
+            await s.commit()
+
+    async def _refresh_pr_feedback_resolution_state(
+        self,
+        *,
+        workspace_id: str,
+        repo: RepoRef,
+        pr_number: int,
+        status: PRStatus,
+        state: MonitorState,
+    ) -> bool:
+        changed = await self._apply_pr_feedback_resolution_state(
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            status=status,
+            state=state,
+        )
+        if _drop_stale_review_thread_addressed_state(status, state):
+            changed = True
+        if _drop_stale_review_comment_addressed_state(status, state):
+            changed = True
+        return changed
+
+    async def _apply_pr_feedback_resolution_state(
+        self,
+        *,
+        workspace_id: str,
+        repo: RepoRef,
+        pr_number: int,
+        status: PRStatus,
+        state: MonitorState,
+    ) -> bool:
+        del workspace_id
+        if not status.unresolved_review_comments:
+            return False
+        async with self._deps.session_factory() as s:
+            rows = await PRFeedbackResolutionRepository(s).list_for_pr(
+                scm_provider="github",
+                repository_key=repo.slug(),
+                pull_request_key=str(pr_number),
+            )
+        if not rows:
+            return False
+        rows_by_feedback = {
+            (row.feedback_kind, row.feedback_id, row.feedback_body_hash): row for row in rows
+        }
+        changed = False
+        for comment in status.unresolved_review_comments:
+            if not _review_comment_needs_attention(state, comment):
+                continue
+            row = rows_by_feedback.get(
+                (
+                    "review_comment",
+                    comment.comment_id,
+                    pr_feedback_body_hash(_review_comment_resolution_body(comment)),
+                )
+            )
+            if row is None:
+                continue
+            _mark_review_comment_addressed(state, comment, _monitor_state_verdict(row.verdict))
+            changed = True
+        return changed
 
     async def _load_workspace(self, workspace_id: str) -> Workspace:
         async with self._deps.session_factory() as s:
@@ -4505,6 +5061,12 @@ def _is_callback_terminal_workspace_status(status: str) -> bool:
 
 _VERDICT_FALSE_POSITIVE = re.compile(r"\bFALSE\s+POSITIVE\s*:", re.IGNORECASE)
 _VERDICT_DEFER = re.compile(r"\bDEFER\s*:", re.IGNORECASE)
+_AWF_VERDICT = re.compile(
+    r"\bAWF-VERDICT\s*:\s*"
+    r"(?P<label>FIXED|FALSE\s+POSITIVE|DEFER|NEEDS_HUMAN)"
+    r"\s*:\s*(?P<reason>[^\n\r]+)",
+    re.IGNORECASE,
+)
 
 
 def _parse_verdict(stdout: str) -> Verdict:
@@ -4515,12 +5077,120 @@ def _parse_verdict(stdout: str) -> Verdict:
     for those markers in the captured stdout; anything else counts as a
     fix commit (the default happy path).
     """
+    return _parse_verdict_result(stdout).verdict
+
+
+def _parse_verdict_result(stdout: str) -> VerdictResult:
     if not stdout:
-        return "defer"
+        return VerdictResult(verdict="defer")
+    awf_match = _AWF_VERDICT.search(stdout)
+    if awf_match is not None:
+        label = re.sub(r"\s+", " ", awf_match.group("label").strip().lower())
+        reason = awf_match.group("reason").strip() or None
+        if label == "false positive":
+            return VerdictResult(verdict="false_positive", reason=reason)
+        if label in {"defer", "needs_human"}:
+            return VerdictResult(verdict="defer", reason=reason)
+        return VerdictResult(verdict="fix_committed", reason=reason)
     if _VERDICT_FALSE_POSITIVE.search(stdout):
-        return "false_positive"
+        return VerdictResult(verdict="false_positive", reason=_verdict_reason(stdout))
     if _VERDICT_DEFER.search(stdout):
+        return VerdictResult(verdict="defer", reason=_verdict_reason(stdout))
+    return VerdictResult(verdict="fix_committed")
+
+
+def _verdict_reason(stdout: str) -> str | None:
+    _prefix, _separator, reason = stdout.partition(":")
+    cleaned = reason.strip()
+    return cleaned or None
+
+
+def _review_comment_resolution_body(comment: ReviewComment) -> str:
+    return comment.body or comment.body_excerpt or ""
+
+
+def _review_comment_body_state_key(comment_id: str) -> str:
+    return f"__review_comment_body_hash__:{comment_id}"
+
+
+def _review_comment_body_hash(comment: ReviewComment) -> str:
+    return pr_feedback_body_hash(_review_comment_resolution_body(comment))
+
+
+def _mark_review_comment_addressed(
+    state: MonitorState,
+    comment: ReviewComment,
+    verdict: str,
+) -> None:
+    state.mark_addressed(comment.comment_id, verdict)
+    state.mark_addressed(
+        _review_comment_body_state_key(comment.comment_id),
+        _review_comment_body_hash(comment),
+    )
+
+
+def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
+    state.threads_addressed_ids.pop(item_id, None)
+    state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
+
+
+def _drop_stale_review_thread_addressed_state(
+    status: PRStatus,
+    state: MonitorState,
+) -> bool:
+    changed = False
+    for thread in status.unresolved_inline_threads:
+        verdict = state.threads_addressed_ids.get(thread.thread_id)
+        if _needs_comment_attention(verdict):
+            continue
+        if (
+            state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
+            == _review_thread_body_hash(thread)
+        ):
+            continue
+        _clear_addressed_state_by_id(state, thread.thread_id)
+        changed = True
+    return changed
+
+
+def _review_comment_needs_attention(state: MonitorState, comment: ReviewComment) -> bool:
+    verdict = state.threads_addressed_ids.get(comment.comment_id)
+    if _needs_comment_attention(verdict):
+        return True
+    return (
+        state.threads_addressed_ids.get(_review_comment_body_state_key(comment.comment_id))
+        != _review_comment_body_hash(comment)
+    )
+
+
+def _drop_stale_review_comment_addressed_state(
+    status: PRStatus,
+    state: MonitorState,
+) -> bool:
+    changed = False
+    for comment in status.unresolved_review_comments:
+        verdict = state.threads_addressed_ids.get(comment.comment_id)
+        if _needs_comment_attention(verdict):
+            continue
+        if (
+            state.threads_addressed_ids.get(_review_comment_body_state_key(comment.comment_id))
+            == _review_comment_body_hash(comment)
+        ):
+            continue
+        _clear_addressed_state_by_id(state, comment.comment_id)
+        changed = True
+    return changed
+
+
+def _monitor_state_verdict(verdict: str) -> Verdict:
+    normalized = verdict.strip().lower()
+    if normalized == "false_positive":
+        return "false_positive"
+    if normalized in {"defer", "needs_human"}:
         return "defer"
+    if normalized == "agent_failed":
+        return "agent_failed"
     return "fix_committed"
 
 
@@ -4702,6 +5372,26 @@ def _transient_github_retry_payload(
     }
 
 
+def _transient_base_fetch_retry_payload(
+    exc: BaseFetchError,
+    *,
+    context: str,
+    pr_number: int,
+    retry_number: int,
+    max_retries: int,
+    wait_seconds: float,
+) -> dict[str, object]:
+    return {
+        "context": context,
+        "operation": "git fetch base",
+        "pr_number": pr_number,
+        "retry_number": retry_number,
+        "max_retries": max_retries,
+        "wait_seconds": wait_seconds,
+        "message": _redact_and_truncate_github_error(str(exc)),
+    }
+
+
 def _redact_and_truncate_github_error(value: str, *, limit: int = 400) -> str:
     redacted = _URL_CREDENTIAL_RE.sub(r"\1<redacted>@", value)
     redacted = _AUTHORIZATION_BEARER_RE.sub(r"\1<redacted>", redacted)
@@ -4737,6 +5427,49 @@ def _is_transient_github_client_error(exc: GitHubClientError) -> bool:
     if any(marker in text for marker in _NON_TRANSIENT_GITHUB_ERROR_MARKERS):
         return False
     return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)
+
+
+def _is_transient_base_fetch_error(exc: BaseFetchError) -> bool:
+    """Classify git transport failures caused by transient GitHub outages."""
+
+    text = str(exc).lower()
+    if any(marker in text for marker in _NON_TRANSIENT_GITHUB_ERROR_MARKERS):
+        return False
+    return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)
+
+
+def _base_fetch_retry_count_key(context: str) -> str:
+    return f"{_BASE_FETCH_RETRY_COUNT_KEY_PREFIX}{context}"
+
+
+def _increment_base_fetch_retry_count(state: MonitorState, context: str) -> int:
+    key = _base_fetch_retry_count_key(context)
+    raw_count = state.threads_addressed_ids.get(key, "0")
+    try:
+        current = int(raw_count)
+    except ValueError:
+        current = 0
+    retry_number = current + 1
+    state.threads_addressed_ids[key] = str(retry_number)
+    return retry_number
+
+
+def _clear_transient_base_fetch_retry_state(state: MonitorState, *, context: str) -> bool:
+    key = _base_fetch_retry_count_key(context)
+    return state.threads_addressed_ids.pop(key, None) is not None
+
+
+def _base_fetch_retry_wait_seconds(
+    *,
+    retry_number: int,
+    initial_backoff_seconds: float,
+    max_backoff_seconds: float,
+) -> float:
+    initial = max(initial_backoff_seconds, 0.0)
+    cap = max(max_backoff_seconds, 0.0)
+    exponent = min(max(retry_number - 1, 0), 30)
+    wait_seconds = initial * float(2**exponent)
+    return wait_seconds if wait_seconds < cap else cap
 
 
 def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
@@ -4943,6 +5676,41 @@ def _normalize_non_check_reviewer_identity(value: object) -> str:
 
 def _merge_gate_blocks(gate: _MergeGateResult) -> bool:
     return gate.stale_reason is not None or gate.notify_message is not None
+
+
+def _gate_requires_validation_recovery(gate: _MergeGateResult) -> bool:
+    return gate.stale_reason == _VALIDATION_INSUFFICIENT_STALE_REASON and (
+        gate.req_action in (None, "validate")
+    )
+
+
+def _is_manual_ready_handoff(
+    action: NotifyHuman,
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+) -> bool:
+    if config.auto_merge or action.message is not None:
+        return False
+    auto_merge_action = decide(status, state, replace(config, auto_merge=True))
+    if isinstance(auto_merge_action, Merge):
+        return True
+    return isinstance(
+        auto_merge_action,
+        NotifyHuman,
+    ) and _is_protected_manual_ready_handoff(status, state)
+
+
+def _is_protected_manual_ready_handoff(status: PRStatus, state: MonitorState) -> bool:
+    if status.merge_state_status not in (
+        MergeStateStatus.BLOCKED,
+        MergeStateStatus.HAS_HOOKS,
+    ):
+        return False
+    if any(c.blocks_merge for c in status.unresolved_review_comments):
+        return False
+    _, human_deferred = _collect_defer_items(status, state)
+    return not human_deferred
 
 
 def _has_successful_validation_for_pr_head(
@@ -5222,7 +5990,7 @@ def _collect_defer_items(
     for t in status.unresolved_inline_threads:
         if state.threads_addressed_ids.get(t.thread_id) != "defer":
             continue
-        bucket = bot_items if _is_bot_author(t.author) else human_items
+        bucket = bot_items if _is_bot_review_thread(t) else human_items
         bucket.append(
             {
                 "kind": "thread",
@@ -5250,41 +6018,6 @@ def _collect_defer_items(
             }
         )
     return bot_items, human_items
-
-
-def _remote_push_url_for_workspace(ws: Workspace, *, base_repo: RepoRef) -> str | None:
-    if ws.task_kind != "sync_feature_pr":
-        return None
-    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
-    adoption = policy.get("pr_adoption")
-    if not isinstance(adoption, Mapping):
-        return None
-    head_repo_value = adoption.get("head_repo_slug") or adoption.get("head_repo_url")
-    if not isinstance(head_repo_value, str) or not head_repo_value.strip():
-        return None
-    try:
-        head_repo = RepoRef.from_url(head_repo_value)
-    except ValueError:
-        return None
-    if head_repo.slug().lower() == base_repo.slug().lower():
-        return None
-    return _github_repo_url_like(ws.repo_url, head_repo)
-
-
-def _github_repo_url_like(repo_url: str, repo: RepoRef) -> str:
-    stripped = repo_url.strip()
-    if stripped.startswith("git@github.com:") or stripped.startswith("ssh://git@github.com/"):
-        return f"git@github.com:{repo.owner}/{repo.name}.git"
-    parsed = urlsplit(stripped)
-    if (
-        parsed.scheme in {"http", "https"}
-        and parsed.hostname is not None
-        and parsed.hostname.lower() == "github.com"
-    ):
-        userinfo, sep, _host = parsed.netloc.rpartition("@")
-        if sep and userinfo:
-            return f"https://{userinfo}@github.com/{repo.owner}/{repo.name}.git"
-    return repo.https_url()
 
 
 def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:

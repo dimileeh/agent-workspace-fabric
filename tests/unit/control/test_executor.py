@@ -817,7 +817,7 @@ class TestHappyPath:
             clock[0] += 700.0
             return clock[0]
 
-        monkeypatch.setattr(executor_module.time, "monotonic", _fake_monotonic)
+        monkeypatch.setattr(executor_module, "_monotonic", _fake_monotonic)
 
         class _IdleConformanceAdapter(adapter_base.AgentAdapter):
             runtime = AgentRuntime.codex
@@ -1007,7 +1007,7 @@ class TestHappyPath:
             clock[0] += 700.0
             return clock[0]
 
-        monkeypatch.setattr(executor_module.time, "monotonic", _fake_monotonic)
+        monkeypatch.setattr(executor_module, "_monotonic", _fake_monotonic)
 
         class _IdleConformanceAdapter(adapter_base.AgentAdapter):
             runtime = AgentRuntime.codex
@@ -1225,7 +1225,7 @@ class TestHappyPath:
             clock[0] += 30.0
             return clock[0]
 
-        monkeypatch.setattr(executor_module.time, "monotonic", _fake_monotonic)
+        monkeypatch.setattr(executor_module, "_monotonic", _fake_monotonic)
 
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
@@ -1509,7 +1509,7 @@ class TestHappyPath:
             clock[0] += 30.0
             return clock[0]
 
-        monkeypatch.setattr(executor_module.time, "monotonic", _fake_monotonic)
+        monkeypatch.setattr(executor_module, "_monotonic", _fake_monotonic)
 
         fake.queue_result(returncode=0, stdout="")  # before planning
         fake.queue_result(returncode=0, stdout="base_sha\n")  # rev-parse HEAD baseline

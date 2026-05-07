@@ -16,7 +16,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
@@ -69,6 +69,7 @@ from awf.db.models import (
     MergeCandidate,
     Operation,
     PolicyFinding,
+    PRFeedbackResolution,
     ProviderModelCircuitBreaker,
     QueueDecision,
     ResourceReservation,
@@ -117,6 +118,14 @@ _CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
 _PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "provider",
     "model",
+)
+_PR_FEEDBACK_RESOLUTION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
+    "scm_provider",
+    "repository_key",
+    "pull_request_key",
+    "feedback_kind",
+    "feedback_id",
+    "feedback_body_hash",
 )
 
 
@@ -261,6 +270,27 @@ def _provider_model_circuit_breaker_insert_if_absent_stmt(
             .returning(ProviderModelCircuitBreaker.id)
         )
     return None
+
+
+def _pr_feedback_resolution_upsert_stmt(dialect_name: str | None) -> Any | None:
+    if dialect_name != "postgresql":
+        return None
+    inserted = postgresql_insert(PRFeedbackResolution)
+    return inserted.on_conflict_do_update(
+        index_elements=_PR_FEEDBACK_RESOLUTION_CONFLICT_COLUMNS,
+        set_={
+            "pull_request_url": inserted.excluded.pull_request_url,
+            "head_sha": inserted.excluded.head_sha,
+            "feedback_url": inserted.excluded.feedback_url,
+            "feedback_author": inserted.excluded.feedback_author,
+            "verdict": inserted.excluded.verdict,
+            "reason": inserted.excluded.reason,
+            "source_workspace_id": inserted.excluded.source_workspace_id,
+            "source_operation_id": inserted.excluded.source_operation_id,
+            "resolved_at": inserted.excluded.resolved_at,
+            "updated_at": func.now(),
+        },
+    ).returning(PRFeedbackResolution)
 
 
 def _callback_subscription_event_type_candidates(event_type: str) -> tuple[str, ...]:
@@ -547,6 +577,115 @@ class TaskAttemptRepository:
 
         stmt = stmt.order_by(TaskAttempt.created_at.desc(), TaskAttempt.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+
+def pr_feedback_body_hash(body: str | None) -> str:
+    """Stable hash for matching the same feedback text across workspaces."""
+
+    return hashlib.sha256((body or "").encode("utf-8")).hexdigest()
+
+
+class PRFeedbackResolutionRepository:
+    """PR-scoped review feedback verdicts shared by replacement workspaces."""
+
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
+        self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+
+    async def record_resolution(
+        self,
+        *,
+        scm_provider: str,
+        repository_key: str,
+        pull_request_key: str,
+        pull_request_url: str | None,
+        head_sha: str,
+        feedback_kind: str,
+        feedback_id: str,
+        feedback_body: str | None,
+        feedback_author: str | None,
+        feedback_url: str | None,
+        verdict: str,
+        reason: str | None,
+        source_workspace_id: str | None,
+        source_operation_id: str | None = None,
+        resolved_at: datetime | None = None,
+    ) -> PRFeedbackResolution:
+        now = resolved_at or datetime.now(UTC)
+        values: dict[str, Any] = {
+            "scm_provider": _normalize_provider_key(scm_provider),
+            "repository_key": _normalize_repository_key(repository_key),
+            "pull_request_key": pull_request_key.strip(),
+            "pull_request_url": pull_request_url,
+            "head_sha": head_sha.strip(),
+            "feedback_kind": feedback_kind.strip().lower(),
+            "feedback_id": feedback_id.strip(),
+            "feedback_body_hash": pr_feedback_body_hash(feedback_body),
+            "feedback_url": feedback_url,
+            "feedback_author": feedback_author,
+            "verdict": verdict.strip(),
+            "reason": reason.strip()[:2048] if reason else None,
+            "source_workspace_id": source_workspace_id,
+            "source_operation_id": source_operation_id,
+            "resolved_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
+        stmt = _pr_feedback_resolution_upsert_stmt(self._dialect_name)
+        if stmt is None:
+            raise RuntimeError("PR feedback resolution persistence requires PostgreSQL")
+        row = cast(
+            PRFeedbackResolution,
+            (await self._session.execute(stmt.values(**values))).scalar_one(),
+        )
+        await self._session.flush()
+        return row
+
+    async def get(
+        self,
+        *,
+        scm_provider: str,
+        repository_key: str,
+        pull_request_key: str,
+        feedback_kind: str,
+        feedback_id: str,
+        feedback_body_hash: str,
+    ) -> PRFeedbackResolution | None:
+        stmt = select(PRFeedbackResolution).where(
+            PRFeedbackResolution.scm_provider == _normalize_provider_key(scm_provider),
+            PRFeedbackResolution.repository_key == _normalize_repository_key(repository_key),
+            PRFeedbackResolution.pull_request_key == pull_request_key.strip(),
+            PRFeedbackResolution.feedback_kind == feedback_kind.strip().lower(),
+            PRFeedbackResolution.feedback_id == feedback_id.strip(),
+            PRFeedbackResolution.feedback_body_hash == feedback_body_hash,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_for_pr(
+        self,
+        *,
+        scm_provider: str,
+        repository_key: str,
+        pull_request_key: str,
+    ) -> list[PRFeedbackResolution]:
+        stmt = (
+            select(PRFeedbackResolution)
+            .where(
+                PRFeedbackResolution.scm_provider == _normalize_provider_key(scm_provider),
+                PRFeedbackResolution.repository_key == _normalize_repository_key(repository_key),
+                PRFeedbackResolution.pull_request_key == pull_request_key.strip(),
+            )
+            .order_by(PRFeedbackResolution.updated_at.desc())
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+
+def _normalize_provider_key(value: str) -> str:
+    return value.strip().lower()
+
+
+def _normalize_repository_key(value: str) -> str:
+    return value.strip().lower()
 
 
 class ProviderModelCircuitBreakerRepository:
