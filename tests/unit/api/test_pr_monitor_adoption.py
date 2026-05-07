@@ -265,9 +265,11 @@ async def test_adopt_pr_returns_structured_terminal_pr_error(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("terminal_status", [WorkspaceStatus.failed, WorkspaceStatus.completed])
 async def test_terminal_existing_adoption_fetch_error_preserves_idempotency_key(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
     engine: AsyncEngine,
+    terminal_status: WorkspaceStatus,
 ) -> None:
     client, fetcher = adoption_client
     headers = {"Authorization": "Bearer secret"}
@@ -289,7 +291,7 @@ async def test_terminal_existing_adoption_fetch_error_preserves_idempotency_key(
         workspace = (
             await session.execute(select(Workspace).where(Workspace.id == workspace_id))
         ).scalar_one()
-        workspace.status = WorkspaceStatus.failed.value
+        workspace.status = terminal_status.value
         assert workspace.idempotency_key == idempotency_key
         await session.commit()
 

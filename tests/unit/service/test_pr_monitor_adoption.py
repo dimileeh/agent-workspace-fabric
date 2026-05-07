@@ -331,6 +331,7 @@ class TestPullRequestMonitorAdoptionService:
         "terminal_status",
         [
             WorkspaceStatus.cancelled,
+            WorkspaceStatus.completed,
             WorkspaceStatus.destroyed,
             WorkspaceStatus.failed,
         ],
@@ -686,7 +687,7 @@ class TestPullRequestMonitorAdoptionService:
         assert adoption_module._adoption_workspace_is_resumable(workspace) is True
 
     @pytest.mark.unit
-    async def test_completed_existing_adoption_still_attaches_without_metadata_fetch(
+    async def test_completed_existing_adoption_refetches_and_rejects_merged_pr(
         self,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -706,22 +707,21 @@ class TestPullRequestMonitorAdoptionService:
             await session.commit()
 
         async with factory() as session:
-            replay_fetcher = _MetadataFetcher(_metadata(head_ref="feature/should-not-fetch"))
-            replay = await PullRequestMonitorAdoptionService(
-                session,
-                metadata_fetcher=replay_fetcher,
-            ).adopt(
-                PullRequestMonitorAdoptionRequest(
-                    pr_url="https://github.com/dimileeh/aira-web/pull/277",
-                    auto_merge=False,
+            replay_fetcher = _MetadataFetcher(_metadata(state="MERGED"))
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await PullRequestMonitorAdoptionService(
+                    session,
+                    metadata_fetcher=replay_fetcher,
+                ).adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                        auto_merge=False,
+                    )
                 )
-            )
             await session.commit()
 
-        assert replay.attached_existing is True
-        assert replay.workspace_id == first.workspace_id
-        assert replay.status == WorkspaceStatus.completed
-        assert replay_fetcher.calls == []
+        assert excinfo.value.error_code == "PR_ALREADY_MERGED"
+        assert replay_fetcher.calls == [("dimileeh/aira-web", 277)]
         assert fetcher.calls == [("dimileeh/aira-web", 277)]
 
         async with factory() as session:
