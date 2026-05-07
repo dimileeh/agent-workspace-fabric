@@ -1927,7 +1927,6 @@ def _active_runtime_health_event_floor(workspace: Workspace) -> datetime | None:
             not isinstance(event.occurred_at, datetime)
             or event.event_type != OPERATOR_REFRESH_EVENT_TYPE
             or event.reason_code != OPERATOR_REFRESH_REASON_CODE
-            or event.new_state != status
         ):
             continue
         occurred_at = _utc_datetime(event.occurred_at)

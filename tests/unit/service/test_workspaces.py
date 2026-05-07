@@ -577,6 +577,7 @@ async def test_preserved_runtime_health_is_floored_by_operator_refresh(
             reason_code=REFRESH_REQUESTED_REASON_CODE,
         )
         refresh.occurred_at = base + timedelta(seconds=1)
+        refresh.new_state = None
         await session.commit()
         workspace_id = workspace.id
 
@@ -741,7 +742,7 @@ async def test_preserved_runtime_health_ignores_operator_refresh_from_prior_stat
             event_type=REFRESH_REQUESTED_EVENT_TYPE,
             reason_code=REFRESH_REQUESTED_REASON_CODE,
         )
-        refresh.occurred_at = base + timedelta(seconds=2)
+        refresh.occurred_at = base - timedelta(seconds=1)
         await repo.transition(
             workspace,
             to=WorkspaceStatus.running,
