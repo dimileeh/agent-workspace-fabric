@@ -1272,7 +1272,10 @@ def _is_superseded_coderabbit_skip_issue_comment(
         return False
     if created_at is None:
         return True
-    return any(evidence_at is None or evidence_at > created_at for evidence_at in review_evidence_times)
+    return any(
+        evidence_at is not None and evidence_at > created_at
+        for evidence_at in review_evidence_times
+    )
 
 
 def _is_coderabbit_author(author: str | None) -> bool:
