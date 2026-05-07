@@ -1913,20 +1913,31 @@ def _workspace_runtime_health_from_matching_events(
 
 def _active_runtime_health_event_floor(workspace: Workspace) -> datetime | None:
     status = str(workspace.status)
-    floors = [
+    status_floors = [
         _utc_datetime(event.occurred_at)
         for event in workspace.events
         if isinstance(event.occurred_at, datetime)
         and event.event_type == "workspace.state_changed"
         and event.new_state == status
     ]
-    floors.extend(
-        _utc_datetime(event.occurred_at)
-        for event in workspace.events
-        if isinstance(event.occurred_at, datetime)
-        and event.event_type == OPERATOR_REFRESH_EVENT_TYPE
-        and event.reason_code == OPERATOR_REFRESH_REASON_CODE
-    )
+    status_started_at = max(status_floors) if status_floors else None
+    floors = [status_started_at] if status_started_at is not None else []
+    for event in workspace.events:
+        if (
+            not isinstance(event.occurred_at, datetime)
+            or event.event_type != OPERATOR_REFRESH_EVENT_TYPE
+            or event.reason_code != OPERATOR_REFRESH_REASON_CODE
+            or event.new_state != status
+        ):
+            continue
+        occurred_at = _utc_datetime(event.occurred_at)
+        if status_started_at is None or occurred_at >= status_started_at:
+            floors.append(occurred_at)
+    claim_expires_at = workspace.execution_claim_expires_at
+    if claim_expires_at is not None:
+        claim_floor = _utc_datetime(claim_expires_at)
+        if claim_floor <= datetime.now(UTC):
+            floors.append(claim_floor)
     return max(floors) if floors else None
 
 

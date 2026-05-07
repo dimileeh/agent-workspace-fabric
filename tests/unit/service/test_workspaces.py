@@ -609,6 +609,174 @@ async def test_preserved_runtime_health_is_floored_by_operator_refresh(
 
 
 @pytest.mark.unit
+async def test_preserved_runtime_health_is_floored_by_past_execution_claim_expiry(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="preserved runtime claim floor",
+            task_prompt="do not show preservation from replaced execution claim",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.running.value
+        workspace.compose_project_name = "awf_preserved_runtime_claim_floor"
+        workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
+        base = datetime.now(UTC) - timedelta(minutes=10)
+        preserved = await repo.add_event(
+            workspace,
+            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            payload={
+                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.running.value,
+                "message": "Live agent runtime was preserved after worker restart.",
+                "runtime": {
+                    "services": [
+                        {
+                            "name": "agent",
+                            "state": "running",
+                            "container_id": "agent-preserved",
+                        }
+                    ]
+                },
+            },
+        )
+        preserved.occurred_at = base
+        workspace.execution_claim_expires_at = base + timedelta(seconds=1)
+        await session.commit()
+        workspace_id = workspace.id
+
+    inspector = _RuntimeInspector(
+        {
+            "awf_preserved_runtime_claim_floor": RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent-current",
+                        image="awf-agent:latest",
+                        state="running",
+                    )
+                ],
+            )
+        }
+    )
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
+    runtime = await WorkspaceService(
+        session_factory,
+        runtime_inspector=inspector,
+    ).get_runtime(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is None
+    assert runtime is not None
+    assert runtime.runtime_health is None
+
+
+@pytest.mark.unit
+async def test_preserved_runtime_health_keeps_current_event_with_unexpired_execution_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="preserved runtime fresh claim",
+            task_prompt="show preservation owned by active execution claim",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.validating.value
+        base = datetime.now(UTC)
+        preserved = await repo.add_event(
+            workspace,
+            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            payload={
+                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.validating.value,
+                "message": "Live agent runtime was preserved after worker restart.",
+            },
+        )
+        preserved.occurred_at = base
+        workspace.execution_claim_expires_at = base + timedelta(minutes=5)
+        await session.commit()
+        workspace_id = workspace.id
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is not None
+    assert detail.runtime_health.status == "ok"
+    assert detail.runtime_health.reason_code == PRESERVED_EXECUTION_REASON_CODE
+    assert detail.runtime_health.decision == "preserve_runtime"
+
+
+@pytest.mark.unit
+async def test_preserved_runtime_health_ignores_operator_refresh_from_prior_status(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="preserved runtime status-scoped refresh",
+            task_prompt="do not let another status refresh hide preservation",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.running.value
+        base = datetime.now(UTC)
+        running = await repo.add_event(
+            workspace,
+            event_type="workspace.state_changed",
+            reason_code="WORKSPACE_RUNNING",
+        )
+        running.old_state = WorkspaceStatus.ready.value
+        running.new_state = WorkspaceStatus.running.value
+        running.occurred_at = base
+        preserved = await repo.add_event(
+            workspace,
+            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            payload={
+                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.running.value,
+                "message": "Live agent runtime was preserved after worker restart.",
+            },
+        )
+        preserved.occurred_at = base + timedelta(seconds=1)
+        refresh = await repo.add_event(
+            workspace,
+            event_type=REFRESH_REQUESTED_EVENT_TYPE,
+            reason_code=REFRESH_REQUESTED_REASON_CODE,
+        )
+        refresh.old_state = WorkspaceStatus.validating.value
+        refresh.new_state = WorkspaceStatus.validating.value
+        refresh.occurred_at = base + timedelta(seconds=2)
+        await session.commit()
+        workspace_id = workspace.id
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is not None
+    assert detail.runtime_health.status == "ok"
+    assert detail.runtime_health.reason_code == PRESERVED_EXECUTION_REASON_CODE
+    assert detail.runtime_health.decision == "preserve_runtime"
+
+
+@pytest.mark.unit
 async def test_workspace_detail_ignores_persisted_preserved_runtime_health_after_cancel(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
