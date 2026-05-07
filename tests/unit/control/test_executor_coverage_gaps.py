@@ -9,6 +9,7 @@ import pytest
 from awf.control.executor import (
     _apply_baseline_coverage_ratchet,
     _coverage_result_from_metadata,
+    _extract_string_tokens,
     _validation_failure_message,
     _validation_run_coverage_metadata,
     _validation_run_reason_code,
@@ -65,6 +66,16 @@ def _coverage(
             provider_failure_evidence if provider_failure_evidence is not None else []
         ),
     )
+
+
+@pytest.mark.unit
+def test_extract_string_tokens_filters_non_string_list_items() -> None:
+    assert _extract_string_tokens(["tests/test_app.py::test_ok", 1, None, "FAILED test"]) == [
+        "tests/test_app.py::test_ok",
+        "FAILED test",
+    ]
+    assert _extract_string_tokens("FAILED test") == []
+    assert _extract_string_tokens(None) == []
 
 
 @pytest.mark.unit

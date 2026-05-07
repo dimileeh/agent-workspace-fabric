@@ -5657,13 +5657,19 @@ def _validation_run_coverage_metadata(
     return metadata
 
 
+def _extract_string_tokens(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str)]
+
+
 def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> ValidationCoverageResult:
     percent = metadata.get("percent")
     minimum = metadata.get("minimum_percent")
     enforce = metadata.get("enforce")
     gaps = metadata.get("gaps")
-    failing_node_ids = metadata.get("failing_test_node_ids")
-    failing_evidence = metadata.get("failing_test_evidence")
+    raw_failing_node_ids = metadata.get("failing_test_node_ids")
+    raw_failing_evidence = metadata.get("failing_test_evidence")
     raw_provider_failure_evidence = metadata.get("provider_failure_evidence")
     parallel_requested = metadata.get("parallel_workers_requested")
     parallel_effective = metadata.get("parallel_workers_effective")
@@ -5676,17 +5682,9 @@ def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> Validation
         status=str(metadata.get("status") or "passed"),
         reason_code=str(metadata.get("reason_code") or "COVERAGE_OK"),
         gaps=[item for item in gaps if isinstance(item, dict)] if isinstance(gaps, list) else [],
-        failing_test_node_ids=[str(item) for item in failing_node_ids if isinstance(item, str)]
-        if isinstance(failing_node_ids, list)
-        else [],
-        failing_test_evidence=[str(item) for item in failing_evidence if isinstance(item, str)]
-        if isinstance(failing_evidence, list)
-        else [],
-        provider_failure_evidence=[
-            str(item) for item in raw_provider_failure_evidence if isinstance(item, str)
-        ]
-        if isinstance(raw_provider_failure_evidence, list)
-        else [],
+        failing_test_node_ids=_extract_string_tokens(raw_failing_node_ids),
+        failing_test_evidence=_extract_string_tokens(raw_failing_evidence),
+        provider_failure_evidence=_extract_string_tokens(raw_provider_failure_evidence),
         parallel_workers_requested=(
             int(parallel_requested) if isinstance(parallel_requested, int) else None
         ),
