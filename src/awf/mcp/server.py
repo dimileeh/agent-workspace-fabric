@@ -29,6 +29,7 @@ from awf.api.schemas import (
     OperationResponse,
     OwnedPath,
     PullRequestMonitorAdoptionRequest,
+    WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
     WorkspaceLockListResponse,
@@ -353,7 +354,7 @@ def build_mcp_server(
             return _task_external_id_conflict_result(exc)
         except WorkspaceProviderReadinessBlockedError as exc:
             return _provider_readiness_blocked_result(exc)
-        return _tool_result(ws.model_dump(mode="json"))
+        return _tool_result(_workspace_accepted_payload(ws))
 
     @mcp.tool(name="awf_retry_workspace")
     async def awf_retry_workspace(
@@ -1445,6 +1446,24 @@ def _normalize_mcp_idempotency_key(idempotency_key: str | None) -> str | None:
 
 def _idempotency_key_error() -> CallToolResult:
     return _error_result("INVALID_REQUEST", _IDEMPOTENCY_KEY_REQUIRED_MESSAGE)
+
+
+def _workspace_accepted_payload(ws: Any) -> dict[str, Any]:
+    workspace_id = ws.id
+    warnings = [
+        warning.model_dump(mode="json") if hasattr(warning, "model_dump") else warning
+        for warning in ws.coordination_warnings
+    ]
+    return WorkspaceAcceptedResponse(
+        workspace_id=workspace_id,
+        status=ws.status,
+        version=ws.version,
+        status_url=f"/v1/workspaces/{workspace_id}",
+        events_url=f"/v1/workspaces/{workspace_id}/events",
+        accepted_at=ws.created_at,
+        warnings=warnings,
+        provider_readiness_preflight=ws.provider_readiness_preflight,
+    ).model_dump(mode="json")
 
 
 def _null_tool_result() -> CallToolResult:

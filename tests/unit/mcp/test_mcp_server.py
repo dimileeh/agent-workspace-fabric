@@ -1136,7 +1136,12 @@ class TestCreateWorkspaceV2:
         )
 
         assert isinstance(payload, dict)
-        ws_id = payload["id"]
+        ws_id = payload["workspace_id"]
+        assert payload["status_url"] == f"/v1/workspaces/{ws_id}"
+        assert payload["events_url"] == f"/v1/workspaces/{ws_id}/events"
+        assert "accepted_at" in payload
+        assert "id" not in payload
+        assert "task_class" not in payload
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(str(ws_id))
 
@@ -1184,12 +1189,10 @@ class TestCreateWorkspaceV2:
         )
 
         assert isinstance(created, dict)
-        ws_id = created["id"]
+        ws_id = created["workspace_id"]
         fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
         listed = await _call(mcp, "awf_list_workspaces", {"limit": 10})
 
-        assert created["task_class"] == "docs_task"
-        assert created["owned_paths"] == ["README.md", "docs/**"]
         assert fetched is not None
         assert fetched["task_class"] == "docs_task"  # type: ignore[index]
         assert fetched["owned_paths"] == ["README.md", "docs/**"]  # type: ignore[index]
@@ -1366,7 +1369,7 @@ class TestCreateWorkspaceV2:
 
         assert isinstance(first, dict)
         assert isinstance(replay, dict)
-        assert replay["id"] == first["id"]
+        assert replay["workspace_id"] == first["workspace_id"]
         assert isinstance(conflict, CallToolResult)
         assert conflict.isError is True
         assert conflict.structuredContent is not None
@@ -1409,7 +1412,7 @@ class TestCreateWorkspaceV2:
 
         assert isinstance(first, dict)
         assert isinstance(replay, dict)
-        assert replay["id"] == first["id"]
+        assert replay["workspace_id"] == first["workspace_id"]
         assert calls == 1
 
     @pytest.mark.unit
@@ -1475,7 +1478,7 @@ class TestCreateWorkspaceV2:
             },
         )
         assert isinstance(created, dict)
-        workspace_id = str(created["id"])
+        workspace_id = str(created["workspace_id"])
         async with factory() as session:
             repo = WorkspaceRepository(session)
             workspace = await repo.get(workspace_id)
