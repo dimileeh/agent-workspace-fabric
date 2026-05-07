@@ -553,6 +553,7 @@ class TestPullRequestMonitorAdoptionService:
         [
             WorkspaceStatus.cancelled,
             WorkspaceStatus.failed,
+            WorkspaceStatus.destroying,
             WorkspaceStatus.destroyed,
         ],
     )
