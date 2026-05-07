@@ -171,7 +171,7 @@ uv run --python 3.12 --extra dev awf workspace runtime ws_123
 uv run --python 3.12 --extra dev awf workspace operations ws_123 --limit 25
 uv run --python 3.12 --extra dev awf workspace operations ws_123 --cursor eyJvIjoyNX0
 uv run --python 3.12 --extra dev awf operations list --workspace-id ws_123 --limit 25
-uv run --python 3.12 --extra dev awf operations list --after eyJvIjoyNX0
+uv run --python 3.12 --extra dev awf operations list --cursor eyJvIjoyNX0
 uv run --python 3.12 --extra dev awf workspace logs ws_123
 uv run --python 3.12 --extra dev awf workspace log ws_123 agent.stdout --offset 0 --limit-bytes 65536
 ```
