@@ -26,7 +26,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.routes import metrics as metrics_routes
 from awf.api.schemas import (
     ErrorResponse,
-    OperationListResponse,
     OperationResponse,
     OwnedPath,
     PullRequestMonitorAdoptionRequest,
@@ -47,10 +46,7 @@ from awf.service.artifacts import (
     MAX_ARTIFACT_LIST_LIMIT,
     list_workspace_artifacts_metadata,
 )
-from awf.service.bounded_list import (
-    InvalidBoundedListCursorError,
-    encode_bounded_list_cursor,
-)
+from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
 from awf.service.local_capacity import detect_local_capacity
@@ -68,6 +64,7 @@ from awf.service.metrics import (
     summarize_slo_metrics_for_session,
     summarize_workspace_reliability_for_session,
 )
+from awf.service.operations import build_operation_list_response
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
 from awf.service.pr_monitor_adoption import PRMonitorAdoptionError
@@ -563,7 +560,7 @@ def build_mcp_server(
             return _error_result("INVALID_CURSOR", "Invalid operation list cursor.")
         if page is None:
             return _null_tool_result()
-        response = _operation_list_response(
+        response = build_operation_list_response(
             page.rows,
             limit=limit,
             cursor=cursor,
@@ -820,7 +817,7 @@ def build_mcp_server(
                 limit=limit + 1,
                 cursor=cursor,
             )
-            response = _operation_list_response(
+            response = build_operation_list_response(
                 page.rows,
                 limit=limit,
                 cursor=cursor,
@@ -1359,24 +1356,6 @@ def _required_idempotency_key(idempotency_key: str | None) -> str | None:
 
 def _idempotency_key_error() -> CallToolResult:
     return _error_result("INVALID_REQUEST", _IDEMPOTENCY_KEY_REQUIRED_MESSAGE)
-
-
-def _operation_list_response(
-    rows: list[OperationResponse],
-    *,
-    limit: int,
-    cursor: str | None = None,
-    offset: int = 0,
-) -> OperationListResponse:
-    page_rows = rows[:limit]
-    has_more = len(rows) > limit
-    return OperationListResponse(
-        items=page_rows,
-        next_cursor=encode_bounded_list_cursor(offset + limit) if has_more else None,
-        has_more=has_more,
-        limit=limit,
-        cursor=cursor,
-    )
 
 
 def _null_tool_result() -> CallToolResult:

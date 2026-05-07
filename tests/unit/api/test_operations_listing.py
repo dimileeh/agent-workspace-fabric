@@ -5,12 +5,12 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from awf.api.routes import operations as operations_route
 from awf.api.schemas import OperationResponse
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.bounded_list import decode_bounded_list_cursor
+from awf.service.operations import build_operation_list_response
 from awf.service.workspaces import OperationRowsPage
 
 
@@ -35,7 +35,7 @@ def _operation_response() -> OperationResponse:
 def test_operation_list_response_uses_prevalidated_offset() -> None:
     operation = _operation_response()
 
-    response = operations_route._operation_list_response(
+    response = build_operation_list_response(
         [operation, operation.model_copy(update={"id": "op_next"})],
         limit=1,
         cursor="prevalidated-upstream",

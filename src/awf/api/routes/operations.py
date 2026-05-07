@@ -11,10 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.api.deps import get_db_session_factory
 from awf.api.schemas import OperationListResponse, OperationResponse
 from awf.db.enums import OperationStatus, OperationType
-from awf.service.bounded_list import (
-    InvalidBoundedListCursorError,
-    encode_bounded_list_cursor,
-)
+from awf.service.bounded_list import InvalidBoundedListCursorError
+from awf.service.operations import build_operation_list_response
 from awf.service.workspaces import WorkspaceService
 
 router = APIRouter(tags=["operations"])
@@ -41,7 +39,7 @@ async def list_operations(
             limit=limit + 1,
             cursor=cursor,
         )
-        return _operation_list_response(
+        return build_operation_list_response(
             page.rows,
             limit=limit,
             cursor=cursor,
@@ -90,7 +88,7 @@ async def list_workspace_operations(
                     "message": f"No workspace with id {workspace_id}",
                 },
             )
-        return _operation_list_response(
+        return build_operation_list_response(
             page.rows,
             limit=limit,
             cursor=cursor,
@@ -98,24 +96,6 @@ async def list_workspace_operations(
         )
     except InvalidBoundedListCursorError as exc:
         raise _invalid_operation_cursor() from exc
-
-
-def _operation_list_response(
-    rows: list[OperationResponse],
-    *,
-    limit: int,
-    cursor: str | None = None,
-    offset: int = 0,
-) -> OperationListResponse:
-    page_rows = rows[:limit]
-    has_more = len(rows) > limit
-    return OperationListResponse(
-        items=page_rows,
-        next_cursor=encode_bounded_list_cursor(offset + limit) if has_more else None,
-        has_more=has_more,
-        limit=limit,
-        cursor=cursor,
-    )
 
 
 def _invalid_operation_cursor() -> HTTPException:
