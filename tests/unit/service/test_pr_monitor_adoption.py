@@ -626,11 +626,21 @@ class TestPullRequestMonitorAdoptionService:
             assert len(workspaces) == 2
             old = next(workspace for workspace in workspaces if workspace.id == first.workspace_id)
             new = next(workspace for workspace in workspaces if workspace.id == fresh.workspace_id)
+            canonical_external_id = adoption_module._adoption_external_id(
+                repo_slug="dimileeh/aira-web",
+                pr_number=277,
+            )
+            superseded_external_id = adoption_module._superseded_adoption_external_id(
+                external_id=canonical_external_id,
+                workspace_id=old.id,
+            )
             assert old.status == terminal_status.value
             assert old.idempotency_key != canonical_key
             assert old.idempotency_key is not None
             assert old.idempotency_key.startswith(f"{canonical_key}:superseded:")
+            assert old.task_external_id == superseded_external_id
             assert new.idempotency_key == canonical_key
+            assert new.task_external_id == canonical_external_id
             assert new.task_policy["pr_adoption"]["head_ref"] == "feature/current"
             assert old.task_policy["pr_adoption"]["head_ref"] == "feature/stale"
 

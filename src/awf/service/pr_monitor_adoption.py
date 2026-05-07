@@ -169,6 +169,16 @@ class PullRequestMonitorAdoptionService:
             workspace_id=workspace.id,
         )
         workspace.idempotency_key = superseded_idempotency_key
+        adoption_external_id = _adoption_external_id(
+            repo_slug=repo.slug(),
+            pr_number=pr_number,
+        )
+        superseded_external_id = _superseded_adoption_external_id(
+            external_id=adoption_external_id,
+            workspace_id=workspace.id,
+        )
+        if workspace.task_external_id == adoption_external_id:
+            workspace.task_external_id = superseded_external_id
 
         attempt = await TaskAttemptRepository(self._session).get_by_workspace_id(workspace.id)
         if attempt is not None:
@@ -176,15 +186,8 @@ class PullRequestMonitorAdoptionService:
             if task is not None:
                 if task.idempotency_key == idempotency_key:
                     task.idempotency_key = superseded_idempotency_key
-                adoption_external_id = _adoption_external_id(
-                    repo_slug=repo.slug(),
-                    pr_number=pr_number,
-                )
                 if task.external_id == adoption_external_id:
-                    task.external_id = _superseded_adoption_external_id(
-                        external_id=adoption_external_id,
-                        workspace_id=workspace.id,
-                    )
+                    task.external_id = superseded_external_id
 
         await self._session.flush()
         return {
