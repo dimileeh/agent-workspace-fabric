@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from awf.api.schemas import (
     PullRequestMonitorAdoptionRequest,
+    PullRequestMonitorAdoptionResponse,
     WorkspaceControlResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
@@ -174,6 +175,46 @@ class _RequestRecordingService:
         self.create_calls: list[WorkspaceCreateRequest] = []
         self.create_v2_calls: list[WorkspaceCreateV2Request] = []
         self.adopt_calls: list[PullRequestMonitorAdoptionRequest] = []
+
+    async def create_v2(
+        self,
+        req: WorkspaceCreateV2Request,
+        *,
+        idempotency_key: str | None = None,
+        disk_check: Any | None = None,
+        disk_check_factory: Any | None = None,
+    ) -> SimpleNamespace:
+        self.create_v2_calls.append(req)
+        return SimpleNamespace(
+            id="ws_mcp_create_v2_contract",
+            status=WorkspaceStatus.requested,
+            version=1,
+            coordination_warnings=[],
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            provider_readiness_preflight=None,
+        )
+
+    async def adopt_pull_request_monitor(
+        self,
+        req: PullRequestMonitorAdoptionRequest,
+    ) -> PullRequestMonitorAdoptionResponse:
+        self.adopt_calls.append(req)
+        return PullRequestMonitorAdoptionResponse(
+            workspace_id="ws_mcp_adopt_contract",
+            status=WorkspaceStatus.requested,
+            version=1,
+            repo_slug=req.repo_slug or "owner/repo",
+            repo_url=req.repo_url or "git@github.com:owner/repo.git",
+            pr_number=req.pr_number or 42,
+            pr_url=req.pr_url or "https://github.com/owner/repo/pull/42",
+            head_ref="feature",
+            base_ref="main",
+            auto_merge=req.auto_merge,
+            attached_existing=True,
+            status_url="/v1/workspaces/ws_mcp_adopt_contract",
+            events_url="/v1/workspaces/ws_mcp_adopt_contract/events",
+            logs_url="/v1/workspaces/ws_mcp_adopt_contract/logs",
+        )
 
 
 @pytest.mark.unit
@@ -354,27 +395,35 @@ async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
     }
     rest_request = WorkspaceCreateV2Request.model_validate(rest_payload)
 
-    mcp_request = WorkspaceCreateV2Request(
-        repo={"url": "git@github.com:example/x.git", "base_branch": "main"},
-        task={
-            "title": "Contract title",
-            "prompt": "Contract prompt.",
-            "kind": "feature_branch_pr",
+    recorder = _RequestRecordingService()
+    mcp = build_mcp_server(service=cast(WorkspaceService, recorder))
+
+    result = await mcp.call_tool(
+        "awf_create_workspace_v2",
+        {
+            "repo_url": "git@github.com:example/x.git",
+            "base_branch": "main",
+            "task_title": "Contract title",
+            "task_prompt": "Contract prompt.",
+            "task_kind": "feature_branch_pr",
             "agent": "codex",
             "model": None,
-            "external_id": None,
+            "task_external_id": None,
             "task_class": None,
             "owned_paths": [],
+            "profile_ref": "auto",
+            "profile": None,
+            "validation_commands": ["pytest -q"],
+            "requested_tier": 1,
             "auto_merge": True,
             "initial_review_grace_period_seconds": None,
-        },
-        workspace={"profile_ref": "auto", "profile": None},
-        validation={"commands": ["pytest -q"], "requested_tier": 1},
-        preflight={
             "provider_readiness_override": False,
             "provider_readiness_override_reason": None,
         },
     )
+    assert getattr(result, "isError", False) is False
+    assert len(recorder.create_v2_calls) == 1
+    mcp_request = recorder.create_v2_calls[0]
     assert rest_request.model_dump(mode="json") == mcp_request.model_dump(mode="json")
 
 
@@ -396,18 +445,29 @@ async def test_mcp_adoption_hydrates_canonical_request_model() -> None:
     }
     rest_request = PullRequestMonitorAdoptionRequest.model_validate(rest_payload)
 
-    mcp_request = PullRequestMonitorAdoptionRequest(
-        repo_slug="owner/repo",
-        pr_number=42,
-        agent="codex",
-        profile_ref="auto",
-        profile=None,
-        auto_merge=True,
-        initial_review_grace_period_seconds=None,
-        task_title=None,
-        task_prompt=None,
-        reason=None,
+    recorder = _RequestRecordingService()
+    mcp = build_mcp_server(service=cast(WorkspaceService, recorder))
+
+    result = await mcp.call_tool(
+        "awf_adopt_pull_request_monitor",
+        {
+            "repo_url": None,
+            "repo_slug": "owner/repo",
+            "pr_number": 42,
+            "pr_url": None,
+            "agent": "codex",
+            "profile_ref": "auto",
+            "profile": None,
+            "auto_merge": True,
+            "initial_review_grace_period_seconds": None,
+            "task_title": None,
+            "task_prompt": None,
+            "reason": None,
+        },
     )
+    assert getattr(result, "isError", False) is False
+    assert len(recorder.adopt_calls) == 1
+    mcp_request = recorder.adopt_calls[0]
     assert rest_request.model_dump(mode="json", exclude_none=True) == (
         mcp_request.model_dump(mode="json", exclude_none=True)
     )
