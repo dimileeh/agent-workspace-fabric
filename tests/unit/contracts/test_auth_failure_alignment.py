@@ -41,6 +41,14 @@ from tests.unit.contracts._stack import ContractStack
 
 _runner = CliRunner()
 
+
+def _is_http_backed_cli_capability(capability: ContractCapability) -> bool:
+    if capability.cli_tokens is None:
+        return False
+    command_info = cli_commands().get(capability.cli_tokens)
+    return command_info is not None and "--base-url" in command_info.options
+
+
 PROTECTED_REST_CAPABILITY_NAMES = tuple(
     sorted(capability.name for capability in all_capabilities() if capability.auth_required)
 )
@@ -49,7 +57,7 @@ PROTECTED_CLI_CAPABILITY_NAMES = tuple(
     sorted(
         capability.name
         for capability in all_capabilities()
-        if capability.auth_required and capability.cli_tokens is not None
+        if capability.auth_required and _is_http_backed_cli_capability(capability)
     )
 )
 
@@ -297,6 +305,7 @@ def test_every_registry_protected_cli_command_propagates_auth_failure(
         )
 
     monkeypatch.setattr("awf.cli.main.httpx.request", _capture)
+    _seed_protected_cli_auth(monkeypatch, CAPABILITIES_BY_NAME[capability_name])
 
     result = _runner.invoke(cli_app, _protected_cli_args(capability_name))
 
@@ -355,6 +364,14 @@ def _protected_rest_body(capability_name: str) -> dict[str, object] | None:
             "reason": None,
         }
     return None
+
+
+def _seed_protected_cli_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: ContractCapability,
+) -> None:
+    if "--api-token" not in capability.cli_options:
+        monkeypatch.setenv("AWF_API_TOKEN", "wrong-token")
 
 
 def _protected_cli_args(capability_name: str) -> list[str]:
