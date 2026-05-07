@@ -325,15 +325,18 @@ def build_mcp_server(
                 "provider_readiness_override_reason": provider_readiness_override_reason,
             },
         )
-        disk_check = await _workspace_admission_disk_check(
-            disk_check_provider=disk_check_provider,
-            settings=settings_value,
-        )
+
+        async def resolve_disk_check() -> DiskCheck:
+            return await _workspace_admission_disk_check(
+                disk_check_provider=disk_check_provider,
+                settings=settings_value,
+            )
+
         try:
             ws = await service.create_v2(
                 req,
                 idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
-                disk_check=disk_check,
+                disk_check_factory=resolve_disk_check,
             )
         except WorkspaceCreateIdempotencyConflictError as exc:
             return _workspace_error_result(exc)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -317,6 +317,16 @@ class WorkspaceCreateInsufficientDiskError(Exception):
         super().__init__(self.message)
 
 
+DiskCheckFactory = Callable[[], DiskCheck | Awaitable[DiskCheck]]
+
+
+async def _resolve_disk_check_factory(factory: DiskCheckFactory) -> DiskCheck:
+    result = factory()
+    if isinstance(result, DiskCheck):
+        return result
+    return await result
+
+
 @dataclass(frozen=True)
 class WorkspaceRetryResult:
     source_workspace_id: str
@@ -466,6 +476,7 @@ class WorkspaceService:
         *,
         idempotency_key: str | None = None,
         disk_check: DiskCheck | None = None,
+        disk_check_factory: DiskCheckFactory | None = None,
     ) -> WorkspaceResponse:
         async with self._factory() as s:
             repo = WorkspaceRepository(s)
@@ -481,6 +492,8 @@ class WorkspaceService:
                         raise WorkspaceCreateIdempotencyConflictError()
                     return workspace_response(existing)
 
+            if disk_check is None and disk_check_factory is not None:
+                disk_check = await _resolve_disk_check_factory(disk_check_factory)
             if disk_check is not None and not disk_check.ok:
                 raise WorkspaceCreateInsufficientDiskError(disk_check)
 

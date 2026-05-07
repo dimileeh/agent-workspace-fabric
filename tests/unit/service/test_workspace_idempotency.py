@@ -14,6 +14,7 @@ from awf.db.repositories import ResourceReservationRepository, WorkspaceReposito
 from awf.db.session import make_session_factory
 from awf.profiles.models import DockerMode, ProfileDocker, ProfileResolution, WorkspaceProfile
 from awf.service import workspaces
+from awf.service.disk import DiskCheck
 from awf.service.workspaces import WorkspaceCreateIdempotencyConflictError, WorkspaceService
 from tests.postgres import postgres_test_engine
 
@@ -85,6 +86,22 @@ def _record_idempotency_lock_order(
     return calls
 
 
+def _ok_disk_check() -> DiskCheck:
+    return DiskCheck(
+        path="/workspace",
+        checked_path="/workspace",
+        total_bytes=100,
+        used_bytes=20,
+        free_bytes=80,
+        percent_free=80.0,
+        threshold_bytes=10,
+        ok=True,
+        status="ok",
+        reason="SUFFICIENT_DISK",
+        detail=None,
+    )
+
+
 @pytest.mark.unit
 async def test_create_locks_idempotency_key_before_lookup(
     factory: async_sessionmaker[AsyncSession],
@@ -121,6 +138,33 @@ async def test_create_v2_locks_idempotency_key_before_lookup(
         ("lock", "service-create-lock-v2"),
         ("lookup", "service-create-lock-v2"),
     ]
+
+
+@pytest.mark.unit
+async def test_create_v2_resolves_lazy_disk_check_after_idempotency_replay(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    calls = 0
+
+    async def disk_check_factory() -> DiskCheck:
+        nonlocal calls
+        calls += 1
+        return _ok_disk_check()
+
+    service = WorkspaceService(factory)
+    created = await service.create_v2(
+        _v2_request(),
+        idempotency_key="service-create-v2-lazy-disk",
+        disk_check_factory=disk_check_factory,
+    )
+    replayed = await service.create_v2(
+        _v2_request(),
+        idempotency_key="service-create-v2-lazy-disk",
+        disk_check_factory=disk_check_factory,
+    )
+
+    assert replayed.id == created.id
+    assert calls == 1
 
 
 @pytest.mark.unit

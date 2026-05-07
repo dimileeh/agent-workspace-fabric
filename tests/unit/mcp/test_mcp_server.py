@@ -156,6 +156,22 @@ def _low_disk_check(settings: Settings) -> DiskCheck:
     )
 
 
+def _ok_disk_check(settings: Settings) -> DiskCheck:
+    return DiskCheck(
+        path=settings.work_dir,
+        checked_path=settings.work_dir,
+        total_bytes=100,
+        used_bytes=20,
+        free_bytes=80,
+        percent_free=80.0,
+        threshold_bytes=10,
+        ok=True,
+        status="ok",
+        reason="SUFFICIENT_DISK",
+        detail=None,
+    )
+
+
 async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
     """Unwrap FastMCP's call_tool payload.
 
@@ -1254,6 +1270,44 @@ class TestCreateWorkspaceV2:
         assert rows == []
 
     @pytest.mark.unit
+    async def test_create_workspace_v2_idempotency_key_still_checks_disk_for_new_workspace(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(
+            _env_file=None,
+            work_dir=str(tmp_path / "awf-state"),
+        )
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, settings=settings),
+            settings=settings,
+            disk_check_provider=_low_disk_check,
+        )
+
+        result = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {
+                "repo_url": "git@github.com:example/docs.git",
+                "base_branch": "main",
+                "task_title": "Document low disk idempotent admission",
+                "task_prompt": "Update the docs.",
+                "idempotency_key": "mcp-create-v2-low-disk",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp disk admission test fixture",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INSUFFICIENT_DISK"
+        assert result.structuredContent["detail"]["disk"]["reason"] == "INSUFFICIENT_DISK"
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
+
+    @pytest.mark.unit
     async def test_create_workspace_v2_override_returns_preflight_summary(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -1317,6 +1371,46 @@ class TestCreateWorkspaceV2:
         assert conflict.isError is True
         assert conflict.structuredContent is not None
         assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
+    async def test_create_workspace_v2_idempotency_replay_skips_disk_check(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(
+            _env_file=None,
+            work_dir=str(tmp_path / "awf-state"),
+        )
+        calls = 0
+
+        def counted_disk_check(settings: Settings) -> DiskCheck:
+            nonlocal calls
+            calls += 1
+            return _ok_disk_check(settings)
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, settings=settings),
+            settings=settings,
+            disk_check_provider=counted_disk_check,
+        )
+        args = {
+            "repo_url": "git@github.com:example/docs.git",
+            "base_branch": "main",
+            "task_title": "Document MCP idempotency disk replay",
+            "task_prompt": "Update the docs.",
+            "idempotency_key": "mcp-create-v2-replay-disk",
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "mcp idempotency disk test fixture",
+        }
+
+        first = await _call(mcp, "awf_create_workspace_v2", args)
+        replay = await _call(mcp, "awf_create_workspace_v2", args)
+
+        assert isinstance(first, dict)
+        assert isinstance(replay, dict)
+        assert replay["id"] == first["id"]
+        assert calls == 1
 
     @pytest.mark.unit
     async def test_create_workspace_v2_external_id_scope_conflict_returns_structured_error(
