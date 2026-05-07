@@ -39,6 +39,10 @@ from awf.service.secret_leases import (
     SecretLeaseService,
     secret_lease_revocation_summary,
 )
+from awf.service.workspace_runtime_health import (
+    OPERATOR_REFRESH_EVENT_TYPE,
+    OPERATOR_REFRESH_REASON_CODE,
+)
 
 ProjectStopper = Callable[[str | None], Awaitable[None]]
 CleanupResultLike = WorkspaceCleanupResult | Sequence[str] | Mapping[str, object]
@@ -71,7 +75,6 @@ _OPERATOR_API_SOURCE = "operator_api"
 _OPERATOR_CANCEL_REASON_CODE = "OPERATOR_CANCEL"
 _OPERATOR_STOP_REASON_CODE = "OPERATOR_STOP"
 _OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
-_OPERATOR_REFRESH_REASON_CODE = "OPERATOR_REFRESH"
 _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
@@ -618,7 +621,7 @@ class WorkspaceControlService:
         operations = OperationRepository(self._session)
         payload = _operator_operation_payload(
             reason=reason,
-            reason_code=_OPERATOR_REFRESH_REASON_CODE,
+            reason_code=OPERATOR_REFRESH_REASON_CODE,
             requested_action=OperationType.refresh.value,
         )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
@@ -653,8 +656,8 @@ class WorkspaceControlService:
         )
         await repo.add_event(
             workspace,
-            event_type="workspace.refresh_requested",
-            reason_code=_OPERATOR_REFRESH_REASON_CODE,
+            event_type=OPERATOR_REFRESH_EVENT_TYPE,
+            reason_code=OPERATOR_REFRESH_REASON_CODE,
             payload=_event_payload(
                 {
                     "source": _OPERATOR_API_SOURCE,

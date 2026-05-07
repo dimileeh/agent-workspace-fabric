@@ -137,6 +137,8 @@ from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
     ACTIVE_RUNTIME_HEALTH_STATUSES,
+    OPERATOR_REFRESH_EVENT_TYPE,
+    OPERATOR_REFRESH_REASON_CODE,
     RUNTIME_STRANDED_EVENT_TYPE,
     classify_runtime_snapshot,
     runtime_workspace_from_workspace,
@@ -157,8 +159,6 @@ OWNED_PATH_OVERLAP_PAYLOAD_FIELDS = (
     "existing_path",
     "requested_path",
 )
-_OPERATOR_REFRESH_EVENT_TYPE = "workspace.refresh_requested"
-_OPERATOR_REFRESH_REASON_CODE = "OPERATOR_REFRESH"
 PROVIDER_READINESS_PREFLIGHT_EVENT_TYPE = "workspace.provider_readiness_preflight"
 PROVIDER_READINESS_READY_REASON = "PROVIDER_READINESS_READY"
 PROVIDER_READINESS_OVERRIDE_REASON = "PROVIDER_READINESS_OVERRIDE_USED"
@@ -1924,8 +1924,8 @@ def _active_runtime_health_event_floor(workspace: Workspace) -> datetime | None:
         _utc_datetime(event.occurred_at)
         for event in workspace.events
         if isinstance(event.occurred_at, datetime)
-        and event.event_type == _OPERATOR_REFRESH_EVENT_TYPE
-        and event.reason_code == _OPERATOR_REFRESH_REASON_CODE
+        and event.event_type == OPERATOR_REFRESH_EVENT_TYPE
+        and event.reason_code == OPERATOR_REFRESH_REASON_CODE
     )
     return max(floors) if floors else None
 

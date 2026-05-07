@@ -56,6 +56,8 @@ from awf.service.secret_leases import SecretLeaseService
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+    OPERATOR_REFRESH_EVENT_TYPE,
+    OPERATOR_REFRESH_REASON_CODE,
     RUNTIME_STRANDED_EVENT_TYPE,
     RuntimeWorkspace,
     WorkspaceRuntimeFinding,
@@ -98,8 +100,6 @@ _ACTIVE_EXECUTION_PRESERVED_UNEXPIRED_CLAIM_CLEARED_REASON_CODE = (
 _ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE = (
     "NO_EXECUTION_CLAIM_DURING_ACTIVE_EXECUTION_PRESERVATION"
 )
-_OPERATOR_REFRESH_EVENT_TYPE = "workspace.refresh_requested"
-_OPERATOR_REFRESH_REASON_CODE = "OPERATOR_REFRESH"
 _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
@@ -1053,8 +1053,8 @@ class ControlWorker:
             select(WorkspaceEvent.occurred_at)
             .where(
                 WorkspaceEvent.workspace_id == workspace_id,
-                WorkspaceEvent.event_type == _OPERATOR_REFRESH_EVENT_TYPE,
-                WorkspaceEvent.reason_code == _OPERATOR_REFRESH_REASON_CODE,
+                WorkspaceEvent.event_type == OPERATOR_REFRESH_EVENT_TYPE,
+                WorkspaceEvent.reason_code == OPERATOR_REFRESH_REASON_CODE,
             )
             .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
             .limit(1)
