@@ -593,6 +593,7 @@ class TestFetchPrStatus:
                                     "databaseId": 201,
                                     "bodyText": "first page comment",
                                     "author": {"login": "reviewer-a"},
+                                    "viewerDidAuthor": False,
                                     "createdAt": "2026-05-06T12:00:00Z",
                                     "url": "https://github.example/review/201",
                                 }
@@ -615,8 +616,17 @@ class TestFetchPrStatus:
                                         "databaseId": 202,
                                         "bodyText": "second page comment",
                                         "author": {"login": "reviewer-b"},
+                                        "viewerDidAuthor": False,
                                         "createdAt": "2026-05-06T12:01:00Z",
                                         "url": "https://github.example/review/202",
+                                    },
+                                    {
+                                        "databaseId": 203,
+                                        "bodyText": "second page self-authored bookkeeping",
+                                        "author": {"login": "token-owner"},
+                                        "viewerDidAuthor": True,
+                                        "createdAt": "2026-05-06T12:02:00Z",
+                                        "url": "https://github.example/review/203",
                                     }
                                 ],
                                 "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -635,6 +645,14 @@ class TestFetchPrStatus:
         assert [c.body for c in status.unresolved_inline_threads[0].comments] == [
             "first page comment",
             "second page comment",
+        ]
+        assert [c.comment_id for c in status.unresolved_inline_threads[0].comments] == [
+            "201",
+            "202",
+        ]
+        assert [c.viewer_did_author for c in status.unresolved_inline_threads[0].comments] == [
+            False,
+            False,
         ]
         assert len(fake.calls) == 2
         assert "threadId=T_paginated" in fake.calls[1].args
@@ -707,6 +725,7 @@ class TestFetchPrStatus:
                         "body": "first review",
                         "state": "COMMENTED",
                         "author": {"login": "reviewer-a"},
+                        "viewerDidAuthor": False,
                     }
                 ],
                 reviews_has_next_page=True,
@@ -717,6 +736,7 @@ class TestFetchPrStatus:
                         "body": "first issue comment",
                         "isMinimized": False,
                         "author": {"login": "reviewer-c"},
+                        "viewerDidAuthor": False,
                     }
                 ],
                 comments_has_next_page=True,
@@ -737,6 +757,14 @@ class TestFetchPrStatus:
                                             "body": "second review",
                                             "state": "COMMENTED",
                                             "author": {"login": "reviewer-b"},
+                                            "viewerDidAuthor": False,
+                                        },
+                                        {
+                                            "databaseId": 303,
+                                            "body": "second page self-authored review",
+                                            "state": "COMMENTED",
+                                            "author": {"login": "token-owner"},
+                                            "viewerDidAuthor": True,
                                         }
                                     ],
                                     "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -761,6 +789,14 @@ class TestFetchPrStatus:
                                             "body": "second issue comment",
                                             "isMinimized": False,
                                             "author": {"login": "reviewer-d"},
+                                            "viewerDidAuthor": False,
+                                        },
+                                        {
+                                            "databaseId": 403,
+                                            "body": "second page self-authored issue comment",
+                                            "isMinimized": False,
+                                            "author": {"login": "token-owner"},
+                                            "viewerDidAuthor": True,
                                         }
                                     ],
                                     "pageInfo": {"hasNextPage": False, "endCursor": None},
