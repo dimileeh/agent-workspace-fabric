@@ -223,6 +223,28 @@ async def test_create_v2_auto_profile_replay_conflicts_with_matching_v1_row(
 
 
 @pytest.mark.unit
+async def test_create_v1_replay_conflicts_with_matching_v2_row(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+
+    v2_payload = _v2_request().model_dump(mode="python")
+    v2_payload["task"]["title"] = "Serialize v1 create"
+    v2_payload["task"]["prompt"] = "Exercise serialized idempotency lookup."
+    created = await service.create_v2(
+        WorkspaceCreateV2Request.model_validate(v2_payload),
+        idempotency_key="service-create-v2-then-v1-auto",
+    )
+
+    assert created.id.startswith("ws_")
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create(
+            _v1_request(),
+            idempotency_key="service-create-v2-then-v1-auto",
+        )
+
+
+@pytest.mark.unit
 async def test_create_v2_auto_profile_replay_conflicts_when_requested_tier_changes(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

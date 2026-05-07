@@ -1057,6 +1057,8 @@ def workspace_create_payload_matches(
     payload: WorkspaceCreateRequest,
 ) -> bool:
     """Compare a persisted v1 workspace against an idempotent replay payload."""
+    if _has_v2_create_artifact(existing):
+        return False
     return (
         existing.repo_url == payload.repo_url
         and existing.branch_base == payload.branch_base
