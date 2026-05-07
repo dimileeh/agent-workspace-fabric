@@ -559,7 +559,7 @@ def build_mcp_server(
         except InvalidBoundedListCursorError:
             return _error_result("INVALID_CURSOR", "Invalid operation list cursor.")
         if page is None:
-            return _null_tool_result()
+            return _error_result("NOT_FOUND", f"No workspace with id {workspace_id}")
         response = build_operation_list_response(
             page.rows,
             limit=limit,

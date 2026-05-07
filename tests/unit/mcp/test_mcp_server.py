@@ -1685,17 +1685,19 @@ class TestWorkspaceOperations:
         assert payload["limit"] == 50
 
     @pytest.mark.unit
-    async def test_list_workspace_operations_missing_workspace_returns_none(
+    async def test_list_workspace_operations_missing_workspace_returns_not_found_error(
         self,
         mcp,
     ) -> None:  # type: ignore[no-untyped-def]
-        result = await _call(
-            mcp,
-            "awf_list_workspace_operations",
-            {"workspace_id": "ws_missing"},
-        )
+        result = await mcp.call_tool("awf_list_workspace_operations", {"workspace_id": "ws_missing"})
 
-        assert result is None
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "NOT_FOUND",
+            "message": "No workspace with id ws_missing",
+            "detail": None,
+        }
 
 
 class TestWorkspaceLogs:
