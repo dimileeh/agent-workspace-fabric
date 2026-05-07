@@ -849,6 +849,12 @@ class ControlWorker:
                 return
             if not _execution_claim_is_stale(ws, now):
                 return
+            if await self._has_operator_refresh_after_latest_preservation_for_workspace(
+                session,
+                ws,
+                candidate.status,
+            ):
+                return
             event_floor = await self._active_execution_preservation_event_floor(
                 session,
                 ws,
@@ -920,29 +926,41 @@ class ControlWorker:
             ws = await repo.get(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return False
-            event_floor = await self._active_execution_preservation_event_floor(
+            return await self._has_operator_refresh_after_latest_preservation_for_workspace(
                 session,
                 ws,
                 candidate.status,
-                include_operator_refresh=False,
-                include_execution_claim_expiry=False,
             )
-            latest_refresh = await self._latest_operator_refresh_requested_at(
-                session,
-                candidate.workspace_id,
-                event_floor=event_floor,
-            )
-            if latest_refresh is None:
-                return False
-            latest_preservation = await self._latest_preserved_active_execution_at(
-                session,
-                candidate.workspace_id,
-                candidate.status,
-                event_floor=event_floor,
-            )
-            if latest_preservation is None:
-                return True
-            return _utc_datetime(latest_refresh) >= _utc_datetime(latest_preservation)
+
+    async def _has_operator_refresh_after_latest_preservation_for_workspace(
+        self,
+        session: AsyncSession,
+        workspace: Workspace,
+        status: WorkspaceStatus,
+    ) -> bool:
+        event_floor = await self._active_execution_preservation_event_floor(
+            session,
+            workspace,
+            status,
+            include_operator_refresh=False,
+            include_execution_claim_expiry=False,
+        )
+        latest_refresh = await self._latest_operator_refresh_requested_at(
+            session,
+            workspace.id,
+            event_floor=event_floor,
+        )
+        if latest_refresh is None:
+            return False
+        latest_preservation = await self._latest_preserved_active_execution_at(
+            session,
+            workspace.id,
+            status,
+            event_floor=event_floor,
+        )
+        if latest_preservation is None:
+            return True
+        return _utc_datetime(latest_refresh) >= _utc_datetime(latest_preservation)
 
     async def _has_current_preserved_active_execution(
         self,

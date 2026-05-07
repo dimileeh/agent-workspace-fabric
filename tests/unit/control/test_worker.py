@@ -3891,6 +3891,69 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert preserved_events[0].payload["operation_id"] == operations[0].id
 
     @pytest.mark.unit
+    async def test_preservation_recording_rechecks_operator_refresh_under_lock(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserve_refresh_race"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserve-refresh-race",
+            WorkspaceStatus.pushing,
+            compose_project_name=compose_project,
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.pushing,
+            repo_url=str(origin_repo),
+            compose_project_name=compose_project,
+        )
+        snapshot = _live_agent_snapshot(container_id="agent-refresh-race")
+        async with session_factory() as s:
+            await WorkspaceControlService(
+                s,
+                project_stopper=_noop_project_stop,
+                cleaner_factory=_unexpected_cleaner_factory,
+            ).request_refresh_workspace(
+                workspace_id,
+                reason="operator recovery",
+                idempotency_key="refresh-before-locked-preservation",
+            )
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector({compose_project: snapshot}),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+            ),
+        )
+
+        await worker._record_preserved_active_execution_after_restart(  # noqa: SLF001
+            candidate,
+            snapshot,
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            operations = await OperationRepository(s).list_for_workspace(workspace_id)
+
+        assert ws is not None
+        assert ws.subphase is None
+        assert preserved_events == []
+        assert [operation.type for operation in operations] == [OperationType.refresh.value]
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("status", [WorkspaceStatus.validating, WorkspaceStatus.pushing])
     async def test_restart_recovery_preserves_live_validating_and_pushing_runtimes(
         self,
