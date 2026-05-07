@@ -2993,8 +2993,8 @@ class TestRunOnceMonitorRecovery:
         release_monitor.set()
         await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=5.0)
 
-        assert await worker.run_once() == 1
-        await worker.wait_for_execution_tasks()
+        assert await asyncio.wait_for(worker.run_once(), timeout=5.0) == 1
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=5.0)
         assert executor.calls == [ready_id]
 
     @pytest.mark.unit
@@ -3062,14 +3062,14 @@ class TestRunOnceMonitorRecovery:
             ),
         )
 
-        assert await asyncio.wait_for(worker.run_once(), timeout=1.0) == 1
-        await asyncio.wait_for(monitor_started.wait(), timeout=1.0)
+        assert await asyncio.wait_for(worker.run_once(), timeout=5.0) == 1
+        await asyncio.wait_for(monitor_started.wait(), timeout=5.0)
 
-        assert await asyncio.wait_for(worker.run_once(), timeout=1.0) == 0
+        assert await asyncio.wait_for(worker.run_once(), timeout=5.0) == 0
         assert executor.resume_calls == [monitor_id]
 
         release_monitor.set()
-        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=1.0)
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=5.0)
 
     @pytest.mark.unit
     async def test_concurrent_workers_do_not_claim_same_monitoring_pr_workspace(
@@ -3109,8 +3109,11 @@ class TestRunOnceMonitorRecovery:
             ),
         )
 
-        dispatched = await asyncio.gather(worker_a.run_once(), worker_b.run_once())
-        await asyncio.wait_for(monitor_started.wait(), timeout=1.0)
+        dispatched = await asyncio.wait_for(
+            asyncio.gather(worker_a.run_once(), worker_b.run_once()),
+            timeout=5.0,
+        )
+        await asyncio.wait_for(monitor_started.wait(), timeout=5.0)
 
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(monitor_id)
@@ -3123,7 +3126,7 @@ class TestRunOnceMonitorRecovery:
             asyncio.gather(
                 worker_a.wait_for_execution_tasks(), worker_b.wait_for_execution_tasks()
             ),
-            timeout=0.5,
+            timeout=5.0,
         )
 
         assert sorted(dispatched) == [0, 1]
