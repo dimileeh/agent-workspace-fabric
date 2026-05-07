@@ -525,7 +525,7 @@ async def test_create_v2_replay_uses_stored_resource_request_after_reservation_c
 
 
 @pytest.mark.unit
-async def test_create_v2_replay_skips_plan_for_empty_resource_snapshot(
+async def test_create_v2_persists_and_replays_empty_resource_snapshot(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -538,11 +538,7 @@ async def test_create_v2_replay_skips_plan_for_empty_resource_snapshot(
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(created.id)
         assert workspace is not None
-        workspace.task_policy = {
-            **workspace.task_policy,
-            workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY: {},
-        }
-        await session.commit()
+        assert workspace.task_policy[workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY] == {}
 
     def unexpected_plan(*_: object, **__: object) -> object:
         raise AssertionError("empty stored resource snapshots should not re-plan")

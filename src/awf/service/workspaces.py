@@ -2773,8 +2773,9 @@ def v2_profile_snapshots(
 def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]:
     policy: dict[str, Any] = {}
     resource_request = _requested_resource_reservation_values(payload)
-    if resource_request:
-        policy[RESOURCE_RESERVATION_REQUEST_POLICY_KEY] = resource_request
+    # Persist empty requests so idempotent replays do not re-plan against
+    # mutable default resource settings.
+    policy[RESOURCE_RESERVATION_REQUEST_POLICY_KEY] = resource_request
     policy[VALIDATION_POLICY_KEY] = {
         VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
     }
