@@ -1361,6 +1361,48 @@ class TestFetchPrStatus:
         assert status.unresolved_review_comments[0].blocks_merge is True
 
     @pytest.mark.unit
+    async def test_preserves_coderabbit_skip_when_later_review_targets_old_head(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                head_sha="current-head",
+                reviews=[
+                    {
+                        "databaseId": 88,
+                        "body": "",
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-07T09:13:00Z",
+                        "commit": {"oid": "old-head"},
+                        "author": {"login": "coderabbitai"},
+                    }
+                ],
+                comments=[
+                    {
+                        "databaseId": 77,
+                        "body": (
+                            "<!-- skip review by coderabbit.ai -->\n"
+                            "> [!IMPORTANT]\n"
+                            "> ## Review skipped\n\n"
+                            "Required review was skipped. Trigger review before merging."
+                        ),
+                        "isMinimized": False,
+                        "createdAt": "2026-05-07T08:00:00Z",
+                        "updatedAt": "2026-05-07T09:12:00Z",
+                        "author": {"login": "coderabbitai"},
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["issue:77"]
+        assert status.unresolved_review_comments[0].blocks_merge is True
+
+    @pytest.mark.unit
     async def test_drops_coderabbit_skip_updated_after_current_head_review(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

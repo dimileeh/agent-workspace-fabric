@@ -2250,6 +2250,7 @@ class PullRequestMonitorRunner:
                         check_policy=True,
                         current_head_sha=status.head_sha,
                     )
+                    manual_ready_handled = None
                     if _gate_requires_validation_recovery(merge_gate):
                         settle_config = replace(self._config, auto_merge=True)
                         settle_decision = _non_check_reviewer_settle_decision(
@@ -2301,7 +2302,7 @@ class PullRequestMonitorRunner:
                             )
                             return False
 
-                        handled = await self._handle_merge_gate_blocker(
+                        manual_ready_handled = await self._handle_merge_gate_blocker(
                             gate=merge_gate,
                             workspace_id=workspace_id,
                             repo_url=repo_url,
@@ -2318,8 +2319,20 @@ class PullRequestMonitorRunner:
                                 self._config.non_check_reviewer_settle_seconds > 0
                             ),
                         )
-                        if handled is not None:
-                            return handled
+                    if manual_ready_handled is not None:
+                        return manual_ready_handled
+
+            if await self._request_review_bot_review_before_human_wait(
+                workspace_id=workspace_id,
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                monitor_log=monitor_log,
+            ):
+                return False
 
             operation = await self._begin_monitor_operation(
                 workspace_id=workspace_id,
@@ -3141,6 +3154,112 @@ class PullRequestMonitorRunner:
             },
             extra_identity=(blocker.candidate_id,),
         )
+
+    async def _request_review_bot_review_before_human_wait(
+        self,
+        *,
+        workspace_id: str,
+        repo: RepoRef,
+        pr_number: int,
+        status: PRStatus,
+        state: MonitorState,
+        base_branch: str,
+        remote_branch: str | None,
+        monitor_log: WorkspaceLogSink | None,
+    ) -> bool:
+        """Ask a known review bot to review the current head before escalating."""
+
+        blocker_match = _review_bot_review_request_blocker(status)
+        if blocker_match is None:
+            return False
+        blocker, reviewer = blocker_match
+        if self._config.non_check_reviewer_settle_seconds <= 0:
+            return False
+
+        done_key = _review_bot_review_request_done_key(
+            pr_number=pr_number,
+            head_sha=status.head_sha,
+            reviewer=reviewer,
+        )
+        if state.threads_addressed_ids.get(done_key) == "elapsed":
+            return False
+
+        now = time.monotonic()
+        started_key = _review_bot_review_request_started_key(
+            pr_number=pr_number,
+            head_sha=status.head_sha,
+            reviewer=reviewer,
+        )
+        started_raw = state.threads_addressed_ids.get(started_key)
+        should_post_request = started_raw is None
+        if started_raw is None:
+            started_at = now
+        else:
+            try:
+                started_at = float(started_raw)
+            except (TypeError, ValueError):
+                started_at = now
+                should_post_request = True
+
+        elapsed_seconds = max(now - started_at, 0.0)
+        remaining_seconds = self._config.non_check_reviewer_settle_seconds - elapsed_seconds
+        if remaining_seconds <= 0:
+            state.mark_addressed(done_key, "elapsed")
+            return False
+
+        wait_seconds = (
+            remaining_seconds
+            if self._config.poll_interval_seconds <= 0
+            else min(self._config.poll_interval_seconds, remaining_seconds)
+        )
+        if should_post_request:
+            try:
+                await self._deps.gh.post_comment(
+                    repo=repo,
+                    pr_number=pr_number,
+                    body=_review_bot_review_request_body(reviewer),
+                )
+            except GitHubClientError as exc:
+                if await self._wait_after_transient_github_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="request_review_bot_review",
+                    monitor_log=monitor_log,
+                ):
+                    return True
+                raise
+            state.mark_addressed(started_key, f"{started_at:.6f}")
+
+        await self._sleep_with_monitor_state_operation(
+            workspace_id=workspace_id,
+            action=(
+                "review_bot_review_requested"
+                if should_post_request
+                else "review_bot_review_wait"
+            ),
+            requested_action="notify_human",
+            reason=(
+                f"Waiting for {reviewer} to submit a review before escalating "
+                "a skipped-review blocker."
+            ),
+            reason_code="REVIEW_BOT_REVIEW_REQUEST",
+            pr_number=pr_number,
+            status=status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            wait_seconds=wait_seconds,
+            monitor_log=monitor_log,
+            extra_payload={
+                "reviewer": reviewer,
+                "blocker_comment_id": blocker.comment_id,
+                "elapsed_seconds": elapsed_seconds,
+                "settle_seconds": self._config.non_check_reviewer_settle_seconds,
+                "posted_review_request": should_post_request,
+            },
+            extra_identity=(reviewer, blocker.comment_id, status.head_sha),
+        )
+        return True
 
     async def _post_human_notification_once(
         self,
@@ -4702,6 +4821,12 @@ class PullRequestMonitorRunner:
                 now_monotonic=now_monotonic,
                 now_wall_seconds=now_wall.timestamp(),
             )
+            threads_addressed = _review_bot_review_request_state_for_runtime(
+                threads_addressed,
+                pr_number=ws.pr_number,
+                now_monotonic=now_monotonic,
+                now_wall_seconds=now_wall.timestamp(),
+            )
         return MonitorState(
             iter_count=ws.monitor_iter_count,
             last_push_sha=ws.monitor_last_commit_sha,
@@ -4727,6 +4852,12 @@ class PullRequestMonitorRunner:
                     now_wall_seconds=now_wall.timestamp(),
                 )
                 threads_addressed = _non_check_reviewer_settle_state_for_persistence(
+                    threads_addressed,
+                    pr_number=ws.pr_number,
+                    now_monotonic=now_monotonic,
+                    now_wall_seconds=now_wall.timestamp(),
+                )
+                threads_addressed = _review_bot_review_request_state_for_persistence(
                     threads_addressed,
                     pr_number=ws.pr_number,
                     now_monotonic=now_monotonic,
@@ -5481,6 +5612,58 @@ def _merge_queue_wait_key(*, head_sha: str, blocker_candidate_id: str) -> str:
     return f"__awf_merge_queue_wait__:{head_sha}:{blocker_candidate_id}"
 
 
+def _review_bot_review_request_started_key(
+    *,
+    pr_number: int,
+    head_sha: str,
+    reviewer: str,
+) -> str:
+    return (
+        f"{_review_bot_review_request_started_prefix(pr_number=pr_number)}"
+        f"{_normalize_review_bot_reviewer(reviewer)}:{head_sha}"
+    )
+
+
+def _review_bot_review_request_started_prefix(*, pr_number: int) -> str:
+    return f"__awf_review_bot_review_requested__:{pr_number}:"
+
+
+def _review_bot_review_request_done_key(
+    *,
+    pr_number: int,
+    head_sha: str,
+    reviewer: str,
+) -> str:
+    return (
+        f"__awf_review_bot_review_request_elapsed__:{pr_number}:"
+        f"{_normalize_review_bot_reviewer(reviewer)}:{head_sha}"
+    )
+
+
+def _review_bot_review_request_body(reviewer: str) -> str:
+    del reviewer
+    return "@coderabbitai review"
+
+
+def _review_bot_review_request_blocker(status: PRStatus) -> tuple[ReviewComment, str] | None:
+    for comment in status.unresolved_review_comments:
+        reviewer = _review_bot_reviewer_for_blocker(comment)
+        if comment.blocks_merge and reviewer is not None:
+            return comment, reviewer
+    return None
+
+
+def _review_bot_reviewer_for_blocker(comment: ReviewComment) -> str | None:
+    author = _normalize_review_bot_reviewer(comment.author)
+    if author in {"coderabbitai", "coderabbitai[bot]"}:
+        return "coderabbitai"
+    return None
+
+
+def _normalize_review_bot_reviewer(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
 def _non_check_reviewer_settle_started_key(*, pr_number: int, head_sha: str) -> str:
     return f"{_non_check_reviewer_settle_started_prefix(pr_number=pr_number)}{head_sha}"
 
@@ -5912,6 +6095,58 @@ def _non_check_reviewer_settle_state_for_persistence(
     now_wall_seconds: float,
 ) -> dict[str, str]:
     started_prefix = _non_check_reviewer_settle_started_prefix(pr_number=pr_number)
+    for started_key, started_raw in list(threads_addressed.items()):
+        if not started_key.startswith(started_prefix):
+            continue
+        started_wall_seconds = _initial_review_grace_wall_seconds(started_raw)
+        if started_wall_seconds is not None:
+            threads_addressed[started_key] = _initial_review_grace_wall_started_value(
+                started_wall_seconds
+            )
+            continue
+        try:
+            started_monotonic = float(started_raw)
+        except (TypeError, ValueError):
+            continue
+        elapsed_seconds = max(now_monotonic - started_monotonic, 0.0)
+        threads_addressed[started_key] = _initial_review_grace_wall_started_value(
+            now_wall_seconds - elapsed_seconds
+        )
+    return threads_addressed
+
+
+def _review_bot_review_request_state_for_runtime(
+    threads_addressed: dict[str, str],
+    *,
+    pr_number: int,
+    now_monotonic: float,
+    now_wall_seconds: float,
+) -> dict[str, str]:
+    started_prefix = _review_bot_review_request_started_prefix(pr_number=pr_number)
+    for started_key, started_raw in list(threads_addressed.items()):
+        if not started_key.startswith(started_prefix):
+            continue
+        started_wall_seconds = _initial_review_grace_wall_seconds(started_raw)
+        if started_wall_seconds is not None:
+            elapsed_seconds = max(now_wall_seconds - started_wall_seconds, 0.0)
+            threads_addressed[started_key] = f"{now_monotonic - elapsed_seconds:.6f}"
+            continue
+        try:
+            float(started_raw)
+        except (TypeError, ValueError):
+            continue
+        threads_addressed[started_key] = f"{now_monotonic:.6f}"
+    return threads_addressed
+
+
+def _review_bot_review_request_state_for_persistence(
+    threads_addressed: dict[str, str],
+    *,
+    pr_number: int,
+    now_monotonic: float,
+    now_wall_seconds: float,
+) -> dict[str, str]:
+    started_prefix = _review_bot_review_request_started_prefix(pr_number=pr_number)
     for started_key, started_raw in list(threads_addressed.items()):
         if not started_key.startswith(started_prefix):
             continue

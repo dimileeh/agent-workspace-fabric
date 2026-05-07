@@ -1309,7 +1309,9 @@ def _is_superseded_coderabbit_skip_issue_comment(
     if changed_at is None:
         return False
     return any(
-        evidence.submitted_at is not None and evidence.submitted_at > changed_at
+        evidence.commit_oid is None
+        and evidence.submitted_at is not None
+        and evidence.submitted_at > changed_at
         for evidence in review_evidence_times
     )
 
