@@ -379,6 +379,7 @@ MonitorAction = (
 BOT_REVIEWER_LOGINS = frozenset(
     {
         "greptile-apps",
+        "coderabbitai",
         "gemini-code-assist",
         "chatgpt-codex-connector",
         "cursor",
