@@ -5178,7 +5178,9 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
 
         assert await worker.run_once() == 0
+        assert worker._next_stale_active_execution_scan_at == 1_060.0  # noqa: SLF001
         assert await worker.run_once() == 0
+        assert worker._next_stale_active_execution_scan_at == 1_060.0  # noqa: SLF001
         assert inspector.calls == ["awf_throttled_running"]
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
@@ -5188,6 +5190,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         current_time = 1_060.0
 
         assert await worker.run_once() == 0
+        assert worker._next_stale_active_execution_scan_at == 1_120.0  # noqa: SLF001
         assert inspector.calls == ["awf_throttled_running"]
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
