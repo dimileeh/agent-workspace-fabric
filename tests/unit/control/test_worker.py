@@ -9,7 +9,6 @@ concurrency, so end-to-end is the most useful test.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -3797,9 +3796,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
             compose_project_name=compose_project,
         )
         snapshot = _live_agent_snapshot(container_id="agent-race")
-        first_checked = asyncio.Event()
+        both_started = asyncio.Event()
+        first_selected = asyncio.Event()
+        allow_first_recording = asyncio.Event()
         second_checked = asyncio.Event()
-        both_selected = asyncio.Event()
+        started_count = 0
         call_count = 0
         selected_count = 0
         count_lock = asyncio.Lock()
@@ -3817,16 +3818,8 @@ class TestRunOnceStaleActiveExecutionRecovery:
             async with count_lock:
                 call_count += 1
                 call_number = call_count
-                if call_number == 1:
-                    first_checked.set()
-                elif call_number == 2:
+                if call_number == 2:
                     second_checked.set()
-
-            if call_number == 1:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(second_checked.wait(), timeout=0.2)
-            else:
-                await first_checked.wait()
 
             has_event = await original_has_event(
                 self,
@@ -3837,11 +3830,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
             async with count_lock:
                 selected_count += 1
-                if selected_count == 2:
-                    both_selected.set()
-            if not has_event:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(both_selected.wait(), timeout=0.2)
+            if call_number == 1:
+                first_selected.set()
+                assert not has_event
+                await asyncio.wait_for(allow_first_recording.wait(), timeout=1.0)
             return has_event
 
         monkeypatch.setattr(
@@ -3865,15 +3857,35 @@ class TestRunOnceStaleActiveExecutionRecovery:
             for _ in range(2)
         ]
 
-        await asyncio.gather(
-            *(
-                worker._record_preserved_active_execution_after_restart(  # noqa: SLF001
-                    candidate,
-                    snapshot,
-                )
-                for worker in workers
+        async def _record_started(worker: ControlWorker) -> None:
+            nonlocal started_count
+            async with count_lock:
+                started_count += 1
+                if started_count == len(workers):
+                    both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=1.0)
+            await worker._record_preserved_active_execution_after_restart(  # noqa: SLF001
+                candidate,
+                snapshot,
             )
-        )
+
+        tasks = [asyncio.create_task(_record_started(worker)) for worker in workers]
+        try:
+            await asyncio.wait_for(first_selected.wait(), timeout=1.0)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(second_checked.wait(), timeout=0.2)
+            allow_first_recording.set()
+            await asyncio.gather(*tasks)
+        finally:
+            allow_first_recording.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert started_count == 2
+        assert call_count == 2
+        assert selected_count == 2
 
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
