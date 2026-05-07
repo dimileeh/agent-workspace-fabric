@@ -68,6 +68,15 @@ key for each operator action. This mirrors the REST `Idempotency-Key`
 requirement for the same control routes; `expected_version` remains optional and
 maps to `If-Match`.
 
+**MCP log and operation response migration note:** `awf_read_workspace_log`
+now returns `WorkspaceLogReadResponse` with `stream_id`, `offset`,
+`next_offset`, `eof`, and `data`; clients should read log content from `data`
+instead of the previous raw `text` key. `awf_list_workspace_logs` now returns
+the `WorkspaceLogListResponse` envelope, and `awf_list_workspace_operations`
+now returns the `OperationListResponse` envelope. Clients that consumed the old
+top-level lists should iterate `items` and honor `has_more`, `limit`, and
+`cursor`.
+
 Example `awf_create_workspace_v2` arguments:
 
 ```json
