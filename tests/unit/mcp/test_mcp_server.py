@@ -432,7 +432,7 @@ class TestToolRegistration:
         assert "operation_type" not in operations_props
         assert operations_props["limit"]["default"] == 50
         assert operations_props["limit"]["maximum"] == 500
-        assert _optional_string_schema(operations_props["cursor"])["maxLength"] == 64
+        assert _optional_string_schema(operations_props["cursor"])["maxLength"] == 128
 
         workspace_operations_props = tools["awf_list_workspace_operations"].inputSchema[
             "properties"
@@ -442,7 +442,7 @@ class TestToolRegistration:
         assert "operation_type" not in workspace_operations_props
         assert workspace_operations_props["limit"]["default"] == 50
         assert workspace_operations_props["limit"]["maximum"] == 500
-        assert _optional_string_schema(workspace_operations_props["cursor"])["maxLength"] == 64
+        assert _optional_string_schema(workspace_operations_props["cursor"])["maxLength"] == 128
 
         overlap_props = tools["awf_get_overlap_graph"].inputSchema["properties"]
         assert overlap_props["limit"]["default"] == 100
@@ -578,7 +578,7 @@ class TestOperationTools:
 
         class PrevalidatedOperationService:
             async def list_all_operations_page(self, **kwargs: object) -> OperationRowsPage:
-                return OperationRowsPage(rows=[operation], offset=0)
+                return OperationRowsPage(rows=[operation])
 
         def fail_model_validate(cls, value) -> OperationResponse:  # type: ignore[no-untyped-def]
             raise AssertionError("OperationResponse.model_validate should not be called")

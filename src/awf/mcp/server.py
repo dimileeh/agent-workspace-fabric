@@ -545,7 +545,7 @@ def build_mcp_server(
             validation_alias=_OPERATION_TYPE_FILTER_ALIAS,
             serialization_alias="type",
         ),
-        cursor: str | None = Field(default=None, max_length=64),
+        cursor: str | None = Field(default=None, max_length=128),
     ) -> CallToolResult:
         """List one workspace's operations using the REST envelope."""
         try:
@@ -564,7 +564,6 @@ def build_mcp_server(
             page.rows,
             limit=limit,
             cursor=cursor,
-            offset=page.offset,
         )
         return _tool_result(response.model_dump(mode="json"))
 
@@ -806,7 +805,7 @@ def build_mcp_server(
             serialization_alias="type",
         ),
         limit: int = Field(default=50, ge=1, le=500),
-        cursor: str | None = Field(default=None, max_length=64),
+        cursor: str | None = Field(default=None, max_length=128),
     ) -> StructuredToolResult:
         """Read-only operator observability: list operations using the REST envelope."""
         try:
@@ -821,7 +820,6 @@ def build_mcp_server(
                 page.rows,
                 limit=limit,
                 cursor=cursor,
-                offset=page.offset,
             )
         except InvalidBoundedListCursorError:
             return _error_result("INVALID_CURSOR", "Invalid operation list cursor.")

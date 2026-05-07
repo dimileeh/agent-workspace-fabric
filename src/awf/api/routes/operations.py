@@ -28,7 +28,7 @@ async def list_operations(
     status: OperationStatus | None = None,
     operation_type: Annotated[OperationType | None, Query(alias="type")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
-    cursor: Annotated[str | None, Query(max_length=64)] = None,
+    cursor: Annotated[str | None, Query(max_length=128)] = None,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> OperationListResponse:
     try:
@@ -43,7 +43,6 @@ async def list_operations(
             page.rows,
             limit=limit,
             cursor=cursor,
-            offset=page.offset,
         )
     except InvalidBoundedListCursorError as exc:
         raise _invalid_operation_cursor() from exc
@@ -69,7 +68,7 @@ async def list_workspace_operations(
     status: OperationStatus | None = None,
     operation_type: Annotated[OperationType | None, Query(alias="type")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
-    cursor: Annotated[str | None, Query(max_length=64)] = None,
+    cursor: Annotated[str | None, Query(max_length=128)] = None,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> OperationListResponse:
     try:
@@ -92,7 +91,6 @@ async def list_workspace_operations(
             page.rows,
             limit=limit,
             cursor=cursor,
-            offset=page.offset,
         )
     except InvalidBoundedListCursorError as exc:
         raise _invalid_operation_cursor() from exc

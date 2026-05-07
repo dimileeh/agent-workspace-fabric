@@ -75,7 +75,6 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
     build_planning_scope_retry_prompt,
 )
-from awf.service.bounded_list import decode_bounded_list_cursor
 from awf.service.config import resolve_service_settings
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
@@ -96,6 +95,7 @@ from awf.service.coordination import (
     task_policy_with_coordination_warnings,
 )
 from awf.service.disk import DiskCheck
+from awf.service.operations import decode_operation_list_cursor
 from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
 from awf.service.profile_metadata import network_posture_from_profile_snapshot
 from awf.service.provider_readiness import (
@@ -153,7 +153,6 @@ class RuntimeInspection(Protocol):
 @dataclass(frozen=True, slots=True)
 class OperationRowsPage:
     rows: builtins.list[OperationResponse]
-    offset: int
 
 
 OWNED_PATH_OVERLAP_RISK_CODE = "OWNED_PATH_OVERLAP_RISK"
@@ -716,18 +715,16 @@ class WorkspaceService:
             workspace_repo = WorkspaceRepository(s)
             if not await workspace_repo.exists(workspace_id):
                 return None
-            offset = decode_bounded_list_cursor(cursor)
+            decoded_cursor = decode_operation_list_cursor(cursor)
             rows = await OperationRepository(s).list_for_workspace(
                 workspace_id,
                 status=status,
                 operation_type=operation_type,
                 limit=limit,
-                offset=offset,
+                before_created_at=decoded_cursor.created_at if decoded_cursor else None,
+                before_operation_id=decoded_cursor.operation_id if decoded_cursor else None,
             )
-            return OperationRowsPage(
-                rows=[OperationResponse.model_validate(row) for row in rows],
-                offset=offset,
-            )
+            return OperationRowsPage(rows=[OperationResponse.model_validate(row) for row in rows])
 
     async def list_all_operations(
         self,
@@ -757,18 +754,16 @@ class WorkspaceService:
         cursor: str | None = None,
     ) -> OperationRowsPage:
         async with self._factory() as s:
-            offset = decode_bounded_list_cursor(cursor)
+            decoded_cursor = decode_operation_list_cursor(cursor)
             rows = await OperationRepository(s).list_all(
                 workspace_id=workspace_id,
                 status=status,
                 operation_type=operation_type,
                 limit=limit,
-                offset=offset,
+                before_created_at=decoded_cursor.created_at if decoded_cursor else None,
+                before_operation_id=decoded_cursor.operation_id if decoded_cursor else None,
             )
-            return OperationRowsPage(
-                rows=[OperationResponse.model_validate(row) for row in rows],
-                offset=offset,
-            )
+            return OperationRowsPage(rows=[OperationResponse.model_validate(row) for row in rows])
 
     async def get_operation(self, operation_id: str) -> OperationResponse | None:
         async with self._factory() as s:

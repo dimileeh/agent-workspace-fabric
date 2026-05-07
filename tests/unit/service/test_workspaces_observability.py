@@ -28,7 +28,7 @@ from awf.db.session import make_session_factory
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.pricing import PricingMetadata
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
-from awf.service.bounded_list import encode_bounded_list_cursor
+from awf.service.operations import build_operation_list_response
 from awf.service.workspace_observability import (
     InvalidWorkspaceOverviewCursorError,
     _decode_overview_cursor,
@@ -475,7 +475,7 @@ async def test_global_operation_helpers_filter_and_get(
 
 
 @pytest.mark.unit
-async def test_operation_page_helpers_return_prevalidated_offset(
+async def test_operation_page_helpers_return_keyset_cursor_pages(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
@@ -504,7 +504,9 @@ async def test_operation_page_helpers_return_prevalidated_offset(
         newer.created_at = base + timedelta(seconds=1)
         await session.commit()
 
-    cursor = encode_bounded_list_cursor(1)
+    first_page = await service.list_all_operations_page(limit=2)
+    cursor = build_operation_list_response(first_page.rows, limit=1).next_cursor
+    assert cursor is not None
     page = await service.list_all_operations_page(limit=2, cursor=cursor)
     workspace_page = await service.list_operations_page(workspace.id, limit=2, cursor=cursor)
     missing_workspace_page = await service.list_operations_page(
@@ -512,10 +514,8 @@ async def test_operation_page_helpers_return_prevalidated_offset(
         cursor="not-a-cursor",
     )
 
-    assert page.offset == 1
     assert [row.id for row in page.rows] == [older.id]
     assert workspace_page is not None
-    assert workspace_page.offset == 1
     assert [row.id for row in workspace_page.rows] == [older.id]
     assert missing_workspace_page is None
 
