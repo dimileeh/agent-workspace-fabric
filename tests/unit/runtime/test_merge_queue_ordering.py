@@ -67,6 +67,7 @@ async def _seed_monitoring_candidate(
             task_title=title,
             task_prompt=f"Implement {title}.",
             task_external_id=f"RUNTIME-QUEUE-{pr_number}",
+            owned_paths=["src/shared/**"],
             auto_merge=True,
             agent=AgentRuntime.claude_code.value,
             test_commands=["pytest -q"],
@@ -89,7 +90,7 @@ async def _seed_monitoring_candidate(
             external_id=workspace.task_external_id,
             idempotency_key=None,
             task_class=None,
-            owned_paths=[],
+            owned_paths=["src/shared/**"],
         )
         attempt = await TaskAttemptRepository(session).create_for_workspace(
             task=task,

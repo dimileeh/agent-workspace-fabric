@@ -160,7 +160,7 @@ async def test_parallel_candidate_stale_after_older_merge_requires_rebase_then_f
             pr_number=101,
             created_at=now,
             task_class=TaskClass.test_task.value,
-            owned_paths=["tests/integration/older_candidate_test.py"],
+            owned_paths=["tests/integration/shared_fixture_test.py"],
             head_sha="1" * 40,
         )
         later = await _seed_monitoring_candidate(

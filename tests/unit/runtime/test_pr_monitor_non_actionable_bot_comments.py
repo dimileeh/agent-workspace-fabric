@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import AddressComments, MonitorState, NotifyHuman, decide
+from awf.runtime.pr_monitor import AddressComments, Merge, MonitorState, NotifyHuman, decide
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -172,6 +172,48 @@ async def test_bot_issue_boilerplate_notifies_human_as_policy_blocker(
     action = decide(status, state, runner._config)
 
     assert isinstance(action, NotifyHuman)
+    assert status.unresolved_review_comments[0].comment_id == "issue:7803"
+    assert status.unresolved_review_comments[0].blocks_merge is True
+    assert adapter.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("verdict", ["false_positive", "fix_committed"])
+async def test_handled_bot_issue_policy_blocker_does_not_notify_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    verdict: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    sleep_fn = RecordedSleep()
+    cmd.queue_result(returncode=0)  # git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(comments=[_disabled_issue_comment_boilerplate()]),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        initial_review_grace_period_seconds=0,
+    )
+
+    status = await runner._fetch_status_for_decision(
+        repo=REPO,
+        pr_number=42,
+        workspace_id=workspace_id,
+        base_branch="development",
+    )
+    state = MonitorState(threads_addressed_ids={"issue:7803": verdict})
+    action = decide(status, state, runner._config)
+
+    assert isinstance(action, Merge)
     assert status.unresolved_review_comments[0].comment_id == "issue:7803"
     assert status.unresolved_review_comments[0].blocks_merge is True
     assert adapter.calls == []

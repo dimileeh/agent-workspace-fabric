@@ -613,7 +613,14 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # an external action rather than a code edit. The runner posts a single
     # human-attention comment and keeps polling so later code-review comments
     # are still handled.
-    if any(c.blocks_merge for c in status.unresolved_review_comments):
+    if any(
+        c.blocks_merge
+        and (
+            _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
+            or state.threads_addressed_ids.get(c.comment_id) == "defer"
+        )
+        for c in status.unresolved_review_comments
+    ):
         return NotifyHuman()
 
     # 4. CI failures.
