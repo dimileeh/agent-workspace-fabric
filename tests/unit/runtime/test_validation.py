@@ -2071,6 +2071,59 @@ class TestCoverageEnforcement:
         )
 
     @pytest.mark.unit
+    async def test_run_profile_coverage_preserves_below_threshold_reason_with_provider_fail_under(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "Name                                      Stmts   Miss  Cover   Missing\n"
+                "---------------------------------------------------------------------\n"
+                "src/awf/runtime/validation.py               674     81    88%\n"
+                "---------------------------------------------------------------------\n"
+                "TOTAL                                     27093   3251    88%\n"
+                "FAIL Required test coverage of 99.0% not reached. Total coverage: 88.00%\n"
+                "============ 4858 passed, 7 skipped, 1 warning in 980.64s ============\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "final-coverage-fail-under-below-threshold",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term-missing",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_coverage(
+            workspace_id="ws_final_coverage_fail_under_below_threshold",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase="final_coverage",
+        )
+
+        assert result is not None
+        assert result.percent == 88
+        assert result.status == "failed"
+        assert result.reason_code == "COVERAGE_BELOW_THRESHOLD"
+        assert not result.ok
+        assert result.provider_failure_evidence == [
+            "FAIL Required test coverage of 99.0% not reached. Total coverage: 88.00%"
+        ]
+        assert result.command_result is not None
+        assert result.command_result.reason_code == "COVERAGE_BELOW_THRESHOLD"
+        assert (
+            result.command_result.metadata["provider_failure_evidence"]
+            == result.provider_failure_evidence
+        )
+
+    @pytest.mark.unit
     async def test_non_pytest_coverage_command_error_stays_coverage_command_failed(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:

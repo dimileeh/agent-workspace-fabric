@@ -1558,8 +1558,6 @@ def _coverage_reason_code(
     has_pytest_failures: bool = False,
     has_provider_fail_under: bool = False,
 ) -> str:
-    if has_provider_fail_under:
-        return "COVERAGE_FAIL_UNDER_NOT_REACHED"
     if percent is None:
         if has_pytest_failures:
             return "COVERAGE_NOT_FOUND"
@@ -1568,6 +1566,8 @@ def _coverage_reason_code(
         return "COVERAGE_NOT_FOUND"
     if percent < minimum_percent:
         return "COVERAGE_BELOW_THRESHOLD"
+    if has_provider_fail_under:
+        return "COVERAGE_FAIL_UNDER_NOT_REACHED"
     if command_result is not None and command_result.returncode != 0 and not has_pytest_failures:
         return "COVERAGE_COMMAND_FAILED"
     return "COVERAGE_OK"
