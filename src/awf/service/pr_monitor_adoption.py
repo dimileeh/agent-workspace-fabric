@@ -599,7 +599,9 @@ def _adoption_workspace_is_resumable(workspace: Workspace) -> bool:
     try:
         status = WorkspaceStatus(workspace.status)
     except ValueError:
-        return False
+        # Unknown statuses may be active states introduced before this code
+        # was updated; attach rather than superseding the canonical key.
+        return True
     return status not in _NON_RESUMABLE_ADOPTION_STATUSES
 
 

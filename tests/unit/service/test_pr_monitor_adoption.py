@@ -669,6 +669,12 @@ class TestPullRequestMonitorAdoptionService:
             assert await _count(session, Workspace) == 1
 
     @pytest.mark.unit
+    def test_unknown_existing_adoption_status_is_treated_as_resumable(self) -> None:
+        workspace = Workspace(status="monitoring_review_repair")
+
+        assert adoption_module._adoption_workspace_is_resumable(workspace) is True
+
+    @pytest.mark.unit
     async def test_completed_existing_adoption_still_attaches_without_metadata_fetch(
         self,
         factory: async_sessionmaker[AsyncSession],
