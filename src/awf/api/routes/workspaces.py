@@ -122,6 +122,7 @@ async def create_workspace(
     repo = WorkspaceRepository(session)
 
     if idempotency_key is not None:
+        await repo.acquire_idempotency_key_lock(idempotency_key)
         existing = await repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             if not _payloads_match(existing, payload):
@@ -172,6 +173,7 @@ async def create_workspace_v2(
     repo = WorkspaceRepository(session)
 
     if idempotency_key is not None:
+        await repo.acquire_idempotency_key_lock(idempotency_key)
         existing = await repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             if not _payloads_match_v2(existing, payload, settings=settings):
