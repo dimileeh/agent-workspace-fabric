@@ -105,6 +105,7 @@ class ReviewThreadComment:
     author: str | None = None
     created_at: datetime | None = None
     url: str | None = None
+    viewer_did_author: bool = False
 
 
 @dataclass(frozen=True)
@@ -420,7 +421,7 @@ _INLINE_RESOLUTION_REPLY_RE = re.compile(
 
 
 def _is_inline_resolution_reply(comment: ReviewThreadComment) -> bool:
-    return bool(_INLINE_RESOLUTION_REPLY_RE.match(comment.body))
+    return comment.viewer_did_author and bool(_INLINE_RESOLUTION_REPLY_RE.match(comment.body))
 
 
 def _review_thread_resolution_body(thread: ReviewThread) -> str:

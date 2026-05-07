@@ -143,6 +143,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
               databaseId
               bodyText
               author { login }
+              viewerDidAuthor
               createdAt
               url
             }
@@ -215,6 +216,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
               databaseId
               bodyText
               author { login }
+              viewerDidAuthor
               createdAt
               url
             }
@@ -238,6 +240,7 @@ query($threadId: ID!, $cursor: String!) {
           databaseId
           bodyText
           author { login }
+          viewerDidAuthor
           createdAt
           url
         }
@@ -1169,6 +1172,7 @@ def _parse_review_thread_comments(
                 comment_id=str(database_id) if database_id is not None else None,
                 body=node.get("bodyText") or "",
                 author=_clean_optional_str(_dig(node, "author", "login")),
+                viewer_did_author=bool(node.get("viewerDidAuthor")),
                 created_at=_parse_github_datetime(node.get("createdAt")),
                 url=_clean_optional_str(node.get("url")),
             )

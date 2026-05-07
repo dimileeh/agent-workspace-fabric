@@ -3015,6 +3015,7 @@ async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
                     "databaseId": 102,
                     "bodyText": "fixed in commit cafebabe",
                     "author": {"login": "dimileeh"},
+                    "viewerDidAuthor": True,
                 },
             ]
         },

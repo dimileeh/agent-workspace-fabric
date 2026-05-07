@@ -530,6 +530,7 @@ class TestFetchPrStatus:
                                     "databaseId": 101,
                                     "bodyText": "Preserve the retry counter per action.",
                                     "author": {"login": "chatgpt-codex-connector[bot]"},
+                                    "viewerDidAuthor": False,
                                     "createdAt": "2026-05-06T10:11:12Z",
                                     "url": "https://github.example/review/101",
                                 },
@@ -537,6 +538,7 @@ class TestFetchPrStatus:
                                     "databaseId": 102,
                                     "bodyText": "Still applies after the latest fix.",
                                     "author": {"login": "dimileeh"},
+                                    "viewerDidAuthor": True,
                                     "createdAt": "2026-05-06T10:15:12Z",
                                     "url": "https://github.example/review/102",
                                 },
@@ -570,6 +572,7 @@ class TestFetchPrStatus:
         assert thread.comments[0].created_at is not None
         assert thread.comments[0].created_at.isoformat() == "2026-05-06T10:11:12+00:00"
         assert thread.comments[1].url == "https://github.example/review/102"
+        assert [c.viewer_did_author for c in thread.comments] == [False, True]
 
     @pytest.mark.unit
     async def test_paginates_review_thread_comment_history(self) -> None:

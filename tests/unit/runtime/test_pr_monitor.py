@@ -27,6 +27,7 @@ from awf.runtime.pr_monitor import (
     SyncBase,
     WaitForCI,
     _mark_review_thread_addressed,
+    _review_thread_needs_attention,
     decide,
 )
 
@@ -891,6 +892,52 @@ class TestDeferredFeedbackGate:
         )
 
         assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "reply_body",
+        (
+            "fixed in commit abc123 still misses the error path",
+            "FALSE POSITIVE: this is still reachable because the fallback is active",
+        ),
+    )
+    def test_reviewer_reply_with_resolution_prefix_requeues_thread(
+        self,
+        reply_body: str,
+    ) -> None:
+        original = ReviewThread(
+            thread_id="T1",
+            path="src/x.py",
+            line=10,
+            body_excerpt="bot nit",
+            author="chatgpt-codex-connector",
+            comments=(
+                ReviewThreadComment(
+                    comment_id="101",
+                    body="bot nit",
+                    author="chatgpt-codex-connector",
+                ),
+            ),
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, original, "false_positive")
+        changed = ReviewThread(
+            thread_id="T1",
+            path="src/x.py",
+            line=10,
+            body_excerpt="bot nit",
+            author="chatgpt-codex-connector",
+            comments=(
+                *original.comments,
+                ReviewThreadComment(
+                    comment_id="102",
+                    body=reply_body,
+                    author="chatgpt-codex-connector",
+                ),
+            ),
+        )
+
+        assert _review_thread_needs_attention(state, changed) is True
 
 
 # ── Iteration accounting — decide() doesn't mutate state ──────────────────
