@@ -1350,8 +1350,7 @@ def _error_result(error_code: str, message: str) -> CallToolResult:
 def _required_idempotency_key(idempotency_key: str | None) -> str | None:
     if idempotency_key is None:
         return None
-    key = idempotency_key.strip()
-    return key or None
+    return idempotency_key if idempotency_key.strip() else None
 
 
 def _idempotency_key_error() -> CallToolResult:

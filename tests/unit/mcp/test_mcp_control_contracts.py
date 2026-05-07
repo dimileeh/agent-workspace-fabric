@@ -531,6 +531,23 @@ class TestSuccessPaths:
         assert isinstance(payload, dict)
         assert service.calls == [expected_call]
 
+    @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
+    async def test_control_tools_preserve_nonblank_idempotency_key_verbatim(
+        self, tool_name: str
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+        idempotency_key = "  literal mcp key  "
+
+        payload = await _call(
+            mcp,
+            tool_name,
+            {"workspace_id": "ws_x", "idempotency_key": idempotency_key},
+        )
+
+        assert isinstance(payload, dict)
+        assert service.calls[0][1]["idempotency_key"] == idempotency_key
+
     async def test_refresh_and_rebase_return_operation_response_shape(self) -> None:
         service = _MockService()
         mcp = build_mcp_server(service=service)
