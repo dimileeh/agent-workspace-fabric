@@ -1092,7 +1092,7 @@ def workspace_create_v2_payload_matches(
         and existing.task_prompt == payload.task.prompt
         and existing.task_external_id == payload.task.external_id
         and existing.task_class == task_class
-        and list(existing.owned_paths) == list(payload.task.owned_paths)
+        and _owned_path_hints_match(existing.owned_paths, payload.task.owned_paths)
         and _stored_task_agent_model(existing) == payload.task.model
         and _stored_task_out_of_scope_policy(existing)
         == _requested_task_out_of_scope_policy(payload)
@@ -1138,6 +1138,10 @@ def _has_v2_create_artifact(existing: Workspace) -> bool:
     return existing.task_attempt is not None
 
 
+def _owned_path_hints_match(stored: Sequence[str], requested: Sequence[str]) -> bool:
+    return list(stored) == list(requested)
+
+
 def _auto_profile_request(payload: WorkspaceCreateV2Request) -> bool:
     return (
         payload.workspace.profile is None
@@ -1152,9 +1156,23 @@ def _stored_validation_requested_tier_matches(
     stored_tier = _stored_validation_requested_tier(existing)
     if stored_tier is not None:
         return stored_tier == payload.validation.requested_tier
-    # Legacy auto-profile rows did not snapshot the requested tier anywhere.
-    # Treat the tier as unknown so an otherwise identical replay stays valid.
-    return _profile_ref_matches(existing, payload) and _auto_profile_request(payload)
+    # Legacy rows did not always snapshot requested_tier before profile
+    # resolution. Treat the tier as unknown when the durable profile request
+    # still matches, so an otherwise identical replay stays valid.
+    return _legacy_validation_requested_tier_unknown(existing, payload)
+
+
+def _legacy_validation_requested_tier_unknown(
+    existing: Workspace,
+    payload: WorkspaceCreateV2Request,
+) -> bool:
+    if not _profile_ref_matches(existing, payload):
+        return False
+    if existing.requested_profile is not None or payload.workspace.profile is not None:
+        return False
+    if _auto_profile_request(payload):
+        return True
+    return existing.profile_ref is not None and existing.resolved_profile is None
 
 
 def _stored_resource_reservation_matches(

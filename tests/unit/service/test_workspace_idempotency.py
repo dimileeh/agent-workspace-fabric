@@ -374,6 +374,47 @@ async def test_create_v2_named_profile_replay_uses_policy_tier_when_profile_unre
 
 
 @pytest.mark.unit
+async def test_create_v2_named_profile_legacy_replay_allows_missing_unresolved_tier(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def resolve_named_profile(**_: object) -> ProfileResolution:
+        return ProfileResolution(
+            profile=WorkspaceProfile(
+                name="high-perf",
+                source="test:high-perf",
+            ),
+            network_posture="restricted",
+            reason="test profile fixture",
+            candidates_considered=["registry:high-perf"],
+        )
+
+    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_named_profile)
+    request = _v2_request(requested_tier=2, profile_ref="high-perf")
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-legacy-named-profile-tier",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        task_policy = dict(workspace.task_policy)
+        task_policy.pop("validation", None)
+        workspace.task_policy = task_policy
+        workspace.resolved_profile = None
+        await session.commit()
+
+    replayed = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-legacy-named-profile-tier",
+    )
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
 async def test_create_v2_named_profile_replay_prefers_policy_tier_over_stale_profile(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
