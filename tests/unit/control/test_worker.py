@@ -4909,6 +4909,114 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert inspector.calls == [compose_project, compose_project, compose_project]
 
     @pytest.mark.unit
+    async def test_operator_refresh_ignores_stale_cleanup_evidence_before_refresh(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserved_refresh_stale_floor"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserved-refresh-stale-floor",
+            WorkspaceStatus.pushing,
+            compose_project_name=compose_project,
+        )
+        now = datetime.now(UTC)
+        status_started_at = now - timedelta(minutes=10)
+        old_preservation_at = now - timedelta(minutes=9)
+        old_stale_at = now - timedelta(minutes=8)
+        refresh_requested_at = now - timedelta(minutes=1)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            pushing_started = next(
+                event
+                for event in state_events
+                if event.new_state == WorkspaceStatus.pushing.value
+            )
+            pushing_started.occurred_at = status_started_at
+            preserved = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            preserved.occurred_at = old_preservation_at
+            stale = await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "compose_project_name": compose_project,
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "runtime": {"stack_state": "running"},
+                },
+            )
+            stale.occurred_at = old_stale_at
+            await WorkspaceControlService(
+                s,
+                project_stopper=_noop_project_stop,
+                cleaner_factory=_unexpected_cleaner_factory,
+            ).request_refresh_workspace(
+                workspace_id,
+                reason="operator recovery",
+                idempotency_key="refresh-stale-floor",
+            )
+            refresh_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.refresh_requested",
+            )
+            assert refresh_events
+            refresh_events[0].occurred_at = refresh_requested_at
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: _live_agent_snapshot(container_id="agent-refresh-stale-floor")}
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        fresh_stale_events = [
+            event for event in stale_events if event.occurred_at >= refresh_requested_at
+        ]
+        assert ws.status == WorkspaceStatus.pushing.value
+        assert ws.failure_reason is None
+        assert len(stale_events) == 2
+        assert len(fresh_stale_events) == 1
+        assert cleaner.calls == []
+        assert inspector.calls == [compose_project]
+
+    @pytest.mark.unit
     async def test_stale_active_execution_scan_is_throttled_between_intervals(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -5556,6 +5664,74 @@ async def test_stale_active_execution_check_preserves_unexpired_execution_claim(
         assert ws is not None
         ws.execution_claimed_by = "live-worker"
         ws.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+
+    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name=f"awf_{workspace_id}",
+            repo_url=str(origin_repo),
+        )
+    )
+
+
+@pytest.mark.unit
+async def test_stale_active_execution_check_ignores_stale_event_before_refresh(
+    worker: ControlWorker,
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    workspace_id = await _create_active_execution(
+        session_factory,
+        origin_repo,
+        "stale-event-before-refresh",
+        WorkspaceStatus.running,
+    )
+    now = datetime.now(UTC)
+    status_started_at = now - timedelta(minutes=10)
+    old_stale_at = now - timedelta(minutes=8)
+    refresh_requested_at = now - timedelta(minutes=1)
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        state_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+        )
+        running_started = next(
+            event
+            for event in state_events
+            if event.new_state == WorkspaceStatus.running.value
+        )
+        running_started.occurred_at = status_started_at
+        stale = await repo.add_event(
+            ws,
+            event_type="workspace.stale_active_execution_detected",
+            reason_code="STALE_ACTIVE_EXECUTION",
+            payload={
+                "compose_project_name": f"awf_{workspace_id}",
+                "workspace_status": WorkspaceStatus.running.value,
+                "runtime": {"stack_state": "running"},
+            },
+        )
+        stale.occurred_at = old_stale_at
+        await WorkspaceControlService(
+            session,
+            project_stopper=_noop_project_stop,
+            cleaner_factory=_unexpected_cleaner_factory,
+        ).request_refresh_workspace(
+            workspace_id,
+            reason="operator recovery",
+            idempotency_key="refresh-before-stale-check",
+        )
+        refresh_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.refresh_requested",
+        )
+        assert refresh_events
+        refresh_events[0].occurred_at = refresh_requested_at
         await session.commit()
 
     assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001

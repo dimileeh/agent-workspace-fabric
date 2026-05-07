@@ -800,7 +800,16 @@ class ControlWorker:
                 return False
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return False
-            if await self._has_stale_active_execution_event(session, candidate.workspace_id):
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
+            if await self._has_stale_active_execution_event(
+                session,
+                candidate.workspace_id,
+                event_floor=event_floor,
+            ):
                 return False
 
             await repo.add_event(
@@ -824,6 +833,8 @@ class ControlWorker:
         self,
         session: AsyncSession,
         workspace_id: str,
+        *,
+        event_floor: datetime | None = None,
     ) -> bool:
         stmt = (
             select(WorkspaceEvent.id)
@@ -834,6 +845,8 @@ class ControlWorker:
             )
             .limit(1)
         )
+        if event_floor is not None:
+            stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
         return (await session.execute(stmt)).scalar_one_or_none() is not None
 
     async def _record_preserved_active_execution_after_restart(
@@ -1158,6 +1171,7 @@ class ControlWorker:
             return await self._has_stale_active_execution_event(
                 session,
                 candidate.workspace_id,
+                event_floor=event_floor,
             )
 
     async def _record_stale_active_execution_cleanup_failed(
