@@ -18,19 +18,22 @@ from awf.control.worker import (
     _active_execution_preservation_claim_cleanup_payload,
     _ActiveExecutionCandidate,
     _execution_claim_is_stale,
+    _has_running_agent_runtime,
     _json_datetime,
     _monitor_claim_is_stale,
     _stale_active_execution_failure_message,
+    _utc_datetime,
 )
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
     SecretLeaseIssue,
     SecretLeaseRepository,
+    WorkspaceEventRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
-from awf.runtime.inspection import RuntimeSnapshot
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from tests.postgres import postgres_test_engine
 
 
@@ -670,3 +673,123 @@ def test_stale_active_execution_failure_message_includes_runtime_reason() -> Non
         RuntimeSnapshot(stack_state="stopped", services=[]),
     )
     assert "compose runtime state is stopped." in no_reason_message
+
+
+@pytest.mark.unit
+def test_runtime_snapshot_requires_running_stack_before_agent_detection() -> None:
+    assert not _has_running_agent_runtime(
+        RuntimeSnapshot(
+            stack_state="stopped",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-1",
+                    image="awf-agent-runtime",
+                    state="running",
+                )
+            ],
+        )
+    )
+
+
+@pytest.mark.unit
+def test_worker_utc_datetime_normalizes_naive_values() -> None:
+    assert _utc_datetime(datetime(2026, 4, 27, 12, 0)) == datetime(
+        2026,
+        4,
+        27,
+        12,
+        0,
+        tzinfo=UTC,
+    )
+
+
+@pytest.mark.unit
+async def test_wait_for_execution_tasks_removes_completed_tasks(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    worker._execution_tasks["ws_done"] = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+
+    await worker.wait_for_execution_tasks()
+
+    assert worker._execution_tasks == {}  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_execution_and_monitor_claim_helpers_skip_already_running_task(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    task = asyncio.create_task(asyncio.sleep(30))
+    worker._execution_tasks["ws_busy"] = task  # noqa: SLF001
+
+    try:
+        assert worker._dispatchable_execution_ids(  # noqa: SLF001
+            ["ws_busy", "ws_next"],
+            limit=2,
+        ) == ["ws_next"]
+        assert await worker._claim_monitoring_pr_ids(["ws_busy"], limit=1) == []  # noqa: SLF001
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.unit
+async def test_stale_active_execution_without_runtime_cleaner_records_cleanup_failure(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _seed_status(
+        factory,
+        WorkspaceStatus.running,
+        title="stale active execution without cleaner",
+    )
+    worker = _worker(factory)
+    candidate = _ActiveExecutionCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus.running,
+        compose_project_name=f"awf_{workspace_id}",
+        repo_url="git@example.com:repo/app.git",
+    )
+    snapshot = RuntimeSnapshot(stack_state="running", reason="control worker restarted")
+    assert await worker._record_stale_active_execution_detected(candidate, snapshot)  # noqa: SLF001
+
+    await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)  # noqa: SLF001
+
+    async with factory() as session:
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.stale_active_execution_cleanup_failed",
+        )
+
+    assert len(events) == 1
+    assert events[0].reason_code == "STALE_ACTIVE_EXECUTION_CLEANUP_FAILED"
+    assert events[0].payload["message"] == "runtime cleanup is not configured"
+
+
+@pytest.mark.unit
+async def test_fail_stale_active_execution_skips_status_mismatch(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _seed_status(
+        factory,
+        WorkspaceStatus.running,
+        title="stale active execution status mismatch",
+    )
+    worker = _worker(factory)
+
+    await worker._fail_stale_active_execution(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.validating,
+            compose_project_name=f"awf_{workspace_id}",
+        ),
+        RuntimeSnapshot(stack_state="running", reason="worker restarted"),
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.running.value

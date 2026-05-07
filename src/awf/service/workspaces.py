@@ -1932,7 +1932,7 @@ def _active_runtime_health_event_floor(workspace: Workspace) -> datetime | None:
         occurred_at = _utc_datetime(event.occurred_at)
         if status_started_at is None or occurred_at >= status_started_at:
             floors.append(occurred_at)
-    claim_expires_at = workspace.execution_claim_expires_at
+    claim_expires_at = getattr(workspace, "execution_claim_expires_at", None)
     if claim_expires_at is not None:
         claim_floor = _utc_datetime(claim_expires_at)
         if claim_floor <= datetime.now(UTC):
@@ -2116,19 +2116,6 @@ def _dind_mode_from_profile_snapshot(profile: Mapping[str, Any] | None) -> str:
     if isinstance(docker, Mapping) and docker.get("mode") == "dind":
         return "dind"
     return "none"
-
-
-def _resource_reservation_row_summary(reservation: Any) -> dict[str, Any]:
-    return {
-        "node_id": reservation.node_id,
-        "steady_cpu": reservation.steady_cpu,
-        "steady_memory_gb": reservation.steady_memory_gb,
-        "peak_cpu": reservation.peak_cpu,
-        "peak_memory_gb": reservation.peak_memory_gb,
-        "disk_mb": reservation.disk_mb,
-        "dind_slots": reservation.dind_slots,
-        "phase": reservation.phase,
-    }
 
 
 def _parse_memory_gb(value: str | None) -> float | None:

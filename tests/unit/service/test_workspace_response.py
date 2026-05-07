@@ -25,6 +25,11 @@ from awf.service.validation_observability import (
     latest_merge_candidate,
     validation_freshness_summary,
 )
+from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+    RUNTIME_STRANDED_EVENT_TYPE,
+)
 from awf.service.workspaces import workspace_failure_details_payload, workspace_response
 
 
@@ -1584,3 +1589,149 @@ def test_workspace_response_provider_recovery_state_none_when_absent() -> None:
     response = workspace_response(workspace)  # type: ignore[arg-type]
 
     assert response.provider_recovery_state is None
+
+
+def _workspace_response_fixture(
+    *,
+    workspace_id: str,
+    status: str,
+    events: list[SimpleNamespace],
+    execution_claim_expires_at: datetime | None = None,
+) -> SimpleNamespace:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    return SimpleNamespace(
+        id=workspace_id,
+        status=status,
+        version=1,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name=f"awf/{workspace_id}",
+        base_commit="abc123",
+        task_title="Runtime health projection",
+        task_prompt="Exercise runtime health projection.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref=None,
+        requested_profile=None,
+        resolved_profile=None,
+        test_commands=[],
+        requires_database=False,
+        node_id=None,
+        compose_project_name=None,
+        compose_file_path=None,
+        pr_url=None,
+        failure_reason=None,
+        failure_message=None,
+        active_policy_findings=[],
+        operations=[],
+        secret_leases=[],
+        events=events,
+        execution_claim_expires_at=execution_claim_expires_at,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@pytest.mark.unit
+def test_workspace_response_projects_runtime_inspection_unavailable_health() -> None:
+    workspace = _workspace_response_fixture(
+        workspace_id="ws-runtime-unavailable",
+        status=WorkspaceStatus.ready.value,
+        events=[
+            SimpleNamespace(
+                event_type=RUNTIME_STRANDED_EVENT_TYPE,
+                reason_code="RUNTIME_INSPECTION_UNAVAILABLE",
+                old_state=None,
+                new_state=None,
+                payload={
+                    "reason_code": "RUNTIME_INSPECTION_UNAVAILABLE",
+                    "decision": "none",
+                    "message": "Docker runtime inspection is unavailable.",
+                },
+                occurred_at=datetime(2026, 4, 27, 12, 5, tzinfo=UTC),
+            )
+        ],
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.runtime_health is not None
+    assert response.runtime_health.status == "unavailable"
+    assert response.runtime_health.reason_code == "RUNTIME_INSPECTION_UNAVAILABLE"
+    assert response.runtime_health.message == "Docker runtime inspection is unavailable."
+
+
+@pytest.mark.unit
+def test_workspace_response_ignores_preserved_runtime_health_before_current_status_floor() -> None:
+    status_started_at = datetime(2026, 4, 27, 12, 0)
+    stale_preservation = SimpleNamespace(
+        event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+        reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+        old_state=None,
+        new_state=None,
+        payload={
+            "reason_code": ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+            "decision": "preserve_runtime",
+            "message": "Old runtime preservation belongs to the previous status.",
+            "workspace_status": WorkspaceStatus.running.value,
+        },
+        occurred_at=status_started_at - timedelta(minutes=1),
+    )
+    current_preservation = SimpleNamespace(
+        event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+        reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+        old_state=None,
+        new_state=None,
+        payload={
+            "reason_code": ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+            "decision": "preserve_runtime",
+            "message": "Runtime is still owned by the active agent.",
+            "workspace_status": WorkspaceStatus.running.value,
+            "runtime": {
+                "services": [
+                    {
+                        "name": "agent",
+                        "state": "running",
+                        "container_id": "container-123",
+                    }
+                ]
+            },
+        },
+        occurred_at=status_started_at + timedelta(minutes=1),
+    )
+    workspace = _workspace_response_fixture(
+        workspace_id="ws-runtime-preserved",
+        status=WorkspaceStatus.running.value,
+        events=[
+            current_preservation,
+            SimpleNamespace(
+                event_type="workspace.state_changed",
+                reason_code="EXECUTION_STARTED",
+                old_state=WorkspaceStatus.ready.value,
+                new_state=WorkspaceStatus.running.value,
+                payload=None,
+                occurred_at=status_started_at,
+            ),
+            stale_preservation,
+        ],
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.runtime_health is not None
+    assert response.runtime_health.status == "ok"
+    assert response.runtime_health.reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE
+    assert response.runtime_health.message == "Runtime is still owned by the active agent."
+    assert response.runtime_health.services == [
+        {
+            "name": "agent",
+            "state": "running",
+            "container_id": "container-123",
+        }
+    ]
