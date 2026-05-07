@@ -92,6 +92,9 @@ _ACTIVE_EXECUTION_PRESERVED_SUBPHASE = "runtime_preserved_after_restart"
 _ACTIVE_EXECUTION_PRESERVED_CLAIM_CLEARED_REASON_CODE = (
     "STALE_EXECUTION_CLAIM_CLEARED_DURING_ACTIVE_EXECUTION_PRESERVATION"
 )
+_ACTIVE_EXECUTION_PRESERVED_UNEXPIRED_CLAIM_CLEARED_REASON_CODE = (
+    "UNEXPIRED_EXECUTION_CLAIM_CLEARED_DURING_ACTIVE_EXECUTION_PRESERVATION"
+)
 _ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE = (
     "NO_EXECUTION_CLAIM_DURING_ACTIVE_EXECUTION_PRESERVATION"
 )
@@ -678,10 +681,7 @@ class ControlWorker:
                             WorkspaceStatus.ready.value,
                         ]
                     ),
-                    and_(
-                        Workspace.status.in_(active_execution_values),
-                        _stale_execution_claim_filter(claim_cutoff),
-                    ),
+                    Workspace.status.in_(active_execution_values),
                     and_(
                         Workspace.status == WorkspaceStatus.monitoring_pr.value,
                         _stale_monitor_claim_filter(claim_cutoff),
@@ -860,8 +860,6 @@ class ControlWorker:
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
-            if not _execution_claim_is_stale(ws, now):
-                return
             if await self._has_operator_refresh_after_latest_preservation_for_workspace(
                 session,
                 ws,
@@ -886,7 +884,7 @@ class ControlWorker:
                 ws,
                 claim_cutoff=now,
             )
-            if claim_cleanup["action"] == "cleared_stale":
+            if claim_cleanup["action"] in {"cleared_stale", "cleared_unexpired"}:
                 ws.execution_claimed_by = None
                 ws.execution_claim_expires_at = None
             ws.subphase = _ACTIVE_EXECUTION_PRESERVED_SUBPHASE
@@ -1959,7 +1957,11 @@ def _active_execution_preservation_claim_cleanup_payload(
         return payload
 
     if not _execution_claim_is_stale(workspace, claim_cutoff):
-        raise ValueError("active execution preservation cleanup requires a stale execution claim")
+        return {
+            **payload,
+            "action": "cleared_unexpired",
+            "reason_code": _ACTIVE_EXECUTION_PRESERVED_UNEXPIRED_CLAIM_CLEARED_REASON_CODE,
+        }
 
     return {
         **payload,
