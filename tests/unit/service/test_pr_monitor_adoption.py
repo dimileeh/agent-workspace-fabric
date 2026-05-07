@@ -331,7 +331,6 @@ class TestPullRequestMonitorAdoptionService:
         "terminal_status",
         [
             WorkspaceStatus.cancelled,
-            WorkspaceStatus.completed,
             WorkspaceStatus.destroyed,
             WorkspaceStatus.failed,
         ],
@@ -371,12 +370,10 @@ class TestPullRequestMonitorAdoptionService:
             assert second_workspace is not None
             assert first_workspace.idempotency_key != original_key
             assert first_workspace.idempotency_key is not None
-            assert first_workspace.idempotency_key.startswith(f"{original_key}:terminal:")
+            assert first_workspace.idempotency_key.startswith(f"{original_key}:superseded:")
             assert second_workspace.idempotency_key == original_key
             assert original_external_id is not None
-            assert second_workspace.task_external_id != original_external_id
-            assert second_workspace.task_external_id is not None
-            assert second_workspace.task_external_id.startswith(f"{original_external_id}:")
+            assert second_workspace.task_external_id == original_external_id
             assert await _count(session, Workspace) == 2
             assert await _count(session, Task) == 2
             assert await _count(session, TaskAttempt) == 2
@@ -416,12 +413,15 @@ class TestPullRequestMonitorAdoptionService:
             assert second_workspace is not None
             assert original_key is not None
             assert original_external_id is not None
-            assert first_workspace.idempotency_key.startswith(f"{original_key}:terminal:")
+            assert first_workspace.idempotency_key is not None
+            assert first_workspace.idempotency_key.startswith(f"{original_key}:superseded:")
             assert second_workspace.idempotency_key == original_key
             assert second_workspace.task_title == "feature: revised title"
-            assert second_workspace.task_external_id != original_external_id
-            assert second_workspace.task_external_id is not None
-            assert second_workspace.task_external_id.startswith(f"{original_external_id}:")
+            assert second_workspace.task_external_id == original_external_id
+            superseded_external_id = adoption_module._superseded_adoption_external_id(
+                external_id=original_external_id,
+                workspace_id=first.workspace_id,
+            )
             tasks = list((await session.execute(select(Task))).scalars())
             assert len(tasks) == 2
             assert {task.title for task in tasks} == {
@@ -429,12 +429,12 @@ class TestPullRequestMonitorAdoptionService:
                 "feature: revised title",
             }
             assert {task.external_id for task in tasks} == {
-                original_external_id,
+                superseded_external_id,
                 second_workspace.task_external_id,
             }
             assert {task.idempotency_key for task in tasks} == {
+                first_workspace.idempotency_key,
                 original_key,
-                f"{original_key}:task:{second.workspace_id}",
             }
 
     @pytest.mark.unit
