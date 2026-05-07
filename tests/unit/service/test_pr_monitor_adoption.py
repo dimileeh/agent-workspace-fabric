@@ -785,6 +785,7 @@ class TestPullRequestMonitorAdoptionService:
             assert old_task is not None
             assert fresh_task is not None
             assert fresh_workspace is not None
+            workspaces = await _adoption_workspaces(session)
             assert old_task.external_id == adoption_module._superseded_adoption_external_id(
                 external_id=logical_task_external_id,
                 workspace_id=first.workspace_id,
@@ -793,6 +794,10 @@ class TestPullRequestMonitorAdoptionService:
             assert fresh_task.external_id == logical_task_external_id
             assert fresh_task.title == "feature: retitled"
             assert fresh_workspace.task_external_id == fresh_task.external_id
+            assert [workspace.id for workspace in workspaces] == [
+                first.workspace_id,
+                result.workspace_id,
+            ]
             assert fresh_workspace.task_policy["pr_adoption"]["lineage"][
                 "previous_terminal_adoptions"
             ] == [
