@@ -1879,7 +1879,30 @@ class PullRequestMonitorRunner:
                     status=merge_status,
                 )
                 if self._config.pre_merge_settle_seconds > 0:
-                    await self._deps.sleep(self._config.pre_merge_settle_seconds)
+                    wait_seconds = self._config.pre_merge_settle_seconds
+                    await self._record_pre_merge_settle_event(
+                        "monitor.pre_merge_settle_started",
+                        monitor_log=monitor_log,
+                        workspace_id=workspace_id,
+                        repo_url=repo_url,
+                        base_branch=base_branch,
+                        pr_number=pr_number,
+                        status=merge_status,
+                        wait_seconds=wait_seconds,
+                    )
+                    settle_started_at = time.monotonic()
+                    await self._deps.sleep(wait_seconds)
+                    await self._record_pre_merge_settle_event(
+                        "monitor.pre_merge_settle_completed",
+                        monitor_log=monitor_log,
+                        workspace_id=workspace_id,
+                        repo_url=repo_url,
+                        base_branch=base_branch,
+                        pr_number=pr_number,
+                        status=merge_status,
+                        wait_seconds=wait_seconds,
+                        elapsed_seconds=max(time.monotonic() - settle_started_at, 0.0),
+                    )
                     try:
                         checked_status = await self._fetch_status_for_decision(
                             repo=repo,
@@ -3013,6 +3036,32 @@ class PullRequestMonitorRunner:
             "pr_number": pr_number,
             "head_sha": status.head_sha[:10],
         }
+        _log.info(event, **payload)
+        await self._write_monitor_log(monitor_log, {"event": event, **payload})
+
+    async def _record_pre_merge_settle_event(
+        self,
+        event: str,
+        *,
+        monitor_log: WorkspaceLogSink | None,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+        pr_number: int,
+        status: PRStatus,
+        wait_seconds: float,
+        elapsed_seconds: float | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "repo_url": repo_url,
+            "base_branch": base_branch,
+            "pr_number": pr_number,
+            "head_sha": status.head_sha,
+            "wait_seconds": wait_seconds,
+        }
+        if elapsed_seconds is not None:
+            payload["elapsed_seconds"] = elapsed_seconds
         _log.info(event, **payload)
         await self._write_monitor_log(monitor_log, {"event": event, **payload})
 
@@ -4768,6 +4817,12 @@ class PullRequestMonitorRunner:
             if ws is None:
                 return
             if ws.status != WorkspaceStatus.monitoring_pr.value:
+                if (
+                    ws.status == WorkspaceStatus.completed.value
+                    and pr_merge_sha
+                    and not ws.pr_merge_sha
+                ):
+                    ws.pr_merge_sha = pr_merge_sha
                 await _record_ignored_monitor_terminal_callback(
                     repo,
                     ws,

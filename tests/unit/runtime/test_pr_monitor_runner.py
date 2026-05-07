@@ -42,6 +42,7 @@ from awf.db.repositories import (
     StaleReasonRepository,
     TaskAttemptRepository,
     ValidationRunRepository,
+    WorkspaceEventRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
@@ -1219,6 +1220,62 @@ async def test_short_circuit_completed_records_completed_monitor_state_operation
     assert operation.payload["action"] == "completed"
     assert operation.payload["reason_code"] == "SHORT_CIRCUIT_COMPLETED"
     assert operation.result == {"status": "succeeded", "outcome": "already_completed"}
+
+
+@pytest.mark.unit
+async def test_terminate_completed_persists_merge_sha_when_workspace_already_completed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory, pr_merge_sha=None)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.completed,
+            reason_code="TEST_ALREADY_COMPLETED",
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    await runner._terminate_completed(
+        workspace_id,
+        pr_merge_sha="MERGESHA",
+        repo_url=None,
+        base_branch=None,
+        compose_project=None,
+        compose_file=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        stale_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.stale_callback_ignored",
+        )
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.completed.value
+    assert workspace.pr_merge_sha == "MERGESHA"
+    assert len(stale_events) == 1
+    assert stale_events[0].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "terminal_completed",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": WorkspaceStatus.completed.value,
+        "requested_status": WorkspaceStatus.completed.value,
+        "reason_code": "MONITOR_DONE",
+    }
 
 
 @pytest.mark.unit
