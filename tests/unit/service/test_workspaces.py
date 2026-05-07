@@ -17,6 +17,8 @@ from awf.service.workspaces import WorkspaceService
 
 PRESERVED_EXECUTION_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
 PRESERVED_EXECUTION_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
+REFRESH_REQUESTED_EVENT_TYPE = "workspace.refresh_requested"
+REFRESH_REQUESTED_REASON_CODE = "OPERATOR_REFRESH"
 
 
 @pytest.fixture
@@ -468,6 +470,82 @@ async def test_preserved_runtime_health_is_scoped_to_current_status_cycle(
             )
         }
     )
+    runtime = await WorkspaceService(
+        session_factory,
+        runtime_inspector=inspector,
+    ).get_runtime(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is None
+    assert runtime is not None
+    assert runtime.runtime_health is None
+
+
+@pytest.mark.unit
+async def test_preserved_runtime_health_is_floored_by_operator_refresh(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="preserved runtime refresh floor",
+            task_prompt="do not show preservation superseded by refresh",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.pushing.value
+        workspace.compose_project_name = "awf_preserved_runtime_refresh_floor"
+        workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
+        base = datetime.now(UTC)
+        preserved = await repo.add_event(
+            workspace,
+            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            payload={
+                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.pushing.value,
+                "message": "Live agent runtime was preserved after worker restart.",
+                "runtime": {
+                    "services": [
+                        {
+                            "name": "agent",
+                            "state": "running",
+                            "container_id": "agent-preserved",
+                        }
+                    ]
+                },
+            },
+        )
+        preserved.occurred_at = base
+        refresh = await repo.add_event(
+            workspace,
+            event_type=REFRESH_REQUESTED_EVENT_TYPE,
+            reason_code=REFRESH_REQUESTED_REASON_CODE,
+        )
+        refresh.occurred_at = base + timedelta(seconds=1)
+        await session.commit()
+        workspace_id = workspace.id
+
+    inspector = _RuntimeInspector(
+        {
+            "awf_preserved_runtime_refresh_floor": RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent-current",
+                        image="awf-agent:latest",
+                        state="running",
+                    )
+                ],
+            )
+        }
+    )
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
     runtime = await WorkspaceService(
         session_factory,
         runtime_inspector=inspector,
