@@ -102,6 +102,13 @@ async def _transition_adoption(
     if status == WorkspaceStatus.failed:
         await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
         return
+    if status == WorkspaceStatus.completed:
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST_PROVISION")
+        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="TEST_READY")
+        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="TEST_RUN")
+        await repo.transition(workspace, to=WorkspaceStatus.validating, reason_code="TEST_VALIDATE")
+        await repo.transition(workspace, to=WorkspaceStatus.completed, reason_code="TEST_COMPLETE")
+        return
     if status in {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}:
         await repo.transition(workspace, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
         await repo.transition(workspace, to=WorkspaceStatus.destroying, reason_code="TEST_DESTROY")
@@ -655,6 +662,48 @@ class TestPullRequestMonitorAdoptionService:
 
         assert replay.attached_existing is True
         assert replay.workspace_id == first.workspace_id
+        assert replay_fetcher.calls == []
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+        async with factory() as session:
+            assert await _count(session, Workspace) == 1
+
+    @pytest.mark.unit
+    async def test_completed_existing_adoption_still_attaches_without_metadata_fetch(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    auto_merge=False,
+                )
+            )
+            await _transition_adoption(session, first.workspace_id, WorkspaceStatus.completed)
+            await session.commit()
+
+        async with factory() as session:
+            replay_fetcher = _MetadataFetcher(_metadata(head_ref="feature/should-not-fetch"))
+            replay = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=replay_fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                    auto_merge=False,
+                )
+            )
+            await session.commit()
+
+        assert replay.attached_existing is True
+        assert replay.workspace_id == first.workspace_id
+        assert replay.status == WorkspaceStatus.completed
         assert replay_fetcher.calls == []
         assert fetcher.calls == [("dimileeh/aira-web", 277)]
 

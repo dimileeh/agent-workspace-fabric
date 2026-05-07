@@ -59,7 +59,6 @@ _PR_ADOPTION_ERROR_CODE_CONTRACT = (
 )
 _NON_RESUMABLE_ADOPTION_STATUSES = frozenset(
     {
-        WorkspaceStatus.completed,
         WorkspaceStatus.failed,
         WorkspaceStatus.cancelled,
         WorkspaceStatus.destroying,
