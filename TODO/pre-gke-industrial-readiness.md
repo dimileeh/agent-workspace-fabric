@@ -75,7 +75,7 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_657b484a622544b6aee70924` | [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing the destroyed monitor `ws_941096a4dc4942dcb877656a`; AWF owns conflict, validation, comment, and merge monitoring. |
+| P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_657b484a622544b6aee70924` | [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing the destroyed monitor `ws_941096a4dc4942dcb877656a`; AWF owns conflict, validation, comment, and merge monitoring. Checklist completion remains pending PR #206 merge. |
 | P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_3b90c8728f0c4862a28d82cc` | [#212](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/212) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing cancelled workspace `ws_7e7f6d54bc924c47a5723621`; AWF owns validation, comment, and merge monitoring. |
 | P0 Operation And Recovery Truth | PR adoption terminal idempotency hardening | `ws_e5b86a598da842e0aaf50d1f` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to harden first-class PR adoption after destroyed adoption workspaces retained deterministic repo/PR task/idempotency slots and caused the first clean re-adoption attempt to 500 while reattaching PR #206. |
 | P0 Control-Plane Restart Recovery Hardening | Adopt or preserve active executions after worker restart | `ws_13dd6ba7165141c285bd771e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to prevent worker restarts or transient control-loop loss from killing live `running` / `validating` / `pushing` agent runtimes when only the in-memory task map was lost. Escalated to P0 after `ws_4f44c108a58f46d092f4e411` was failed as `STALE_ACTIVE_EXECUTION` despite no API/worker Docker restart. |
@@ -714,7 +714,7 @@ coding agent in any project to use AWF for a feature.
   service/api/cli/mcp/control/node/runtime/scripts unit gate all passed. PR
   [#198](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/198)
   merged 2026-05-05.
-- [x] Align CLI command coverage with the canonical REST API and MCP surfaces:
+- [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
   why that surface is intentionally MCP/API-only.
@@ -727,8 +727,10 @@ coding agent in any project to use AWF for a feature.
   `tests/unit/contracts/test_control_surface_parity_contract.py`; and
   `tests/unit/mcp/test_mcp_client_parity_docs.py` to pin parity documentation
   for intentional control-surface gaps.
-  Iteration 3 status: implementation-backed parity evidence is now complete and
-  validated. Focused artifacts are collected with:
+  Iteration 3 status: implementation-backed parity evidence is complete in PR
+  [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206)
+  and remains pending PR #206 merge before this row counts as landed. Focused
+  artifacts are collected with:
   `tests/unit/cli/test_cli.py`, `tests/unit/contracts/test_control_surface_parity_contract.py`,
   `tests/unit/mcp/test_mcp_client_parity_docs.py`, `tests/unit/mcp/test_mcp_parity_matrix_crossref.py`,
   `tests/unit/mcp/test_mcp_operator_surfaces.py`, `tests/unit/api/test_controls.py`,
