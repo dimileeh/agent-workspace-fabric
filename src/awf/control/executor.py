@@ -5664,7 +5664,7 @@ def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> Validation
     gaps = metadata.get("gaps")
     failing_node_ids = metadata.get("failing_test_node_ids")
     failing_evidence = metadata.get("failing_test_evidence")
-    provider_failure_evidence = metadata.get("provider_failure_evidence")
+    raw_provider_failure_evidence = metadata.get("provider_failure_evidence")
     parallel_requested = metadata.get("parallel_workers_requested")
     parallel_effective = metadata.get("parallel_workers_effective")
     parallel_distribution = metadata.get("parallel_distribution")
@@ -5683,9 +5683,9 @@ def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> Validation
         if isinstance(failing_evidence, list)
         else [],
         provider_failure_evidence=[
-            str(item) for item in provider_failure_evidence if isinstance(item, str)
+            str(item) for item in raw_provider_failure_evidence if isinstance(item, str)
         ]
-        if isinstance(provider_failure_evidence, list)
+        if isinstance(raw_provider_failure_evidence, list)
         else [],
         parallel_workers_requested=(
             int(parallel_requested) if isinstance(parallel_requested, int) else None
