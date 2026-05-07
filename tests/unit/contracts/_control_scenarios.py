@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.api.routes.controls as controls_route
+from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -17,6 +18,7 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
+from awf.service import pr_monitor_adoption as pr_adoption_module
 from tests.unit.contracts._capabilities import CAPABILITIES_BY_NAME
 from tests.unit.contracts._stack import ContractStack
 
@@ -29,6 +31,15 @@ CONTROL_CAPABILITY_NAMES = (
     "refresh_workspace",
     "rebase_workspace",
 )
+CONTROL_CAPABILITY_SET = frozenset(CONTROL_CAPABILITY_NAMES)
+
+NON_CONTROL_IDEMPOTENT_SURFACE_NAMES = (
+    "create_workspace_v1",
+    "create_workspace_v2",
+    "adopt_pr_monitor",
+)
+
+ALL_IDEMPOTENT_SURFACES = CONTROL_CAPABILITY_NAMES + NON_CONTROL_IDEMPOTENT_SURFACE_NAMES
 
 
 async def seed_workspace_for_control(
@@ -146,6 +157,27 @@ def install_control_side_effect_stubs(
     async def fake_stop(_compose_project_name: str | None) -> None:
         return None
 
+    async def fake_pr_adoption_metadata_fetcher(
+        *,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> PullRequestAdoptionMetadata:
+        return PullRequestAdoptionMetadata(
+            number=pr_number,
+            head_ref="feature/idempotent",
+            head_repo_slug=repo.slug(),
+            base_ref="main",
+            head_sha="c" * 40,
+            base_sha="d" * 40,
+            state="OPEN",
+            is_draft=False,
+            closed=False,
+            merged=False,
+            author="octocat",
+            url=f"https://github.com/{repo.slug()}/pull/{pr_number}",
+            title="feature: idempotent adoption",
+        )
+
     class FakeCleaner:
         async def cleanup(
             self,
@@ -162,8 +194,84 @@ def install_control_side_effect_stubs(
 
     monkeypatch.setattr(controls_route, "_stop_project", fake_stop)
     monkeypatch.setattr(controls_route, "_cleaner", FakeCleaner)
+    monkeypatch.setattr(
+        pr_adoption_module,
+        "_default_metadata_fetcher",
+        fake_pr_adoption_metadata_fetcher,
+    )
     contract_stack.service._project_stopper = fake_stop  # type: ignore[attr-defined]
     contract_stack.service._cleaner_factory = FakeCleaner  # type: ignore[attr-defined]
+    contract_stack.service._pr_adoption_metadata_fetcher = (  # type: ignore[attr-defined]
+        fake_pr_adoption_metadata_fetcher
+    )
+
+
+async def seed_workspace_for_idempotent_surface(
+    factory: async_sessionmaker[AsyncSession],
+    capability_name: str,
+) -> tuple[str, int]:
+    if capability_name in CONTROL_CAPABILITY_SET:
+        return await seed_workspace_for_control(factory, capability_name)
+    if capability_name in NON_CONTROL_IDEMPOTENT_SURFACE_NAMES:
+        return "", 0
+    raise AssertionError(f"unknown idempotent surface {capability_name}")
+
+
+async def call_rest_idempotent_surface(
+    contract_stack: ContractStack,
+    capability_name: str,
+    *,
+    workspace_id: str,
+    idempotency_key: str,
+    expected_version: int | None = None,
+    variant: str = "base",
+) -> Any:
+    if capability_name in CONTROL_CAPABILITY_SET:
+        return await call_rest_control(
+            contract_stack,
+            capability_name,
+            workspace_id=workspace_id,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+            variant=variant,
+        )
+
+    capability = CAPABILITIES_BY_NAME[capability_name]
+    headers: dict[str, str] = dict(contract_stack.auth_headers) if capability.auth_required else {}
+    if capability.supports_idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return await contract_stack.client.request(
+        capability.rest_method,
+        capability.rest_path,
+        headers=headers or None,
+        json=idempotent_rest_body(capability_name, variant=variant),
+    )
+
+
+async def call_mcp_idempotent_surface(
+    contract_stack: ContractStack,
+    capability_name: str,
+    *,
+    workspace_id: str,
+    idempotency_key: str,
+    expected_version: int | None = None,
+    variant: str = "base",
+) -> Any:
+    if capability_name in CONTROL_CAPABILITY_SET:
+        return await call_mcp_control(
+            contract_stack,
+            capability_name,
+            workspace_id=workspace_id,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+            variant=variant,
+        )
+
+    capability = CAPABILITIES_BY_NAME[capability_name]
+    args = idempotent_mcp_args(capability_name, variant=variant)
+    if capability.supports_idempotency_key:
+        args["idempotency_key"] = idempotency_key
+    return await contract_stack.mcp.call_tool(capability.mcp_tool or "", args)
 
 
 async def call_rest_control(
@@ -259,12 +367,128 @@ def control_mcp_args(
     return args
 
 
+def idempotent_rest_body(
+    capability_name: str,
+    *,
+    variant: str = "base",
+) -> dict[str, object]:
+    if capability_name == "create_workspace_v1":
+        return {
+            "repo_url": "git@github.com:example/idempotent-create-v1.git",
+            "branch_base": "main",
+            "task_title": (
+                "Idempotent create v1"
+                if variant == "base"
+                else "Changed idempotent create v1"
+            ),
+            "task_prompt": "Exercise create v1 idempotency.",
+            "test_commands": ["pytest -q"],
+        }
+    if capability_name == "create_workspace_v2":
+        return {
+            "repo": {
+                "url": "git@github.com:example/idempotent-create-v2.git",
+                "base_branch": "main",
+            },
+            "task": {
+                "title": (
+                    "Idempotent create v2"
+                    if variant == "base"
+                    else "Changed idempotent create v2"
+                ),
+                "prompt": "Exercise create v2 idempotency.",
+                "agent": "codex",
+                "auto_merge": True,
+            },
+            "validation": {"commands": ["pytest -q"], "requested_tier": 1},
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "contract idempotency override",
+            },
+        }
+    if capability_name == "adopt_pr_monitor":
+        return {
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "auto_merge": variant == "base",
+        }
+    raise AssertionError(f"unknown idempotent surface {capability_name}")
+
+
+def idempotent_mcp_args(
+    capability_name: str,
+    *,
+    variant: str = "base",
+) -> dict[str, object]:
+    if capability_name == "create_workspace_v1":
+        body = idempotent_rest_body(capability_name, variant=variant)
+        return {
+            "repo_url": body["repo_url"],
+            "branch_base": body["branch_base"],
+            "task_title": body["task_title"],
+            "task_prompt": body["task_prompt"],
+            "test_commands": body["test_commands"],
+        }
+    if capability_name == "create_workspace_v2":
+        body = idempotent_rest_body(capability_name, variant=variant)
+        repo = body["repo"]
+        task = body["task"]
+        validation = body["validation"]
+        assert isinstance(repo, dict)
+        assert isinstance(task, dict)
+        assert isinstance(validation, dict)
+        return {
+            "repo_url": repo["url"],
+            "base_branch": repo["base_branch"],
+            "task_title": task["title"],
+            "task_prompt": task["prompt"],
+            "agent": task["agent"],
+            "auto_merge": task["auto_merge"],
+            "validation_commands": validation["commands"],
+            "requested_tier": validation["requested_tier"],
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "contract idempotency override",
+        }
+    if capability_name == "adopt_pr_monitor":
+        return idempotent_rest_body(capability_name, variant=variant)
+    raise AssertionError(f"unknown idempotent surface {capability_name}")
+
+
 def control_success_status(capability_name: str) -> int:
     return 202 if capability_name in {"request_validation", "refresh_workspace", "rebase_workspace"} else 200
 
 
 def response_operation_id_field(capability_name: str) -> str:
     return "id" if capability_name in {"request_validation", "refresh_workspace", "rebase_workspace"} else "operation_id"
+
+
+def idempotent_success_status(capability_name: str) -> int:
+    if capability_name in CONTROL_CAPABILITY_SET:
+        return control_success_status(capability_name)
+    if capability_name in NON_CONTROL_IDEMPOTENT_SURFACE_NAMES:
+        return 202
+    raise AssertionError(f"unknown idempotent surface {capability_name}")
+
+
+def idempotent_response_identity_field(capability_name: str, *, client: str) -> str:
+    if capability_name in CONTROL_CAPABILITY_SET:
+        return response_operation_id_field(capability_name)
+    if capability_name == "create_workspace_v1" and client == "mcp":
+        return "id"
+    if capability_name in NON_CONTROL_IDEMPOTENT_SURFACE_NAMES:
+        return "workspace_id"
+    raise AssertionError(f"unknown idempotent surface {capability_name}")
+
+
+def idempotent_conflict_error_code(capability_name: str) -> str:
+    if capability_name == "adopt_pr_monitor":
+        return "PR_ADOPTION_POLICY_CONFLICT"
+    if capability_name in CONTROL_CAPABILITY_SET or capability_name in {
+        "create_workspace_v1",
+        "create_workspace_v2",
+    }:
+        return "IDEMPOTENCY_CONFLICT"
+    raise AssertionError(f"unknown idempotent surface {capability_name}")
 
 
 def unique_key(capability_name: str, suffix: str) -> str:
