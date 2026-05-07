@@ -57,6 +57,9 @@ class ContractCapability:
     mcp_required_fields: frozenset[str] = field(default_factory=frozenset)
     cli_options: frozenset[str] = field(default_factory=frozenset)
     cli_arguments: frozenset[str] = field(default_factory=frozenset)
+    # Representative client-visible keys. For MCP-backed capabilities, these
+    # must be present in the MCP structuredContent payload; REST models are
+    # tracked separately by rest_response_model.
     response_fields: frozenset[str] = field(default_factory=frozenset)
     auth_required: bool = False
 
@@ -421,7 +424,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             }
         ),
         mcp_required_fields=frozenset({"repo_url", "task_title", "task_prompt"}),
-        response_fields=frozenset({"workspace_id", "status", "version", "status_url"}),
+        response_fields=frozenset({"id", "status", "version"}),
     ),
     ContractCapability(
         name="create_workspace_v2",
