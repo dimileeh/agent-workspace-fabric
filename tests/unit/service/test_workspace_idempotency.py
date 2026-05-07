@@ -473,6 +473,39 @@ async def test_create_v2_replay_uses_stored_resource_request_after_reservation_c
 
 
 @pytest.mark.unit
+async def test_create_v2_replay_skips_plan_for_empty_resource_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        _v2_request(),
+        idempotency_key="service-create-v2-empty-resource-snapshot",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        workspace.task_policy = {
+            **workspace.task_policy,
+            workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY: {},
+        }
+        await session.commit()
+
+    def unexpected_plan(*_: object, **__: object) -> object:
+        raise AssertionError("empty stored resource snapshots should not re-plan")
+
+    monkeypatch.setattr(workspaces, "resource_reservation_plan", unexpected_plan)
+
+    replayed = await service.create_v2(
+        _v2_request(),
+        idempotency_key="service-create-v2-empty-resource-snapshot",
+    )
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
 async def test_create_v2_named_profile_replay_preserves_stored_dind_mode(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
