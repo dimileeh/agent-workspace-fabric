@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.workspaces as workspaces_route
 import awf.service.workspaces as workspace_service
-from awf.common.config import Settings
+from awf.common.config import Settings, get_settings
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -63,6 +65,14 @@ _V2_RETRY_BODY = {
 def _clear_provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in _PROVIDER_AUTH_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture
+def api_auth_headers(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+    get_settings.cache_clear()
+    yield {"Authorization": "Bearer secret"}
+    get_settings.cache_clear()
 
 
 async def _create_failed_workspace(client: AsyncClient, engine: AsyncEngine) -> str:
@@ -150,12 +160,14 @@ async def _create_conformance_failed_workspace(
 async def test_retry_endpoint_creates_new_requested_workspace(
     client: AsyncClient,
     engine: AsyncEngine,
+    api_auth_headers: dict[str, str],
 ) -> None:
     original_id = await _create_failed_workspace(client, engine)
 
     response = await client.post(
         f"/v1/workspaces/{original_id}/retry",
         params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers=api_auth_headers,
     )
 
     assert response.status_code == 202
@@ -170,12 +182,16 @@ async def test_retry_endpoint_creates_new_requested_workspace(
     assert body["events_url"] == f"/v1/workspaces/{body['new_workspace_id']}/events"
 
     operations = await client.get(
-        f"/v1/workspaces/{body['new_workspace_id']}/operations?type=retry"
+        f"/v1/workspaces/{body['new_workspace_id']}/operations?type=retry",
+        headers=api_auth_headers,
     )
     assert operations.status_code == 200
     assert [item["id"] for item in operations.json()["items"]] == [body["operation_id"]]
 
-    retried = await client.get(f"/v1/workspaces/{body['new_workspace_id']}")
+    retried = await client.get(
+        f"/v1/workspaces/{body['new_workspace_id']}",
+        headers=api_auth_headers,
+    )
     assert retried.status_code == 200
     retried_body = retried.json()
     assert retried_body["repo_url"] == _V2_RETRY_BODY["repo"]["url"]
@@ -193,15 +209,35 @@ async def test_retry_endpoint_creates_new_requested_workspace(
 
 
 @pytest.mark.unit
+async def test_retry_endpoint_requires_authorization_when_api_token_configured(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    api_auth_headers: dict[str, str],
+) -> None:
+    _ = api_auth_headers
+    original_id = await _create_failed_workspace(client, engine)
+
+    response = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
 async def test_retry_endpoint_reports_unrecoverable_conformance_salvage_failure(
     client: AsyncClient,
     engine: AsyncEngine,
+    api_auth_headers: dict[str, str],
 ) -> None:
     original_id = await _create_conformance_failed_workspace(client, engine)
 
     response = await client.post(
         f"/v1/workspaces/{original_id}/retry",
         params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers=api_auth_headers,
     )
 
     assert response.status_code == 409
@@ -242,12 +278,14 @@ async def test_retry_route_direct_success_returns_retry_response(
 async def test_retry_endpoint_accepts_cancelled_workspace(
     client: AsyncClient,
     engine: AsyncEngine,
+    api_auth_headers: dict[str, str],
 ) -> None:
     original_id = await _create_cancelled_workspace(client, engine)
 
     response = await client.post(
         f"/v1/workspaces/{original_id}/retry",
         params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers=api_auth_headers,
     )
 
     assert response.status_code == 202
@@ -257,20 +295,32 @@ async def test_retry_endpoint_accepts_cancelled_workspace(
 
 
 @pytest.mark.unit
-async def test_retry_endpoint_rejects_missing_workspace(client: AsyncClient) -> None:
-    response = await client.post("/v1/workspaces/ws_missing_retry/retry")
+async def test_retry_endpoint_rejects_missing_workspace(
+    client: AsyncClient,
+    api_auth_headers: dict[str, str],
+) -> None:
+    response = await client.post(
+        "/v1/workspaces/ws_missing_retry/retry",
+        headers=api_auth_headers,
+    )
 
     assert response.status_code == 404
     assert response.json()["error_code"] == "WORKSPACE_NOT_FOUND"
 
 
 @pytest.mark.unit
-async def test_retry_endpoint_rejects_non_terminal_workspace(client: AsyncClient) -> None:
+async def test_retry_endpoint_rejects_non_terminal_workspace(
+    client: AsyncClient,
+    api_auth_headers: dict[str, str],
+) -> None:
     created = await client.post("/v2/workspaces", json=_V2_RETRY_BODY)
     assert created.status_code == 202
     workspace_id = str(created.json()["workspace_id"])
 
-    response = await client.post(f"/v1/workspaces/{workspace_id}/retry")
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/retry",
+        headers=api_auth_headers,
+    )
 
     assert response.status_code == 409
     body = response.json()
@@ -284,6 +334,7 @@ async def test_retry_endpoint_blocks_missing_provider_readiness(
     client: AsyncClient,
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
+    api_auth_headers: dict[str, str],
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     original_id = await _create_failed_workspace(client, engine)
@@ -293,7 +344,10 @@ async def test_retry_endpoint_blocks_missing_provider_readiness(
         lambda: Settings(_env_file=None, host_home=str(tmp_path / "home"), docker_host=""),
     )
 
-    response = await client.post(f"/v1/workspaces/{original_id}/retry")
+    response = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        headers=api_auth_headers,
+    )
 
     assert response.status_code == 409
     body = response.json()
@@ -309,6 +363,7 @@ async def test_retry_endpoint_override_records_preflight(
     client: AsyncClient,
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
+    api_auth_headers: dict[str, str],
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     original_id = await _create_failed_workspace(client, engine)
@@ -324,6 +379,7 @@ async def test_retry_endpoint_override_records_preflight(
             "provider_readiness_override": "true",
             "provider_readiness_override_reason": "operator verified local auth",
         },
+        headers=api_auth_headers,
     )
 
     assert response.status_code == 202
