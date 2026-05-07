@@ -1269,10 +1269,16 @@ def _coderabbit_review_evidence_times(
     evidence: list[_CodeRabbitReviewEvidence] = []
     for node in review_nodes:
         author = _dig(node, "author", "login")
-        if _is_coderabbit_author(author):
+        submitted_at = _parse_github_datetime(node.get("submittedAt"))
+        state = (node.get("state") or "").upper()
+        if (
+            _is_coderabbit_author(author)
+            and state != "PENDING"
+            and submitted_at is not None
+        ):
             evidence.append(
                 _CodeRabbitReviewEvidence(
-                    submitted_at=_parse_github_datetime(node.get("submittedAt")),
+                    submitted_at=submitted_at,
                     commit_oid=_clean_optional_str(_dig(node, "commit", "oid")),
                 )
             )
