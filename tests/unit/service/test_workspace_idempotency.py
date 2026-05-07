@@ -168,6 +168,31 @@ async def test_create_v2_resolves_lazy_disk_check_after_idempotency_replay(
 
 
 @pytest.mark.unit
+async def test_create_v2_auto_profile_replay_conflicts_with_matching_v1_row(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+
+    created = await service.create(
+        _v1_request(),
+        idempotency_key="service-create-v1-then-v2-auto",
+    )
+
+    v2_payload = _v2_request().model_dump(mode="python")
+    v2_payload["task"]["title"] = "Serialize v1 create"
+    v2_payload["task"]["prompt"] = "Exercise serialized idempotency lookup."
+    v2_payload["preflight"] = {}
+    request = WorkspaceCreateV2Request.model_validate(v2_payload)
+
+    assert created.id.startswith("ws_")
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create_v2(
+            request,
+            idempotency_key="service-create-v1-then-v2-auto",
+        )
+
+
+@pytest.mark.unit
 async def test_create_v2_auto_profile_replay_conflicts_when_requested_tier_changes(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

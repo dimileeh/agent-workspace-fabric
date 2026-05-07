@@ -1114,14 +1114,26 @@ def workspace_create_v2_payload_matches(
 
 
 def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateV2Request) -> bool:
-    if existing.profile_ref == payload.workspace.profile_ref:
-        return True
-    return (
-        existing.profile_ref is None
-        and payload.workspace.profile_ref == "auto"
-        and existing.requested_profile is None
-        and payload.workspace.profile is None
-    )
+    if existing.profile_ref is not None:
+        return existing.profile_ref == payload.workspace.profile_ref
+    if payload.workspace.profile_ref not in (None, "auto"):
+        return False
+    if (
+        payload.workspace.profile_ref == "auto"
+        and (existing.requested_profile is not None or payload.workspace.profile is not None)
+    ):
+        return False
+    return _has_v2_create_artifact(existing)
+
+
+def _has_v2_create_artifact(existing: Workspace) -> bool:
+    try:
+        state = sa_inspect(existing)
+    except NoInspectionAvailable:
+        return getattr(existing, "task_attempt", None) is not None
+    if "task_attempt" in state.unloaded:
+        return False
+    return existing.task_attempt is not None
 
 
 def _auto_profile_request(payload: WorkspaceCreateV2Request) -> bool:
