@@ -168,6 +168,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           body
           isMinimized
           createdAt
+          updatedAt
           url
           author { login }
         }
@@ -278,6 +279,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
           body
           isMinimized
           createdAt
+          updatedAt
           url
           author { login }
         }
@@ -762,6 +764,7 @@ class GitHubClient:
             if _is_superseded_coderabbit_skip_issue_comment(
                 body,
                 author=author,
+                updated_at=_parse_github_datetime(node.get("updatedAt")),
                 created_at=_parse_github_datetime(node.get("createdAt")),
                 review_evidence_times=coderabbit_review_evidence_times,
             ):
@@ -1265,6 +1268,7 @@ def _is_superseded_coderabbit_skip_issue_comment(
     body: str,
     *,
     author: str | None,
+    updated_at: datetime | None,
     created_at: datetime | None,
     review_evidence_times: tuple[datetime, ...],
 ) -> bool:
@@ -1272,9 +1276,10 @@ def _is_superseded_coderabbit_skip_issue_comment(
         return False
     if not review_evidence_times:
         return False
-    if created_at is None:
+    changed_at = updated_at or created_at
+    if changed_at is None:
         return False
-    return any(evidence_at > created_at for evidence_at in review_evidence_times)
+    return any(evidence_at > changed_at for evidence_at in review_evidence_times)
 
 
 def _is_coderabbit_author(author: str | None) -> bool:
