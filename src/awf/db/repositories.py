@@ -82,6 +82,7 @@ from awf.db.models import (
     WorkspaceLogStream,
     WorkspaceSecretLease,
 )
+from awf.db.utils import escape_like_pattern as _escape_like_pattern
 from awf.runtime.merge_eligibility import DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
 from awf.service.scheduler import scheduler_order_key, scheduler_score_from_workspace
 
@@ -3755,10 +3756,6 @@ def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -
     if unsigned >= 1 << 63:
         return unsigned - (1 << 64)
     return unsigned
-
-
-def _escape_like_pattern(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _operation_idempotency_advisory_lock_key(key: str) -> int:

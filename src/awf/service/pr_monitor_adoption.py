@@ -37,6 +37,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.db.utils import escape_like_pattern as _escape_like_pattern
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
 
@@ -936,10 +937,6 @@ def _raise_if_existing_workspace_is_not_requested_adoption(
             "existing_pr_adoption_pr_number": existing_pr_number,
         },
     )
-
-
-def _escape_like_pattern(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _raise_if_policy_conflicts(
