@@ -121,7 +121,7 @@ Adoption maps to `POST /v1/workspaces/adopt-pr` and returns
 `PullRequestMonitorAdoptionResponse`. AWF derives deterministic repo/PR
 idempotency; callers do not provide an `Idempotency-Key`. See
 [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for GitHub auth readiness,
-monitor policy, terminal-row current behavior, console inspection, and the
+monitor policy, terminal-row reuse behavior, console inspection, and the
 mocked-local demo path.
 
 `awf_get_workspace_runtime` arguments:

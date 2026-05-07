@@ -10,8 +10,9 @@ The supported adoption surfaces are:
 - CLI: `awf workspace adopt-pr`
 - MCP: `awf_adopt_pull_request_monitor`
 
-The console does not start adoption today. Use REST, CLI, or MCP to create the
-adopted monitor workspace, then use the console to inspect and recover it.
+The console is an inspection and recovery surface for adopted monitor workspaces.
+Start adoption through REST, CLI, or MCP, then use the console to inspect and
+recover it.
 
 ## Preflight
 
@@ -136,8 +137,8 @@ policies. If the first request omitted the grace override, later REST or MCP
 retries must also omit it or send `null`; if the first request set `900`,
 retries must set `900`.
 
-Current behavior: deterministic adoption-key reuse does not yet distinguish
-terminal adoption rows. A previous terminal row can still satisfy the
+Adoption-key reuse behavior: deterministic adoption-key reuse does not
+distinguish terminal adoption rows. A previous terminal row can still satisfy the
 deterministic adoption key, so a destroyed, cancelled, failed, or superseded
 adoption row may be returned as `attached_existing=true` even though the prior
 monitor is not landed. Inspect the returned workspace status before assuming a
@@ -203,7 +204,7 @@ Use recovery controls when the monitor is stale, stranded, blocked on validation
 freshness, or needs an operator-initiated refresh. Mutating controls require
 auditable reasons and, where the REST API requires it, an `Idempotency-Key`.
 
-CLI currently exposes remonitor and retry:
+CLI supports remonitor and retry:
 
 ```bash
 awf workspace remonitor ws_123 \

@@ -110,14 +110,14 @@ def _admin_url(database_url: str) -> str:
 
 def _test_schema_url(
     database_url: str,
-    quoted_schema: str,
+    schema: str,
     *,
     null_pool: bool = False,
     connect_retries: bool = False,
 ) -> str:
     return _schema_url(
         database_url,
-        quoted_schema,
+        schema,
         null_pool=null_pool,
         connect_retries=connect_retries,
     )
@@ -408,7 +408,7 @@ async def postgres_test_engine() -> AsyncIterator[AsyncEngine]:
             schema_created = True
         schema_database_url = _test_schema_url(
             database_url,
-            quoted_schema,
+            schema,
             null_pool=True,
             connect_retries=True,
         )
@@ -481,7 +481,7 @@ async def create_postgres_test_engine() -> AsyncEngine:
             engine = await _create_metadata_engine(
                 _test_schema_url(
                     database_url,
-                    quoted_schema,
+                    schema,
                     null_pool=True,
                     connect_retries=True,
                 )
@@ -517,7 +517,7 @@ async def postgres_test_url() -> AsyncIterator[str]:
             schema_created = True
             schema_database_url = _test_schema_url(
                 database_url,
-                quoted_schema,
+                schema,
                 null_pool=True,
                 connect_retries=True,
             )
@@ -554,7 +554,7 @@ def postgres_test_url_sync() -> Iterator[str]:
                 schema_created = True
                 schema_database_url = _test_schema_url(
                     database_url,
-                    quoted_schema,
+                    schema,
                     null_pool=True,
                     connect_retries=True,
                 )
@@ -600,7 +600,7 @@ async def postgres_empty_test_url() -> AsyncIterator[str]:
         async with _postgres_schema_ddl_lock(admin_engine) as admin_conn:
             await _create_schema(admin_conn, quoted_schema)
             schema_created = True
-        yield _test_schema_url(database_url, quoted_schema, connect_retries=True)
+        yield _test_schema_url(database_url, schema, connect_retries=True)
     finally:
         try:
             if schema_created:

@@ -668,7 +668,7 @@ curl -X POST "http://localhost:8000/v1/workspaces/ws_123/rebase" \
 
 See [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for the CLI/MCP equivalents,
 GitHub auth readiness, `auto_merge=true` versus manual monitor policy,
-terminal-row current behavior, console inspection, and mocked-local demo path.
+terminal-row reuse behavior, console inspection, and mocked-local demo path.
 
 ---
 

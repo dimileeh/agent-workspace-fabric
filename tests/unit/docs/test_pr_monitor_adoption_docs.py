@@ -126,8 +126,8 @@ def test_runbook_covers_auth_policy_idempotency_and_terminal_behavior() -> None:
     ):
         assert idempotency_term in doc
 
-    for current_terminal_term in (
-        "Current behavior",
+    for terminal_reuse_term in (
+        "Adoption-key reuse behavior",
         "terminal row can still satisfy",
         "destroyed",
         "cancelled",
@@ -135,7 +135,14 @@ def test_runbook_covers_auth_policy_idempotency_and_terminal_behavior() -> None:
         "superseded",
         "not landed",
     ):
-        assert current_terminal_term in doc
+        assert terminal_reuse_term in doc
+
+    for non_evergreen_phrase in (
+        "does not start adoption today",
+        "CLI currently exposes",
+        "Current behavior",
+    ):
+        assert non_evergreen_phrase not in doc
 
 
 @pytest.mark.unit
