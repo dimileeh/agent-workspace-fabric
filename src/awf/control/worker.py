@@ -972,7 +972,7 @@ class ControlWorker:
             event_floor=event_floor,
         )
         if latest_preservation is None:
-            return True
+            return False
         return _utc_datetime(latest_refresh) >= _utc_datetime(latest_preservation)
 
     async def _has_current_preserved_active_execution(
