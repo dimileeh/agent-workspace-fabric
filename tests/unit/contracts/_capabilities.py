@@ -424,7 +424,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             }
         ),
         mcp_required_fields=frozenset({"repo_url", "task_title", "task_prompt"}),
-        response_fields=frozenset({"id", "status", "version"}),
+        response_fields=frozenset({"workspace_id", "status", "version", "status_url"}),
     ),
     ContractCapability(
         name="create_workspace_v2",

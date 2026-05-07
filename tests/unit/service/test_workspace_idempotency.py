@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -104,6 +106,155 @@ def _ok_disk_check() -> DiskCheck:
         reason="SUFFICIENT_DISK",
         detail=None,
     )
+
+
+@pytest.mark.unit
+async def test_resolve_disk_check_factory_accepts_sync_result() -> None:
+    disk_check = _ok_disk_check()
+
+    resolved = await workspaces._resolve_disk_check_factory(lambda: disk_check)  # noqa: SLF001
+
+    assert resolved is disk_check
+
+
+@pytest.mark.unit
+def test_v2_idempotency_helper_edges_use_durable_request_snapshots() -> None:
+    legacy_resources = _v2_request(resources={"cpu": 2.0, "memory": "4096mb"})
+
+    assert workspaces._requested_resource_reservation_values(legacy_resources) == {  # noqa: SLF001
+        "steady_cpu": 2.0,
+        "peak_cpu": 2.0,
+        "steady_memory_gb": 4.0,
+        "peak_memory_gb": 4.0,
+    }
+    assert workspaces._owned_path_hints_match(["src/awf"], ["src/awf"])  # noqa: SLF001
+    assert not workspaces._owned_path_hints_match(  # noqa: SLF001
+        ["src/awf", "tests/unit"],
+        ["tests/unit", "src/awf"],
+    )
+    assert not workspaces._owned_path_hints_match(["src/awf"], ["./src/awf"])  # noqa: SLF001
+    assert workspaces._has_v2_create_artifact(SimpleNamespace(task_attempt=object()))  # noqa: SLF001
+    assert not workspaces._has_v2_create_artifact(SimpleNamespace(task_attempt=None))  # noqa: SLF001
+    assert not workspaces._profile_ref_matches(  # noqa: SLF001
+        SimpleNamespace(
+            profile_ref=None,
+            requested_profile={"name": "inline"},
+            task_attempt=object(),
+        ),
+        _v2_request(profile_ref="auto"),
+    )
+    assert not workspaces._legacy_validation_requested_tier_unknown(  # noqa: SLF001
+        SimpleNamespace(
+            profile_ref="python",
+            requested_profile={"name": "inline"},
+            resolved_profile=None,
+        ),
+        _v2_request(profile_ref="python"),
+    )
+    assert not workspaces._legacy_validation_requested_tier_unknown(  # noqa: SLF001
+        SimpleNamespace(
+            profile_ref="python",
+            requested_profile=None,
+            resolved_profile=None,
+        ),
+        _v2_request(profile_ref="node"),
+    )
+
+
+@pytest.mark.unit
+def test_v2_resource_snapshot_helpers_reject_malformed_values() -> None:
+    assert not workspaces._resource_reservation_matches_request_values(  # noqa: SLF001
+        SimpleNamespace(
+            steady_cpu=2.0,
+            steady_memory_gb=4.0,
+            peak_cpu=4.0,
+            peak_memory_gb=8.0,
+            disk_mb=1024,
+        ),
+        {"steady_cpu": 3.0},
+    )
+    assert (
+        workspaces._stored_resource_reservation_request_values(  # noqa: SLF001
+            SimpleNamespace(
+                task_policy={
+                    workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY: {"steady_cpu": True}
+                }
+            )
+        )
+        is None
+    )
+    assert (
+        workspaces._stored_resource_reservation_request_values(  # noqa: SLF001
+            SimpleNamespace(
+                task_policy={
+                    workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY: {"disk_mb": 1.5}
+                }
+            )
+        )
+        is None
+    )
+    assert (
+        workspaces._stored_resource_reservation_request_values(  # noqa: SLF001
+            SimpleNamespace(
+                task_policy={
+                    workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY: {
+                        "steady_memory_gb": "large"
+                    }
+                }
+            )
+        )
+        is None
+    )
+    assert (
+        workspaces._latest_workspace_resource_reservation(  # noqa: SLF001
+            SimpleNamespace(
+                resource_reservations=[
+                    SimpleNamespace(id="older", reserved_at=datetime(2026, 1, 1, tzinfo=UTC)),
+                    SimpleNamespace(id="newer", reserved_at=datetime(2026, 1, 2, tzinfo=UTC)),
+                ]
+            )
+        ).id
+        == "newer"
+    )
+    assert (
+        workspaces._stored_resource_reservation_matches(  # noqa: SLF001
+            SimpleNamespace(
+                task_policy={},
+                resource_reservations=[],
+                resolved_profile=None,
+            ),
+            _v2_request(),
+            settings=None,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_v2_resource_snapshot_helpers_do_not_lazy_load_unloaded_reservations(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    created = await WorkspaceService(factory).create_v2(
+        _v2_request(),
+        idempotency_key="service-create-v2-unloaded-reservation-helper",
+    )
+
+    async with factory() as session:
+        workspace = await session.get(Workspace, created.id)
+        assert workspace is not None
+        session.expire(workspace, ["resource_reservations"])
+
+        assert workspaces._latest_workspace_resource_reservation(workspace) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_v2_validation_tier_helper_falls_back_to_resolved_profile() -> None:
+    assert workspaces._stored_validation_requested_tier(  # noqa: SLF001
+        SimpleNamespace(
+            task_policy={},
+            resolved_profile={"validation": {"requested_tier": 3}},
+        )
+    ) == 3
 
 
 @pytest.mark.unit
@@ -605,6 +756,39 @@ async def test_create_v2_replay_uses_stored_resource_request_after_reservation_c
 
 
 @pytest.mark.unit
+async def test_create_v2_legacy_replay_allows_explicit_resource_matching_prior_default(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        _v2_request(),
+        idempotency_key="service-create-v2-legacy-default-then-explicit-resource",
+    )
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(created.id)
+        steady_cpu = reservations[0].steady_cpu
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        task_policy = dict(workspace.task_policy)
+        task_policy.pop(workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY, None)
+        workspace.task_policy = task_policy
+        await session.commit()
+
+    replayed = await service.create_v2(
+        _v2_request(resources={"steady_state_cpu_cores": steady_cpu}),
+        idempotency_key="service-create-v2-legacy-default-then-explicit-resource",
+    )
+
+    assert replayed.id == created.id
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create_v2(
+            _v2_request(resources={"steady_state_cpu_cores": steady_cpu + 1.0}),
+            idempotency_key="service-create-v2-legacy-default-then-explicit-resource",
+        )
+
+
+@pytest.mark.unit
 async def test_create_v2_persists_and_replays_empty_resource_snapshot(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -674,3 +858,42 @@ async def test_create_v2_named_profile_replay_preserves_stored_dind_mode(
 
     assert replayed.id == created.id
     assert reservations[0].dind_slots == 1
+
+
+@pytest.mark.unit
+async def test_create_v2_named_profile_replay_uses_stored_resource_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def resolve_named_profile(**_: object) -> ProfileResolution:
+        return ProfileResolution(
+            profile=WorkspaceProfile(
+                name="mutable-dind",
+                source="test:mutable-dind",
+                docker=ProfileDocker(mode=DockerMode.dind),
+            ),
+            network_posture="restricted",
+            reason="test profile fixture",
+            candidates_considered=["registry:mutable-dind"],
+        )
+
+    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_named_profile)
+    request = _v2_request(profile_ref="mutable-dind")
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-named-profile-stored-resource-snapshot",
+    )
+
+    def fail_profile_resolution(**_: object) -> ProfileResolution:
+        raise AssertionError("idempotency replay should not resolve mutable profiles")
+
+    monkeypatch.setattr(workspaces, "resolve_workspace_profile", fail_profile_resolution)
+
+    replayed = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-named-profile-stored-resource-snapshot",
+    )
+
+    assert replayed.id == created.id

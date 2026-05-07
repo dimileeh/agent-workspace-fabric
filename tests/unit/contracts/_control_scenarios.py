@@ -481,8 +481,6 @@ def idempotent_success_status(capability_name: str) -> int:
 def idempotent_response_identity_field(capability_name: str, *, client: str) -> str:
     if capability_name in CONTROL_CAPABILITY_SET:
         return response_operation_id_field(capability_name)
-    if capability_name == "create_workspace_v1" and client == "mcp":
-        return "id"
     if capability_name in NON_CONTROL_IDEMPOTENT_SURFACE_NAMES:
         return "workspace_id"
     raise AssertionError(f"unknown idempotent surface {capability_name}")

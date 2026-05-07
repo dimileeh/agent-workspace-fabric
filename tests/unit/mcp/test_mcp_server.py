@@ -189,6 +189,11 @@ async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
     return payload
 
 
+def _workspace_id(payload: object) -> str:
+    assert isinstance(payload, dict)
+    return str(payload["workspace_id"])
+
+
 def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
     any_of = schema.get("anyOf")
     assert isinstance(any_of, list)
@@ -696,15 +701,18 @@ class TestOperationTools:
 
 class TestCreateWorkspace:
     @pytest.mark.unit
-    async def test_happy_path_returns_workspace_payload(self, mcp) -> None:  # type: ignore[no-untyped-def]
+    async def test_happy_path_returns_accepted_payload(self, mcp) -> None:  # type: ignore[no-untyped-def]
         payload = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
 
         assert isinstance(payload, dict)
+        workspace_id = str(payload["workspace_id"])
         assert payload["status"] == "requested"
-        assert payload["id"].startswith("ws_")
-        assert payload["task_title"] == _CREATE_ARGS["task_title"]
-        assert payload["agent"] == "codex"
-        assert payload["test_commands"] == ["pytest -q"]
+        assert workspace_id.startswith("ws_")
+        assert payload["status_url"] == f"/v1/workspaces/{workspace_id}"
+        assert payload["events_url"] == f"/v1/workspaces/{workspace_id}/events"
+        assert "accepted_at" in payload
+        assert "id" not in payload
+        assert "task_title" not in payload
 
     @pytest.mark.unit
     async def test_idempotency_key_replays_or_conflicts(self, mcp) -> None:  # type: ignore[no-untyped-def]
@@ -719,7 +727,7 @@ class TestCreateWorkspace:
 
         assert isinstance(first, dict)
         assert isinstance(replay, dict)
-        assert replay["id"] == first["id"]
+        assert _workspace_id(replay) == _workspace_id(first)
         assert isinstance(conflict, CallToolResult)
         assert conflict.isError is True
         assert conflict.structuredContent is not None
@@ -1034,7 +1042,7 @@ class TestWorkspaceControls:
         mcp,
     ) -> None:  # type: ignore[no-untyped-def]
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        workspace_id = str(created["id"])  # type: ignore[index]
+        workspace_id = _workspace_id(created)
 
         payload = await _call(
             mcp,
@@ -1080,7 +1088,7 @@ class TestWorkspaceControls:
         from mcp.types import CallToolResult
 
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        workspace_id = str(created["id"])  # type: ignore[index]
+        workspace_id = _workspace_id(created)
 
         result = await mcp.call_tool(
             "awf_destroy_workspace",
@@ -1609,7 +1617,7 @@ class TestGetAndList:
     @pytest.mark.unit
     async def test_get_returns_the_workspace_just_created(self, mcp) -> None:  # type: ignore[no-untyped-def]
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = created["id"]  # type: ignore[index]
+        ws_id = _workspace_id(created)
 
         fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
         assert fetched is not None
@@ -1627,7 +1635,7 @@ class TestGetAndList:
         for title in ["first", "second", "third"]:
             args = {**_CREATE_ARGS, "task_title": title}
             created = await _call(mcp, "awf_create_workspace", args)
-            ids.append(created["id"])  # type: ignore[index]
+            ids.append(_workspace_id(created))
 
         listed = await _call(mcp, "awf_list_workspaces", {"limit": 10})
         assert isinstance(listed, list)
@@ -1687,7 +1695,11 @@ class TestGetAndList:
 
         async with factory() as session:
             repo = WorkspaceRepository(session)
-            for workspace_id in (matching["id"], wrong_agent["id"], wrong_repo["id"]):
+            for workspace_id in (
+                _workspace_id(matching),
+                _workspace_id(wrong_agent),
+                _workspace_id(wrong_repo),
+            ):
                 workspace = await repo.get(str(workspace_id))
                 assert workspace is not None
                 await repo.transition(
@@ -1710,8 +1722,8 @@ class TestGetAndList:
         )
 
         assert isinstance(listed, list)
-        assert [row["id"] for row in listed] == [matching["id"]]
-        assert wrong_status["id"] not in [row["id"] for row in listed]
+        assert [row["id"] for row in listed] == [_workspace_id(matching)]
+        assert _workspace_id(wrong_status) not in [row["id"] for row in listed]
 
 
 class TestWaitForWorkspace:
@@ -1720,7 +1732,7 @@ class TestWaitForWorkspace:
         # Simulate a workspace that's already terminal by creating one and
         # configuring the terminal_statuses to include 'requested'.
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = created["id"]  # type: ignore[index]
+        ws_id = _workspace_id(created)
 
         result = await _call(
             mcp,
@@ -1738,7 +1750,7 @@ class TestWaitForWorkspace:
     @pytest.mark.unit
     async def test_returns_current_state_on_timeout(self, mcp) -> None:  # type: ignore[no-untyped-def]
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = created["id"]  # type: ignore[index]
+        ws_id = _workspace_id(created)
 
         # Pick terminal statuses the workspace will never reach + tight timeout.
         result = await _call(
@@ -1782,8 +1794,8 @@ class TestWorkspaceEvents:
             "awf_create_workspace",
             {**_CREATE_ARGS, "task_title": "second"},
         )
-        first_id = str(first["id"])  # type: ignore[index]
-        second_id = str(second["id"])  # type: ignore[index]
+        first_id = _workspace_id(first)
+        second_id = _workspace_id(second)
         base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
 
         async with factory() as session:

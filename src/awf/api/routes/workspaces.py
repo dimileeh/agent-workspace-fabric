@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated, cast
@@ -89,7 +88,6 @@ from awf.service.workspaces import (
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
 router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
 DiskCheckProvider = Callable[[Settings], DiskCheck]
-_REDACTED_TEXT = "<redacted>"
 _logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -565,133 +563,3 @@ def _payloads_match_v2(
     settings: Settings | None = None,
 ) -> bool:
     return workspace_create_v2_payload_matches(existing, payload, settings=settings)
-
-
-def _resolved_profile_requested_tier(existing: Workspace) -> int | None:
-    profile = existing.resolved_profile
-    if profile is None:
-        return None
-    validation = profile.get("validation")
-    if not isinstance(validation, dict):
-        return None
-    tier = validation.get("requested_tier")
-    return tier if isinstance(tier, int) else None
-
-
-def _requested_task_out_of_scope_policy(
-    payload: WorkspaceCreateV2Request,
-) -> dict[str, object] | None:
-    if payload.task.out_of_scope_changes is None:
-        return None
-    return payload.task.out_of_scope_changes.model_dump(mode="json")
-
-
-def _stored_task_out_of_scope_policy(existing: Workspace) -> dict[str, object] | None:
-    out_of_scope = existing.task_policy.get("out_of_scope_changes")
-    return out_of_scope if isinstance(out_of_scope, dict) else None
-
-
-def _requested_task_provider_recovery_policy(
-    payload: WorkspaceCreateV2Request,
-) -> dict[str, object] | None:
-    if payload.task.provider_recovery is None:
-        return None
-    return payload.task.provider_recovery.model_dump(
-        mode="json",
-        exclude_none=True,
-        exclude_unset=True,
-    )
-
-
-def _stored_task_provider_recovery_policy(
-    existing: Workspace,
-) -> dict[str, object] | None:
-    provider_recovery = existing.task_policy.get("provider_recovery")
-    return provider_recovery if isinstance(provider_recovery, dict) else None
-
-
-def _stored_task_agent_model(existing: Workspace) -> str | None:
-    model = existing.task_policy.get("agent_model")
-    return model if isinstance(model, str) and model else None
-
-
-def _requested_provider_readiness_override(
-    payload: WorkspaceCreateV2Request,
-) -> tuple[bool, str | None]:
-    return (
-        payload.preflight.provider_readiness_override,
-        _normalized_provider_readiness_override_reason(
-            payload.preflight.provider_readiness_override_reason
-        ),
-    )
-
-
-def _stored_task_provider_readiness_override(
-    existing: Workspace,
-) -> tuple[bool, str | None]:
-    preflight = workspace_provider_readiness_preflight(existing)
-    if preflight is None:
-        return (False, None)
-    reason = preflight.get("override_reason")
-    override_requested = preflight.get("override_requested")
-    return (
-        override_requested
-        if isinstance(override_requested, bool)
-        else preflight.get("override_used") is True,
-        reason if isinstance(reason, str) else None,
-    )
-
-
-def _task_provider_readiness_override_matches(
-    existing: Workspace,
-    payload: WorkspaceCreateV2Request,
-) -> bool:
-    stored_override, stored_reason = _stored_task_provider_readiness_override(existing)
-    stored_redaction_parts = _stored_task_provider_readiness_override_redaction_parts(existing)
-    requested_override, requested_reason = _requested_provider_readiness_override(payload)
-    return stored_override == requested_override and _override_reasons_match(
-        stored_reason,
-        requested_reason,
-        stored_redaction_parts=stored_redaction_parts,
-    )
-
-
-def _normalized_provider_readiness_override_reason(reason: str | None) -> str | None:
-    if reason is None:
-        return None
-    normalized = reason.strip()
-    return normalized or None
-
-
-def _override_reasons_match(
-    stored_reason: str | None,
-    requested_reason: str | None,
-    *,
-    stored_redaction_parts: list[str] | None = None,
-) -> bool:
-    if stored_reason == requested_reason:
-        return True
-    if stored_reason is None or requested_reason is None:
-        return False
-    if stored_redaction_parts is None:
-        return False
-
-    # Stored preflight snapshots are redacted at create time. Treat those
-    # actual redacted spans as stable wildcards so replays do not depend on
-    # today's service secret set after token rotation.
-    if _REDACTED_TEXT.join(stored_redaction_parts) != stored_reason:
-        return False
-    pattern = ".+".join(re.escape(part) for part in stored_redaction_parts)
-    return re.fullmatch(pattern, requested_reason, flags=re.DOTALL) is not None
-
-
-def _stored_task_provider_readiness_override_redaction_parts(
-    existing: Workspace,
-) -> list[str] | None:
-    preflight = workspace_provider_readiness_preflight(existing)
-    if preflight is None:
-        return None
-    parts = preflight.get("override_reason_redaction_parts")
-    if not isinstance(parts, list) or len(parts) < 2:
-        return None
-    return cast(list[str], parts) if all(isinstance(part, str) for part in parts) else None

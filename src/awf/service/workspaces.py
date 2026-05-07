@@ -1181,6 +1181,8 @@ def _stored_resource_reservation_matches(
     *,
     settings: Settings | None,
 ) -> bool:
+    # Kept for caller compatibility; replay matching must not re-plan mutable defaults.
+    del settings
     reservation = _latest_workspace_resource_reservation(existing)
     requested_values = _requested_resource_reservation_values(payload)
     stored_dind_slots = _stored_resource_dind_slots(existing, payload)
@@ -1191,16 +1193,6 @@ def _stored_resource_reservation_matches(
     if reservation is None:
         return False
 
-    plan = resource_reservation_plan(payload, settings=settings or get_settings())
-    if (
-        reservation.steady_cpu == plan.steady_cpu
-        and reservation.steady_memory_gb == plan.steady_memory_gb
-        and reservation.peak_cpu == plan.peak_cpu
-        and reservation.peak_memory_gb == plan.peak_memory_gb
-        and reservation.disk_mb == plan.disk_mb
-        and reservation.dind_slots == plan.dind_slots
-    ):
-        return True
     return (
         _resource_reservation_matches_request_values(reservation, requested_values)
         and reservation.dind_slots == stored_dind_slots

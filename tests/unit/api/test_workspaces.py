@@ -40,6 +40,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.service import workspaces as workspaces_service
 from awf.service.disk import DiskCheck
 
 pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
@@ -188,7 +189,7 @@ def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() ->
     payload = WorkspaceCreateV2Request.model_validate(body)
     existing = SimpleNamespace(task_policy={})
 
-    assert workspaces_route._requested_task_provider_recovery_policy(payload) == {
+    assert workspaces_service._requested_task_provider_recovery_policy(payload) == {  # noqa: SLF001
         "fallbacks": [
             {
                 "agent": "opencode",
@@ -198,7 +199,7 @@ def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() ->
         ],
         "max_fallback_attempts": 1,
     }
-    assert workspaces_route._stored_task_provider_readiness_override(existing) == (
+    assert workspaces_service._stored_task_provider_readiness_override(existing) == (  # noqa: SLF001
         False,
         None,
     )
@@ -206,12 +207,12 @@ def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() ->
 
 @pytest.mark.unit
 def test_provider_readiness_override_reason_match_redaction_edges() -> None:
-    assert workspaces_route._override_reasons_match("same", "same") is True
-    assert workspaces_route._override_reasons_match(None, "reason") is False
-    assert workspaces_route._override_reasons_match("reason", None) is False
-    assert workspaces_route._override_reasons_match("stored", "requested") is False
+    assert workspaces_service._override_reasons_match("same", "same") is True  # noqa: SLF001
+    assert workspaces_service._override_reasons_match(None, "reason") is False  # noqa: SLF001
+    assert workspaces_service._override_reasons_match("reason", None) is False  # noqa: SLF001
+    assert workspaces_service._override_reasons_match("stored", "requested") is False  # noqa: SLF001
     assert (
-        workspaces_route._override_reasons_match(
+        workspaces_service._override_reasons_match(  # noqa: SLF001
             "stored",
             "prefix-secret-suffix",
             stored_redaction_parts=["prefix-", "-suffix"],
@@ -234,15 +235,21 @@ def test_provider_readiness_override_reason_match_redaction_edges() -> None:
     )
 
     assert (
-        workspaces_route._stored_task_provider_readiness_override_redaction_parts(missing_preflight)
+        workspaces_service._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+            missing_preflight
+        )
         is None
     )
     assert (
-        workspaces_route._stored_task_provider_readiness_override_redaction_parts(malformed_parts)
+        workspaces_service._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+            malformed_parts
+        )
         is None
     )
     assert (
-        workspaces_route._stored_task_provider_readiness_override_redaction_parts(non_string_parts)
+        workspaces_service._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+            non_string_parts
+        )
         is None
     )
 
@@ -2168,19 +2175,23 @@ class TestCreateWorkspaceV2PolicyMetadata:
         )
         payload = WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY)
 
-        assert workspaces_route._resolved_profile_requested_tier(workspace) == 2  # type: ignore[arg-type]
-        assert workspaces_route._resolved_profile_requested_tier(malformed_workspace) is None  # type: ignore[arg-type]
-        assert workspaces_route._resolved_profile_requested_tier(missing_profile_workspace) is None  # type: ignore[arg-type]
+        assert workspaces_service._resolved_profile_requested_tier(workspace) == 2  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._resolved_profile_requested_tier(malformed_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._resolved_profile_requested_tier(missing_profile_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
         assert (
-            workspaces_route._resolved_profile_requested_tier(malformed_validation_workspace)
+            workspaces_service._resolved_profile_requested_tier(  # noqa: SLF001
+                malformed_validation_workspace
+            )
             is None
         )  # type: ignore[arg-type]
-        assert workspaces_route._stored_task_agent_model(workspace) == "gpt-test"  # type: ignore[arg-type]
-        assert workspaces_route._stored_task_agent_model(malformed_workspace) is None  # type: ignore[arg-type]
-        assert workspaces_route._stored_task_out_of_scope_policy(workspace) == {"mode": "warn"}  # type: ignore[arg-type]
-        assert workspaces_route._stored_task_out_of_scope_policy(malformed_workspace) is None  # type: ignore[arg-type]
-        assert workspaces_route._requested_task_out_of_scope_policy(payload) is None
-        assert workspaces_route._requested_task_out_of_scope_policy(policy_payload) == {
+        assert workspaces_service._stored_task_agent_model(workspace) == "gpt-test"  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._stored_task_agent_model(malformed_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._stored_task_out_of_scope_policy(workspace) == {  # type: ignore[arg-type]  # noqa: SLF001
+            "mode": "warn"
+        }
+        assert workspaces_service._stored_task_out_of_scope_policy(malformed_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._requested_task_out_of_scope_policy(payload) is None  # noqa: SLF001
+        assert workspaces_service._requested_task_out_of_scope_policy(policy_payload) == {  # noqa: SLF001
             "mode": "block",
             "allowlist_patterns": [],
         }

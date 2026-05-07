@@ -208,7 +208,7 @@ def build_mcp_server(
             description="Optional replay key matching the REST Idempotency-Key header.",
         ),
     ) -> StructuredToolResult:
-        """Create a new AWF workspace. Returns the initial workspace state (async)."""
+        """Create a new AWF workspace. Returns the accepted workspace payload."""
         req = WorkspaceCreateRequest(
             repo_url=repo_url,
             branch_base=branch_base,
@@ -227,7 +227,7 @@ def build_mcp_server(
             )
         except WorkspaceCreateIdempotencyConflictError as exc:
             return _workspace_error_result(exc)
-        return _tool_result(response.model_dump(mode="json"))
+        return _tool_result(_workspace_accepted_payload(response))
 
     @mcp.tool(name="awf_create_workspace_v2")
     async def awf_create_workspace_v2(

@@ -15,6 +15,7 @@ import awf.api.routes.validation as validation_routes
 import awf.api.routes.workspaces as workspace_routes
 from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
 from awf.db.repositories import TaskExternalIdConflictError
+from awf.service import workspaces as workspaces_service
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck
 
@@ -275,22 +276,22 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
 
 @pytest.mark.unit
 def test_workspace_override_reason_matching_uses_redacted_parts_as_wildcards() -> None:
-    assert not workspace_routes._override_reasons_match(  # noqa: SLF001
+    assert not workspaces_service._override_reasons_match(  # noqa: SLF001
         "operator checked <redacted> manually",
         None,
         stored_redaction_parts=["operator checked ", " manually"],
     )
-    assert workspace_routes._override_reasons_match(  # noqa: SLF001
+    assert workspaces_service._override_reasons_match(  # noqa: SLF001
         "operator checked <redacted> manually",
         "operator checked rotated-token-value manually",
         stored_redaction_parts=["operator checked ", " manually"],
     )
-    assert not workspace_routes._override_reasons_match(  # noqa: SLF001
+    assert not workspaces_service._override_reasons_match(  # noqa: SLF001
         "operator checked <redacted> manually",
         "operator checked rotated-token-value manually",
         stored_redaction_parts=["stale prefix ", " manually"],
     )
-    assert not workspace_routes._override_reasons_match(  # noqa: SLF001
+    assert not workspaces_service._override_reasons_match(  # noqa: SLF001
         "operator checked <redacted> manually",
         "operator checked rotated-token-value manually",
         stored_redaction_parts=None,
@@ -326,23 +327,23 @@ def test_workspace_stored_provider_readiness_override_handles_sparse_snapshots()
         }
     )
 
-    assert workspace_routes._stored_task_provider_readiness_override(  # noqa: SLF001
+    assert workspaces_service._stored_task_provider_readiness_override(  # noqa: SLF001
         no_preflight  # type: ignore[arg-type]
     ) == (False, None)
     assert (
-        workspace_routes._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+        workspaces_service._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
             no_preflight  # type: ignore[arg-type]
         )
         is None
     )
-    assert workspace_routes._stored_task_provider_readiness_override(  # noqa: SLF001
+    assert workspaces_service._stored_task_provider_readiness_override(  # noqa: SLF001
         legacy_override  # type: ignore[arg-type]
     ) == (True, None)
-    assert workspace_routes._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+    assert workspaces_service._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
         redacted_override  # type: ignore[arg-type]
     ) == ["operator checked ", ""]
     assert (
-        workspace_routes._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+        workspaces_service._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
             malformed_parts  # type: ignore[arg-type]
         )
         is None
