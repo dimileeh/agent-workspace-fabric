@@ -1182,13 +1182,14 @@ def _stored_resource_reservation_matches(
     settings: Settings | None,
 ) -> bool:
     reservation = _latest_workspace_resource_reservation(existing)
-    if reservation is None:
-        return True
     requested_values = _requested_resource_reservation_values(payload)
     stored_dind_slots = _stored_resource_dind_slots(existing, payload)
     stored_values = _stored_resource_reservation_request_values(existing)
     if stored_values is not None:
         return stored_values == requested_values
+
+    if reservation is None:
+        return False
 
     plan = resource_reservation_plan(payload, settings=settings or get_settings())
     if (

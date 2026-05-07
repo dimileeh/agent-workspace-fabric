@@ -498,6 +498,45 @@ async def test_create_v2_replay_conflicts_when_resources_change(
 
 
 @pytest.mark.unit
+async def test_create_v2_replay_conflicts_when_resources_change_without_reservation_row(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        _v2_request(
+            resources={
+                "steady_state_cpu_cores": 2.0,
+                "steady_state_memory_gb": 6.0,
+                "peak_cpu_cores": 4.0,
+                "peak_memory_gb": 12.0,
+                "disk_mb": 2048,
+            }
+        ),
+        idempotency_key="service-create-v2-missing-reservation-resources",
+    )
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(created.id)
+        assert len(reservations) == 1
+        await session.delete(reservations[0])
+        await session.commit()
+
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create_v2(
+            _v2_request(
+                resources={
+                    "steady_state_cpu_cores": 3.0,
+                    "steady_state_memory_gb": 6.0,
+                    "peak_cpu_cores": 4.0,
+                    "peak_memory_gb": 12.0,
+                    "disk_mb": 2048,
+                }
+            ),
+            idempotency_key="service-create-v2-missing-reservation-resources",
+        )
+
+
+@pytest.mark.unit
 async def test_create_v2_replay_ignores_absent_disk_request(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
