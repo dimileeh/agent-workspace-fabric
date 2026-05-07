@@ -51,6 +51,7 @@ def _metadata(
     base_sha: str = "b" * 40,
     merged: bool | None = None,
     closed: bool | None = None,
+    title: str = "feature: ready",
 ) -> PullRequestAdoptionMetadata:
     merged_value = state == "MERGED" if merged is None else merged
     closed_value = state == "CLOSED" if closed is None else closed
@@ -67,7 +68,7 @@ def _metadata(
         merged=merged_value,
         author="octocat",
         url=f"https://github.com/dimileeh/aira-web/pull/{number}",
-        title="feature: ready",
+        title=title,
     )
 
 
@@ -306,6 +307,7 @@ class TestPullRequestMonitorAdoptionService:
             workspace = await WorkspaceRepository(session).get(first.workspace_id)
             assert workspace is not None
             original_key = workspace.idempotency_key
+            original_external_id = workspace.task_external_id
             workspace.status = terminal_status.value
             await session.flush()
 
@@ -328,9 +330,69 @@ class TestPullRequestMonitorAdoptionService:
             assert first_workspace.idempotency_key is not None
             assert first_workspace.idempotency_key.startswith(f"{original_key}:terminal:")
             assert second_workspace.idempotency_key == original_key
+            assert original_external_id is not None
+            assert second_workspace.task_external_id != original_external_id
+            assert second_workspace.task_external_id is not None
+            assert second_workspace.task_external_id.startswith(f"{original_external_id}:")
             assert await _count(session, Workspace) == 2
-            assert await _count(session, Task) == 1
+            assert await _count(session, Task) == 2
             assert await _count(session, TaskAttempt) == 2
+
+    @pytest.mark.unit
+    async def test_terminal_adoption_record_allows_fresh_pr_monitor_after_title_change(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata(title="feature: first title"))
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+            workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert workspace is not None
+            original_key = workspace.idempotency_key
+            original_external_id = workspace.task_external_id
+            workspace.status = WorkspaceStatus.failed.value
+            await session.flush()
+
+            fetcher.metadata = _metadata(title="feature: revised title")
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        assert second.task_id != first.task_id
+
+        async with factory() as session:
+            first_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            second_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            assert first_workspace is not None
+            assert second_workspace is not None
+            assert original_key is not None
+            assert original_external_id is not None
+            assert first_workspace.idempotency_key.startswith(f"{original_key}:terminal:")
+            assert second_workspace.idempotency_key == original_key
+            assert second_workspace.task_title == "feature: revised title"
+            assert second_workspace.task_external_id != original_external_id
+            assert second_workspace.task_external_id is not None
+            assert second_workspace.task_external_id.startswith(f"{original_external_id}:")
+            tasks = list((await session.execute(select(Task))).scalars())
+            assert len(tasks) == 2
+            assert {task.title for task in tasks} == {
+                "feature: first title",
+                "feature: revised title",
+            }
+            assert {task.external_id for task in tasks} == {
+                original_external_id,
+                second_workspace.task_external_id,
+            }
+            assert {task.idempotency_key for task in tasks} == {
+                original_key,
+                f"{original_key}:task:{second.workspace_id}",
+            }
 
     @pytest.mark.unit
     async def test_adopt_rechecks_existing_workspace_after_idempotency_lock(

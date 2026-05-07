@@ -117,11 +117,13 @@ class PullRequestMonitorAdoptionService:
         # Re-read under the transaction lock so a concurrent adopter that won
         # the race attaches here instead of surfacing the unique constraint.
         existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
+        fresh_task_identity = False
         if existing is not None:
             if not _allows_fresh_adoption(existing):
                 _raise_if_policy_conflicts(existing, request, repo=repo)
                 return await self._response(existing, attached_existing=True)
 
+            fresh_task_identity = True
             metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
             await self._archive_terminal_adoption_key(
                 workspace_repo=workspace_repo,
@@ -138,6 +140,7 @@ class PullRequestMonitorAdoptionService:
             repo=repo,
             metadata=metadata,
             idempotency_key=idempotency_key,
+            fresh_task_identity=fresh_task_identity,
         )
         return await self._response(workspace, attached_existing=False)
 
@@ -214,6 +217,7 @@ class PullRequestMonitorAdoptionService:
         repo: RepoRef,
         metadata: PullRequestAdoptionMetadata,
         idempotency_key: str,
+        fresh_task_identity: bool = False,
     ) -> Workspace:
         requested_profile = _requested_inline_profile_policy(request)
         repo_url = _adoption_repo_url(request=request, repo=repo)
@@ -253,6 +257,16 @@ class PullRequestMonitorAdoptionService:
         workspace.pr_number = metadata.number
         workspace.base_commit = metadata.base_sha
         workspace.monitor_last_commit_sha = metadata.head_sha
+        task_idempotency_key = idempotency_key
+        if fresh_task_identity and workspace.task_external_id is not None:
+            workspace.task_external_id = _fresh_adoption_task_external_id(
+                external_id=workspace.task_external_id,
+                workspace_id=workspace.id,
+            )
+            task_idempotency_key = _fresh_adoption_task_idempotency_key(
+                idempotency_key=idempotency_key,
+                workspace_id=workspace.id,
+            )
 
         task = await TaskRepository(self._session).create_or_get(
             repo_url=workspace.repo_url,
@@ -260,7 +274,7 @@ class PullRequestMonitorAdoptionService:
             title=workspace.task_title,
             prompt=workspace.task_prompt,
             external_id=workspace.task_external_id,
-            idempotency_key=idempotency_key,
+            idempotency_key=task_idempotency_key,
             task_class=workspace.task_class,
             owned_paths=list(workspace.owned_paths),
         )
@@ -536,6 +550,14 @@ def _adoption_task_prompt(
 def _adoption_external_id(*, repo_slug: str, pr_number: int) -> str:
     digest = hashlib.sha256(f"{repo_slug.lower()}#{pr_number}".encode()).hexdigest()
     return f"pr-adopt-{digest[:40]}"
+
+
+def _fresh_adoption_task_external_id(*, external_id: str, workspace_id: str) -> str:
+    return f"{external_id}:{workspace_id}"
+
+
+def _fresh_adoption_task_idempotency_key(*, idempotency_key: str, workspace_id: str) -> str:
+    return f"{idempotency_key}:task:{workspace_id}"
 
 
 def _adoption_repo_url(*, request: PullRequestMonitorAdoptionRequest, repo: RepoRef) -> str:
