@@ -28,7 +28,7 @@ from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
 from awf.service.controls import WorkspaceControlError
-from awf.service.workspaces import WorkspaceRetryError
+from awf.service.workspaces import OperationRowsPage, WorkspaceRetryError
 from tests.postgres import postgres_test_engine
 
 _PROVIDER_AUTH_ENV_KEYS = (
@@ -576,8 +576,8 @@ class TestOperationTools:
         operation = _operation_response()
 
         class PrevalidatedOperationService:
-            async def list_all_operations(self, **kwargs) -> list[OperationResponse]:  # type: ignore[no-untyped-def]
-                return [operation]
+            async def list_all_operations_page(self, **kwargs: object) -> OperationRowsPage:
+                return OperationRowsPage(rows=[operation], offset=0)
 
         def fail_model_validate(cls, value) -> OperationResponse:  # type: ignore[no-untyped-def]
             raise AssertionError("OperationResponse.model_validate should not be called")

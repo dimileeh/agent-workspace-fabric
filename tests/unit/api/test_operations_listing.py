@@ -5,10 +5,13 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from awf.api.routes import operations as operations_route
 from awf.api.schemas import OperationResponse
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service.bounded_list import decode_bounded_list_cursor
+from awf.service.workspaces import OperationRowsPage
 
 
 def _operation_response() -> OperationResponse:
@@ -26,6 +29,22 @@ def _operation_response() -> OperationResponse:
         started_at=None,
         finished_at=None,
     )
+
+
+@pytest.mark.unit
+def test_operation_list_response_uses_prevalidated_offset() -> None:
+    operation = _operation_response()
+
+    response = operations_route._operation_list_response(
+        [operation, operation.model_copy(update={"id": "op_next"})],
+        limit=1,
+        cursor="prevalidated-upstream",
+        offset=7,
+    )
+
+    assert response.cursor == "prevalidated-upstream"
+    assert response.next_cursor is not None
+    assert decode_bounded_list_cursor(response.next_cursor) == 8
 
 
 @pytest.fixture
@@ -222,8 +241,11 @@ async def test_list_operations_uses_prevalidated_service_responses(
         def __init__(self, session_factory) -> None:  # type: ignore[no-untyped-def]
             self.session_factory = session_factory
 
-        async def list_all_operations(self, **kwargs) -> list[OperationResponse]:  # type: ignore[no-untyped-def]
-            return [operation]
+        async def list_all_operations_page(
+            self,
+            **kwargs: object,
+        ) -> OperationRowsPage:
+            return OperationRowsPage(rows=[operation], offset=0)
 
     def fail_model_validate(cls, value) -> OperationResponse:  # type: ignore[no-untyped-def]
         raise AssertionError("OperationResponse.model_validate should not be called")

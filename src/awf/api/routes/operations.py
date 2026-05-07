@@ -13,7 +13,6 @@ from awf.api.schemas import OperationListResponse, OperationResponse
 from awf.db.enums import OperationStatus, OperationType
 from awf.service.bounded_list import (
     InvalidBoundedListCursorError,
-    decode_bounded_list_cursor,
     encode_bounded_list_cursor,
 )
 from awf.service.workspaces import WorkspaceService
@@ -35,14 +34,19 @@ async def list_operations(
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> OperationListResponse:
     try:
-        rows = await WorkspaceService(session_factory).list_all_operations(
+        page = await WorkspaceService(session_factory).list_all_operations_page(
             workspace_id=workspace_id,
             status=status,
             operation_type=operation_type,
             limit=limit + 1,
             cursor=cursor,
         )
-        return _operation_list_response(rows, limit=limit, cursor=cursor)
+        return _operation_list_response(
+            page.rows,
+            limit=limit,
+            cursor=cursor,
+            offset=page.offset,
+        )
     except InvalidBoundedListCursorError as exc:
         raise _invalid_operation_cursor() from exc
 
@@ -71,14 +75,14 @@ async def list_workspace_operations(
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> OperationListResponse:
     try:
-        rows = await WorkspaceService(session_factory).list_operations(
+        page = await WorkspaceService(session_factory).list_operations_page(
             workspace_id,
             status=status,
             operation_type=operation_type,
             limit=limit + 1,
             cursor=cursor,
         )
-        if rows is None:
+        if page is None:
             raise HTTPException(
                 status_code=fastapi_status.HTTP_404_NOT_FOUND,
                 detail={
@@ -86,7 +90,12 @@ async def list_workspace_operations(
                     "message": f"No workspace with id {workspace_id}",
                 },
             )
-        return _operation_list_response(rows, limit=limit, cursor=cursor)
+        return _operation_list_response(
+            page.rows,
+            limit=limit,
+            cursor=cursor,
+            offset=page.offset,
+        )
     except InvalidBoundedListCursorError as exc:
         raise _invalid_operation_cursor() from exc
 
@@ -96,10 +105,10 @@ def _operation_list_response(
     *,
     limit: int,
     cursor: str | None = None,
+    offset: int = 0,
 ) -> OperationListResponse:
     page_rows = rows[:limit]
     has_more = len(rows) > limit
-    offset = decode_bounded_list_cursor(cursor)
     return OperationListResponse(
         items=page_rows,
         next_cursor=encode_bounded_list_cursor(offset + limit) if has_more else None,

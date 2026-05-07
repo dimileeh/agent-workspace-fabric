@@ -49,7 +49,6 @@ from awf.service.artifacts import (
 )
 from awf.service.bounded_list import (
     InvalidBoundedListCursorError,
-    decode_bounded_list_cursor,
     encode_bounded_list_cursor,
 )
 from awf.service.controls import WorkspaceControlError
@@ -553,7 +552,7 @@ def build_mcp_server(
     ) -> CallToolResult:
         """List one workspace's operations using the REST envelope."""
         try:
-            rows = await service.list_operations(
+            page = await service.list_operations_page(
                 workspace_id,
                 status=status,
                 operation_type=operation_type,
@@ -562,9 +561,14 @@ def build_mcp_server(
             )
         except InvalidBoundedListCursorError:
             return _error_result("INVALID_CURSOR", "Invalid operation list cursor.")
-        if rows is None:
+        if page is None:
             return _null_tool_result()
-        response = _operation_list_response(rows, limit=limit, cursor=cursor)
+        response = _operation_list_response(
+            page.rows,
+            limit=limit,
+            cursor=cursor,
+            offset=page.offset,
+        )
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_list_workspace_logs")
@@ -809,14 +813,19 @@ def build_mcp_server(
     ) -> StructuredToolResult:
         """Read-only operator observability: list operations using the REST envelope."""
         try:
-            rows = await service.list_all_operations(
+            page = await service.list_all_operations_page(
                 workspace_id=workspace_id,
                 status=status,
                 operation_type=operation_type,
                 limit=limit + 1,
                 cursor=cursor,
             )
-            response = _operation_list_response(rows, limit=limit, cursor=cursor)
+            response = _operation_list_response(
+                page.rows,
+                limit=limit,
+                cursor=cursor,
+                offset=page.offset,
+            )
         except InvalidBoundedListCursorError:
             return _error_result("INVALID_CURSOR", "Invalid operation list cursor.")
         return _tool_result(response.model_dump(mode="json"))
@@ -1355,10 +1364,10 @@ def _operation_list_response(
     *,
     limit: int,
     cursor: str | None = None,
+    offset: int = 0,
 ) -> OperationListResponse:
     page_rows = rows[:limit]
     has_more = len(rows) > limit
-    offset = decode_bounded_list_cursor(cursor)
     return OperationListResponse(
         items=page_rows,
         next_cursor=encode_bounded_list_cursor(offset + limit) if has_more else None,
