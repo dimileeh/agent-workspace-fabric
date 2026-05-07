@@ -283,6 +283,56 @@ class TestPullRequestMonitorAdoptionService:
             assert await _count(session, Operation) == 1
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "terminal_status",
+        [
+            WorkspaceStatus.cancelled,
+            WorkspaceStatus.completed,
+            WorkspaceStatus.destroyed,
+            WorkspaceStatus.failed,
+        ],
+    )
+    async def test_terminal_adoption_record_allows_fresh_pr_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        terminal_status: WorkspaceStatus,
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+            workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert workspace is not None
+            original_key = workspace.idempotency_key
+            workspace.status = terminal_status.value
+            await session.flush()
+
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+            await session.commit()
+
+        assert second.attached_existing is False
+        assert second.workspace_id != first.workspace_id
+        assert second.status == WorkspaceStatus.requested
+        assert fetcher.calls == [("dimileeh/aira-web", 277), ("dimileeh/aira-web", 277)]
+
+        async with factory() as session:
+            first_workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            second_workspace = await WorkspaceRepository(session).get(second.workspace_id)
+            assert first_workspace is not None
+            assert second_workspace is not None
+            assert first_workspace.idempotency_key != original_key
+            assert first_workspace.idempotency_key is not None
+            assert first_workspace.idempotency_key.startswith(f"{original_key}:terminal:")
+            assert second_workspace.idempotency_key == original_key
+            assert await _count(session, Workspace) == 2
+            assert await _count(session, Task) == 1
+            assert await _count(session, TaskAttempt) == 2
+
+    @pytest.mark.unit
     async def test_adopt_rechecks_existing_workspace_after_idempotency_lock(
         self,
         factory: async_sessionmaker[AsyncSession],
