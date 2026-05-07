@@ -157,6 +157,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           body
           state
           submittedAt
+          commit { oid }
           url
           author { login }
         }
@@ -258,6 +259,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
           body
           state
           submittedAt
+          commit { oid }
           url
           author { login }
         }
@@ -764,6 +766,7 @@ class GitHubClient:
             if _is_superseded_coderabbit_skip_issue_comment(
                 body,
                 author=author,
+                head_sha=pr["headRefOid"],
                 updated_at=_parse_github_datetime(node.get("updatedAt")),
                 created_at=_parse_github_datetime(node.get("createdAt")),
                 review_evidence_times=coderabbit_review_evidence_times,
@@ -1250,39 +1253,59 @@ def _is_awf_status_issue_comment(body: str) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class _CodeRabbitReviewEvidence:
+    submitted_at: datetime | None
+    commit_oid: str | None
+
+
 def _coderabbit_review_evidence_times(
     *,
     review_nodes: list[dict[str, Any]],
-) -> tuple[datetime, ...]:
+) -> tuple[_CodeRabbitReviewEvidence, ...]:
     # Intentionally use submitted review objects only. CodeRabbit "Review
     # triggered" acknowledgements prove a review request was queued, not that
     # the review completed or that an earlier skip blocker is obsolete.
-    times: list[datetime] = []
+    evidence: list[_CodeRabbitReviewEvidence] = []
     for node in review_nodes:
         author = _dig(node, "author", "login")
         if _is_coderabbit_author(author):
-            submitted_at = _parse_github_datetime(node.get("submittedAt"))
-            if submitted_at is not None:
-                times.append(submitted_at)
-    return tuple(times)
+            evidence.append(
+                _CodeRabbitReviewEvidence(
+                    submitted_at=_parse_github_datetime(node.get("submittedAt")),
+                    commit_oid=_clean_optional_str(_dig(node, "commit", "oid")),
+                )
+            )
+    return tuple(evidence)
 
 
 def _is_superseded_coderabbit_skip_issue_comment(
     body: str,
     *,
     author: str | None,
+    head_sha: str | None,
     updated_at: datetime | None,
     created_at: datetime | None,
-    review_evidence_times: tuple[datetime, ...],
+    review_evidence_times: tuple[_CodeRabbitReviewEvidence, ...],
 ) -> bool:
     if not _is_coderabbit_author(author) or not _is_merge_blocking_issue_comment(body):
         return False
     if not review_evidence_times:
         return False
+    if any(
+        evidence.commit_oid is not None
+        and head_sha is not None
+        and evidence.commit_oid.lower() == head_sha.lower()
+        for evidence in review_evidence_times
+    ):
+        return True
     changed_at = updated_at or created_at
     if changed_at is None:
         return False
-    return any(evidence_at > changed_at for evidence_at in review_evidence_times)
+    return any(
+        evidence.submitted_at is not None and evidence.submitted_at > changed_at
+        for evidence in review_evidence_times
+    )
 
 
 def _is_coderabbit_author(author: str | None) -> bool:
