@@ -9,6 +9,7 @@ backend call — which is the single source of truth for downstream behavior.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,11 +19,12 @@ from awf.api.schemas import (
     WorkspaceControlResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
+    WorkspaceRetryResponse,
 )
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation
 from awf.mcp.server import build_mcp_server
-from awf.service.workspaces import WorkspaceService
+from awf.service.workspaces import WorkspaceRetryResult, WorkspaceService
 from tests.unit.contracts._capabilities import CAPABILITIES_BY_NAME
 from tests.unit.contracts._control_scenarios import (
     CONTROL_CAPABILITY_NAMES,
@@ -32,6 +34,8 @@ from tests.unit.contracts._control_scenarios import (
 )
 from tests.unit.contracts._stack import ContractStack
 
+REQUEST_PAYLOAD_CONTROL_CAPABILITY_NAMES = (*CONTROL_CAPABILITY_NAMES, "retry_workspace")
+
 
 def _stub_control_response(workspace_id: str, operation_id: str = "op_stub") -> WorkspaceControlResponse:
     return WorkspaceControlResponse(
@@ -40,6 +44,22 @@ def _stub_control_response(workspace_id: str, operation_id: str = "op_stub") -> 
         operation_status=OperationStatus.succeeded,
         status=WorkspaceStatus.cancelled,
         message="stub",
+    )
+
+
+def _stub_retry_response(
+    source_workspace_id: str,
+    operation_id: str = "op_retry_contract",
+) -> WorkspaceRetryResponse:
+    new_workspace_id = f"{source_workspace_id}_retry"
+    return WorkspaceRetryResponse(
+        source_workspace_id=source_workspace_id,
+        new_workspace_id=new_workspace_id,
+        operation_id=operation_id,
+        status=WorkspaceStatus.requested,
+        attempt_number=2,
+        status_url=f"/v1/workspaces/{new_workspace_id}",
+        events_url=f"/v1/workspaces/{new_workspace_id}/events",
     )
 
 
@@ -515,13 +535,14 @@ async def test_rest_controls_reject_unsupported_body_fields(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+@pytest.mark.parametrize("capability_name", REQUEST_PAYLOAD_CONTROL_CAPABILITY_NAMES)
 async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract(
     contract_stack: ContractStack,
     monkeypatch: pytest.MonkeyPatch,
     capability_name: str,
 ) -> None:
     """Every registered control normalizes REST headers/body/query and MCP args alike."""
+    from awf.api.routes import workspaces as workspaces_route
     from awf.service import controls as controls_module
 
     calls: list[dict[str, Any]] = []
@@ -642,6 +663,52 @@ async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract
         )
         return _stub_operation(workspace_id, OperationType.rebase)
 
+    async def record_retry_row(
+        session: Any,
+        workspace_id: str,
+        *,
+        provider_readiness_override: bool = False,
+        provider_readiness_override_reason: str | None = None,
+        settings: Any | None = None,
+        provider_environ: Any | None = None,
+        run_subprocess: Any | None = None,
+        http_get: Any | None = None,
+    ) -> WorkspaceRetryResult:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "provider_readiness_override": provider_readiness_override,
+                "provider_readiness_override_reason": provider_readiness_override_reason,
+            }
+        )
+        response = _stub_retry_response(workspace_id)
+        return WorkspaceRetryResult(
+            source_workspace_id=response.source_workspace_id,
+            new_workspace=SimpleNamespace(
+                id=response.new_workspace_id,
+                status=response.status,
+                task_policy={},
+            ),
+            operation=SimpleNamespace(id=response.operation_id),
+            attempt_number=response.attempt_number,
+        )
+
+    async def record_retry_service(
+        self: Any,
+        workspace_id: str,
+        *,
+        provider_readiness_override: bool = False,
+        provider_readiness_override_reason: str | None = None,
+    ) -> WorkspaceRetryResponse:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "provider_readiness_override": provider_readiness_override,
+                "provider_readiness_override_reason": provider_readiness_override_reason,
+            }
+        )
+        return _stub_retry_response(workspace_id)
+
     monkeypatch.setattr(controls_module.WorkspaceControlService, "cancel_workspace", record_cancel)
     monkeypatch.setattr(controls_module.WorkspaceControlService, "stop_workspace", record_stop_or_remonitor)
     monkeypatch.setattr(
@@ -665,6 +732,8 @@ async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract
         "request_rebase_workspace",
         record_rebase,
     )
+    monkeypatch.setattr(workspaces_route, "retry_workspace_row", record_retry_row)
+    monkeypatch.setattr(WorkspaceService, "retry_workspace", record_retry_service)
 
     rest_response = await call_rest_control(
         contract_stack,

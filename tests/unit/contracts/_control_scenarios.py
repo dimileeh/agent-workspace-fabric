@@ -284,11 +284,10 @@ async def call_rest_control(
     variant: str = "base",
 ) -> Any:
     capability = CAPABILITIES_BY_NAME[capability_name]
-    headers = {
-        **contract_stack.auth_headers,
-        "Idempotency-Key": idempotency_key,
-    }
-    if expected_version is not None:
+    headers = dict(contract_stack.auth_headers)
+    if capability.supports_idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    if expected_version is not None and capability.supports_if_match:
         headers["If-Match"] = str(expected_version)
     return await contract_stack.client.request(
         capability.rest_method,
@@ -330,19 +329,28 @@ def control_rest_body(capability_name: str, *, variant: str = "base") -> dict[st
             "reason": reason,
             "requested_tier": 2 if variant == "base" else 3,
         }
-    if capability_name == "destroy_workspace":
+    if capability_name in {"destroy_workspace", "retry_workspace"}:
         return None
     raise AssertionError(f"unknown control capability {capability_name}")
 
 
 def control_rest_params(capability_name: str, *, variant: str = "base") -> dict[str, object]:
-    if capability_name != "destroy_workspace":
-        return {}
-    return {
-        "force": True,
-        "remove_volumes": variant != "base",
-        "remove_worktree": False,
-    }
+    if capability_name == "destroy_workspace":
+        return {
+            "force": True,
+            "remove_volumes": variant != "base",
+            "remove_worktree": False,
+        }
+    if capability_name == "retry_workspace":
+        return {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": (
+                "operator readiness override"
+                if variant == "base"
+                else "changed operator readiness override"
+            ),
+        }
+    return {}
 
 
 def control_mcp_args(
@@ -353,16 +361,16 @@ def control_mcp_args(
     expected_version: int | None = None,
     variant: str = "base",
 ) -> dict[str, object]:
-    args: dict[str, object] = {
-        "workspace_id": workspace_id,
-        "idempotency_key": idempotency_key,
-    }
-    if expected_version is not None:
+    capability = CAPABILITIES_BY_NAME[capability_name]
+    args: dict[str, object] = {"workspace_id": workspace_id}
+    if "idempotency_key" in capability.mcp_request_fields:
+        args["idempotency_key"] = idempotency_key
+    if expected_version is not None and "expected_version" in capability.mcp_request_fields:
         args["expected_version"] = expected_version
 
     body = control_rest_body(capability_name, variant=variant) or {}
     args.update(body)
-    if capability_name == "destroy_workspace":
+    if capability_name in {"destroy_workspace", "retry_workspace"}:
         args.update(control_rest_params(capability_name, variant=variant))
     return args
 
