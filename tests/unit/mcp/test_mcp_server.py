@@ -1699,6 +1699,40 @@ class TestWorkspaceOperations:
             "detail": None,
         }
 
+    @pytest.mark.unit
+    async def test_list_workspace_operations_rejects_invalid_cursor(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Reject bad operation cursor",
+                task_prompt="Exercise invalid operation cursor.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+
+        result = await mcp.call_tool(
+            "awf_list_workspace_operations",
+            {
+                "workspace_id": workspace.id,
+                "limit": 2,
+                "cursor": "not-valid-cursor",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "INVALID_CURSOR",
+            "message": "Invalid operation list cursor.",
+            "detail": None,
+        }
+
 
 class TestWorkspaceLogs:
     @pytest.mark.unit
