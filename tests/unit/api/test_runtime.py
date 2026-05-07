@@ -12,7 +12,11 @@ from awf.api.app import configure_database, create_app
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.inspection import RuntimeSnapshot
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+)
 
 
 class _RuntimeInspector:
@@ -133,6 +137,65 @@ async def test_runtime_endpoint_serializes_app_endpoint_metadata(
             },
         }
     ]
+
+
+@pytest.mark.unit
+async def test_runtime_endpoint_surfaces_preserved_live_runtime_health(
+    runtime_app_and_client: tuple[object, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = runtime_app_and_client
+    workspace_id = await _running_workspace(engine)
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        await WorkspaceRepository(session).add_event(
+            workspace,
+            event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+            reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+            payload={
+                "reason_code": ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+                "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.running.value,
+                "message": "Live agent runtime was preserved after worker restart.",
+                "runtime": {
+                    "services": [
+                        {
+                            "name": "agent",
+                            "state": "running",
+                            "container_id": "agent",
+                        }
+                    ]
+                },
+            },
+        )
+        await session.commit()
+
+    app.state.workspace_runtime_inspector = _RuntimeInspector(
+        RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent",
+                    image="awf-agent:latest",
+                    state="running",
+                )
+            ],
+        )
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/runtime")
+
+    assert response.status_code == 200
+    assert response.json()["runtime_health"] == {
+        "status": "ok",
+        "reason_code": ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+        "decision": "preserve_runtime",
+        "message": "Live agent runtime was preserved after worker restart.",
+        "services": [{"name": "agent", "state": "running", "container_id": "agent"}],
+    }
 
 
 @pytest.mark.unit

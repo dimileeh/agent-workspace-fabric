@@ -54,6 +54,10 @@ from awf.service.scheduler import (
 )
 from awf.service.secret_leases import SecretLeaseService
 from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+    OPERATOR_REFRESH_EVENT_TYPE,
+    OPERATOR_REFRESH_REASON_CODE,
     RUNTIME_STRANDED_EVENT_TYPE,
     RuntimeWorkspace,
     WorkspaceRuntimeFinding,
@@ -84,6 +88,18 @@ _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE = (
     "workspace.stale_active_execution_cleanup_failed"
 )
 _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE = "STALE_ACTIVE_EXECUTION_CLEANUP_FAILED"
+_ACTIVE_EXECUTION_PRESERVED_SOURCE = "worker_restart"
+_ACTIVE_EXECUTION_PRESERVED_OWNER = "control_worker"
+_ACTIVE_EXECUTION_PRESERVED_SUBPHASE = "runtime_preserved_after_restart"
+_ACTIVE_EXECUTION_PRESERVED_CLAIM_CLEARED_REASON_CODE = (
+    "STALE_EXECUTION_CLAIM_CLEARED_DURING_ACTIVE_EXECUTION_PRESERVATION"
+)
+_ACTIVE_EXECUTION_PRESERVED_UNEXPIRED_CLAIM_PRESERVED_REASON_CODE = (
+    "UNEXPIRED_EXECUTION_CLAIM_PRESERVED_DURING_ACTIVE_EXECUTION_PRESERVATION"
+)
+_ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE = (
+    "NO_EXECUTION_CLAIM_DURING_ACTIVE_EXECUTION_PRESERVATION"
+)
 _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
@@ -701,6 +717,8 @@ class ControlWorker:
         self,
         candidate: _ActiveExecutionCandidate,
     ) -> None:
+        if await self._has_current_preserved_active_execution(candidate):
+            return
         try:
             snapshot = await self._runtime_inspector.inspect(candidate.compose_project_name)
         except Exception as exc:  # pragma: no cover - defensive around Docker tooling
@@ -752,6 +770,13 @@ class ControlWorker:
         if finding is not None and finding.decision == "defer_retry_policy":
             await self._record_recoverable_runtime_stranding(candidate, snapshot, finding)
             return
+        if (
+            candidate.status in _ACTIVE_EXECUTION_STATUSES
+            and _has_running_agent_runtime(snapshot)
+            and not await self._has_operator_refresh_after_latest_preservation(candidate)
+        ):
+            await self._record_preserved_active_execution_after_restart(candidate, snapshot)
+            return
         if candidate.compose_project_name and snapshot.stack_state == "running":
             if not await self._record_stale_active_execution_detected(
                 candidate,
@@ -778,7 +803,16 @@ class ControlWorker:
                 return False
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return False
-            if await self._has_stale_active_execution_event(session, candidate.workspace_id):
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
+            if await self._has_stale_active_execution_event(
+                session,
+                candidate.workspace_id,
+                event_floor=event_floor,
+            ):
                 return False
 
             await repo.add_event(
@@ -802,6 +836,8 @@ class ControlWorker:
         self,
         session: AsyncSession,
         workspace_id: str,
+        *,
+        event_floor: datetime | None = None,
     ) -> bool:
         stmt = (
             select(WorkspaceEvent.id)
@@ -812,7 +848,266 @@ class ControlWorker:
             )
             .limit(1)
         )
+        if event_floor is not None:
+            stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
         return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _record_preserved_active_execution_after_restart(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        snapshot: RuntimeSnapshot,
+    ) -> None:
+        now = datetime.now(UTC)
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return
+            if not _execution_claim_is_stale(ws, now):
+                return
+            if await self._has_operator_refresh_after_latest_preservation_for_workspace(
+                session,
+                ws,
+                candidate.status,
+            ):
+                return
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
+            if await self._has_preserved_active_execution_event(
+                session,
+                candidate.workspace_id,
+                candidate.status,
+                event_floor=event_floor,
+            ):
+                return
+
+            previous_claim = _workspace_claim_snapshot(ws)
+            claim_cleanup = _active_execution_preservation_claim_cleanup_payload(
+                ws,
+                claim_cutoff=now,
+            )
+            if claim_cleanup["action"] == "cleared_stale":
+                ws.execution_claimed_by = None
+                ws.execution_claim_expires_at = None
+            ws.subphase = _ACTIVE_EXECUTION_PRESERVED_SUBPHASE
+            ws.version += 1
+            payload = _active_execution_preservation_payload(
+                candidate,
+                snapshot,
+                worker_id=self._worker_id,
+                previous_claim=previous_claim,
+                claim_cleanup=claim_cleanup,
+            )
+            operation = await OperationRepository(session).create(
+                workspace_id=candidate.workspace_id,
+                operation_type=OperationType.refresh,
+                status=OperationStatus.running,
+                payload=payload,
+            )
+            payload_with_operation = {**payload, "operation_id": operation.id}
+            operation.payload = payload_with_operation
+            await OperationRepository(session).finish(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "decision": "preserve_runtime",
+                    "reason_code": ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+                reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+                payload=payload_with_operation,
+            )
+            await session.commit()
+
+        _log.warning(
+            ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            compose_project_name=candidate.compose_project_name,
+            reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+        )
+
+    async def _has_operator_refresh_after_latest_preservation(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            return await self._has_operator_refresh_after_latest_preservation_for_workspace(
+                session,
+                ws,
+                candidate.status,
+            )
+
+    async def _has_operator_refresh_after_latest_preservation_for_workspace(
+        self,
+        session: AsyncSession,
+        workspace: Workspace,
+        status: WorkspaceStatus,
+    ) -> bool:
+        event_floor = await self._active_execution_preservation_event_floor(
+            session,
+            workspace,
+            status,
+            include_operator_refresh=False,
+            include_execution_claim_expiry=False,
+        )
+        latest_refresh = await self._latest_operator_refresh_requested_at(
+            session,
+            workspace.id,
+            event_floor=event_floor,
+        )
+        if latest_refresh is None:
+            return False
+        latest_preservation = await self._latest_preserved_active_execution_at(
+            session,
+            workspace.id,
+            status,
+            event_floor=event_floor,
+        )
+        if latest_preservation is None:
+            return False
+        return _utc_datetime(latest_refresh) >= _utc_datetime(latest_preservation)
+
+    async def _has_current_preserved_active_execution(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
+            return False
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
+            return await self._has_preserved_active_execution_event(
+                session,
+                candidate.workspace_id,
+                candidate.status,
+                event_floor=event_floor,
+            )
+
+    async def _has_preserved_active_execution_event(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        status: WorkspaceStatus,
+        *,
+        event_floor: datetime | None = None,
+    ) -> bool:
+        stmt = (
+            select(WorkspaceEvent.id)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+                WorkspaceEvent.reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+                WorkspaceEvent.payload["workspace_status"].as_string() == status.value,
+            )
+            .limit(1)
+        )
+        if event_floor is not None:
+            stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
+        return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _latest_preserved_active_execution_at(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        status: WorkspaceStatus,
+        *,
+        event_floor: datetime | None = None,
+    ) -> datetime | None:
+        stmt = (
+            select(WorkspaceEvent.occurred_at)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+                WorkspaceEvent.reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+                WorkspaceEvent.payload["workspace_status"].as_string() == status.value,
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        if event_floor is not None:
+            stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def _latest_operator_refresh_requested_at(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        *,
+        event_floor: datetime | None = None,
+    ) -> datetime | None:
+        stmt = (
+            select(WorkspaceEvent.occurred_at)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == OPERATOR_REFRESH_EVENT_TYPE,
+                WorkspaceEvent.reason_code == OPERATOR_REFRESH_REASON_CODE,
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        if event_floor is not None:
+            stmt = stmt.where(WorkspaceEvent.occurred_at >= event_floor)
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def _active_execution_preservation_event_floor(
+        self,
+        session: AsyncSession,
+        workspace: Workspace,
+        status: WorkspaceStatus,
+        *,
+        include_operator_refresh: bool = True,
+        include_execution_claim_expiry: bool = True,
+    ) -> datetime | None:
+        floors: list[datetime] = []
+        if include_execution_claim_expiry and workspace.execution_claim_expires_at is not None:
+            claim_floor = _utc_datetime(workspace.execution_claim_expires_at)
+            if claim_floor <= datetime.now(UTC):
+                floors.append(claim_floor)
+
+        stmt = (
+            select(WorkspaceEvent.occurred_at)
+            .where(
+                WorkspaceEvent.workspace_id == workspace.id,
+                WorkspaceEvent.event_type == "workspace.state_changed",
+                WorkspaceEvent.new_state == status.value,
+            )
+            .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+            .limit(1)
+        )
+        status_started_at = (await session.execute(stmt)).scalar_one_or_none()
+        if status_started_at is not None:
+            floors.append(_utc_datetime(status_started_at))
+
+        # An operator refresh is an explicit recovery request for preserved runtime.
+        # Preservation evidence older than that request must not keep scans skipped.
+        if include_operator_refresh:
+            refresh_requested_at = await self._latest_operator_refresh_requested_at(
+                session,
+                workspace.id,
+            )
+            if refresh_requested_at is not None:
+                floors.append(_utc_datetime(refresh_requested_at))
+
+        return max(floors) if floors else None
 
     async def _cleanup_and_fail_stale_active_execution(
         self,
@@ -866,9 +1161,22 @@ class ControlWorker:
                 return False
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return False
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
+            if await self._has_preserved_active_execution_event(
+                session,
+                candidate.workspace_id,
+                candidate.status,
+                event_floor=event_floor,
+            ):
+                return False
             return await self._has_stale_active_execution_event(
                 session,
                 candidate.workspace_id,
+                event_floor=event_floor,
             )
 
     async def _record_stale_active_execution_cleanup_failed(
@@ -1621,12 +1929,51 @@ def _runtime_workspace(candidate: _ActiveExecutionCandidate) -> RuntimeWorkspace
     )
 
 
+def _has_running_agent_runtime(snapshot: RuntimeSnapshot) -> bool:
+    if snapshot.stack_state != "running":
+        return False
+    return any(
+        service.name.lower() == "agent" and service.state.lower() == "running"
+        for service in snapshot.services
+    )
+
+
 def _workspace_claim_snapshot(workspace: Workspace) -> dict[str, str | None]:
     return {
         "monitor_claimed_by": workspace.monitor_claimed_by,
         "monitor_claim_expires_at": _json_datetime(workspace.monitor_claim_expires_at),
         "execution_claimed_by": workspace.execution_claimed_by,
         "execution_claim_expires_at": _json_datetime(workspace.execution_claim_expires_at),
+    }
+
+
+def _active_execution_preservation_claim_cleanup_payload(
+    workspace: Workspace,
+    *,
+    claim_cutoff: datetime,
+) -> dict[str, str | None]:
+    previous_claimed_by = workspace.execution_claimed_by
+    previous_expires_at = _json_datetime(workspace.execution_claim_expires_at)
+    payload = {
+        "action": "none",
+        "reason_code": _ACTIVE_EXECUTION_PRESERVED_NO_CLAIM_REASON_CODE,
+        "previous_claimed_by": previous_claimed_by,
+        "previous_expires_at": previous_expires_at,
+    }
+    if previous_claimed_by is None and workspace.execution_claim_expires_at is None:
+        return payload
+
+    if not _execution_claim_is_stale(workspace, claim_cutoff):
+        return {
+            **payload,
+            "action": "preserved_unexpired",
+            "reason_code": _ACTIVE_EXECUTION_PRESERVED_UNEXPIRED_CLAIM_PRESERVED_REASON_CODE,
+        }
+
+    return {
+        **payload,
+        "action": "cleared_stale",
+        "reason_code": _ACTIVE_EXECUTION_PRESERVED_CLAIM_CLEARED_REASON_CODE,
     }
 
 
@@ -1731,6 +2078,12 @@ def _json_datetime(value: datetime | None) -> str | None:
     return value.isoformat()
 
 
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:
     return {
         "stack_state": snapshot.stack_state,
@@ -1748,6 +2101,38 @@ def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:
             }
             for service in snapshot.services
         ],
+    }
+
+
+def _active_execution_preservation_payload(
+    candidate: _ActiveExecutionCandidate,
+    snapshot: RuntimeSnapshot,
+    *,
+    worker_id: str,
+    previous_claim: dict[str, str | None],
+    claim_cleanup: dict[str, str | None],
+) -> dict[str, Any]:
+    message = (
+        "Worker restart found a persisted active execution with a live running "
+        "agent runtime. AWF preserved the runtime for explicit operator recovery "
+        "instead of starting a duplicate execution or stopping the compose stack."
+    )
+    return {
+        "owner": _ACTIVE_EXECUTION_PRESERVED_OWNER,
+        "source": _ACTIVE_EXECUTION_PRESERVED_SOURCE,
+        "requested_action": OperationType.refresh.value,
+        "reason": message,
+        "message": message,
+        "reason_code": ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+        "decision": "preserve_runtime",
+        "workspace_status": candidate.status.value,
+        "subphase": _ACTIVE_EXECUTION_PRESERVED_SUBPHASE,
+        "compose_project_name": candidate.compose_project_name,
+        "compose_file_path": candidate.compose_file_path,
+        "worker_id": worker_id,
+        "previous_claim": previous_claim,
+        "claim_cleanup": claim_cleanup,
+        "runtime": _runtime_snapshot_payload(snapshot),
     }
 
 

@@ -19,16 +19,22 @@ RuntimeHealthReasonCode = Literal[
     "AGENT_CONTAINER_MISSING",
     "AGENT_CONTAINER_EXITED",
     "RUNTIME_INSPECTION_UNAVAILABLE",
+    "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART",
 ]
 RuntimeHealthDecision = Literal[
     "none",
     "fail_workspace",
     "remonitor_workspace",
     "defer_retry_policy",
+    "preserve_runtime",
 ]
 RuntimeHealthStatus = Literal["ok", "stranded", "unavailable"]
 
 RUNTIME_STRANDED_EVENT_TYPE = "workspace.runtime_stranded_detected"
+OPERATOR_REFRESH_EVENT_TYPE = "workspace.refresh_requested"
+OPERATOR_REFRESH_REASON_CODE = "OPERATOR_REFRESH"
+ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
+ACTIVE_EXECUTION_PRESERVED_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
 
 ACTIVE_RUNTIME_HEALTH_STATUSES = frozenset(
     {

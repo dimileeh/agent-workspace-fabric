@@ -7,6 +7,7 @@ import builtins
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -133,6 +134,11 @@ from awf.service.workspace_observability import (
     workspace_pricing_metadata,
 )
 from awf.service.workspace_runtime_health import (
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+    ACTIVE_RUNTIME_HEALTH_STATUSES,
+    OPERATOR_REFRESH_EVENT_TYPE,
+    OPERATOR_REFRESH_REASON_CODE,
     RUNTIME_STRANDED_EVENT_TYPE,
     classify_runtime_snapshot,
     runtime_workspace_from_workspace,
@@ -639,9 +645,15 @@ class WorkspaceService:
             compose_project_name = workspace.compose_project_name
             runtime_workspace = runtime_workspace_from_workspace(workspace)
             app_endpoints = _workspace_app_endpoint_responses(workspace)
+            preserved_runtime_health = _workspace_preserved_runtime_health_from_events(workspace)
 
         snapshot = await self._runtime_inspector.inspect(compose_project_name)
         finding = classify_runtime_snapshot(runtime_workspace, snapshot)
+        runtime_health = (
+            WorkspaceRuntimeHealthResponse(**finding.to_response_dict())
+            if finding is not None
+            else preserved_runtime_health
+        )
         return WorkspaceRuntimeResponse(
             workspace_id=workspace_id,
             compose_project_name=compose_project_name,
@@ -662,11 +674,7 @@ class WorkspaceService:
             logs_available=True,
             control_available=True,
             reason=snapshot.reason,
-            runtime_health=(
-                WorkspaceRuntimeHealthResponse(**finding.to_response_dict())
-                if finding is not None
-                else None
-            ),
+            runtime_health=runtime_health,
             app_endpoints=app_endpoints,
         )
 
@@ -1834,8 +1842,43 @@ def _approved_planning_scope_fallback_model(
 def _workspace_runtime_health_from_events(
     workspace: Workspace,
 ) -> WorkspaceRuntimeHealthResponse | None:
+    return _workspace_runtime_health_from_matching_events(
+        workspace,
+        event_types=frozenset(
+            {
+                RUNTIME_STRANDED_EVENT_TYPE,
+                ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+            }
+        ),
+    )
+
+
+def _workspace_preserved_runtime_health_from_events(
+    workspace: Workspace,
+) -> WorkspaceRuntimeHealthResponse | None:
+    return _workspace_runtime_health_from_matching_events(
+        workspace,
+        event_types=frozenset({ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE}),
+    )
+
+
+def _workspace_runtime_health_from_matching_events(
+    workspace: Workspace,
+    *,
+    event_types: frozenset[str],
+) -> WorkspaceRuntimeHealthResponse | None:
+    preserved_event_floor = (
+        _active_runtime_health_event_floor(workspace)
+        if ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE in event_types
+        else None
+    )
     for event in reversed(workspace.events):
-        if event.event_type != RUNTIME_STRANDED_EVENT_TYPE:
+        if event.event_type not in event_types:
+            continue
+        if (
+            event.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE
+            and _event_occurred_before_floor(event.occurred_at, preserved_event_floor)
+        ):
             continue
         payload = event.payload or {}
         reason_code = payload.get("reason_code") or event.reason_code
@@ -1845,14 +1888,73 @@ def _workspace_runtime_health_from_events(
             return None
         if not isinstance(message, str):
             message = reason_code
+        status = "stranded"
+        if reason_code == "RUNTIME_INSPECTION_UNAVAILABLE":
+            status = "unavailable"
+        if reason_code == ACTIVE_EXECUTION_PRESERVED_REASON_CODE:
+            if workspace.status not in ACTIVE_RUNTIME_HEALTH_STATUSES:
+                continue
+            event_workspace_status = payload.get("workspace_status")
+            if (
+                not isinstance(event_workspace_status, str)
+                or event_workspace_status != workspace.status
+            ):
+                continue
+            status = "ok"
         return WorkspaceRuntimeHealthResponse(
-            status="unavailable" if reason_code == "RUNTIME_INSPECTION_UNAVAILABLE" else "stranded",
+            status=cast(Any, status),
             reason_code=reason_code,
             decision=cast(Any, decision),
             message=message,
             services=_runtime_health_event_services(payload),
         )
     return None
+
+
+def _active_runtime_health_event_floor(workspace: Workspace) -> datetime | None:
+    status = str(workspace.status)
+    status_floors = [
+        _utc_datetime(event.occurred_at)
+        for event in workspace.events
+        if isinstance(event.occurred_at, datetime)
+        and event.event_type == "workspace.state_changed"
+        and event.new_state == status
+    ]
+    status_started_at = max(status_floors) if status_floors else None
+    floors = [status_started_at] if status_started_at is not None else []
+    for event in workspace.events:
+        if (
+            not isinstance(event.occurred_at, datetime)
+            or event.event_type != OPERATOR_REFRESH_EVENT_TYPE
+            or event.reason_code != OPERATOR_REFRESH_REASON_CODE
+        ):
+            continue
+        occurred_at = _utc_datetime(event.occurred_at)
+        if status_started_at is None or occurred_at >= status_started_at:
+            floors.append(occurred_at)
+    claim_expires_at = getattr(workspace, "execution_claim_expires_at", None)
+    if claim_expires_at is not None:
+        claim_floor = _utc_datetime(claim_expires_at)
+        if claim_floor <= datetime.now(UTC):
+            floors.append(claim_floor)
+    return max(floors) if floors else None
+
+
+def _event_occurred_before_floor(
+    occurred_at: datetime | None,
+    floor: datetime | None,
+) -> bool:
+    return (
+        isinstance(occurred_at, datetime)
+        and floor is not None
+        and _utc_datetime(occurred_at) < floor
+    )
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _runtime_health_event_services(payload: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -2014,19 +2116,6 @@ def _dind_mode_from_profile_snapshot(profile: Mapping[str, Any] | None) -> str:
     if isinstance(docker, Mapping) and docker.get("mode") == "dind":
         return "dind"
     return "none"
-
-
-def _resource_reservation_row_summary(reservation: Any) -> dict[str, Any]:
-    return {
-        "node_id": reservation.node_id,
-        "steady_cpu": reservation.steady_cpu,
-        "steady_memory_gb": reservation.steady_memory_gb,
-        "peak_cpu": reservation.peak_cpu,
-        "peak_memory_gb": reservation.peak_memory_gb,
-        "disk_mb": reservation.disk_mb,
-        "dind_slots": reservation.dind_slots,
-        "phase": reservation.phase,
-    }
 
 
 def _parse_memory_gb(value: str | None) -> float | None:

@@ -9799,7 +9799,8 @@
               "none",
               "fail_workspace",
               "remonitor_workspace",
-              "defer_retry_policy"
+              "defer_retry_policy",
+              "preserve_runtime"
             ],
             "title": "Decision",
             "type": "string"
