@@ -1127,6 +1127,132 @@ class TestFetchPrStatus:
         assert c.blocks_merge is True
 
     @pytest.mark.unit
+    async def test_drops_superseded_coderabbit_skip_after_trigger_ack(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 77,
+                        "body": (
+                            "<!-- skip review by coderabbit.ai -->\n"
+                            "> [!IMPORTANT]\n"
+                            "> ## Review skipped\n\n"
+                            "Auto reviews are disabled on base/target branches "
+                            "other than the configured development branch.\n\n"
+                            "- [ ] Trigger review"
+                        ),
+                        "isMinimized": False,
+                        "createdAt": "2026-05-07T08:00:00Z",
+                        "author": {"login": "coderabbitai"},
+                    },
+                    {
+                        "databaseId": 78,
+                        "body": "@coderabbitai review",
+                        "isMinimized": False,
+                        "createdAt": "2026-05-07T08:05:00Z",
+                        "author": {"login": "dimileeh"},
+                    },
+                    {
+                        "databaseId": 79,
+                        "body": (
+                            "<!-- This is an auto-generated reply by CodeRabbit -->\n"
+                            "<details>\n"
+                            "<summary>Actions performed</summary>\n\n"
+                            "Review triggered.\n"
+                            "</details>"
+                        ),
+                        "isMinimized": False,
+                        "createdAt": "2026-05-07T08:05:10Z",
+                        "author": {"login": "coderabbitai"},
+                    },
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_review_comments == ()
+
+    @pytest.mark.unit
+    async def test_missing_skip_timestamp_still_drops_when_review_evidence_exists(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 77,
+                        "body": (
+                            "> [!IMPORTANT]\n"
+                            "> ## Review skipped\n\n"
+                            "Auto reviews are disabled on this base branch.\n\n"
+                            "- [ ] Trigger review"
+                        ),
+                        "isMinimized": False,
+                        "author": {"login": "coderabbitai"},
+                    },
+                    {
+                        "databaseId": 79,
+                        "body": "Review triggered.",
+                        "isMinimized": False,
+                        "createdAt": "2026-05-07T08:05:10Z",
+                        "author": {"login": "coderabbitai"},
+                    },
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.unresolved_review_comments == ()
+
+    @pytest.mark.unit
+    async def test_drops_superseded_coderabbit_skip_after_later_coderabbit_review(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                reviews=[
+                    {
+                        "databaseId": 88,
+                        "body": "**Actionable comments posted: 5**",
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-05-07T09:09:31Z",
+                        "author": {"login": "coderabbitai"},
+                    }
+                ],
+                comments=[
+                    {
+                        "databaseId": 77,
+                        "body": (
+                            "<!-- skip review by coderabbit.ai -->\n"
+                            "> [!IMPORTANT]\n"
+                            "> ## Review skipped\n\n"
+                            "Required review was skipped. Trigger review before merging."
+                        ),
+                        "isMinimized": False,
+                        "createdAt": "2026-05-07T08:00:00Z",
+                        "author": {"login": "coderabbitai"},
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [c.comment_id for c in status.unresolved_review_comments] == ["88"]
+        assert status.unresolved_review_comments[0].author == "coderabbitai"
+        assert status.unresolved_review_comments[0].blocks_merge is False
+
+    @pytest.mark.unit
     async def test_routes_bot_issue_summary_to_agent_feedback(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

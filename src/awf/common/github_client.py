@@ -745,13 +745,28 @@ class GitHubClient:
             connection_name="comments",
             query=_GQL_PR_ISSUE_COMMENTS_PAGE,
         )
+        coderabbit_review_evidence_times = _coderabbit_review_evidence_times(
+            issue_comment_nodes=issue_comment_nodes,
+            review_nodes=review_nodes,
+        )
         for node in issue_comment_nodes:
             body = node.get("body") or ""
             if node.get("isMinimized") or not body.strip():
                 continue
-            if _is_awf_status_issue_comment(body):
-                continue
             author = _dig(node, "author", "login")
+            if (
+                _is_awf_status_issue_comment(body)
+                or _is_review_bot_trigger_command_issue_comment(body)
+                or _is_coderabbit_review_trigger_ack_issue_comment(body, author=author)
+            ):
+                continue
+            if _is_superseded_coderabbit_skip_issue_comment(
+                body,
+                author=author,
+                created_at=_parse_github_datetime(node.get("createdAt")),
+                review_evidence_times=coderabbit_review_evidence_times,
+            ):
+                continue
             reviews.append(
                 ReviewComment(
                     comment_id=f"issue:{node['databaseId']}",
@@ -1231,6 +1246,56 @@ def _is_awf_status_issue_comment(body: str) -> bool:
         or "after the blocker is cleared or a new commit lands, awf will re-verify" in lower
         or _is_awf_resolution_issue_comment(lower)
     )
+
+
+def _coderabbit_review_evidence_times(
+    *,
+    issue_comment_nodes: list[dict[str, Any]],
+    review_nodes: list[dict[str, Any]],
+) -> tuple[datetime | None, ...]:
+    times: list[datetime | None] = []
+    for node in issue_comment_nodes:
+        author = _dig(node, "author", "login")
+        body = node.get("body") or ""
+        if _is_coderabbit_review_trigger_ack_issue_comment(body, author=author):
+            times.append(_parse_github_datetime(node.get("createdAt")))
+    for node in review_nodes:
+        author = _dig(node, "author", "login")
+        if _is_coderabbit_author(author):
+            times.append(_parse_github_datetime(node.get("submittedAt")))
+    return tuple(times)
+
+
+def _is_superseded_coderabbit_skip_issue_comment(
+    body: str,
+    *,
+    author: str | None,
+    created_at: datetime | None,
+    review_evidence_times: tuple[datetime | None, ...],
+) -> bool:
+    if not _is_coderabbit_author(author) or not _is_merge_blocking_issue_comment(body):
+        return False
+    if not review_evidence_times:
+        return False
+    if created_at is None:
+        return True
+    return any(evidence_at is None or evidence_at > created_at for evidence_at in review_evidence_times)
+
+
+def _is_coderabbit_author(author: str | None) -> bool:
+    return (author or "").lower() in {"coderabbitai", "coderabbitai[bot]"}
+
+
+def _is_review_bot_trigger_command_issue_comment(body: str) -> bool:
+    lower = " ".join(body.lower().split())
+    return lower in {"@coderabbitai review", "@coderabbitai full review"}
+
+
+def _is_coderabbit_review_trigger_ack_issue_comment(body: str, *, author: str | None) -> bool:
+    if not _is_coderabbit_author(author):
+        return False
+    lower = " ".join(body.lower().split())
+    return "review triggered" in lower or "review has been triggered" in lower
 
 
 def _is_merge_blocking_issue_comment(body: str) -> bool:

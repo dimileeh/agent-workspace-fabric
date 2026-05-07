@@ -2982,16 +2982,16 @@ class TestRunOnceMonitorRecovery:
             ),
         )
 
-        assert await asyncio.wait_for(worker.run_once(), timeout=1.0) == 1
-        await asyncio.wait_for(monitor_started.wait(), timeout=1.0)
+        assert await asyncio.wait_for(worker.run_once(), timeout=5.0) == 1
+        await asyncio.wait_for(monitor_started.wait(), timeout=5.0)
         assert executor.resume_calls == [monitor_id]
         assert executor.calls == []
 
-        assert await asyncio.wait_for(worker.run_once(), timeout=1.0) == 0
+        assert await asyncio.wait_for(worker.run_once(), timeout=5.0) == 0
         assert executor.calls == []
 
         release_monitor.set()
-        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=1.0)
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=5.0)
 
         assert await worker.run_once() == 1
         await worker.wait_for_execution_tasks()

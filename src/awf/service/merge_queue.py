@@ -45,6 +45,7 @@ from awf.db.repositories import (
     StaleReasonRepository,
     ValidationRunRepository,
     WorkspaceRepository,
+    owned_paths_overlap,
 )
 from awf.runtime.merge_eligibility import (
     DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
@@ -188,6 +189,8 @@ async def list_merge_queue_blockers_for_candidate(
     rows = await _load_older_open_candidates(session, candidate)
     blockers: list[MergeQueueBlocker] = []
     for row in rows:
+        if not _candidate_blocks_target(row, candidate):
+            continue
         blocker_state = _blocking_state(row)
         if blocker_state is None:
             continue
@@ -230,6 +233,8 @@ async def list_merge_queue_blockers_for_candidates(
                 blocker_candidate,
                 candidate,
             ):
+                continue
+            if not _candidate_blocks_target(blocker_candidate, candidate):
                 continue
             blocker_state = _blocking_state(blocker_candidate)
             if blocker_state is None:
@@ -733,6 +738,28 @@ def _blocking_state(candidate: MergeCandidate) -> str | None:
     if _is_monitor_owned_recovery(candidate):
         return "monitor_owned_recovery"
     return None
+
+
+def _candidate_blocks_target(
+    candidate: MergeCandidate,
+    target: MergeCandidate,
+) -> bool:
+    candidate_paths = _candidate_owned_paths(candidate)
+    target_paths = _candidate_owned_paths(target)
+    if not candidate_paths or not target_paths:
+        return False
+    return any(
+        owned_paths_overlap(candidate_path, target_path)
+        for candidate_path in candidate_paths
+        for target_path in target_paths
+    )
+
+
+def _candidate_owned_paths(candidate: MergeCandidate) -> tuple[str, ...]:
+    paths = tuple(path for path in candidate.workspace.owned_paths if path)
+    if paths:
+        return paths
+    return tuple(path for path in candidate.attempt.owned_paths if path)
 
 
 def _is_merge_ready_candidate(candidate: MergeCandidate) -> bool:

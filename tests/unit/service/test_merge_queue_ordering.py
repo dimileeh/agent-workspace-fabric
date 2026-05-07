@@ -78,7 +78,9 @@ async def _seed_candidate(
     repo_url: str = "git@github.com:example/service.git",
     base_branch: str = "development",
     canonical: bool = True,
+    owned_paths: list[str] | None = None,
 ) -> tuple[str, str, str]:
+    declared_owned_paths = ["src/shared/**"] if owned_paths is None else owned_paths
     workspace_repo = WorkspaceRepository(session)
     workspace = await workspace_repo.create(
         repo_url=repo_url,
@@ -86,6 +88,7 @@ async def _seed_candidate(
         task_title=title,
         task_prompt=f"Implement {title}.",
         task_external_id=f"QUEUE-{pr_number}",
+        owned_paths=declared_owned_paths,
         auto_merge=True,
         agent=AgentRuntime.codex.value,
         test_commands=[],
@@ -104,7 +107,7 @@ async def _seed_candidate(
         external_id=f"QUEUE-{pr_number}",
         idempotency_key=None,
         task_class=None,
-        owned_paths=[],
+        owned_paths=declared_owned_paths,
     )
     attempt = await TaskAttemptRepository(session).create_for_workspace(
         task=task,
@@ -177,6 +180,37 @@ async def test_older_open_candidate_blocks_later_same_repo_base_candidate(
     assert blockers[0].workspace_id == older_workspace_id
     assert blockers[0].blocker_state == expected_state
     assert blockers[0].reason_code == "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE"
+
+
+@pytest.mark.unit
+async def test_disjoint_owned_paths_do_not_block_later_candidate(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    async with factory() as session:
+        await _seed_candidate(
+            session,
+            title="Older docs candidate",
+            pr_number=15,
+            created_at=now,
+            owned_paths=["docs/**"],
+        )
+        _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_candidate(
+            session,
+            title="Later API candidate",
+            pr_number=16,
+            created_at=now + timedelta(minutes=5),
+            owned_paths=["src/awf/api/**"],
+        )
+        await session.commit()
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id=later_candidate_id,
+        )
+
+    assert blockers == []
 
 
 @pytest.mark.unit
@@ -398,7 +432,9 @@ def _candidate(
     repo_url: str = "git@github.com:example/service.git",
     base_branch: str = "development",
     operations: list[Operation] | None = None,
+    owned_paths: list[str] | None = None,
 ) -> MergeCandidate:
+    declared_owned_paths = ["src/shared/**"] if owned_paths is None else owned_paths
     workspace_status_value = (
         workspace_status.value
         if isinstance(workspace_status, WorkspaceStatus)
@@ -413,6 +449,7 @@ def _candidate(
         task_prompt="Merge me",
         agent=AgentRuntime.codex.value,
         auto_merge=auto_merge,
+        owned_paths=declared_owned_paths,
     )
     workspace.operations = operations or []
     attempt = TaskAttempt(
@@ -425,6 +462,7 @@ def _candidate(
         base_branch=base_branch,
         title=workspace.task_title,
         status=workspace.status,
+        owned_paths=declared_owned_paths,
         is_canonical_for_merge=canonical,
         created_at=created_at,
         updated_at=created_at,
@@ -496,6 +534,11 @@ async def test_batch_blocker_lookup_filters_same_candidate_newer_and_nonblocking
     older_blocker = _candidate(candidate_id="older", created_at=now)
     same_candidate = _candidate(candidate_id="later", created_at=now - timedelta(minutes=1))
     newer_candidate = _candidate(candidate_id="newer", created_at=now + timedelta(minutes=10))
+    disjoint_candidate = _candidate(
+        candidate_id="disjoint",
+        created_at=now - timedelta(minutes=3),
+        owned_paths=["docs/**"],
+    )
     nonblocking_candidate = _candidate(
         candidate_id="nonblocking",
         created_at=now - timedelta(minutes=2),
@@ -512,7 +555,13 @@ async def test_batch_blocker_lookup_filters_same_candidate_newer_and_nonblocking
         _session: object,
         _candidates: list[MergeCandidate],
     ) -> list[MergeCandidate]:
-        return [same_candidate, newer_candidate, nonblocking_candidate, older_blocker]
+        return [
+            same_candidate,
+            newer_candidate,
+            disjoint_candidate,
+            nonblocking_candidate,
+            older_blocker,
+        ]
 
     monkeypatch.setattr(merge_queue, "_load_candidates", fake_load_candidates)
     monkeypatch.setattr(merge_queue, "_load_older_open_candidate_pool", fake_blocker_pool)
@@ -564,6 +613,21 @@ def test_merge_queue_private_policy_helpers_cover_false_paths() -> None:
         )
         is None
     )
+    assert not merge_queue._candidate_blocks_target(  # noqa: SLF001
+        _candidate(candidate_id="unowned", created_at=now, owned_paths=[]),
+        target,
+    )
+
+
+@pytest.mark.unit
+def test_merge_queue_candidate_dependency_falls_back_to_attempt_owned_paths() -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    blocker = _candidate(candidate_id="older", created_at=now, owned_paths=[])
+    target = _candidate(candidate_id="later", created_at=now + timedelta(minutes=5), owned_paths=[])
+    blocker.attempt.owned_paths = ["src/shared/**"]
+    target.attempt.owned_paths = ["src/shared/file.py"]
+
+    assert merge_queue._candidate_blocks_target(blocker, target)  # noqa: SLF001
 
 
 @pytest.mark.unit
