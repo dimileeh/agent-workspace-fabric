@@ -3758,7 +3758,10 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
         ]
 
     assert workspace.status == operator_status.value
-    assert workspace.pr_merge_sha is None
+    if operator_status == WorkspaceStatus.completed and callback == "completed":
+        assert workspace.pr_merge_sha == "stale-merge-sha"
+    else:
+        assert workspace.pr_merge_sha is None
     assert workspace.failure_reason is None
     assert workspace.failure_message is None
     assert cmd.calls == []

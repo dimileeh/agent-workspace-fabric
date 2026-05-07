@@ -190,6 +190,84 @@ class TestMonitorActionLogging:
         assert '"action": "Merge"' in log_text
 
     @pytest.mark.unit
+    async def test_pre_merge_settle_emits_started_and_completed_logs(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        # Initial monitor poll is green.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
+        # Pre-merge settle recheck is still green.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # sha lookup
+        log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            pre_merge_settle_seconds=5,
+            log_store=log_store,
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        event_names = [record.get("event") for record in captured]
+        entered_index = event_names.index("monitor.merge_critical_section_entered")
+        started_index = event_names.index("monitor.pre_merge_settle_started")
+        completed_index = event_names.index("monitor.pre_merge_settle_completed")
+        assert entered_index < started_index < completed_index
+        started = captured[started_index]
+        completed = captured[completed_index]
+        for record in (started, completed):
+            assert record["workspace_id"] == ws_id
+            assert record["pr_number"] == 42
+            assert record["base_branch"] == "development"
+            assert record["head_sha"] == "abc1234567890def"
+            assert record["wait_seconds"] == 5
+        assert isinstance(completed["elapsed_seconds"], (int, float))
+        assert completed["elapsed_seconds"] >= 0
+
+        async with factory() as s:
+            streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws_id)
+            monitor_stream = next(stream for stream in streams if stream.stream_id == "monitor.log")
+        durable_records = [
+            json.loads(line)
+            for line in Path(monitor_stream.path).read_text().splitlines()
+            if line.strip()
+        ]
+        durable_events = [record.get("event") for record in durable_records]
+        durable_entered_index = durable_events.index("monitor.merge_critical_section_entered")
+        durable_started_index = durable_events.index("monitor.pre_merge_settle_started")
+        durable_completed_index = durable_events.index("monitor.pre_merge_settle_completed")
+        assert durable_entered_index < durable_started_index < durable_completed_index
+        durable_started = durable_records[durable_started_index]
+        durable_completed = durable_records[durable_completed_index]
+        for record in (durable_started, durable_completed):
+            assert record["workspace_id"] == ws_id
+            assert record["pr_number"] == 42
+            assert record["base_branch"] == "development"
+            assert record["head_sha"] == "abc1234567890def"
+            assert record["wait_seconds"] == 5
+        assert isinstance(durable_completed["elapsed_seconds"], (int, float))
+        assert durable_completed["elapsed_seconds"] >= 0
+
+    @pytest.mark.unit
     async def test_recovery_operation_log_indexing(
         self,
         factory: async_sessionmaker[AsyncSession],
