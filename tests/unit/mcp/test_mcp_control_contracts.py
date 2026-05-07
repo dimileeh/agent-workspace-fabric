@@ -549,7 +549,7 @@ class TestSuccessPaths:
 @pytest.mark.unit
 class TestErrorMapping:
     @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
-    async def test_idempotency_key_is_required_in_tool_schema(
+    async def test_idempotency_key_schema_documents_required_control_contract(
         self, tool_name: str
     ) -> None:
         service = _MockService()
@@ -559,12 +559,16 @@ class TestErrorMapping:
         schema = tools[tool_name].inputSchema
         required = schema.get("required", [])
         idempotency_key = schema["properties"]["idempotency_key"]
+        string_schema = next(
+            item for item in idempotency_key["anyOf"] if item.get("type") == "string"
+        )
 
-        assert "idempotency_key" in required
-        assert idempotency_key["type"] == "string"
+        assert "idempotency_key" not in required
+        assert idempotency_key["description"].startswith("Required idempotency key")
         assert idempotency_key["minLength"] == 1
-        assert idempotency_key["maxLength"] == 128
-        assert "default" not in idempotency_key
+        assert string_schema["maxLength"] == 128
+        assert any(item.get("type") == "null" for item in idempotency_key["anyOf"])
+        assert idempotency_key["default"] is None
         assert service.calls == []
 
     @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
@@ -577,6 +581,24 @@ class TestErrorMapping:
         result = await _call_result(
             mcp, tool_name, {"workspace_id": "ws_x", "idempotency_key": ""}
         )
+
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        assert (
+            result.structuredContent["message"]
+            == "Idempotency-Key header is required for this endpoint."
+        )
+        assert service.calls == []
+
+    @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
+    async def test_omitted_idempotency_key_returns_structured_mcp_error(
+        self, tool_name: str
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        result = await _call_result(mcp, tool_name, {"workspace_id": "ws_x"})
 
         assert result.isError is True
         assert result.structuredContent is not None

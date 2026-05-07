@@ -268,9 +268,8 @@ async def test_rest_and_mcp_agree_on_invalid_request_missing_idempotency_key() -
     """REST and MCP reject missing or blank idempotency keys on control surfaces.
 
     The REST control surface treats ``Idempotency-Key`` as required;
-    ``INVALID_REQUEST`` is the agreed-upon code. The MCP tool schema marks the
-    same key required and its adapter rejects blank values before calling the
-    control service.
+    ``INVALID_REQUEST`` is the agreed-upon code. The MCP adapter normalizes
+    omitted and blank values before calling the control service.
     """
     # Asserted via dedicated REST endpoint test in
     # tests/unit/api/test_workspace_controls_idempotency.py — this contract test
