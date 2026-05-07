@@ -558,7 +558,7 @@ def test_execution_claim_is_stale_handles_missing_and_naive_datetimes() -> None:
 
 
 @pytest.mark.unit
-def test_active_execution_preservation_claim_cleanup_clears_unexpired_claim() -> None:
+def test_active_execution_preservation_claim_cleanup_preserves_unexpired_claim() -> None:
     cutoff = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     workspace = SimpleNamespace(
         execution_claimed_by="live-worker",
@@ -569,8 +569,8 @@ def test_active_execution_preservation_claim_cleanup_clears_unexpired_claim() ->
         workspace,
         claim_cutoff=cutoff,
     ) == {
-        "action": "cleared_unexpired",
-        "reason_code": "UNEXPIRED_EXECUTION_CLAIM_CLEARED_DURING_ACTIVE_EXECUTION_PRESERVATION",
+        "action": "preserved_unexpired",
+        "reason_code": "UNEXPIRED_EXECUTION_CLAIM_PRESERVED_DURING_ACTIVE_EXECUTION_PRESERVATION",
         "previous_claimed_by": "live-worker",
         "previous_expires_at": "2026-04-27T12:05:00+00:00",
     }
