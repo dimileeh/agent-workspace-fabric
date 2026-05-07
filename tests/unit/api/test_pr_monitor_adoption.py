@@ -141,6 +141,7 @@ async def test_adopt_pr_accepts_repo_slug_and_pr_number(
 @pytest.mark.unit
 async def test_adopt_pr_accepts_full_pr_url_idempotently(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
 ) -> None:
     client, fetcher = adoption_client
     headers = {"Authorization": "Bearer secret"}
@@ -160,6 +161,29 @@ async def test_adopt_pr_accepts_full_pr_url_idempotently(
     assert second.status_code == 202
     assert second.json()["attached_existing"] is True
     assert second.json()["workspace_id"] == first.json()["workspace_id"]
+    assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+    session_factory = make_session_factory(engine)
+    unknown_status = "monitoring_review_repair"
+    async with session_factory() as session:
+        workspace = (
+            await session.execute(
+                select(Workspace).where(Workspace.id == first.json()["workspace_id"])
+            )
+        ).scalar_one()
+        workspace.status = unknown_status
+        await session.commit()
+
+    third = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={"pr_url": "https://github.com/dimileeh/aira-web/pull/277"},
+    )
+
+    assert third.status_code == 202
+    assert third.json()["attached_existing"] is True
+    assert third.json()["workspace_id"] == first.json()["workspace_id"]
+    assert third.json()["status"] == unknown_status
     assert fetcher.calls == [("dimileeh/aira-web", 277)]
 
 

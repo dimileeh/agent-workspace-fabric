@@ -4027,7 +4027,15 @@
             "type": "string"
           },
           "status": {
-            "$ref": "#/components/schemas/WorkspaceStatus"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceStatus"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Status"
           },
           "status_url": {
             "title": "Status Url",

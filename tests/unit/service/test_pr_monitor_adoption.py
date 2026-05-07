@@ -687,6 +687,48 @@ class TestPullRequestMonitorAdoptionService:
         assert adoption_module._adoption_workspace_is_resumable(workspace) is True
 
     @pytest.mark.unit
+    async def test_unknown_existing_adoption_status_attaches_with_raw_status(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        unknown_status = "monitoring_review_repair"
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    auto_merge=False,
+                )
+            )
+            workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert workspace is not None
+            workspace.status = unknown_status
+            await session.commit()
+
+        async with factory() as session:
+            replay_fetcher = _MetadataFetcher(_metadata(head_ref="feature/should-not-fetch"))
+            replay = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=replay_fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                    auto_merge=False,
+                )
+            )
+            await session.commit()
+
+        assert replay.attached_existing is True
+        assert replay.workspace_id == first.workspace_id
+        assert replay.status == unknown_status
+        assert replay_fetcher.calls == []
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+    @pytest.mark.unit
     async def test_completed_existing_adoption_refetches_and_rejects_merged_pr(
         self,
         factory: async_sessionmaker[AsyncSession],

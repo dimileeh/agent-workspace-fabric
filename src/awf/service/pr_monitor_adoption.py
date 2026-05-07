@@ -418,7 +418,7 @@ class PullRequestMonitorAdoptionService:
         pr_url = str(adoption.get("pr_url") or workspace.pr_url or "")
         return PullRequestMonitorAdoptionResponse(
             workspace_id=workspace.id,
-            status=WorkspaceStatus(workspace.status),
+            status=_workspace_status_for_response(workspace.status),
             version=workspace.version,
             task_id=attempt.task_id if attempt is not None else None,
             attempt_id=attempt.id if attempt is not None else None,
@@ -612,6 +612,13 @@ def _adoption_workspace_is_resumable(workspace: Workspace) -> bool:
         # was updated; attach rather than superseding the canonical key.
         return True
     return status not in _NON_RESUMABLE_ADOPTION_STATUSES
+
+
+def _workspace_status_for_response(status: str) -> WorkspaceStatus | str:
+    try:
+        return WorkspaceStatus(status)
+    except ValueError:
+        return status
 
 
 def _raise_if_existing_workspace_is_not_requested_adoption(
