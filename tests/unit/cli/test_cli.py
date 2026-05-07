@@ -373,6 +373,7 @@ class TestWorkspaceRemonitor:
         assert result.exit_code == 0, result.output
         generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
         assert re.fullmatch(r"awf-cli-remonitor-[0-9a-f]{32}", generated_key)
+        assert f"Generated Idempotency-Key: {generated_key}" in result.stderr
 
 
 class TestWorkspaceControlCommandsPresence:
@@ -408,6 +409,24 @@ def test_workspace_control_commands_generate_idempotency_key_when_omitted(
     assert result.exit_code == 0, result.output
     generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
     assert re.fullmatch(rf"awf-cli-{command}-[0-9a-f]{{32}}", generated_key)
+    assert f"Generated Idempotency-Key: {generated_key}" in result.stderr
+
+
+@pytest.mark.unit
+def test_workspace_control_generated_idempotency_key_survives_request_failure() -> None:
+    with patch(
+        "awf.cli.main.httpx.request",
+        side_effect=httpx.ReadTimeout("response dropped"),
+    ) as mock:
+        result = _runner.invoke(
+            app,
+            ["workspace", "cancel", "ws_cancel", "--reason", "operator requested"],
+        )
+
+    assert result.exit_code == 2
+    generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
+    assert re.fullmatch(r"awf-cli-cancel-[0-9a-f]{32}", generated_key)
+    assert f"Generated Idempotency-Key: {generated_key}" in result.stderr
 
 
 @pytest.mark.unit

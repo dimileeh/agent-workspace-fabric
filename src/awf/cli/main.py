@@ -57,8 +57,9 @@ _PROVIDER_HELP_PASSTHROUGH = (
     "or docker."
 )
 _CONTROL_IDEMPOTENCY_KEY_HELP = (
-    "Idempotency key for this mutating control. Generated when omitted; "
-    "pass the same value again to safely retry after a timeout or dropped response."
+    "Idempotency key for this mutating control. When omitted, generated and "
+    "printed to stderr before the request; pass the same value again to safely "
+    "retry after a timeout or dropped response."
 )
 
 
@@ -123,9 +124,12 @@ def _control_headers(
     if_match: str | None,
     action: str,
 ) -> dict[str, str]:
+    generated = idempotency_key is None
     resolved_key = (
         idempotency_key if idempotency_key is not None else f"awf-cli-{action}-{uuid4().hex}"
     )
+    if generated:
+        typer.echo(f"Generated Idempotency-Key: {resolved_key}", err=True)
     headers = {
         **_api_token_headers(api_token),
         "Idempotency-Key": resolved_key,
