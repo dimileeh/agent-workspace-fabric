@@ -556,12 +556,11 @@ async def _next_adoption_workspace_idempotency_key(
     reserved_idempotency_keys: Iterable[str] = (),
     require_generation: bool = False,
 ) -> str:
-    if known_workspace_keys is None:
-        existing_keys = set(
-            await workspace_repo.list_idempotency_key_family(logical_idempotency_key)
-        )
-    else:
-        existing_keys = set(known_workspace_keys)
+    existing_keys = set(
+        await workspace_repo.list_idempotency_key_family(logical_idempotency_key)
+    )
+    if known_workspace_keys is not None:
+        existing_keys.update(known_workspace_keys)
     existing_keys.update(reserved_idempotency_keys)
     if not existing_keys and not require_generation:
         return logical_idempotency_key

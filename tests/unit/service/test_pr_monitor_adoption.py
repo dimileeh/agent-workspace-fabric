@@ -956,10 +956,9 @@ class TestPullRequestMonitorAdoptionService:
             assert fresh_task.title == "feature: retitled again"
 
     @pytest.mark.unit
-    async def test_terminal_prior_reuses_canonical_key_from_loaded_adoption_history(
+    async def test_terminal_prior_reuses_canonical_key_despite_unrelated_generated_key(
         self,
         factory: async_sessionmaker[AsyncSession],
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         logical_key = adoption_module.pr_adoption_idempotency_key(
             repo_slug="dimileeh/aira-web",
@@ -979,19 +978,17 @@ class TestPullRequestMonitorAdoptionService:
             old_workspace = await WorkspaceRepository(session).get(first.workspace_id)
             assert old_workspace is not None
             old_workspace.status = WorkspaceStatus.destroyed.value
+            await WorkspaceRepository(session).create(
+                repo_url="git@github.com:dimileeh/unrelated.git",
+                branch_base="main",
+                task_title="unrelated stale adoption key",
+                task_prompt="stale key collision fixture",
+                task_external_id="unrelated-stale-adoption-key",
+                agent="codex",
+                test_commands=[],
+                idempotency_key=f"{logical_key}:g1",
+            )
             await session.commit()
-
-        async def _unexpected_family_lookup(
-            _self: WorkspaceRepository,
-            _logical_key: str,
-        ) -> list[str]:
-            raise AssertionError("adoption history should provide workspace idempotency keys")
-
-        monkeypatch.setattr(
-            WorkspaceRepository,
-            "list_idempotency_key_family",
-            _unexpected_family_lookup,
-        )
 
         async with factory() as session:
             result = await PullRequestMonitorAdoptionService(
@@ -2330,12 +2327,21 @@ class TestPullRequestMonitorAdoptionService:
         assert task_attempt_selects == []
 
     @pytest.mark.unit
-    async def test_adoption_workspace_idempotency_key_uses_known_workspace_keys(
+    async def test_adoption_workspace_idempotency_key_merges_known_keys_with_family(
         self,
     ) -> None:
         class _WorkspaceRepo:
+            calls: list[str]
+
+            def __init__(self) -> None:
+                self.calls = []
+
             async def list_idempotency_key_family(self, logical_key: str) -> list[str]:
-                raise AssertionError(f"unexpected generation family lookup for {logical_key}")
+                self.calls.append(logical_key)
+                return [
+                    "pr-adopt:logical:g2",
+                    "pr-adopt:logical:g1000",
+                ]
 
             async def get_by_idempotency_key(self, key: str) -> object | None:
                 raise AssertionError(f"unexpected per-key lookup for {key}")
@@ -2352,15 +2358,18 @@ class TestPullRequestMonitorAdoptionService:
                 "pr-adopt:logical:g1000",
                 "pr-adopt:logical:gignored",
             ],
+            reserved_idempotency_keys=["pr-adopt:logical:g4"],
         )
 
-        assert key == "pr-adopt:logical:g2"
+        assert key == "pr-adopt:logical:g5"
+        assert repo.calls == ["pr-adopt:logical"]
 
     @pytest.mark.unit
     async def test_adoption_workspace_idempotency_key_exhaustion_is_explicit(self) -> None:
         class _ExhaustedWorkspaceRepo:
             async def list_idempotency_key_family(self, logical_key: str) -> list[str]:
-                raise AssertionError(f"unexpected generation family lookup for {logical_key}")
+                assert logical_key == "pr-adopt:exhausted"
+                return []
 
         with pytest.raises(RuntimeError, match="fresh PR adoption workspace idempotency key"):
             await adoption_module._next_adoption_workspace_idempotency_key(
