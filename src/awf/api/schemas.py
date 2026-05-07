@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -1477,6 +1477,33 @@ class WorkspaceReasonRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     reason: Annotated[str | None, Field(default=None, max_length=1024)]
+
+
+class _WorkspaceReasonCompatibilityRequest(WorkspaceReasonRequest):
+    _ignored_legacy_body_fields: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_ignored_legacy_body_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or not cls._ignored_legacy_body_fields:
+            return data
+        return {
+            field_name: value
+            for field_name, value in data.items()
+            if field_name not in cls._ignored_legacy_body_fields
+        }
+
+
+class WorkspaceReasonWithLegacyStopStackRequest(_WorkspaceReasonCompatibilityRequest):
+    """Reason-only request that still accepts the deprecated no-op ``stop_stack`` field."""
+
+    _ignored_legacy_body_fields: ClassVar[frozenset[str]] = frozenset({"stop_stack"})
+
+
+class WorkspaceReasonWithLegacyRequestedTierRequest(_WorkspaceReasonCompatibilityRequest):
+    """Reason-only request that still accepts deprecated no-op ``requested_tier``."""
+
+    _ignored_legacy_body_fields: ClassVar[frozenset[str]] = frozenset({"requested_tier"})
 
 
 class WorkspaceControlRequest(WorkspaceReasonRequest):

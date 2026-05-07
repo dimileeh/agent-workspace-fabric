@@ -8954,8 +8954,9 @@
         "title": "WorkspaceProviderRecoveryPolicy",
         "type": "object"
       },
-      "WorkspaceReasonRequest": {
+      "WorkspaceReasonWithLegacyRequestedTierRequest": {
         "additionalProperties": false,
+        "description": "Reason-only request that still accepts deprecated no-op ``requested_tier``.",
         "properties": {
           "reason": {
             "anyOf": [
@@ -8970,7 +8971,27 @@
             "title": "Reason"
           }
         },
-        "title": "WorkspaceReasonRequest",
+        "title": "WorkspaceReasonWithLegacyRequestedTierRequest",
+        "type": "object"
+      },
+      "WorkspaceReasonWithLegacyStopStackRequest": {
+        "additionalProperties": false,
+        "description": "Reason-only request that still accepts the deprecated no-op ``stop_stack`` field.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "WorkspaceReasonWithLegacyStopStackRequest",
         "type": "object"
       },
       "WorkspaceRecoveryCurrentOperationResponse": {
@@ -12804,7 +12825,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkspaceReasonRequest"
+                "$ref": "#/components/schemas/WorkspaceReasonWithLegacyRequestedTierRequest"
               }
             }
           },
@@ -12904,7 +12925,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkspaceReasonRequest"
+                "$ref": "#/components/schemas/WorkspaceReasonWithLegacyRequestedTierRequest"
               }
             }
           },
@@ -13004,7 +13025,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkspaceReasonRequest"
+                "$ref": "#/components/schemas/WorkspaceReasonWithLegacyStopStackRequest"
               }
             }
           },
@@ -13396,7 +13417,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkspaceReasonRequest"
+                "$ref": "#/components/schemas/WorkspaceReasonWithLegacyStopStackRequest"
               }
             }
           },

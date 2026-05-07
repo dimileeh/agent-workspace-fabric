@@ -519,32 +519,32 @@ async def test_mcp_destroy_invokes_service_with_canonical_kwargs(
             {"reason": "operator recovery", "stop_stack": False},
             "stop_workspace",
             None,
-            422,
+            200,
         ),
         (
             "/v1/workspaces/ws_canonical/remonitor",
             {"reason": "operator recovery", "stop_stack": False},
             "remonitor_workspace",
             None,
-            422,
+            200,
         ),
         (
             "/v1/workspaces/ws_canonical/refresh",
             {"reason": "operator recovery", "requested_tier": 2},
             "request_refresh_workspace",
             OperationType.refresh,
-            422,
+            202,
         ),
         (
             "/v1/workspaces/ws_canonical/rebase",
             {"reason": "operator recovery", "requested_tier": 2},
             "request_rebase_workspace",
             OperationType.rebase,
-            422,
+            202,
         ),
     ],
 )
-async def test_rest_controls_reject_unsupported_body_fields(
+async def test_rest_controls_ignore_deprecated_body_fields(
     contract_stack: ContractStack,
     monkeypatch: pytest.MonkeyPatch,
     path: str,
@@ -553,7 +553,7 @@ async def test_rest_controls_reject_unsupported_body_fields(
     operation_type: OperationType | None,
     expected_status: int,
 ) -> None:
-    """REST rejects fields that are not implemented by the backend contract."""
+    """REST still accepts deprecated no-op fields while calling the canonical backend."""
     from awf.service import controls as controls_module
 
     calls: list[dict[str, Any]] = []
@@ -591,6 +591,92 @@ async def test_rest_controls_reject_unsupported_body_fields(
     )
 
     assert response.status_code == expected_status, response.text
+    assert calls == [
+        {
+            "workspace_id": "ws_canonical",
+            "reason": "operator recovery",
+            "idempotency_key": "ignored-field",
+            "expected_version": 5,
+        }
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("path", "body", "method_name", "operation_type"),
+    [
+        (
+            "/v1/workspaces/ws_canonical/stop",
+            {"reason": "operator recovery", "unknown_legacy_field": True},
+            "stop_workspace",
+            None,
+        ),
+        (
+            "/v1/workspaces/ws_canonical/remonitor",
+            {"reason": "operator recovery", "unknown_legacy_field": True},
+            "remonitor_workspace",
+            None,
+        ),
+        (
+            "/v1/workspaces/ws_canonical/refresh",
+            {"reason": "operator recovery", "unknown_legacy_field": True},
+            "request_refresh_workspace",
+            OperationType.refresh,
+        ),
+        (
+            "/v1/workspaces/ws_canonical/rebase",
+            {"reason": "operator recovery", "unknown_legacy_field": True},
+            "request_rebase_workspace",
+            OperationType.rebase,
+        ),
+    ],
+)
+async def test_rest_controls_reject_unknown_body_fields(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    body: dict[str, object],
+    method_name: str,
+    operation_type: OperationType | None,
+) -> None:
+    """REST rejects fields that were never part of the compatibility contract."""
+    from awf.service import controls as controls_module
+
+    calls: list[dict[str, Any]] = []
+
+    async def record_request(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse | Operation:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        if operation_type is not None:
+            return _stub_operation(workspace_id, operation_type)
+        return _stub_control_response(workspace_id, operation_id="op_legacy_contract")
+
+    monkeypatch.setattr(controls_module.WorkspaceControlService, method_name, record_request)
+
+    response = await contract_stack.client.post(
+        path,
+        headers={
+            **contract_stack.auth_headers,
+            "Idempotency-Key": "unknown-field",
+            "If-Match": "5",
+        },
+        json=body,
+    )
+
+    assert response.status_code == 422, response.text
     assert calls == []
 
 
