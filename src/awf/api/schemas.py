@@ -278,7 +278,7 @@ class PullRequestMonitorAdoptionResponse(BaseModel):
     """Response for the supported existing-PR adoption flow."""
 
     workspace_id: str
-    status: WorkspaceStatus
+    status: WorkspaceStatus | str
     version: int
     task_id: str | None = None
     attempt_id: str | None = None

@@ -15,6 +15,7 @@ from awf.common.config import Settings, get_settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.pr_monitor_adoption import pr_adoption_idempotency_key
 
@@ -30,14 +31,18 @@ def _metadata(
     *,
     state: str = "OPEN",
     number: int = 277,
+    head_ref: str = "feature/ready",
+    base_ref: str = "development",
+    head_sha: str = "h" * 40,
+    base_sha: str = "b" * 40,
 ) -> PullRequestAdoptionMetadata:
     return PullRequestAdoptionMetadata(
         number=number,
-        head_ref="feature/ready",
+        head_ref=head_ref,
         head_repo_slug="dimileeh/aira-web",
-        base_ref="development",
-        head_sha="h" * 40,
-        base_sha="b" * 40,
+        base_ref=base_ref,
+        head_sha=head_sha,
+        base_sha=base_sha,
         state=state,
         is_draft=False,
         closed=state == "CLOSED",
@@ -136,6 +141,7 @@ async def test_adopt_pr_accepts_repo_slug_and_pr_number(
 @pytest.mark.unit
 async def test_adopt_pr_accepts_full_pr_url_idempotently(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
 ) -> None:
     client, fetcher = adoption_client
     headers = {"Authorization": "Bearer secret"}
@@ -156,6 +162,101 @@ async def test_adopt_pr_accepts_full_pr_url_idempotently(
     assert second.json()["attached_existing"] is True
     assert second.json()["workspace_id"] == first.json()["workspace_id"]
     assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+    session_factory = make_session_factory(engine)
+    unknown_status = "monitoring_review_repair"
+    async with session_factory() as session:
+        workspace = (
+            await session.execute(
+                select(Workspace).where(Workspace.id == first.json()["workspace_id"])
+            )
+        ).scalar_one()
+        workspace.status = unknown_status
+        await session.commit()
+
+    third = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={"pr_url": "https://github.com/dimileeh/aira-web/pull/277"},
+    )
+
+    assert third.status_code == 202
+    assert third.json()["attached_existing"] is True
+    assert third.json()["workspace_id"] == first.json()["workspace_id"]
+    assert third.json()["status"] == unknown_status
+    assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+
+@pytest.mark.unit
+async def test_adopt_pr_supersedes_cancelled_previous_adoption(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    client, fetcher = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+    session_factory = make_session_factory(engine)
+    fetcher.metadata = _metadata(
+        head_ref="feature/stale",
+        base_ref="development-old",
+        head_sha="a" * 40,
+        base_sha="1" * 40,
+    )
+    first = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "auto_merge": False,
+        },
+    )
+    assert first.status_code == 202
+    first_body = first.json()
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        previous = await repo.get(first_body["workspace_id"])
+        assert previous is not None
+        await repo.transition(previous, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
+        await session.commit()
+
+    fetcher.metadata = _metadata(
+        head_ref="feature/current",
+        base_ref="development",
+        head_sha="c" * 40,
+        base_sha="2" * 40,
+    )
+    second = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "auto_merge": True,
+        },
+    )
+
+    assert second.status_code == 202
+    body = second.json()
+    assert body["attached_existing"] is False
+    assert body["workspace_id"] != first_body["workspace_id"]
+    assert body["head_ref"] == "feature/current"
+    assert body["base_ref"] == "development"
+    assert body["head_sha"] == "c" * 40
+    assert body["base_sha"] == "2" * 40
+    assert body["auto_merge"] is True
+
+    canonical_key = pr_adoption_idempotency_key(repo_slug="dimileeh/aira-web", pr_number=277)
+    async with session_factory() as session:
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+    assert len(workspaces) == 2
+    previous = next(workspace for workspace in workspaces if workspace.id == first_body["workspace_id"])
+    fresh = next(workspace for workspace in workspaces if workspace.id == body["workspace_id"])
+    assert previous.status == WorkspaceStatus.cancelled.value
+    assert previous.idempotency_key != canonical_key
+    assert fresh.idempotency_key == canonical_key
+    assert previous.task_policy["pr_adoption"]["head_ref"] == "feature/stale"
+    assert fresh.task_policy["pr_adoption"]["head_ref"] == "feature/current"
 
 
 @pytest.mark.unit
@@ -188,9 +289,11 @@ async def test_adopt_pr_returns_structured_terminal_pr_error(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("terminal_status", [WorkspaceStatus.failed, WorkspaceStatus.completed])
 async def test_terminal_existing_adoption_fetch_error_preserves_idempotency_key(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
     engine: AsyncEngine,
+    terminal_status: WorkspaceStatus,
 ) -> None:
     client, fetcher = adoption_client
     headers = {"Authorization": "Bearer secret"}
@@ -212,7 +315,7 @@ async def test_terminal_existing_adoption_fetch_error_preserves_idempotency_key(
         workspace = (
             await session.execute(select(Workspace).where(Workspace.id == workspace_id))
         ).scalar_one()
-        workspace.status = WorkspaceStatus.failed.value
+        workspace.status = terminal_status.value
         assert workspace.idempotency_key == idempotency_key
         await session.commit()
 
