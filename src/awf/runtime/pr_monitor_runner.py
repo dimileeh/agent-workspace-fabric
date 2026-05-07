@@ -3057,6 +3057,7 @@ class PullRequestMonitorRunner:
             "repo_url": repo_url,
             "base_branch": base_branch,
             "pr_number": pr_number,
+            # Pre-merge settle events intentionally carry the full SHA.
             "head_sha": status.head_sha,
             "wait_seconds": wait_seconds,
         }
