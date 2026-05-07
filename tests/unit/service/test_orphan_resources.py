@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,13 @@ def _ok_view(
         retained_ids=frozenset(retained or set()),
         available=True,
     )
+
+
+@pytest.mark.unit
+def test_orphan_resource_to_utc_accepts_naive_datetime() -> None:
+    naive = datetime(2026, 5, 7, 14, 15)
+
+    assert orphan_resources._to_utc(naive) == naive.replace(tzinfo=orphan_resources.UTC)
 
 
 def _run_for(

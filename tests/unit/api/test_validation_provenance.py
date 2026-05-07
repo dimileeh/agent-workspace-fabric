@@ -21,6 +21,13 @@ from awf.db.session import make_session_factory
 pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
 
 
+@pytest.mark.unit
+def test_validation_provenance_ensure_utc_accepts_naive_datetime() -> None:
+    naive = datetime(2026, 5, 7, 13, 45)
+
+    assert validation_service._ensure_utc(naive) == naive.replace(tzinfo=UTC)
+
+
 @pytest.fixture(autouse=True)
 def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
