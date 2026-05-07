@@ -172,34 +172,41 @@ async def test_create_v2_auto_profile_legacy_replay_allows_missing_requested_tie
 
 
 @pytest.mark.unit
-async def test_create_v2_replay_conflicts_when_owned_path_payload_changes(
+@pytest.mark.parametrize(
+    ("case_name", "initial_owned_paths", "changed_owned_paths"),
+    [
+        ("reordered", ["src/awf/**", "tests/unit/**"], ["tests/unit/**", "src/awf/**"]),
+        ("duplicate_added", ["src/awf/**"], ["src/awf/**", "src/awf/**"]),
+        ("deduped", ["src/awf/**", "src/awf/**"], ["src/awf/**"]),
+        ("removed", ["src/awf/**", "tests/unit/**"], ["src/awf/**"]),
+    ],
+)
+async def test_create_v2_replay_compares_owned_paths_as_submitted_list(
     factory: async_sessionmaker[AsyncSession],
+    case_name: str,
+    initial_owned_paths: list[str],
+    changed_owned_paths: list[str],
 ) -> None:
     service = WorkspaceService(factory)
+    idempotency_key = f"service-create-v2-owned-paths-list-{case_name}"
 
     created = await service.create_v2(
-        _v2_request(owned_paths=["src/awf/**", "tests/unit/**"]),
-        idempotency_key="service-create-v2-owned-paths-order",
+        _v2_request(owned_paths=initial_owned_paths),
+        idempotency_key=idempotency_key,
     )
 
     assert created.id.startswith("ws_")
-    for changed_paths in (
-        ["tests/unit/**", "src/awf/**"],
-        ["src/awf/**"],
-        ["src/awf/**", "tests/unit/**", "tests/unit/**"],
-    ):
-        with pytest.raises(WorkspaceCreateIdempotencyConflictError):
-            await service.create_v2(
-                _v2_request(owned_paths=changed_paths),
-                idempotency_key="service-create-v2-owned-paths-order",
-            )
-
     replayed = await service.create_v2(
-        _v2_request(owned_paths=["src/awf/**", "tests/unit/**"]),
-        idempotency_key="service-create-v2-owned-paths-order",
+        _v2_request(owned_paths=list(initial_owned_paths)),
+        idempotency_key=idempotency_key,
     )
-
     assert replayed.id == created.id
+
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create_v2(
+            _v2_request(owned_paths=changed_owned_paths),
+            idempotency_key=idempotency_key,
+        )
 
 
 @pytest.mark.unit
