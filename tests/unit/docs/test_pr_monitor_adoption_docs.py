@@ -64,6 +64,7 @@ async def _real_mcp_tools() -> set[str]:
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
 async def test_adoption_docs_publish_real_rest_cli_and_mcp_names() -> None:
     from awf.cli.main import app as cli_app
 
