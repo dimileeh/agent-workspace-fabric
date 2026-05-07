@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -412,8 +413,23 @@ def _review_thread_body_state_key(thread_id: str) -> str:
     return f"__review_thread_body_hash__:{thread_id}"
 
 
+_INLINE_RESOLUTION_REPLY_RE = re.compile(
+    r"^\s*(?:fixed\s+in\s+commit\b|false\s+positive\s*:|defer\s*:)",
+    re.IGNORECASE,
+)
+
+
+def _is_inline_resolution_reply(comment: ReviewThreadComment) -> bool:
+    return bool(_INLINE_RESOLUTION_REPLY_RE.match(comment.body))
+
+
 def _review_thread_resolution_body(thread: ReviewThread) -> str:
     if thread.comments:
+        comments = [
+            comment for comment in thread.comments if not _is_inline_resolution_reply(comment)
+        ]
+        if not comments:
+            comments = list(thread.comments)
         payload = [
             {
                 "author": comment.author,
@@ -423,7 +439,7 @@ def _review_thread_resolution_body(thread: ReviewThread) -> str:
                     comment.created_at.isoformat() if comment.created_at is not None else None
                 ),
             }
-            for comment in thread.comments
+            for comment in comments
         ]
     else:
         payload = [
