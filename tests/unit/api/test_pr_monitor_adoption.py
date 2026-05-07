@@ -13,8 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from awf.api.app import configure_database, create_app
 from awf.common.config import Settings, get_settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
+from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.session import make_session_factory
+from awf.service.pr_monitor_adoption import pr_adoption_idempotency_key
 
 
 @pytest.fixture(autouse=True)
@@ -183,3 +185,48 @@ async def test_adopt_pr_returns_structured_terminal_pr_error(
 
     assert response.status_code == 409
     assert response.json()["error_code"] == "PR_ALREADY_MERGED"
+
+
+@pytest.mark.unit
+async def test_terminal_existing_adoption_fetch_error_preserves_idempotency_key(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    client, fetcher = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+
+    first = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+    )
+    assert first.status_code == 202
+    workspace_id = first.json()["workspace_id"]
+    idempotency_key = pr_adoption_idempotency_key(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+    )
+
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        workspace = (
+            await session.execute(select(Workspace).where(Workspace.id == workspace_id))
+        ).scalar_one()
+        workspace.status = WorkspaceStatus.failed.value
+        assert workspace.idempotency_key == idempotency_key
+        await session.commit()
+
+    fetcher.metadata = _metadata(state="MERGED")
+    replay = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+    )
+
+    assert replay.status_code == 409
+    assert replay.json()["error_code"] == "PR_ALREADY_MERGED"
+    async with session_factory() as session:
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+    assert len(workspaces) == 1
+    assert workspaces[0].id == workspace_id
+    assert workspaces[0].idempotency_key == idempotency_key

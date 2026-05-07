@@ -42,6 +42,16 @@ PR_ADOPTION_REQUESTED_REASON = "PR_MONITOR_ADOPTION_REQUESTED"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
+PR_ADOPTION_SUPERSEDED_EVENT_TYPE = "workspace.pr_monitor_adoption_superseded"
+PR_ADOPTION_SUPERSEDED_REASON = "PR_MONITOR_ADOPTION_SUPERSEDED"
+_FRESH_ADOPTION_ALLOWED_STATUSES = frozenset(
+    {
+        WorkspaceStatus.cancelled.value,
+        WorkspaceStatus.completed.value,
+        WorkspaceStatus.destroyed.value,
+        WorkspaceStatus.failed.value,
+    }
+)
 # Keep the public adoption error-code contract present in service source so
 # docs parity tests can cross-reference the matrix against implementation.
 _PR_ADOPTION_ERROR_CODE_CONTRACT = (
@@ -107,16 +117,30 @@ class PullRequestMonitorAdoptionService:
         # Re-read under the transaction lock so a concurrent adopter that won
         # the race attaches here instead of surfacing the unique constraint.
         existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
+        fresh_task_identity = False
         if existing is not None:
-            _raise_if_policy_conflicts(existing, request, repo=repo)
-            return await self._response(existing, attached_existing=True)
+            if not _allows_fresh_adoption(existing):
+                _raise_if_policy_conflicts(existing, request, repo=repo)
+                return await self._response(existing, attached_existing=True)
 
-        metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+            fresh_task_identity = True
+            metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+            await self._archive_terminal_adoption_key(
+                workspace_repo=workspace_repo,
+                workspace=existing,
+                idempotency_key=idempotency_key,
+                repo=repo,
+                pr_number=pr_number,
+            )
+        else:
+            metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+
         workspace = await self._create_adoption_workspace(
             request=request,
             repo=repo,
             metadata=metadata,
             idempotency_key=idempotency_key,
+            fresh_task_identity=fresh_task_identity,
         )
         return await self._response(workspace, attached_existing=False)
 
@@ -157,6 +181,35 @@ class PullRequestMonitorAdoptionService:
             )
         return metadata
 
+    async def _archive_terminal_adoption_key(
+        self,
+        *,
+        workspace_repo: WorkspaceRepository,
+        workspace: Workspace,
+        idempotency_key: str,
+        repo: RepoRef,
+        pr_number: int,
+    ) -> None:
+        previous_key = workspace.idempotency_key
+        workspace.idempotency_key = _archived_adoption_idempotency_key(
+            idempotency_key=idempotency_key,
+            workspace_id=workspace.id,
+        )
+        await workspace_repo.add_event(
+            workspace,
+            event_type=PR_ADOPTION_SUPERSEDED_EVENT_TYPE,
+            reason_code=PR_ADOPTION_SUPERSEDED_REASON,
+            payload={
+                "repo_slug": repo.slug(),
+                "pr_number": pr_number,
+                "previous_workspace_id": workspace.id,
+                "previous_status": workspace.status,
+                "previous_idempotency_key": previous_key,
+                "new_idempotency_key": workspace.idempotency_key,
+            },
+        )
+        await self._session.flush()
+
     async def _create_adoption_workspace(
         self,
         *,
@@ -164,6 +217,7 @@ class PullRequestMonitorAdoptionService:
         repo: RepoRef,
         metadata: PullRequestAdoptionMetadata,
         idempotency_key: str,
+        fresh_task_identity: bool = False,
     ) -> Workspace:
         requested_profile = _requested_inline_profile_policy(request)
         repo_url = _adoption_repo_url(request=request, repo=repo)
@@ -203,6 +257,16 @@ class PullRequestMonitorAdoptionService:
         workspace.pr_number = metadata.number
         workspace.base_commit = metadata.base_sha
         workspace.monitor_last_commit_sha = metadata.head_sha
+        task_idempotency_key = idempotency_key
+        if fresh_task_identity and workspace.task_external_id is not None:
+            workspace.task_external_id = _fresh_adoption_task_external_id(
+                external_id=workspace.task_external_id,
+                workspace_id=workspace.id,
+            )
+            task_idempotency_key = _fresh_adoption_task_idempotency_key(
+                idempotency_key=idempotency_key,
+                workspace_id=workspace.id,
+            )
 
         task = await TaskRepository(self._session).create_or_get(
             repo_url=workspace.repo_url,
@@ -210,7 +274,7 @@ class PullRequestMonitorAdoptionService:
             title=workspace.task_title,
             prompt=workspace.task_prompt,
             external_id=workspace.task_external_id,
-            idempotency_key=idempotency_key,
+            idempotency_key=task_idempotency_key,
             task_class=workspace.task_class,
             owned_paths=list(workspace.owned_paths),
         )
@@ -359,6 +423,14 @@ def pr_adoption_idempotency_key(*, repo_slug: str, pr_number: int) -> str:
     return f"pr-adopt:{digest[:48]}"
 
 
+def _allows_fresh_adoption(workspace: Workspace) -> bool:
+    return workspace.status in _FRESH_ADOPTION_ALLOWED_STATUSES
+
+
+def _archived_adoption_idempotency_key(*, idempotency_key: str, workspace_id: str) -> str:
+    return f"{idempotency_key}:terminal:{workspace_id}"
+
+
 def _normalize_request_identity(
     request: PullRequestMonitorAdoptionRequest,
 ) -> tuple[RepoRef, int]:
@@ -478,6 +550,14 @@ def _adoption_task_prompt(
 def _adoption_external_id(*, repo_slug: str, pr_number: int) -> str:
     digest = hashlib.sha256(f"{repo_slug.lower()}#{pr_number}".encode()).hexdigest()
     return f"pr-adopt-{digest[:40]}"
+
+
+def _fresh_adoption_task_external_id(*, external_id: str, workspace_id: str) -> str:
+    return f"{external_id}:{workspace_id}"
+
+
+def _fresh_adoption_task_idempotency_key(*, idempotency_key: str, workspace_id: str) -> str:
+    return f"{idempotency_key}:task:{workspace_id}"
 
 
 def _adoption_repo_url(*, request: PullRequestMonitorAdoptionRequest, repo: RepoRef) -> str:

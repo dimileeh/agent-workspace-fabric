@@ -96,10 +96,6 @@ from awf.runtime.pr_monitor_runner import (
     _notify_human_reason,
     _parse_verdict,
     _parse_verdict_result,
-    _review_bot_review_request_done_key,
-    _review_bot_review_request_started_key,
-    _review_bot_review_request_state_for_persistence,
-    _review_bot_review_request_state_for_runtime,
     _review_comment_body_state_key,
     _stale_pending_check_warning_key,
     _stale_pending_check_warnings,
@@ -148,21 +144,6 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
         unresolved_review_comments=(),
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
-    )
-
-
-def _coderabbit_skip_status(*, pr_number: int, head_sha: str) -> PRStatus:
-    blocker = ReviewComment(
-        comment_id="issue:77",
-        body_excerpt="Review skipped. Trigger review before merging.",
-        body="Review skipped. Trigger review before merging.",
-        author="coderabbitai",
-        blocks_merge=True,
-        source_kind="issue_comment",
-    )
-    return replace(
-        _green_status(pr_number=pr_number, head_sha=head_sha),
-        unresolved_review_comments=(blocker,),
     )
 
 
@@ -3113,7 +3094,7 @@ class TestCollectDeferItems:
             path="src/x.py",
             line=1,
             body_excerpt="nit",
-            author="coderabbitai[bot]",
+            author="reviewer-bot[bot]",
         )
         state = MonitorState(threads_addressed_ids={"T1": "defer"})
         bots, humans = _collect_defer_items(_status(inline=(t,)), state)
@@ -3144,7 +3125,7 @@ class TestCollectDeferItems:
             path=None,
             line=None,
             body_excerpt="fixed",
-            author="coderabbitai[bot]",
+            author="reviewer-bot[bot]",
         )
         state = MonitorState(threads_addressed_ids={"T3": "fix_committed"})
         bots, humans = _collect_defer_items(_status(inline=(t,)), state)
@@ -3267,7 +3248,7 @@ class TestNotificationAndGraceHelpers:
     def test_notify_human_reason_prioritizes_blocking_conditions(self) -> None:
         blocking_review = ReviewComment(
             comment_id="C-block",
-            body_excerpt="review skipped",
+            body_excerpt="external policy gate",
             author="review-bot",
             blocks_merge=True,
         )
@@ -3278,7 +3259,7 @@ class TestNotificationAndGraceHelpers:
         )
         deferred_state = MonitorState(threads_addressed_ids={"C-human": "defer"})
 
-        assert "review was skipped" in (
+        assert "external merge-blocking review policy comment" in (
             _notify_human_reason(_status(reviews=(blocking_review,)), MonitorState()) or ""
         )
         assert "required protection" in (
@@ -3384,72 +3365,6 @@ class TestNotificationAndGraceHelpers:
         )
         assert invalid_started.threads_addressed_ids[started_key] == "20.000000"
         assert invalid_started.threads_addressed_ids[done_key] == "elapsed"
-
-    @pytest.mark.unit
-    def test_review_bot_request_state_converts_between_wall_and_monotonic_time(self) -> None:
-        pr_number = 42
-        started_key = _review_bot_review_request_started_key(
-            pr_number=pr_number,
-            head_sha="head-a",
-            reviewer="CodeRabbitAI",
-        )
-        unrelated_key = _review_bot_review_request_started_key(
-            pr_number=43,
-            head_sha="head-a",
-            reviewer="coderabbitai",
-        )
-        wall_started = datetime(2026, 4, 27, 12, 0, tzinfo=UTC).timestamp()
-
-        converted_runtime = _review_bot_review_request_state_for_runtime(
-            {
-                started_key: f"{wall_started:.6f}",
-                unrelated_key: f"{wall_started:.6f}",
-                "ordinary": "value",
-            },
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started + 45.0,
-        )
-        legacy_runtime = _review_bot_review_request_state_for_runtime(
-            {started_key: "900.0"},
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started,
-        )
-        invalid_runtime = _review_bot_review_request_state_for_runtime(
-            {started_key: "invalid"},
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started,
-        )
-        converted_persistence = _review_bot_review_request_state_for_persistence(
-            {started_key: "900.0"},
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started + 60.0,
-        )
-        wall_persistence = _review_bot_review_request_state_for_persistence(
-            {started_key: f"{wall_started:.6f}"},
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started + 60.0,
-        )
-        invalid_persistence = _review_bot_review_request_state_for_persistence(
-            {started_key: "invalid"},
-            pr_number=pr_number,
-            now_monotonic=1000.0,
-            now_wall_seconds=wall_started,
-        )
-
-        assert converted_runtime[started_key] == "955.000000"
-        assert converted_runtime[unrelated_key] == f"{wall_started:.6f}"
-        assert converted_runtime["ordinary"] == "value"
-        assert legacy_runtime[started_key] == "1000.000000"
-        assert invalid_runtime[started_key] == "invalid"
-        assert converted_persistence[started_key] == f"{wall_started - 40.0:.6f}"
-        assert wall_persistence[started_key] == f"{wall_started:.6f}"
-        assert invalid_persistence[started_key] == "invalid"
-
 
 class TestMiscMonitorHelpers:
     @pytest.mark.unit
@@ -3929,344 +3844,6 @@ async def test_manual_human_wait_records_operation(
         "outcome": "human_notification_posted",
         "slept_seconds": 60,
     }
-
-
-@pytest.mark.unit
-async def test_review_bot_skip_requests_review_before_human_escalation(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    pr_number = 223
-    head_sha = "b" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        non_check_reviewer_settle_seconds=180,
-    )
-    gh = _CapturingGH()
-    runner._deps.gh = gh  # type: ignore[assignment]
-    status = _coderabbit_skip_status(pr_number=pr_number, head_sha=head_sha)
-    state = MonitorState(started_at=0.0)
-
-    terminal = await runner._execute(
-        action=NotifyHuman(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=status,
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-    terminal_again = await runner._execute(
-        action=NotifyHuman(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=status,
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert terminal_again is False
-    assert [body for _, _, body in gh.posted_comments] == ["@coderabbitai review"]
-    assert sleep_fn.calls == [60, 60]
-    assert (
-        _review_bot_review_request_started_key(
-            pr_number=pr_number,
-            head_sha=head_sha,
-            reviewer="coderabbitai",
-        )
-        in state.threads_addressed_ids
-    )
-
-
-@pytest.mark.unit
-async def test_review_bot_skip_escalates_after_review_request_wait_budget(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    pr_number = 224
-    head_sha = "c" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        non_check_reviewer_settle_seconds=180,
-    )
-    gh = _CapturingGH()
-    runner._deps.gh = gh  # type: ignore[assignment]
-    status = _coderabbit_skip_status(pr_number=pr_number, head_sha=head_sha)
-    state = MonitorState(
-        started_at=0.0,
-        threads_addressed_ids={
-            _review_bot_review_request_started_key(
-                pr_number=pr_number,
-                head_sha=head_sha,
-                reviewer="coderabbitai",
-            ): f"{time.monotonic() - 181:.6f}",
-        },
-    )
-
-    terminal = await runner._execute(
-        action=NotifyHuman(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=status,
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert len(gh.posted_comments) == 1
-    assert "needs human attention" in gh.posted_comments[0][2]
-    assert "@coderabbitai review" not in gh.posted_comments[0][2]
-    assert sleep_fn.calls == [60]
-
-
-@pytest.mark.unit
-async def test_review_bot_skip_uses_human_wait_when_review_request_budget_disabled(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    pr_number = 225
-    head_sha = "d" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        non_check_reviewer_settle_seconds=0,
-    )
-    gh = _CapturingGH()
-    runner._deps.gh = gh  # type: ignore[assignment]
-
-    terminal = await runner._execute(
-        action=NotifyHuman(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=_coderabbit_skip_status(pr_number=pr_number, head_sha=head_sha),
-        state=MonitorState(started_at=0.0),
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert len(gh.posted_comments) == 1
-    assert "needs human attention" in gh.posted_comments[0][2]
-    assert "@coderabbitai review" not in gh.posted_comments[0][2]
-    assert sleep_fn.calls == [60]
-
-
-@pytest.mark.unit
-async def test_review_bot_skip_done_marker_allows_human_escalation(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    pr_number = 226
-    head_sha = "e" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        non_check_reviewer_settle_seconds=180,
-    )
-    gh = _CapturingGH()
-    runner._deps.gh = gh  # type: ignore[assignment]
-    state = MonitorState(
-        started_at=0.0,
-        threads_addressed_ids={
-            _review_bot_review_request_done_key(
-                pr_number=pr_number,
-                head_sha=head_sha,
-                reviewer="coderabbitai",
-            ): "elapsed",
-        },
-    )
-
-    terminal = await runner._execute(
-        action=NotifyHuman(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=_coderabbit_skip_status(pr_number=pr_number, head_sha=head_sha),
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert len(gh.posted_comments) == 1
-    assert "needs human attention" in gh.posted_comments[0][2]
-    assert "@coderabbitai review" not in gh.posted_comments[0][2]
-    assert sleep_fn.calls == [60]
-
-
-@pytest.mark.unit
-async def test_review_bot_skip_repairs_invalid_started_marker_by_requesting_review(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    pr_number = 227
-    head_sha = "1" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        non_check_reviewer_settle_seconds=180,
-    )
-    gh = _CapturingGH()
-    runner._deps.gh = gh  # type: ignore[assignment]
-    started_key = _review_bot_review_request_started_key(
-        pr_number=pr_number,
-        head_sha=head_sha,
-        reviewer="coderabbitai",
-    )
-    state = MonitorState(started_at=0.0, threads_addressed_ids={started_key: "bad"})
-
-    terminal = await runner._execute(
-        action=NotifyHuman(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=_coderabbit_skip_status(pr_number=pr_number, head_sha=head_sha),
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert [body for _, _, body in gh.posted_comments] == ["@coderabbitai review"]
-    assert state.threads_addressed_ids[started_key] != "bad"
-    assert sleep_fn.calls == [60]
-
-
-@pytest.mark.unit
-async def test_review_bot_request_transient_github_error_retries_without_marking_started(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    pr_number = 228
-    head_sha = "2" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        non_check_reviewer_settle_seconds=180,
-    )
-    gh = _CapturingGH()
-    gh.post_errors.append(
-        GitHubClientError(
-            operation="gh pr comment",
-            returncode=1,
-            stderr="GitHub returned HTTP 500 Internal Server Error",
-        )
-    )
-    runner._deps.gh = gh  # type: ignore[assignment]
-    state = MonitorState(started_at=0.0)
-
-    terminal = await runner._execute(
-        action=NotifyHuman(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=_coderabbit_skip_status(pr_number=pr_number, head_sha=head_sha),
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert gh.posted_comments == []
-    assert sleep_fn.calls == [60]
-    assert state.threads_addressed_ids == {}
 
 
 @pytest.mark.unit

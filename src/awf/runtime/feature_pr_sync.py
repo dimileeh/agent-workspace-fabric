@@ -153,9 +153,8 @@ def _parse_metadata(payload: dict[str, Any]) -> FeaturePRMetadata:
         # + ``merged=false`` slip past the refusal checks below and
         # spin up a workspace for a PR that can't transition. Trust
         # ``state`` authoritatively — it's what gh returns and what
-        # we've already built the rest of the parser around. Review
-        # feedback on PR #4 (CodeRabbit): "Keep terminal-state refusal
-        # canonical even when legacy keys are present".
+        # we've already built the rest of the parser around. Keep terminal
+        # refusal canonical even when legacy keys are present.
         closed = state == "CLOSED"
         merged = state == "MERGED"
         url = payload["url"]

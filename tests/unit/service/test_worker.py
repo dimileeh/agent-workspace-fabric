@@ -675,6 +675,18 @@ def test_is_postgres_database_url_warns_on_postgres_backend_typo() -> None:
 
 
 @pytest.mark.unit
+def test_is_postgres_database_url_rejects_non_postgres_backend_without_warning() -> None:
+    with structlog.testing.capture_logs() as captured:
+        result = worker_mod._is_postgres_database_url("sqlite+aiosqlite:///tmp/awf.db")
+
+    assert result is False
+    assert not any(
+        event.get("event") == "worker.postgres_merge_coordinator_not_selected"
+        for event in captured
+    )
+
+
+@pytest.mark.unit
 def test_service_git_environment_uses_mounted_host_home(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     ssh_dir = host_home / ".ssh"

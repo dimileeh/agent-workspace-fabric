@@ -16,6 +16,7 @@ from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
 )
+from awf.service import validation_observability as validation_observability_module
 from awf.service import workspaces as workspaces_service
 from awf.service.validation_observability import (
     _loaded_collection,
@@ -25,6 +26,13 @@ from awf.service.validation_observability import (
     validation_freshness_summary,
 )
 from awf.service.workspaces import workspace_failure_details_payload, workspace_response
+
+
+@pytest.mark.unit
+def test_validation_observability_ensure_utc_accepts_naive_datetime() -> None:
+    naive = datetime(2026, 5, 7, 12, 30)
+
+    assert validation_observability_module._ensure_utc(naive) == naive.replace(tzinfo=UTC)
 
 
 @pytest.mark.unit

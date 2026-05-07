@@ -33,6 +33,15 @@ from tests.unit.helpers import create_operation, create_workspace, zero_status_c
 _MIB = 1024 * 1024
 
 
+@pytest.mark.unit
+def test_metrics_to_utc_accepts_naive_datetime() -> None:
+    from awf.service import metrics
+
+    naive = datetime(2026, 5, 7, 14, 45)
+
+    assert metrics._to_utc(naive) == naive.replace(tzinfo=UTC)
+
+
 @pytest.fixture
 async def session_factory(
     engine: AsyncEngine,

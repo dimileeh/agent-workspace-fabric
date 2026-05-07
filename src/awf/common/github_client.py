@@ -143,6 +143,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
               databaseId
               bodyText
               author { login }
+              viewerDidAuthor
               createdAt
               url
             }
@@ -160,6 +161,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           commit { oid }
           url
           author { login }
+          viewerDidAuthor
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -168,6 +170,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           databaseId
           body
           isMinimized
+          viewerDidAuthor
           createdAt
           updatedAt
           url
@@ -215,6 +218,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
               databaseId
               bodyText
               author { login }
+              viewerDidAuthor
               createdAt
               url
             }
@@ -238,6 +242,7 @@ query($threadId: ID!, $cursor: String!) {
           databaseId
           bodyText
           author { login }
+          viewerDidAuthor
           createdAt
           url
         }
@@ -262,6 +267,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
           commit { oid }
           url
           author { login }
+          viewerDidAuthor
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -280,6 +286,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
           databaseId
           body
           isMinimized
+          viewerDidAuthor
           createdAt
           updatedAt
           url
@@ -688,6 +695,9 @@ class GitHubClient:
                     first_page=_dig(node, "comments"),
                 )
             )
+            comments = tuple(comment for comment in comments if not comment.viewer_did_author)
+            if not comments:
+                continue
             first_comment = comments[0] if comments else None
             body = (first_comment.body if first_comment is not None else "")[:400]
             author = first_comment.author if first_comment is not None else None
@@ -708,7 +718,7 @@ class GitHubClient:
         # ── Review-level (outside-diff) comments ───────────────────────
         # A "review" is a top-level object that may or may not carry a
         # body; we treat non-empty bodies as outside-diff comments that
-        # need to be addressed too (CodeRabbit posts these).
+        # need to be addressed too.
         reviews: list[ReviewComment] = []
         review_nodes = await self._fetch_paginated_pr_connection_nodes(
             repo=repo,
@@ -719,7 +729,7 @@ class GitHubClient:
         )
         for node in review_nodes:
             body = node.get("body") or ""
-            if not body.strip():
+            if node.get("viewerDidAuthor") or not body.strip():
                 continue
             author = _dig(node, "author", "login")
             state = (node.get("state") or "").upper()
@@ -734,14 +744,15 @@ class GitHubClient:
                     created_at=_parse_github_datetime(node.get("submittedAt")),
                     state=state,
                     source_kind="review",
+                    viewer_did_author=False,
                 )
             )
 
         # ── Top-level PR comments ──────────────────────────────────────
         # Review bots sometimes report feedback as top-level issue comments
-        # instead of review objects. AWF only filters its own bookkeeping;
-        # code-fixable comments go to the agent, while external checklist
-        # blockers stay visible to the merge gate.
+        # instead of review objects. AWF filters only comments authored by the
+        # current token identity; all third-party text is external feedback for
+        # the agent to triage rather than control-plane policy.
         issue_comment_nodes = await self._fetch_paginated_pr_connection_nodes(
             repo=repo,
             pr_number=pr_number,
@@ -749,40 +760,22 @@ class GitHubClient:
             connection_name="comments",
             query=_GQL_PR_ISSUE_COMMENTS_PAGE,
         )
-        coderabbit_review_evidence_times = _coderabbit_review_evidence_times(
-            review_nodes=review_nodes,
-        )
         for node in issue_comment_nodes:
             body = node.get("body") or ""
-            if node.get("isMinimized") or not body.strip():
+            if node.get("isMinimized") or node.get("viewerDidAuthor") or not body.strip():
                 continue
             author = _dig(node, "author", "login")
-            if (
-                _is_awf_status_issue_comment(body)
-                or _is_review_bot_trigger_command_issue_comment(body)
-                or _is_coderabbit_review_trigger_ack_issue_comment(body, author=author)
-            ):
-                continue
-            if _is_superseded_coderabbit_skip_issue_comment(
-                body,
-                author=author,
-                head_sha=pr["headRefOid"],
-                updated_at=_parse_github_datetime(node.get("updatedAt")),
-                created_at=_parse_github_datetime(node.get("createdAt")),
-                review_evidence_times=coderabbit_review_evidence_times,
-            ):
-                continue
             reviews.append(
                 ReviewComment(
                     comment_id=f"issue:{node['databaseId']}",
                     body_excerpt=body[:400],
                     author=author,
                     is_resolved=False,
-                    blocks_merge=_is_merge_blocking_issue_comment(body),
                     body=body,
                     url=_clean_optional_str(node.get("url")),
                     created_at=_parse_github_datetime(node.get("createdAt")),
                     source_kind="issue",
+                    viewer_did_author=False,
                 )
             )
 
@@ -1169,6 +1162,7 @@ def _parse_review_thread_comments(
                 comment_id=str(database_id) if database_id is not None else None,
                 body=node.get("bodyText") or "",
                 author=_clean_optional_str(_dig(node, "author", "login")),
+                viewer_did_author=bool(node.get("viewerDidAuthor")),
                 created_at=_parse_github_datetime(node.get("createdAt")),
                 url=_clean_optional_str(node.get("url")),
             )
@@ -1241,155 +1235,3 @@ def _tail(text: str, n: int) -> str:
     if len(text) <= n:
         return text
     return "…[truncated]…\n" + text[-n:]
-
-
-def _is_awf_status_issue_comment(body: str) -> bool:
-    lower = " ".join(body.lower().split())
-    return (
-        "awf did not auto-merge because" in lower
-        or "all 5 awf gates are green" in lower
-        or "after the blocker is cleared or a new commit lands, awf will re-verify" in lower
-        or _is_awf_resolution_issue_comment(lower)
-    )
-
-
-@dataclass(frozen=True)
-class _CodeRabbitReviewEvidence:
-    submitted_at: datetime | None
-    commit_oid: str | None
-
-
-def _coderabbit_review_evidence_times(
-    *,
-    review_nodes: list[dict[str, Any]],
-) -> tuple[_CodeRabbitReviewEvidence, ...]:
-    # Intentionally use submitted review objects only. CodeRabbit "Review
-    # triggered" acknowledgements prove a review request was queued, not that
-    # the review completed or that an earlier skip blocker is obsolete.
-    evidence: list[_CodeRabbitReviewEvidence] = []
-    for node in review_nodes:
-        author = _dig(node, "author", "login")
-        submitted_at = _parse_github_datetime(node.get("submittedAt"))
-        state = (node.get("state") or "").upper()
-        if (
-            _is_coderabbit_author(author)
-            and state != "PENDING"
-            and submitted_at is not None
-        ):
-            evidence.append(
-                _CodeRabbitReviewEvidence(
-                    submitted_at=submitted_at,
-                    commit_oid=_clean_optional_str(_dig(node, "commit", "oid")),
-                )
-            )
-    return tuple(evidence)
-
-
-def _is_superseded_coderabbit_skip_issue_comment(
-    body: str,
-    *,
-    author: str | None,
-    head_sha: str | None,
-    updated_at: datetime | None,
-    created_at: datetime | None,
-    review_evidence_times: tuple[_CodeRabbitReviewEvidence, ...],
-) -> bool:
-    if not _is_coderabbit_author(author) or not _is_merge_blocking_issue_comment(body):
-        return False
-    if not review_evidence_times:
-        return False
-    if any(
-        evidence.commit_oid is not None
-        and head_sha is not None
-        and evidence.commit_oid.lower() == head_sha.lower()
-        for evidence in review_evidence_times
-    ):
-        return True
-    changed_at = updated_at or created_at
-    if changed_at is None:
-        return False
-    return any(
-        evidence.commit_oid is None
-        and evidence.submitted_at is not None
-        and evidence.submitted_at > changed_at
-        for evidence in review_evidence_times
-    )
-
-
-def _is_coderabbit_author(author: str | None) -> bool:
-    return (author or "").lower() in {"coderabbitai", "coderabbitai[bot]"}
-
-
-_REVIEW_BOT_TRIGGER_COMMAND_RE = re.compile(r"(?<![\w@])@coderabbitai (?:full )?review(?![\w])")
-_REVIEW_BOT_TRIGGER_COMMAND_FILLER_WORDS = frozenset(
-    {
-        "can",
-        "could",
-        "do",
-        "now",
-        "please",
-        "proceed",
-        "run",
-        "thank",
-        "thanks",
-        "trigger",
-        "you",
-    }
-)
-
-
-def _is_review_bot_trigger_command_issue_comment(body: str) -> bool:
-    lower = " ".join(body.lower().split())
-    if not _REVIEW_BOT_TRIGGER_COMMAND_RE.search(lower):
-        return False
-
-    # Keep this narrow: a prose comment that mentions the command is feedback.
-    remainder = _REVIEW_BOT_TRIGGER_COMMAND_RE.sub(" ", lower)
-    remainder_words = set(re.findall(r"[a-z0-9']+", remainder))
-    return remainder_words <= _REVIEW_BOT_TRIGGER_COMMAND_FILLER_WORDS
-
-
-def _is_coderabbit_review_trigger_ack_issue_comment(body: str, *, author: str | None) -> bool:
-    if not _is_coderabbit_author(author):
-        return False
-    lower = " ".join(body.lower().split())
-    return "review triggered" in lower or "review has been triggered" in lower
-
-
-def _is_merge_blocking_issue_comment(body: str) -> bool:
-    lower = " ".join(body.lower().split())
-    if "trigger review" not in lower and "auto reviews are disabled" not in lower:
-        return False
-    return (
-        "review skipped" in lower
-        or "required review" in lower
-        or "auto reviews are disabled" in lower
-    )
-
-
-def _is_awf_resolution_issue_comment(lower_normalized_body: str) -> bool:
-    """True when a top-level issue comment is AWF's resolution bookkeeping.
-
-    PR #159 exposed a stale human-defer loop: the monitor treated owner
-    comments like ``FALSE POSITIVE on comment ...`` and ``confirmed
-    resolved`` as fresh human review feedback. These comments close prior
-    review work; they are not new merge blockers.
-    """
-
-    lower = lower_normalized_body
-    return (
-        lower.startswith("fixed in commit ")
-        or lower.startswith("false positive:")
-        or lower.startswith("false positive on ")
-        or lower.startswith("false positive for ")
-        or (
-            lower.startswith("review-level comment ")
-            and " confirmed resolved" in lower
-            and "commit " in lower
-        )
-        or (
-            lower.startswith(("no further action required", "no action required"))
-            and ("already fixed" in lower or "already resolved" in lower or "commit " in lower)
-        )
-        or lower.startswith("defer:")
-    )

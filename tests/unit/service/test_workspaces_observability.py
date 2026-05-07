@@ -101,6 +101,47 @@ def test_workspace_observability_private_fallbacks_cover_absent_policy_metadata(
 
 
 @pytest.mark.unit
+def test_workspace_observability_handles_missing_activity_and_valid_pricing_metadata() -> None:
+    stale_running = SimpleNamespace(
+        status=WorkspaceStatus.running.value,
+        last_activity_at=None,
+        updated_at=None,
+        created_at=None,
+    )
+    timestamp = datetime(2026, 5, 7, 12, 0, tzinfo=UTC)
+    priced_workspace = SimpleNamespace(
+        id="ws_priced",
+        resolved_profile={
+            "pricing": {
+                "pricing": {
+                    "provider": "openai",
+                    "model": "gpt-5.5",
+                    "currency": "USD",
+                    "unit": "per_1k_tokens",
+                    "price_per_unit": 0.01,
+                    "timestamp": timestamp,
+                }
+            }
+        },
+    )
+    malformed_pricing_workspace = SimpleNamespace(
+        id="ws_bad_pricing_shape",
+        resolved_profile={"pricing": {"pricing": "not-a-dict"}},
+    )
+
+    assert workspace_observability_module.is_workspace_stale_running(stale_running) is False
+    pricing = workspace_observability_module._overview_pricing_metadata(priced_workspace)
+    assert pricing is not None
+    assert pricing["provider"] == "openai"
+    assert pricing["model"] == "gpt-5.5"
+    assert pricing["currency"] == "USD"
+    assert pricing["unit"] == "per_1k_tokens"
+    assert pricing["price_per_unit"] == 0.01
+    assert pricing["timestamp"] == timestamp
+    assert workspace_pricing_metadata(malformed_pricing_workspace) is None
+
+
+@pytest.mark.unit
 def test_workspace_usage_summary_handles_mixed_currencies_and_result_fallback() -> None:
     workspace = SimpleNamespace(
         operations=[
@@ -122,6 +163,56 @@ def test_workspace_usage_summary_handles_mixed_currencies_and_result_fallback() 
     assert summary.output_tokens == 2
     assert summary.currency == "MIXED"
     assert summary.cost_estimate is None
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_ignores_usage_dict_without_valid_metrics() -> None:
+    workspace = SimpleNamespace(
+        operations=[
+            SimpleNamespace(
+                result={
+                    "usage": {
+                        "input_tokens": True,
+                        "output_tokens": False,
+                        "total_tokens": None,
+                        "cost_estimate": False,
+                        "currency": "USD",
+                    }
+                },
+                payload={},
+            )
+        ]
+    )
+
+    summary = workspace_usage_summary(workspace)
+
+    assert summary.status == "unavailable"
+    assert summary.reason == "usage_not_reported"
+    assert summary.input_tokens is None
+    assert summary.cost_estimate is None
+    assert summary.currency is None
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_accumulates_same_currency_costs() -> None:
+    workspace = SimpleNamespace(
+        operations=[
+            SimpleNamespace(
+                result={"usage": {"input_tokens": 1, "cost_estimate": 0.25, "currency": "USD"}},
+                payload={},
+            ),
+            SimpleNamespace(
+                result={"usage": {"output_tokens": 2, "cost_estimate": 0.75, "currency": "USD"}},
+                payload={},
+            ),
+        ]
+    )
+
+    summary = workspace_usage_summary(workspace)
+
+    assert summary.status == "available"
+    assert summary.currency == "USD"
+    assert summary.cost_estimate == pytest.approx(1.0)
 
 
 @pytest.mark.unit

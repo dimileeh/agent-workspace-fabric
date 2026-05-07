@@ -97,6 +97,21 @@ class TestBotDeferUnblocksMerge:
         assert isinstance(action, Merge)
 
     @pytest.mark.unit
+    def test_coderabbit_login_without_bot_suffix_classified_as_advisory_bot(self) -> None:
+        state = MonitorState(
+            threads_addressed_ids={
+                "T1": "defer",
+                "C1": "defer",
+            }
+        )
+        status = _status(
+            inline=(_thread("T1", "coderabbitai"),),
+            reviews=(_review("C1", "coderabbitai"),),
+        )
+        action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "login",
         [

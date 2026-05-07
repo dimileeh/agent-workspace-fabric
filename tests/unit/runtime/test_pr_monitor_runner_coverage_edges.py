@@ -2991,6 +2991,86 @@ async def test_fix_cycle_readdresses_thread_when_history_changes_before_push(
 
 
 @pytest.mark.unit
+async def test_fix_cycle_does_not_readdress_thread_for_agent_resolution_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed in commit cafebabe")
+    changed_thread = {
+        "id": "T_same",
+        "isResolved": False,
+        "isOutdated": False,
+        "path": "src/foo.py",
+        "line": 12,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 101,
+                    "bodyText": "bot-only feedback",
+                    "author": {"login": "chatgpt-codex-connector"},
+                },
+                {
+                    "databaseId": 102,
+                    "bodyText": "fixed in commit cafebabe",
+                    "author": {"login": "dimileeh"},
+                    "viewerDidAuthor": True,
+                },
+            ]
+        },
+    }
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[changed_thread]))
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    cmd.queue_result(returncode=0, stdout='{"data":{}}')
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    initial_thread = ReviewThread(
+        thread_id="T_same",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="bot-only feedback",
+        author="chatgpt-codex-connector",
+        comments=(
+            ReviewThreadComment(
+                comment_id="101",
+                body="bot-only feedback",
+                author="chatgpt-codex-connector",
+            ),
+        ),
+    )
+
+    await runner._run_fix_cycle(
+        workspace_id="ws_thread_resolution_reply",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(initial_thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_thread_resolution_reply",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert len(adapter.calls) == 1
+    assert state.threads_addressed_ids["T_same"] == "fix_committed"
+    assert _review_thread_body_state_key("T_same") in state.threads_addressed_ids
+    assert runner._deps.sleep.calls == [30]  # type: ignore[attr-defined]
+    assert [call.args[:3] for call in cmd.calls] == [
+        ["gh", "api", "graphql"],
+        ["git", "-C", str(tmp_path / "worktrees" / "ws_thread_resolution_reply")],
+        ["gh", "api", "graphql"],
+    ]
+
+
+@pytest.mark.unit
 async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_committed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -3913,7 +3993,10 @@ def test_notify_human_reason_and_merge_rejection_detail() -> None:
     )
     status = _status_for_helpers(reviews=(blocking_review,))
 
-    assert "review bot reported" in (_notify_human_reason(status, MonitorState()) or "")
+    assert (
+        _notify_human_reason(status, MonitorState())
+        == "an external merge-blocking review policy comment remains unresolved"
+    )
     blocked = _status_for_helpers()
     blocked = PRStatus(
         number=blocked.number,

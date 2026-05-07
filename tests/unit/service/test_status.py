@@ -400,6 +400,34 @@ async def test_egress_audit_status_redacts_unavailable_detail() -> None:
 
 
 @pytest.mark.unit
+async def test_egress_audit_status_reports_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _slow_lookup(_database_url: str) -> dict[str, int]:
+        raise AssertionError("wait_for should timeout before the lookup resolves")
+
+    def _raise_timeout(awaitable: object, *, timeout: float) -> None:
+        assert timeout == status_mod._CHECK_TIMEOUT_SECONDS
+        close = getattr(awaitable, "close", None)
+        if close is not None:
+            close()
+        raise TimeoutError
+
+    monkeypatch.setattr(status_mod.asyncio, "wait_for", _raise_timeout)
+
+    egress_audit = await collect_egress_audit_status(
+        "postgresql+asyncpg://awf:db_password@db.internal:5432/awf",
+        summary_lookup=_slow_lookup,
+    )
+
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unknown"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_TIMEOUT"
+    assert egress_audit["resource_count"] == 0
+    assert egress_audit["egress_posture_counts"] == {}
+
+
+@pytest.mark.unit
 def test_workspace_cleanup_status_reports_disabled_policy(tmp_path: Path) -> None:
     settings = replace(_settings(tmp_path), workspace_cleanup_enabled=False)
 

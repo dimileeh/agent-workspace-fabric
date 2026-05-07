@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import AddressComments, Merge, MonitorState, NotifyHuman, decide
+from awf.runtime.pr_monitor import AddressComments, Merge, MonitorState, decide
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -135,7 +135,7 @@ async def test_bot_review_boilerplate_routes_to_agent_without_human_wait(
 
 
 @pytest.mark.unit
-async def test_bot_issue_boilerplate_notifies_human_as_policy_blocker(
+async def test_bot_issue_boilerplate_defer_does_not_notify_human(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -171,9 +171,9 @@ async def test_bot_issue_boilerplate_notifies_human_as_policy_blocker(
     state = MonitorState(threads_addressed_ids={"issue:7803": "defer"})
     action = decide(status, state, runner._config)
 
-    assert isinstance(action, NotifyHuman)
+    assert isinstance(action, Merge)
     assert status.unresolved_review_comments[0].comment_id == "issue:7803"
-    assert status.unresolved_review_comments[0].blocks_merge is True
+    assert status.unresolved_review_comments[0].blocks_merge is False
     assert adapter.calls == []
 
 
@@ -215,7 +215,7 @@ async def test_handled_bot_issue_policy_blocker_does_not_notify_human(
 
     assert isinstance(action, Merge)
     assert status.unresolved_review_comments[0].comment_id == "issue:7803"
-    assert status.unresolved_review_comments[0].blocks_merge is True
+    assert status.unresolved_review_comments[0].blocks_merge is False
     assert adapter.calls == []
 
 

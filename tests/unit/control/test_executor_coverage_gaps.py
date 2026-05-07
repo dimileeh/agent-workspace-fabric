@@ -8,6 +8,8 @@ import pytest
 
 from awf.control.executor import (
     _apply_baseline_coverage_ratchet,
+    _coverage_result_from_metadata,
+    _extract_string_tokens,
     _validation_failure_message,
     _validation_run_coverage_metadata,
     _validation_run_reason_code,
@@ -47,6 +49,7 @@ def _coverage(
     gaps: list[dict[str, object]] | None = None,
     failing_test_node_ids: list[str] | None = None,
     failing_test_evidence: list[str] | None = None,
+    provider_failure_evidence: list[str] | None = None,
 ) -> ValidationCoverageResult:
     return ValidationCoverageResult(
         provider="python",
@@ -59,7 +62,20 @@ def _coverage(
         gaps=gaps if gaps is not None else [],
         failing_test_node_ids=failing_test_node_ids if failing_test_node_ids is not None else [],
         failing_test_evidence=failing_test_evidence if failing_test_evidence is not None else [],
+        provider_failure_evidence=(
+            provider_failure_evidence if provider_failure_evidence is not None else []
+        ),
     )
+
+
+@pytest.mark.unit
+def test_extract_string_tokens_filters_non_string_list_items() -> None:
+    assert _extract_string_tokens(["tests/test_app.py::test_ok", 1, None, "FAILED test"]) == [
+        "tests/test_app.py::test_ok",
+        "FAILED test",
+    ]
+    assert _extract_string_tokens("FAILED test") == []
+    assert _extract_string_tokens(None) == []
 
 
 @pytest.mark.unit
@@ -286,6 +302,51 @@ def test_coverage_wrapped_pytest_failure_and_coverage_below_threshold_surfaces_b
 
 
 @pytest.mark.unit
+def test_coverage_wrapped_pytest_failure_and_provider_fail_under_surfaces_both(
+    tmp_path: Path,
+) -> None:
+    node_ids = ["tests/unit/test_widget.py::test_handles_edges"]
+    evidence = ["FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"]
+    command = _command_result(tmp_path, returncode=1)
+    result = ValidationResult(
+        commands=[
+            ValidationCommandResult(
+                command=command.command,
+                returncode=command.returncode,
+                duration_seconds=command.duration_seconds,
+                stdout_path=command.stdout_path,
+                stderr_path=command.stderr_path,
+                phase=command.phase,
+                reason_code="PYTEST_TEST_FAILURE",
+                stream_ids=command.stream_ids,
+                metadata={
+                    "failing_test_node_ids": node_ids,
+                    "failing_test_evidence": evidence,
+                },
+            )
+        ],
+        coverage=_coverage(
+            tmp_path,
+            percent=99.0,
+            minimum=99.0,
+            reason_code="COVERAGE_FAIL_UNDER_NOT_REACHED",
+            command_result=command,
+            failing_test_node_ids=node_ids,
+            failing_test_evidence=evidence,
+            provider_failure_evidence=[
+                "FAIL Required test coverage of 99.0% not reached. Total coverage: 99.00%"
+            ],
+        ),
+    )
+
+    assert _validation_run_reason_code(result) == "PYTEST_TEST_FAILURE"
+    message = _validation_failure_message(result)
+    assert "tests/unit/test_widget.py::test_handles_edges" in message
+    assert "coverage provider also reported that fail-under was not reached" in message
+    assert "coverage met the 99.0% requirement" not in message
+
+
+@pytest.mark.unit
 def test_validation_failure_message_names_failing_tests_when_coverage_met(
     tmp_path: Path,
 ) -> None:
@@ -395,6 +456,34 @@ def test_failure_message_coverage_not_found_ignores_gaps(tmp_path: Path) -> None
 
     assert message == "validation failed: coverage output was not found"
     assert "src/x.py" not in message
+
+
+@pytest.mark.unit
+def test_failure_message_reports_provider_fail_under_without_trusting_rounded_percent(
+    tmp_path: Path,
+) -> None:
+    evidence = ["FAIL Required test coverage of 99.0% not reached. Total coverage: 99.00%"]
+    result = ValidationResult(
+        coverage=_coverage(
+            tmp_path,
+            percent=99.0,
+            minimum=99.0,
+            reason_code="COVERAGE_FAIL_UNDER_NOT_REACHED",
+            provider_failure_evidence=evidence,
+        )
+    )
+
+    metadata = _validation_run_coverage_metadata(result)
+    assert metadata is not None
+    assert metadata["provider_failure_evidence"] == evidence
+    assert _coverage_result_from_metadata(metadata).provider_failure_evidence == evidence
+
+    message = _validation_failure_message(result)
+
+    assert "coverage provider reported that fail-under was not reached" in message
+    assert "displayed rounded coverage was 99.00%" in message
+    assert "required coverage is 99.00%" in message
+    assert "provider fail-under output as authoritative" in message
 
 
 @pytest.mark.unit

@@ -60,6 +60,9 @@ _COVERAGE_TOTAL_RE = re.compile(r"(?im)^\s*TOTAL\b.*?(?P<percent>\d+(?:\.\d+)?)%
 _COVERAGE_SUMMARY_RE = re.compile(
     r"(?i)\b(?:total\s+coverage|coverage)\D+(?P<percent>\d+(?:\.\d+)?)%"
 )
+_COVERAGE_FAIL_UNDER_RE = re.compile(
+    r"(?i)^\s*FAIL\b.*\bcoverage\b.*\bnot reached\b.*$"
+)
 _COVERAGE_FILE_LINE_RE = re.compile(
     r"^(?P<file>\S.*?)\s+(?P<stmts>\d+)\s+(?P<miss>\d+)\s+(?P<cover>\d+)%\s*(?P<missing>.*?)\s*$"
 )
@@ -174,6 +177,7 @@ class ValidationCoverageResult:
     gaps: list[dict[str, object]] = field(default_factory=list)
     failing_test_node_ids: list[str] = field(default_factory=list)
     failing_test_evidence: list[str] = field(default_factory=list)
+    provider_failure_evidence: list[str] = field(default_factory=list)
     parallel_workers_requested: int | None = None
     parallel_workers_effective: int | None = None
     parallel_distribution: str | None = None
@@ -202,6 +206,8 @@ class ValidationCoverageResult:
             metadata["failing_test_node_ids"] = self.failing_test_node_ids
         if self.failing_test_evidence:
             metadata["failing_test_evidence"] = self.failing_test_evidence
+        if self.provider_failure_evidence:
+            metadata["provider_failure_evidence"] = self.provider_failure_evidence
         if self.parallel_workers_requested is not None:
             metadata["parallel_workers_requested"] = self.parallel_workers_requested
         if self.parallel_workers_effective is not None:
@@ -919,6 +925,9 @@ class ValidationRunner:
         output_paths = _coverage_output_paths(coverage_outputs)
         percent = _parse_python_coverage_percent_from_files(output_paths)
         gaps = _parse_term_missing_gaps(output_paths)
+        provider_failure_evidence = _parse_coverage_provider_failure_evidence_from_files(
+            output_paths
+        )
         pytest_evidence = (
             _parse_pytest_failure_evidence_from_files(output_paths)
             if _should_parse_pytest_failure_evidence(command_result)
@@ -929,6 +938,7 @@ class ValidationRunner:
             minimum_percent=coverage.minimum_percent,
             command_result=command_result,
             has_pytest_failures=pytest_evidence.present,
+            has_provider_fail_under=bool(provider_failure_evidence),
         )
         status = _coverage_status(reason_code=reason_code, enforce=coverage.enforce)
         policy_failed = status == "failed"
@@ -941,6 +951,8 @@ class ValidationRunner:
                 command_metadata["failing_test_evidence"] = pytest_evidence.evidence
             if pytest_evidence.present:
                 command_metadata["coverage_reason_code"] = reason_code
+            if provider_failure_evidence:
+                command_metadata["provider_failure_evidence"] = provider_failure_evidence
             if command_plan is not None and command_plan.parallel_workers_requested is not None:
                 command_metadata["parallel_workers_requested"] = (
                     command_plan.parallel_workers_requested
@@ -979,6 +991,7 @@ class ValidationRunner:
             gaps=gaps,
             failing_test_node_ids=pytest_evidence.node_ids,
             failing_test_evidence=pytest_evidence.evidence,
+            provider_failure_evidence=provider_failure_evidence,
             parallel_workers_requested=(
                 command_plan.parallel_workers_requested if command_plan is not None else None
             ),
@@ -1449,6 +1462,27 @@ def _parse_python_coverage_percent_from_files(paths: list[Path]) -> float | None
     return total_percent if total_percent is not None else summary_percent
 
 
+def _parse_coverage_provider_failure_evidence_from_files(paths: list[Path]) -> list[str]:
+    evidence: list[str] = []
+    for path in paths:
+        try:
+            stream = path.open("r", encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        with stream:
+            for raw_line in stream:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if _COVERAGE_FAIL_UNDER_RE.match(line):
+                    _append_unique_capped(
+                        evidence,
+                        _truncate_pytest_evidence_line(line),
+                        limit=_PYTEST_EVIDENCE_LIMIT,
+                    )
+    return evidence
+
+
 def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailureEvidence:
     node_ids: list[str] = []
     evidence: list[str] = []
@@ -1522,6 +1556,7 @@ def _coverage_reason_code(
     minimum_percent: float,
     command_result: ValidationCommandResult | None,
     has_pytest_failures: bool = False,
+    has_provider_fail_under: bool = False,
 ) -> str:
     if percent is None:
         if has_pytest_failures:
@@ -1531,6 +1566,8 @@ def _coverage_reason_code(
         return "COVERAGE_NOT_FOUND"
     if percent < minimum_percent:
         return "COVERAGE_BELOW_THRESHOLD"
+    if has_provider_fail_under:
+        return "COVERAGE_FAIL_UNDER_NOT_REACHED"
     if command_result is not None and command_result.returncode != 0 and not has_pytest_failures:
         return "COVERAGE_COMMAND_FAILED"
     return "COVERAGE_OK"

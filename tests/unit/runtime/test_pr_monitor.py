@@ -27,6 +27,7 @@ from awf.runtime.pr_monitor import (
     SyncBase,
     WaitForCI,
     _mark_review_thread_addressed,
+    _review_thread_needs_attention,
     decide,
 )
 
@@ -351,7 +352,7 @@ class TestAddressComments:
     def test_policy_blocker_notifies_human_instead_of_addressing(self) -> None:
         c = _review(
             "issue:77",
-            body="Review skipped. Trigger review before merging.",
+            body="External policy gate requires operator approval.",
             blocks_merge=True,
         )
         action = decide(
@@ -366,7 +367,7 @@ class TestAddressComments:
         t = _thread("T_fresh")
         blocker = _review(
             "issue:77",
-            body="Review skipped. Trigger review before merging.",
+            body="External policy gate requires operator approval.",
             blocks_merge=True,
         )
         action = decide(
@@ -482,8 +483,8 @@ class TestSyncBase:
     @pytest.mark.unit
     def test_base_sync_runs_before_addressing_comments(self) -> None:
         """SyncBase runs BEFORE AddressComments. Rationale: on a PR with
-        active bot reviewers (Greptile/CodeRabbit/Bugbot/Codex) every push
-        after AddressComments triggers a fresh comment wave — the monitor
+        active bot reviewers, every push after AddressComments triggers a
+        fresh comment wave — the monitor
         would loop AddressComments forever and never SyncBase, leaving the
         PR stuck on BEHIND until iter_cap aborts. SyncBase only adds a
         merge commit; the comments are still unresolved for the NEXT
@@ -796,12 +797,7 @@ class TestTerminalSuccess:
 
 
 class TestDeferredFeedbackGate:
-    """Regression tests for the Major bug CodeRabbit flagged on PR #2:
-    the pre-fix filter treated threads marked ``"defer"`` as "addressed"
-    at step 2, so a PR with only-deferred unresolved threads looked
-    clean to the merge gate and auto-merged silently. The fix adds a
-    dedicated gate: if any deferred thread is still unresolved on
-    GitHub, return NotifyHuman regardless of ``auto_merge``."""
+    """Deferred unresolved feedback must never be treated as merge-ready."""
 
     @pytest.mark.unit
     def test_deferred_thread_still_open_blocks_merge(self) -> None:
@@ -814,9 +810,7 @@ class TestDeferredFeedbackGate:
 
     @pytest.mark.unit
     def test_deferred_review_comment_still_open_blocks_merge(self) -> None:
-        """Same contract for top-level review comments (CodeRabbit posts
-        these as ``ReviewComment`` not ``ReviewThread`` — both paths
-        must honour defer)."""
+        """Same contract for top-level review comments."""
         state = MonitorState(threads_addressed_ids={"C1": "defer"})
         status = _status(reviews=(_review(cid="C1"),))
         action = decide(state=state, status=status, config=MonitorConfig(auto_merge=True))
@@ -891,6 +885,52 @@ class TestDeferredFeedbackGate:
         )
 
         assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "reply_body",
+        (
+            "The latest patch still misses the error path.",
+            "The fallback remains reachable in this branch.",
+        ),
+    )
+    def test_reviewer_reply_with_new_feedback_requeues_thread(
+        self,
+        reply_body: str,
+    ) -> None:
+        original = ReviewThread(
+            thread_id="T1",
+            path="src/x.py",
+            line=10,
+            body_excerpt="bot nit",
+            author="chatgpt-codex-connector",
+            comments=(
+                ReviewThreadComment(
+                    comment_id="101",
+                    body="bot nit",
+                    author="chatgpt-codex-connector",
+                ),
+            ),
+        )
+        state = MonitorState()
+        _mark_review_thread_addressed(state, original, "false_positive")
+        changed = ReviewThread(
+            thread_id="T1",
+            path="src/x.py",
+            line=10,
+            body_excerpt="bot nit",
+            author="chatgpt-codex-connector",
+            comments=(
+                *original.comments,
+                ReviewThreadComment(
+                    comment_id="102",
+                    body=reply_body,
+                    author="chatgpt-codex-connector",
+                ),
+            ),
+        )
+
+        assert _review_thread_needs_attention(state, changed) is True
 
 
 # ── Iteration accounting — decide() doesn't mutate state ──────────────────

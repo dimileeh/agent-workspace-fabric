@@ -34,6 +34,7 @@ from awf.service.target_branch_monitor import (
     TargetBranchMonitorResult,
     TargetBranchMonitorStatus,
     TargetBranchReconcileMonitor,
+    _generated_relative_path,
     reconcile_and_refresh_stale_candidates,
     run_target_branch_reconcile_once,
 )
@@ -1161,6 +1162,20 @@ class TestTargetBranchMonitorResult:
         assert resolver["generated_path_relative"] == (
             "migrations/versions/merge001_merge_alembic_heads.py"
         )
+
+    @pytest.mark.unit
+    def test_generated_relative_path_rejects_missing_generated_path(self, tmp_path: Path) -> None:
+        result = AlembicResolveResult(
+            status=AlembicResolveStatus.resolved,
+            reason_code="ALEMBIC_HEADS_MERGED",
+            heads=("left001", "right001"),
+            generated_revision="merge001",
+            generated_path=None,
+            generated_path_relative=None,
+        )
+
+        with pytest.raises(RuntimeError, match="generated path"):
+            _generated_relative_path(result, tmp_path)
 
 
 class TestReconcileAndRefreshResult:
