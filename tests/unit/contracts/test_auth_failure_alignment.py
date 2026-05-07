@@ -31,10 +31,12 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.unit.contracts._capabilities import (
     CAPABILITIES_BY_NAME,
+    ContractCapability,
     all_capabilities,
     mutating_capabilities,
     normalize_rest_error_body,
 )
+from tests.unit.contracts._introspection import cli_commands
 from tests.unit.contracts._stack import ContractStack
 
 _runner = CliRunner()
@@ -50,6 +52,18 @@ PROTECTED_CLI_CAPABILITY_NAMES = tuple(
         if capability.auth_required and capability.cli_tokens is not None
     )
 )
+
+_CLI_ARGUMENT_VALUES = {
+    "workspace_id": "ws_auth_contract",
+    "stream_id": "agent.stdout",
+}
+
+_CLI_OPTION_VALUES_BY_CAPABILITY = {
+    "adopt_pr_monitor": {
+        "--repo": "owner/repo",
+        "--pr": "1",
+    },
+}
 
 
 @pytest.mark.unit
@@ -348,35 +362,35 @@ def _protected_cli_args(capability_name: str) -> list[str]:
     if capability.cli_tokens is None:
         raise AssertionError(f"{capability_name} has no registered CLI command")
     command = list(capability.cli_tokens)
+    command.extend(_protected_cli_argument_tokens(capability))
+    command.extend(_protected_cli_option_tokens(capability))
+    return command
 
-    if capability_name == "remonitor_workspace":
-        return command + [
-            "ws_auth_contract",
-            "--idempotency-key",
-            "cli-auth",
-            "--api-token",
-            "wrong-token",
-        ]
-    if capability_name == "adopt_pr_monitor":
-        return command + [
-            "--repo",
-            "owner/repo",
-            "--pr",
-            "1",
-            "--api-token",
-            "wrong-token",
-        ]
-    if capability_name == "workspace_logs":
-        return command + [
-            "ws_auth_contract",
-            "--api-token",
-            "wrong-token",
-        ]
-    if capability_name == "read_workspace_log":
-        return command + [
-            "ws_auth_contract",
-            "agent.stdout",
-            "--api-token",
-            "wrong-token",
-        ]
-    raise AssertionError(f"no protected CLI args for {capability_name}")
+
+def _protected_cli_argument_tokens(capability: ContractCapability) -> list[str]:
+    command_info = cli_commands().get(capability.cli_tokens or ())
+    if command_info is None:
+        raise AssertionError(
+            f"{capability.name}: missing registered CLI command {capability.cli_tokens}"
+        )
+    values: list[str] = []
+    for argument in command_info.argument_order:
+        try:
+            values.append(_CLI_ARGUMENT_VALUES[argument])
+        except KeyError as exc:
+            raise AssertionError(
+                f"{capability.name}: no auth-contract CLI fixture for argument {argument!r}"
+            ) from exc
+    return values
+
+
+def _protected_cli_option_tokens(capability: ContractCapability) -> list[str]:
+    values: list[str] = []
+    option_values = _CLI_OPTION_VALUES_BY_CAPABILITY.get(capability.name, {})
+    for option in sorted(option_values):
+        values.extend([option, option_values[option]])
+    if capability.requires_idempotency_key and "--idempotency-key" in capability.cli_options:
+        values.extend(["--idempotency-key", f"{capability.name}-cli-auth"])
+    if "--api-token" in capability.cli_options:
+        values.extend(["--api-token", "wrong-token"])
+    return values

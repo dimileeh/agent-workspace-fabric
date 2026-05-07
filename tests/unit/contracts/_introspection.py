@@ -33,6 +33,7 @@ class CliCommandInfo:
     callback_name: str
     options: frozenset[str]
     arguments: frozenset[str]
+    argument_order: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,7 @@ async def mcp_tools() -> dict[str, McpToolInfo]:
 def _cli_command_info(tokens: tuple[str, ...], callback: Any) -> CliCommandInfo:
     options: set[str] = set()
     arguments: set[str] = set()
+    argument_order: list[str] = []
     for name, parameter in inspect.signature(callback).parameters.items():
         default = parameter.default
         if isinstance(default, OptionInfo):
@@ -118,11 +120,13 @@ def _cli_command_info(tokens: tuple[str, ...], callback: Any) -> CliCommandInfo:
             options.update(str(declaration) for declaration in declarations if str(declaration).startswith("--"))
         elif isinstance(default, ArgumentInfo):
             arguments.add(name)
+            argument_order.append(name)
     return CliCommandInfo(
         tokens=tokens,
         callback_name=callback.__name__,
         options=frozenset(options),
         arguments=frozenset(arguments),
+        argument_order=tuple(argument_order),
     )
 
 
