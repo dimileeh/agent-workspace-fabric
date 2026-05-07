@@ -1265,14 +1265,14 @@ def _latest_workspace_resource_reservation(existing: Workspace) -> ResourceReser
 
 
 def _stored_validation_requested_tier(existing: Workspace) -> int | None:
-    resolved_tier = _resolved_profile_requested_tier(existing)
-    if resolved_tier is not None:
-        return resolved_tier
     validation_policy = existing.task_policy.get(VALIDATION_POLICY_KEY)
     if isinstance(validation_policy, dict):
         tier = validation_policy.get(VALIDATION_REQUESTED_TIER_POLICY_KEY)
-        if isinstance(tier, int):
+        if isinstance(tier, int) and not isinstance(tier, bool):
             return tier
+    resolved_tier = _resolved_profile_requested_tier(existing)
+    if resolved_tier is not None:
+        return resolved_tier
     return None
 
 

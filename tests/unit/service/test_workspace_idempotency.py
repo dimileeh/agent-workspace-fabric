@@ -246,6 +246,54 @@ async def test_create_v2_named_profile_replay_uses_policy_tier_when_profile_unre
 
 
 @pytest.mark.unit
+async def test_create_v2_named_profile_replay_prefers_policy_tier_over_stale_profile(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def resolve_named_profile(**_: object) -> ProfileResolution:
+        return ProfileResolution(
+            profile=WorkspaceProfile(
+                name="high-perf",
+                source="test:high-perf",
+            ),
+            network_posture="restricted",
+            reason="test profile fixture",
+            candidates_considered=["registry:high-perf"],
+        )
+
+    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_named_profile)
+    request = _v2_request(requested_tier=2, profile_ref="high-perf")
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-named-profile-policy-tier",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        assert workspace.task_policy["validation"]["requested_tier"] == 2
+        resolved_profile = dict(workspace.resolved_profile or {})
+        validation = dict(resolved_profile.get("validation") or {})
+        validation["requested_tier"] = 1
+        resolved_profile["validation"] = validation
+        workspace.resolved_profile = resolved_profile
+        await session.commit()
+
+    replayed = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-named-profile-policy-tier",
+    )
+
+    assert replayed.id == created.id
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create_v2(
+            _v2_request(requested_tier=1, profile_ref="high-perf"),
+            idempotency_key="service-create-v2-named-profile-policy-tier",
+        )
+
+
+@pytest.mark.unit
 async def test_create_v2_replay_conflicts_when_resources_change(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
