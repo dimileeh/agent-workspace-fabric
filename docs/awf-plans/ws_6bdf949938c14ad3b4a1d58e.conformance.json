@@ -1,5 +1,5 @@
 {
   "status": "satisfied",
-  "summary": "The committed PR adoption implementation matches the saved plan: terminal previous adoption rows are superseded while remaining auditable, active/resumable rows still attach idempotently with policy conflict checks, task identity supersession prevents stale task reuse, audit events record the supersession, and PostgreSQL-backed service/API regressions cover the required behavior. The missing validation evidence has now been run and recorded in docs/awf-plans/ws_6bdf949938c14ad3b4a1d58e.validation.txt, including focused PR adoption service/API tests, touched-file ruff, mypy src/awf, and the full 99% coverage gate.",
+  "summary": "The current PR adoption implementation matches the saved plan: terminal previous adoption rows are superseded while remaining auditable, active/resumable rows still attach idempotently with policy conflict checks, task identity supersession prevents stale task reuse, audit events record the supersession, and PostgreSQL-backed service/API regressions cover the required behavior. Existing validation evidence in docs/awf-plans/ws_6bdf949938c14ad3b4a1d58e.validation.txt records focused PR adoption service/API tests, touched-file ruff, mypy src/awf, and the full 99% coverage gate passing.",
   "gaps": []
 }
