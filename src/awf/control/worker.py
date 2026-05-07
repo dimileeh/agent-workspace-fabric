@@ -925,6 +925,7 @@ class ControlWorker:
                 ws,
                 candidate.status,
                 include_operator_refresh=False,
+                include_execution_claim_expiry=False,
             )
             latest_refresh = await self._latest_operator_refresh_requested_at(
                 session,
@@ -1040,9 +1041,10 @@ class ControlWorker:
         status: WorkspaceStatus,
         *,
         include_operator_refresh: bool = True,
+        include_execution_claim_expiry: bool = True,
     ) -> datetime | None:
         floors: list[datetime] = []
-        if workspace.execution_claim_expires_at is not None:
+        if include_execution_claim_expiry and workspace.execution_claim_expires_at is not None:
             floors.append(_utc_datetime(workspace.execution_claim_expires_at))
 
         stmt = (

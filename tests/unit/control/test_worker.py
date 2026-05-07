@@ -4680,6 +4680,95 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert inspector.calls == [compose_project, compose_project]
 
     @pytest.mark.unit
+    async def test_operator_refresh_before_stale_lease_expiry_prevents_late_preservation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_refresh_before_lease_expiry"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "refresh-before-lease-expiry",
+            WorkspaceStatus.pushing,
+            compose_project_name=compose_project,
+        )
+        now = datetime.now(UTC)
+        status_started_at = now - timedelta(minutes=10)
+        refresh_requested_at = now - timedelta(minutes=2)
+        lease_expires_at = now - timedelta(minutes=1)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "old-worker"
+            ws.execution_claim_expires_at = lease_expires_at
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            pushing_started = next(
+                event
+                for event in state_events
+                if event.new_state == WorkspaceStatus.pushing.value
+            )
+            pushing_started.occurred_at = status_started_at
+            await WorkspaceControlService(
+                s,
+                project_stopper=_noop_project_stop,
+                cleaner_factory=_unexpected_cleaner_factory,
+            ).request_refresh_workspace(
+                workspace_id,
+                reason="operator recovery",
+                idempotency_key="refresh-before-lease-expiry",
+            )
+            refresh_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.refresh_requested",
+            )
+            assert refresh_events
+            refresh_events[0].occurred_at = refresh_requested_at
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {compose_project: _live_agent_snapshot(container_id="agent-refresh-before-expiry")}
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+
+        assert ws.status == WorkspaceStatus.pushing.value
+        assert preserved_events == []
+        assert len(stale_events) == 1
+        assert stale_events[0].reason_code == "STALE_ACTIVE_EXECUTION"
+        assert cleaner.calls == []
+        assert inspector.calls == [compose_project]
+
+    @pytest.mark.unit
     async def test_operator_refresh_of_live_preserved_runtime_does_not_represerve(
         self,
         session_factory: async_sessionmaker[AsyncSession],
