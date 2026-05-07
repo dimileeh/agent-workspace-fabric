@@ -1347,8 +1347,13 @@ def _stored_task_provider_recovery_policy(
 def _requested_task_scheduler_policy(
     payload: WorkspaceCreateV2Request,
 ) -> dict[str, object] | None:
-    scheduler_policy = v2_task_policy_snapshot(payload).get(SCHEDULER_POLICY_KEY)
-    return scheduler_policy if isinstance(scheduler_policy, dict) else None
+    if payload.task.priority == 0 and payload.task.human_boost == 0:
+        return None
+    scheduler_policy = scheduler_policy_snapshot(
+        base_priority=payload.task.priority,
+        human_boost=payload.task.human_boost,
+    )
+    return cast(dict[str, object], scheduler_policy) if isinstance(scheduler_policy, dict) else None
 
 
 def _stored_task_scheduler_policy(existing: Workspace) -> dict[str, object] | None:

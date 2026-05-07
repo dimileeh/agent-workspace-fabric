@@ -43,6 +43,8 @@ def _v2_request(
     resources: dict[str, object] | None = None,
     owned_paths: list[str] | None = None,
     profile_ref: str | None = "auto",
+    priority: int = 0,
+    human_boost: int = 0,
 ) -> WorkspaceCreateV2Request:
     return WorkspaceCreateV2Request(
         repo={"url": "git@github.com:example/idempotency.git", "base_branch": "main"},
@@ -51,6 +53,8 @@ def _v2_request(
             "prompt": "Exercise serialized idempotency lookup.",
             "agent": "codex",
             "kind": "feature_branch_pr",
+            "priority": priority,
+            "human_boost": human_boost,
             "owned_paths": owned_paths or [],
         },
         workspace={"profile_ref": profile_ref, "profile": None},
@@ -165,6 +169,32 @@ async def test_create_v2_resolves_lazy_disk_check_after_idempotency_replay(
 
     assert replayed.id == created.id
     assert calls == 1
+
+
+@pytest.mark.unit
+async def test_create_v2_scheduler_replay_does_not_rebuild_full_task_policy(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = WorkspaceService(factory)
+    request = _v2_request(priority=42, human_boost=3)
+
+    created = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-scheduler-policy",
+    )
+
+    def unexpected_snapshot(_: WorkspaceCreateV2Request) -> dict[str, object]:
+        raise AssertionError("scheduler replay should not rebuild the full task policy")
+
+    monkeypatch.setattr(workspaces, "v2_task_policy_snapshot", unexpected_snapshot)
+
+    replayed = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-scheduler-policy",
+    )
+
+    assert replayed.id == created.id
 
 
 @pytest.mark.unit
