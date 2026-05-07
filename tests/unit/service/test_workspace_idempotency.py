@@ -40,6 +40,8 @@ def _v2_request(
     *,
     requested_tier: int = 1,
     resources: dict[str, object] | None = None,
+    owned_paths: list[str] | None = None,
+    profile_ref: str | None = "auto",
 ) -> WorkspaceCreateV2Request:
     return WorkspaceCreateV2Request(
         repo={"url": "git@github.com:example/idempotency.git", "base_branch": "main"},
@@ -48,9 +50,9 @@ def _v2_request(
             "prompt": "Exercise serialized idempotency lookup.",
             "agent": "codex",
             "kind": "feature_branch_pr",
-            "owned_paths": [],
+            "owned_paths": owned_paths or [],
         },
-        workspace={"profile_ref": "auto", "profile": None},
+        workspace={"profile_ref": profile_ref, "profile": None},
         validation={"commands": ["pytest -q"], "requested_tier": requested_tier},
         resources=resources or {},
         preflight={
@@ -137,6 +139,68 @@ async def test_create_v2_auto_profile_replay_conflicts_when_requested_tier_chang
         await service.create_v2(
             _v2_request(requested_tier=2),
             idempotency_key="service-create-v2-tier",
+        )
+
+
+@pytest.mark.unit
+async def test_create_v2_replay_treats_owned_paths_as_unordered_scope(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        _v2_request(owned_paths=["src/awf/**", "tests/unit/**"]),
+        idempotency_key="service-create-v2-owned-paths-order",
+    )
+
+    replayed = await service.create_v2(
+        _v2_request(owned_paths=["tests/unit/**", "src/awf/**"]),
+        idempotency_key="service-create-v2-owned-paths-order",
+    )
+
+    assert replayed.id == created.id
+
+
+@pytest.mark.unit
+async def test_create_v2_named_profile_replay_uses_policy_tier_when_profile_unresolved(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def resolve_named_profile(**_: object) -> ProfileResolution:
+        return ProfileResolution(
+            profile=WorkspaceProfile(
+                name="high-perf",
+                source="test:high-perf",
+            ),
+            network_posture="restricted",
+            reason="test profile fixture",
+            candidates_considered=["registry:high-perf"],
+        )
+
+    monkeypatch.setattr(workspaces, "resolve_workspace_profile", resolve_named_profile)
+    request = _v2_request(requested_tier=2, profile_ref="high-perf")
+    service = WorkspaceService(factory)
+
+    created = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-named-profile-unresolved-tier",
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        workspace.resolved_profile = None
+        await session.commit()
+
+    replayed = await service.create_v2(
+        request,
+        idempotency_key="service-create-v2-named-profile-unresolved-tier",
+    )
+
+    assert replayed.id == created.id
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create_v2(
+            _v2_request(requested_tier=1, profile_ref="high-perf"),
+            idempotency_key="service-create-v2-named-profile-unresolved-tier",
         )
 
 

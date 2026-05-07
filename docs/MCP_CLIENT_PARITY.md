@@ -28,6 +28,15 @@ The key maps to REST `Idempotency-Key`: same key and same effective create
 payload returns the existing workspace, while same key and changed payload
 returns structured `IDEMPOTENCY_CONFLICT`.
 
+**MCP log and operation response migration note:** MCP log and operation tools
+now use REST-compatible response models. `awf_read_workspace_log` returns
+`WorkspaceLogReadResponse`, so clients should read log content from `data`
+instead of the previous raw `text` key. `awf_list_workspace_logs` returns a
+`WorkspaceLogListResponse` envelope, and `awf_list_workspace_operations`
+returns an `OperationListResponse` envelope; clients should iterate `items`
+and honor `has_more`, `limit`, and `cursor` instead of treating the result as a
+top-level list.
+
 ## Status Vocabulary
 
 - `MCP implemented`: MCP exposes the same operator data or control intent as

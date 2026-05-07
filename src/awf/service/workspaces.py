@@ -1078,7 +1078,7 @@ def workspace_create_v2_payload_matches(
         and existing.task_prompt == payload.task.prompt
         and existing.task_external_id == payload.task.external_id
         and existing.task_class == task_class
-        and list(existing.owned_paths) == list(payload.task.owned_paths)
+        and frozenset(existing.owned_paths) == frozenset(payload.task.owned_paths)
         and _stored_task_agent_model(existing) == payload.task.model
         and _stored_task_out_of_scope_policy(existing)
         == _requested_task_out_of_scope_policy(payload)
@@ -2718,10 +2718,9 @@ def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]
     resource_request = _requested_resource_reservation_values(payload)
     if resource_request:
         policy[RESOURCE_RESERVATION_REQUEST_POLICY_KEY] = resource_request
-    if _v2_payload_defers_profile_resolution(payload):
-        policy[VALIDATION_POLICY_KEY] = {
-            VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
-        }
+    policy[VALIDATION_POLICY_KEY] = {
+        VALIDATION_REQUESTED_TIER_POLICY_KEY: payload.validation.requested_tier
+    }
     if payload.task.priority != 0 or payload.task.human_boost != 0:
         policy["scheduler"] = scheduler_policy_snapshot(
             base_priority=payload.task.priority,
@@ -2738,12 +2737,6 @@ def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]
             exclude_unset=True,
         )
     return policy
-
-
-def _v2_payload_defers_profile_resolution(payload: WorkspaceCreateV2Request) -> bool:
-    return payload.workspace.profile is None and (
-        payload.workspace.profile_ref is None or payload.workspace.profile_ref == "auto"
-    )
 
 
 def profile_with_requested_tier(
