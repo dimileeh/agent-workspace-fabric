@@ -1035,6 +1035,43 @@ class TestWorkspaceObservability:
         }
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("cursor_flag", ["--cursor", "--after"])
+    def test_operations_forwards_pagination_cursor(self, cursor_flag: str) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "items": [{"id": "op_2", "type": "validate", "status": "running"}],
+                "cursor": "eyJvIjoxfQ",
+                "next_cursor": None,
+                "has_more": False,
+                "limit": 1,
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "operations",
+                    "ws_obs",
+                    "--limit",
+                    "1",
+                    cursor_flag,
+                    "eyJvIjoxfQ",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[0] == (
+            "GET",
+            "http://localhost:8000/v1/workspaces/ws_obs/operations",
+        )
+        assert mock.call_args.kwargs["params"] == {
+            "limit": 1,
+            "cursor": "eyJvIjoxfQ",
+        }
+
+    @pytest.mark.unit
     def test_logs_injects_env_api_token_without_printing_it(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1196,6 +1233,39 @@ class TestOperationCommands:
             "type": "validate",
         }
         assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("cursor_flag", ["--cursor", "--after"])
+    def test_list_forwards_pagination_cursor(self, cursor_flag: str) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "items": [{"id": "op_2", "type": "validate", "status": "running"}],
+                "cursor": "eyJvIjoxfQ",
+                "next_cursor": None,
+                "has_more": False,
+                "limit": 1,
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "operations",
+                    "list",
+                    "--limit",
+                    "1",
+                    cursor_flag,
+                    "eyJvIjoxfQ",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[0] == ("GET", "http://localhost:8000/v1/operations")
+        assert mock.call_args.kwargs["params"] == {
+            "limit": 1,
+            "cursor": "eyJvIjoxfQ",
+        }
 
     @pytest.mark.unit
     def test_show_fetches_operation_detail(self) -> None:

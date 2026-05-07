@@ -4219,6 +4219,7 @@ class OperationRepository:
         status: OperationStatus | str | None = None,
         operation_type: OperationType | str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[Operation]:
         stmt = select(Operation)
         status_value = status.value if isinstance(status, OperationStatus) else status
@@ -4232,7 +4233,11 @@ class OperationRepository:
         if operation_type_value is not None:
             stmt = stmt.where(Operation.type == operation_type_value)
 
-        stmt = stmt.order_by(Operation.created_at.desc(), Operation.id.desc()).limit(limit)
+        stmt = (
+            stmt.order_by(Operation.created_at.desc(), Operation.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
         return list((await self._session.execute(stmt)).scalars())
 
     async def list_for_workspace(
@@ -4242,12 +4247,14 @@ class OperationRepository:
         status: OperationStatus | str | None = None,
         operation_type: OperationType | str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[Operation]:
         return await self.list_all(
             workspace_id=workspace_id,
             status=status,
             operation_type=operation_type,
             limit=limit,
+            offset=offset,
         )
 
     async def finish(

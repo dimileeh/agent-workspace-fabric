@@ -431,6 +431,7 @@ class TestToolRegistration:
         assert "operation_type" not in operations_props
         assert operations_props["limit"]["default"] == 50
         assert operations_props["limit"]["maximum"] == 500
+        assert _optional_string_schema(operations_props["cursor"])["maxLength"] == 64
 
         workspace_operations_props = tools["awf_list_workspace_operations"].inputSchema[
             "properties"
@@ -440,6 +441,7 @@ class TestToolRegistration:
         assert "operation_type" not in workspace_operations_props
         assert workspace_operations_props["limit"]["default"] == 50
         assert workspace_operations_props["limit"]["maximum"] == 500
+        assert _optional_string_schema(workspace_operations_props["cursor"])["maxLength"] == 64
 
         overlap_props = tools["awf_get_overlap_graph"].inputSchema["properties"]
         assert overlap_props["limit"]["default"] == 100
@@ -550,9 +552,21 @@ class TestOperationTools:
         assert isinstance(payload, dict)
         assert [item["id"] for item in payload["items"]] == [stop.id, validate.id]
         assert payload["has_more"] is True
-        assert payload["next_cursor"] is None
+        assert payload["next_cursor"] is not None
         assert payload["limit"] == 2
         assert payload["cursor"] is None
+
+        second_page = await _call(
+            mcp,
+            "awf_list_operations",
+            {"limit": 2, "cursor": payload["next_cursor"]},
+        )
+
+        assert isinstance(second_page, dict)
+        assert [item["id"] for item in second_page["items"]] == [create.id]
+        assert second_page["has_more"] is False
+        assert second_page["next_cursor"] is None
+        assert second_page["cursor"] == payload["next_cursor"]
 
     @pytest.mark.unit
     async def test_list_operations_uses_prevalidated_service_responses(
@@ -1589,9 +1603,25 @@ class TestWorkspaceOperations:
         assert [item["type"] for item in payload["items"]] == ["stop", "validate"]
         assert [item["status"] for item in payload["items"]] == ["pending", "running"]
         assert payload["has_more"] is True
-        assert payload["next_cursor"] is None
+        assert payload["next_cursor"] is not None
         assert payload["limit"] == 2
         assert payload["cursor"] is None
+
+        second_page = await _call(
+            mcp,
+            "awf_list_workspace_operations",
+            {
+                "workspace_id": workspace.id,
+                "limit": 2,
+                "cursor": payload["next_cursor"],
+            },
+        )
+
+        assert isinstance(second_page, dict)
+        assert [item["id"] for item in second_page["items"]] == [create.id]
+        assert second_page["has_more"] is False
+        assert second_page["next_cursor"] is None
+        assert second_page["cursor"] == payload["next_cursor"]
 
     @pytest.mark.unit
     async def test_list_workspace_operations_forwards_status_and_type_filters(

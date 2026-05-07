@@ -47,7 +47,11 @@ from awf.service.artifacts import (
     MAX_ARTIFACT_LIST_LIMIT,
     list_workspace_artifacts_metadata,
 )
-from awf.service.bounded_list import InvalidBoundedListCursorError
+from awf.service.bounded_list import (
+    InvalidBoundedListCursorError,
+    decode_bounded_list_cursor,
+    encode_bounded_list_cursor,
+)
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
 from awf.service.local_capacity import detect_local_capacity
@@ -540,21 +544,27 @@ def build_mcp_server(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
         limit: int = Field(default=50, ge=1, le=500),
         status: OperationStatus | None = Field(default=None),
-        type: OperationType | None = Field(
+        operation_type: OperationType | None = Field(
             default=None,
             validation_alias=_OPERATION_TYPE_FILTER_ALIAS,
+            serialization_alias="type",
         ),
+        cursor: str | None = Field(default=None, max_length=64),
     ) -> CallToolResult:
         """List one workspace's operations using the REST envelope."""
-        rows = await service.list_operations(
-            workspace_id,
-            status=status,
-            operation_type=type,
-            limit=limit + 1,
-        )
+        try:
+            rows = await service.list_operations(
+                workspace_id,
+                status=status,
+                operation_type=operation_type,
+                limit=limit + 1,
+                cursor=cursor,
+            )
+        except InvalidBoundedListCursorError:
+            return _error_result("INVALID_CURSOR", "Invalid operation list cursor.")
         if rows is None:
             return _null_tool_result()
-        response = _operation_list_response(rows, limit=limit)
+        response = _operation_list_response(rows, limit=limit, cursor=cursor)
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_list_workspace_logs")
@@ -789,20 +799,26 @@ def build_mcp_server(
     async def awf_list_operations(
         workspace_id: str | None = Field(default=None),
         status: OperationStatus | None = Field(default=None),
-        type: OperationType | None = Field(
+        operation_type: OperationType | None = Field(
             default=None,
             validation_alias=_OPERATION_TYPE_FILTER_ALIAS,
+            serialization_alias="type",
         ),
         limit: int = Field(default=50, ge=1, le=500),
+        cursor: str | None = Field(default=None, max_length=64),
     ) -> StructuredToolResult:
         """Read-only operator observability: list operations using the REST envelope."""
-        rows = await service.list_all_operations(
-            workspace_id=workspace_id,
-            status=status,
-            operation_type=type,
-            limit=limit + 1,
-        )
-        response = _operation_list_response(rows, limit=limit)
+        try:
+            rows = await service.list_all_operations(
+                workspace_id=workspace_id,
+                status=status,
+                operation_type=operation_type,
+                limit=limit + 1,
+                cursor=cursor,
+            )
+            response = _operation_list_response(rows, limit=limit, cursor=cursor)
+        except InvalidBoundedListCursorError:
+            return _error_result("INVALID_CURSOR", "Invalid operation list cursor.")
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_operation")
@@ -1325,9 +1341,7 @@ def _error_result(error_code: str, message: str) -> CallToolResult:
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
-def _required_idempotency_key(idempotency_key: str | None) -> str | None:
-    if idempotency_key is None:
-        return None
+def _required_idempotency_key(idempotency_key: str) -> str | None:
     key = idempotency_key.strip()
     return key or None
 
@@ -1340,14 +1354,17 @@ def _operation_list_response(
     rows: list[OperationResponse],
     *,
     limit: int,
+    cursor: str | None = None,
 ) -> OperationListResponse:
     page_rows = rows[:limit]
+    has_more = len(rows) > limit
+    offset = decode_bounded_list_cursor(cursor)
     return OperationListResponse(
         items=page_rows,
-        next_cursor=None,
-        has_more=len(rows) > limit,
+        next_cursor=encode_bounded_list_cursor(offset + limit) if has_more else None,
+        has_more=has_more,
         limit=limit,
-        cursor=None,
+        cursor=cursor,
     )
 
 

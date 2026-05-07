@@ -1736,6 +1736,7 @@ def workspace_runtime(
 def workspace_operations(
     workspace_id: str = typer.Argument(...),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
+    cursor: str | None = typer.Option(None, "--cursor", "--after"),
     status: OperationStatus | None = typer.Option(None, "--status"),
     operation_type: OperationType | None = typer.Option(None, "--type"),
     api_token: str | None = _api_token_option(),
@@ -1744,6 +1745,8 @@ def workspace_operations(
 ) -> None:
     """List operations for one workspace."""
     params: dict[str, Any] = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
     if status is not None:
         params["status"] = status.value
     if operation_type is not None:
@@ -1762,6 +1765,7 @@ def workspace_operations(
 def operations_list(
     workspace_id: str | None = typer.Option(None, "--workspace-id"),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
+    cursor: str | None = typer.Option(None, "--cursor", "--after"),
     status: OperationStatus | None = typer.Option(None, "--status"),
     operation_type: OperationType | None = typer.Option(None, "--type"),
     api_token: str | None = _api_token_option(),
@@ -1772,6 +1776,8 @@ def operations_list(
     params: dict[str, Any] = {"limit": limit}
     if workspace_id is not None:
         params["workspace_id"] = workspace_id
+    if cursor is not None:
+        params["cursor"] = cursor
     if status is not None:
         params["status"] = status.value
     if operation_type is not None:

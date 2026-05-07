@@ -402,6 +402,7 @@ curl "http://localhost:8000/v1/workspaces/ws_123/stale-reasons?include_resolved=
 
 ```bash
 curl "http://localhost:8000/v1/operations?limit=50"
+curl "http://localhost:8000/v1/operations?limit=50&cursor=eyJvIjo1MH0"
 ```
 
 Filter by workspace ID, status, or operation type:
@@ -414,6 +415,7 @@ curl "http://localhost:8000/v1/operations?workspace_id=ws_123&type=rebase&status
 
 ```bash
 curl "http://localhost:8000/v1/workspaces/ws_123/operations?limit=50"
+curl "http://localhost:8000/v1/workspaces/ws_123/operations?limit=50&cursor=eyJvIjo1MH0"
 ```
 
 ### Get a single operation

@@ -75,6 +75,7 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
     build_planning_scope_retry_prompt,
 )
+from awf.service.bounded_list import decode_bounded_list_cursor
 from awf.service.config import resolve_service_settings
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
@@ -685,16 +686,19 @@ class WorkspaceService:
         status: OperationStatus | str | None = None,
         operation_type: OperationType | str | None = None,
         limit: int = 50,
+        cursor: str | None = None,
     ) -> builtins.list[OperationResponse] | None:
         async with self._factory() as s:
             workspace_repo = WorkspaceRepository(s)
             if not await workspace_repo.exists(workspace_id):
                 return None
+            offset = decode_bounded_list_cursor(cursor)
             rows = await OperationRepository(s).list_for_workspace(
                 workspace_id,
                 status=status,
                 operation_type=operation_type,
                 limit=limit,
+                offset=offset,
             )
             return [OperationResponse.model_validate(row) for row in rows]
 
@@ -705,13 +709,16 @@ class WorkspaceService:
         status: OperationStatus | str | None = None,
         operation_type: OperationType | str | None = None,
         limit: int = 50,
+        cursor: str | None = None,
     ) -> builtins.list[OperationResponse]:
         async with self._factory() as s:
+            offset = decode_bounded_list_cursor(cursor)
             rows = await OperationRepository(s).list_all(
                 workspace_id=workspace_id,
                 status=status,
                 operation_type=operation_type,
                 limit=limit,
+                offset=offset,
             )
             return [OperationResponse.model_validate(row) for row in rows]
 

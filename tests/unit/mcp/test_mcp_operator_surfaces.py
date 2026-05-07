@@ -1781,6 +1781,11 @@ class TestMcpOperatorSurfaceParity:
             "awf_list_workspace_overview",
             {"cursor": "not-a-cursor"},
         )
+        operations_result = await _call_result(
+            operator_stack.mcp,
+            "awf_list_operations",
+            {"cursor": "not-a-cursor"},
+        )
 
         assert merge_result.isError is True
         assert merge_result.structuredContent == {
@@ -1792,6 +1797,12 @@ class TestMcpOperatorSurfaceParity:
         assert overview_result.structuredContent == {
             "error_code": "INVALID_CURSOR",
             "message": "Invalid workspace overview cursor.",
+            "detail": None,
+        }
+        assert operations_result.isError is True
+        assert operations_result.structuredContent == {
+            "error_code": "INVALID_CURSOR",
+            "message": "Invalid operation list cursor.",
             "detail": None,
         }
 
