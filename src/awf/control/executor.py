@@ -5664,6 +5664,7 @@ def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> Validation
     gaps = metadata.get("gaps")
     failing_node_ids = metadata.get("failing_test_node_ids")
     failing_evidence = metadata.get("failing_test_evidence")
+    provider_failure_evidence = metadata.get("provider_failure_evidence")
     parallel_requested = metadata.get("parallel_workers_requested")
     parallel_effective = metadata.get("parallel_workers_effective")
     parallel_distribution = metadata.get("parallel_distribution")
@@ -5680,6 +5681,11 @@ def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> Validation
         else [],
         failing_test_evidence=[str(item) for item in failing_evidence if isinstance(item, str)]
         if isinstance(failing_evidence, list)
+        else [],
+        provider_failure_evidence=[
+            str(item) for item in provider_failure_evidence if isinstance(item, str)
+        ]
+        if isinstance(provider_failure_evidence, list)
         else [],
         parallel_workers_requested=(
             int(parallel_requested) if isinstance(parallel_requested, int) else None
@@ -5738,6 +5744,17 @@ def _coverage_wrapped_pytest_failure_message(
             "then address coverage if it remains below threshold"
             f"{gap_text}"
         )
+    if coverage.reason_code == "COVERAGE_FAIL_UNDER_NOT_REACHED":
+        displayed = (
+            f"; displayed rounded coverage was {coverage.percent:.2f}%"
+            if coverage.percent is not None
+            else ""
+        )
+        return (
+            f"validation failed: pytest reported failing tests{tests_fragment}; "
+            "coverage provider also reported that fail-under was not reached"
+            f"{displayed}; required coverage is {coverage.minimum_percent:.2f}%"
+        )
     if coverage.percent is not None:
         return (
             f"validation failed: pytest reported failing tests{tests_fragment}; "
@@ -5789,6 +5806,18 @@ def _validation_failure_message(
                 "validation failed: coverage command failed"
                 f"{baseline_suffix}; fix the failing tests or add meaningful coverage, "
                 "do not lower coverage thresholds"
+            )
+        if coverage.reason_code == "COVERAGE_FAIL_UNDER_NOT_REACHED":
+            displayed = (
+                f"; displayed rounded coverage was {coverage.percent:.2f}%"
+                if coverage.percent is not None
+                else ""
+            )
+            return (
+                "validation failed: coverage provider reported that fail-under was not reached"
+                f"{displayed}; required coverage is {coverage.minimum_percent:.2f}%"
+                f"{baseline_suffix}; treat provider fail-under output as authoritative "
+                "and add meaningful tests instead of relying on rounded coverage"
             )
         if coverage.reason_code == "COVERAGE_PROVIDER_UNSUPPORTED":
             return f"validation failed: unsupported coverage provider {coverage.provider}"
