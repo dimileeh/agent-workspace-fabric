@@ -945,6 +945,37 @@ class TestCreateWorkspaceV2ResourceIdempotency:
         assert reservation["peak_cpu"] == 3.0
         assert reservation["peak_memory_gb"] == 8.0
 
+    @pytest.mark.unit
+    async def test_defaulted_resource_create_conflicts_with_explicit_default_replay(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: Settings(
+            _env_file=None,
+            workspace_steady_cpu=2.0,
+            workspace_steady_memory_gb=6.0,
+            workspace_peak_cpu=3.0,
+            workspace_peak_memory_gb=8.0,
+        )
+        headers = {"Idempotency-Key": "resource-default-explicit-conflict"}
+        replay_payload = {
+            **_V2_MINIMAL_BODY,
+            "resources": {
+                "steady_state_cpu_cores": 2.0,
+                "steady_state_memory_gb": 6.0,
+                "peak_cpu_cores": 3.0,
+                "peak_memory_gb": 8.0,
+            },
+        }
+
+        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 409
+        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
 
 class TestWorkspaceCreateProviderReadinessPreflight:
     @pytest.fixture(autouse=True)
