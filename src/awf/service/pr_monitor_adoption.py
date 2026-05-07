@@ -355,18 +355,23 @@ class PullRequestMonitorAdoptionService:
         except TaskExternalIdConflictError:
             if not previous_terminal_adoptions:
                 raise
+            task_generation_idempotency_key = await _next_adoption_task_idempotency_key(
+                self._session,
+                logical_idempotency_key=logical_idempotency_key,
+                task_external_id=workspace.task_external_id or _adoption_external_id(
+                    repo_slug=repo.slug(),
+                    pr_number=metadata.number,
+                ),
+            )
             workspace.task_external_id = _adoption_generation_external_id(
                 repo_slug=repo.slug(),
                 pr_number=metadata.number,
                 logical_idempotency_key=logical_idempotency_key,
-                workspace_idempotency_key=idempotency_key,
+                workspace_idempotency_key=task_generation_idempotency_key,
             )
             task = await _create_or_get_task(
                 external_id=workspace.task_external_id,
-                task_idempotency_key=_adoption_generation_idempotency_key(
-                    logical_idempotency_key=logical_idempotency_key,
-                    workspace_idempotency_key=idempotency_key,
-                ),
+                task_idempotency_key=task_generation_idempotency_key,
             )
         attempt = await TaskAttemptRepository(self._session).create_for_workspace(
             task=task,
@@ -587,6 +592,68 @@ async def _task_idempotency_key_family(
     )
     keys = (await session.execute(stmt)).scalars().all()
     return [key for key in keys if key is not None]
+
+
+async def _task_external_id_family_idempotency_keys(
+    session: AsyncSession,
+    *,
+    logical_idempotency_key: str,
+    task_external_id: str,
+) -> list[str]:
+    generation_pattern = f"{_escape_like_pattern(task_external_id)}:g%"
+    stmt = (
+        select(Task.external_id)
+        .where(
+            or_(
+                Task.external_id == task_external_id,
+                Task.external_id.like(generation_pattern, escape="\\"),
+            )
+        )
+        .order_by(Task.external_id.asc())
+    )
+    external_ids = (await session.execute(stmt)).scalars().all()
+    reserved_keys: list[str] = []
+    generation_prefix = f"{task_external_id}:"
+    for external_id in external_ids:
+        if external_id == task_external_id:
+            reserved_keys.append(logical_idempotency_key)
+            continue
+        if external_id is None or not external_id.startswith(generation_prefix):
+            continue
+        generation = external_id[len(generation_prefix) :]
+        if _is_adoption_generation_suffix(generation):
+            reserved_keys.append(f"{logical_idempotency_key}:{generation}")
+    return list(dict.fromkeys(reserved_keys))
+
+
+async def _next_adoption_task_idempotency_key(
+    session: AsyncSession,
+    *,
+    logical_idempotency_key: str,
+    task_external_id: str,
+) -> str:
+    existing_keys = set(
+        await _task_idempotency_key_family(
+            session,
+            logical_idempotency_key=logical_idempotency_key,
+        )
+    )
+    existing_keys.update(
+        await _task_external_id_family_idempotency_keys(
+            session,
+            logical_idempotency_key=logical_idempotency_key,
+            task_external_id=task_external_id,
+        )
+    )
+    for generation in range(1, 1000):
+        candidate = f"{logical_idempotency_key}:g{generation}"
+        if candidate not in existing_keys:
+            return candidate
+    raise RuntimeError("Could not allocate a fresh PR adoption task idempotency key.")
+
+
+def _is_adoption_generation_suffix(value: str) -> bool:
+    return value.startswith("g") and value[1:].isdigit()
 
 
 async def _terminal_adoption_lineage(
