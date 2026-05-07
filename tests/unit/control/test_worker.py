@@ -3688,6 +3688,70 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert inspector.calls == [compose_project]
 
     @pytest.mark.unit
+    async def test_preservation_idempotency_keeps_current_event_with_unexpired_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserve_fresh_claim"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserve-fresh-claim",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        now = datetime.now(UTC)
+        status_started_at = now - timedelta(minutes=5)
+        preserved_at = now - timedelta(minutes=1)
+        claim_expires_at = now + timedelta(minutes=5)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            running_started = next(
+                event
+                for event in state_events
+                if event.new_state == WorkspaceStatus.running.value
+            )
+            running_started.occurred_at = status_started_at
+            preserved = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            preserved.occurred_at = preserved_at
+            ws.execution_claimed_by = "live-worker"
+            ws.execution_claim_expires_at = claim_expires_at
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector({compose_project: _live_agent_snapshot()}),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        assert await worker._has_current_preserved_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name=compose_project,
+            )
+        )
+
+    @pytest.mark.unit
     async def test_operator_refresh_from_old_cycle_does_not_block_fresh_preservation(
         self,
         session_factory: async_sessionmaker[AsyncSession],

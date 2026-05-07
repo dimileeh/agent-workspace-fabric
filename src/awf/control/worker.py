@@ -1079,7 +1079,9 @@ class ControlWorker:
     ) -> datetime | None:
         floors: list[datetime] = []
         if include_execution_claim_expiry and workspace.execution_claim_expires_at is not None:
-            floors.append(_utc_datetime(workspace.execution_claim_expires_at))
+            claim_floor = _utc_datetime(workspace.execution_claim_expires_at)
+            if claim_floor <= datetime.now(UTC):
+                floors.append(claim_floor)
 
         stmt = (
             select(WorkspaceEvent.occurred_at)
