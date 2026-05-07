@@ -61,7 +61,7 @@ _COVERAGE_SUMMARY_RE = re.compile(
     r"(?i)\b(?:total\s+coverage|coverage)\D+(?P<percent>\d+(?:\.\d+)?)%"
 )
 _COVERAGE_FAIL_UNDER_RE = re.compile(
-    r"(?im)^\s*FAIL\b.*\bcoverage\b.*\bnot reached\b.*$"
+    r"(?i)^\s*FAIL\b.*\bcoverage\b.*\bnot reached\b.*$"
 )
 _COVERAGE_FILE_LINE_RE = re.compile(
     r"^(?P<file>\S.*?)\s+(?P<stmts>\d+)\s+(?P<miss>\d+)\s+(?P<cover>\d+)%\s*(?P<missing>.*?)\s*$"
