@@ -31,21 +31,11 @@ from awf.db.repositories import TaskAttemptRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service import pr_monitor_adoption as adoption_module
 from awf.service.pr_monitor_adoption import (
+    _LIVE_ADOPTION_STATUSES,
     PRMonitorAdoptionError,
     PullRequestMonitorAdoptionService,
 )
 from tests.postgres import postgres_test_engine
-
-_LIVE_ADOPTION_STATUSES = {
-    WorkspaceStatus.requested.value,
-    WorkspaceStatus.provisioning.value,
-    WorkspaceStatus.ready.value,
-    WorkspaceStatus.running.value,
-    WorkspaceStatus.validating.value,
-    WorkspaceStatus.pushing.value,
-    WorkspaceStatus.monitoring_pr.value,
-    WorkspaceStatus.destroying.value,
-}
 
 
 @pytest.fixture
