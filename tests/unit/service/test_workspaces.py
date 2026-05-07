@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -384,6 +384,99 @@ async def test_workspace_detail_ignores_preserved_health_from_prior_active_statu
 
     assert detail is not None
     assert detail.runtime_health is None
+
+
+@pytest.mark.unit
+async def test_preserved_runtime_health_is_scoped_to_current_status_cycle(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="preserved runtime cycle floor",
+            task_prompt="do not show previous-cycle preserved runtime",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.running.value
+        workspace.compose_project_name = "awf_preserved_runtime_cycle_floor"
+        workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
+        base = datetime.now(UTC)
+        prior_running = await repo.add_event(
+            workspace,
+            event_type="workspace.state_changed",
+            reason_code="WORKSPACE_RUNNING",
+        )
+        prior_running.old_state = WorkspaceStatus.ready.value
+        prior_running.new_state = WorkspaceStatus.running.value
+        prior_running.occurred_at = base
+        preserved = await repo.add_event(
+            workspace,
+            event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            reason_code=PRESERVED_EXECUTION_REASON_CODE,
+            payload={
+                "reason_code": PRESERVED_EXECUTION_REASON_CODE,
+                "decision": "preserve_runtime",
+                "workspace_status": WorkspaceStatus.running.value,
+                "message": "Live agent runtime was preserved after worker restart.",
+                "runtime": {
+                    "services": [
+                        {
+                            "name": "agent",
+                            "state": "running",
+                            "container_id": "agent-old",
+                        }
+                    ]
+                },
+            },
+        )
+        preserved.occurred_at = base + timedelta(seconds=1)
+        completed = await repo.add_event(
+            workspace,
+            event_type="workspace.state_changed",
+            reason_code="WORKSPACE_COMPLETED",
+        )
+        completed.old_state = WorkspaceStatus.running.value
+        completed.new_state = WorkspaceStatus.completed.value
+        completed.occurred_at = base + timedelta(seconds=2)
+        current_running = await repo.add_event(
+            workspace,
+            event_type="workspace.state_changed",
+            reason_code="WORKSPACE_RUNNING",
+        )
+        current_running.old_state = WorkspaceStatus.ready.value
+        current_running.new_state = WorkspaceStatus.running.value
+        current_running.occurred_at = base + timedelta(seconds=3)
+        await session.commit()
+        workspace_id = workspace.id
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
+    inspector = _RuntimeInspector(
+        {
+            "awf_preserved_runtime_cycle_floor": RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent-current",
+                        image="awf-agent:latest",
+                        state="running",
+                    )
+                ],
+            )
+        }
+    )
+    runtime = await WorkspaceService(
+        session_factory,
+        runtime_inspector=inspector,
+    ).get_runtime(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is None
+    assert runtime is not None
+    assert runtime.runtime_health is None
 
 
 @pytest.mark.unit

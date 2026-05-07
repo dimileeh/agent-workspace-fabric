@@ -7,6 +7,7 @@ import builtins
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -1864,8 +1865,18 @@ def _workspace_runtime_health_from_matching_events(
     *,
     event_types: frozenset[str],
 ) -> WorkspaceRuntimeHealthResponse | None:
+    preserved_event_floor = (
+        _active_runtime_health_event_floor(workspace)
+        if ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE in event_types
+        else None
+    )
     for event in reversed(workspace.events):
         if event.event_type not in event_types:
+            continue
+        if (
+            event.event_type == ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE
+            and _event_occurred_before_floor(event.occurred_at, preserved_event_floor)
+        ):
             continue
         payload = event.payload or {}
         reason_code = payload.get("reason_code") or event.reason_code
@@ -1896,6 +1907,35 @@ def _workspace_runtime_health_from_matching_events(
             services=_runtime_health_event_services(payload),
         )
     return None
+
+
+def _active_runtime_health_event_floor(workspace: Workspace) -> datetime | None:
+    status = str(workspace.status)
+    floors = [
+        _utc_datetime(event.occurred_at)
+        for event in workspace.events
+        if isinstance(event.occurred_at, datetime)
+        and event.event_type == "workspace.state_changed"
+        and event.new_state == status
+    ]
+    return max(floors) if floors else None
+
+
+def _event_occurred_before_floor(
+    occurred_at: datetime | None,
+    floor: datetime | None,
+) -> bool:
+    return (
+        isinstance(occurred_at, datetime)
+        and floor is not None
+        and _utc_datetime(occurred_at) < floor
+    )
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _runtime_health_event_services(payload: Mapping[str, Any]) -> list[dict[str, str]]:
