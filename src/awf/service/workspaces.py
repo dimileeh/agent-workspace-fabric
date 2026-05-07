@@ -172,7 +172,6 @@ PROVIDER_READINESS_READY_REASON = "PROVIDER_READINESS_READY"
 PROVIDER_READINESS_OVERRIDE_REASON = "PROVIDER_READINESS_OVERRIDE_USED"
 VALIDATION_POLICY_KEY = "validation"
 VALIDATION_REQUESTED_TIER_POLICY_KEY = "requested_tier"
-DEFAULT_REQUESTED_VALIDATION_TIER = 1
 RESOURCE_RESERVATION_REQUEST_POLICY_KEY = "resource_reservation_request"
 QUEUE_DECISION_ADMITTED = "admitted"
 QUEUE_DECISION_ADMITTED_LOCAL_REASON = "ADMITTED_LOCAL"
@@ -1078,7 +1077,7 @@ def workspace_create_v2_payload_matches(
         and existing.task_prompt == payload.task.prompt
         and existing.task_external_id == payload.task.external_id
         and existing.task_class == task_class
-        and frozenset(existing.owned_paths) == frozenset(payload.task.owned_paths)
+        and list(existing.owned_paths) == list(payload.task.owned_paths)
         and _stored_task_agent_model(existing) == payload.task.model
         and _stored_task_out_of_scope_policy(existing)
         == _requested_task_out_of_scope_policy(payload)
@@ -1092,13 +1091,43 @@ def workspace_create_v2_payload_matches(
         )
         and existing.agent == payload.task.agent.value
         and existing.task_kind == payload.task.kind
-        and existing.profile_ref == payload.workspace.profile_ref
+        and _profile_ref_matches(existing, payload)
         and existing.requested_profile == requested_profile
-        and _stored_validation_requested_tier(existing) == payload.validation.requested_tier
+        and _stored_validation_requested_tier_matches(existing, payload)
         and list(existing.test_commands) == list(payload.validation.commands)
         and _stored_resource_reservation_matches(existing, payload, settings=settings)
         and _task_provider_readiness_override_matches(existing, payload)
     )
+
+
+def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateV2Request) -> bool:
+    if existing.profile_ref == payload.workspace.profile_ref:
+        return True
+    return (
+        existing.profile_ref is None
+        and payload.workspace.profile_ref == "auto"
+        and existing.requested_profile is None
+        and payload.workspace.profile is None
+    )
+
+
+def _auto_profile_request(payload: WorkspaceCreateV2Request) -> bool:
+    return (
+        payload.workspace.profile is None
+        and payload.workspace.profile_ref in (None, "auto")
+    )
+
+
+def _stored_validation_requested_tier_matches(
+    existing: Workspace,
+    payload: WorkspaceCreateV2Request,
+) -> bool:
+    stored_tier = _stored_validation_requested_tier(existing)
+    if stored_tier is not None:
+        return stored_tier == payload.validation.requested_tier
+    # Legacy auto-profile rows did not snapshot the requested tier anywhere.
+    # Treat the tier as unknown so an otherwise identical replay stays valid.
+    return _profile_ref_matches(existing, payload) and _auto_profile_request(payload)
 
 
 def _stored_resource_reservation_matches(
@@ -1114,11 +1143,7 @@ def _stored_resource_reservation_matches(
     stored_dind_slots = _stored_resource_dind_slots(existing, payload)
     stored_values = _stored_resource_reservation_request_values(existing)
     if stored_values is not None:
-        return (
-            stored_values == requested_values
-            and _resource_reservation_matches_request_values(reservation, requested_values)
-            and reservation.dind_slots == stored_dind_slots
-        )
+        return stored_values == requested_values
 
     plan = resource_reservation_plan(payload, settings=settings or get_settings())
     if (
@@ -1204,7 +1229,7 @@ def _stored_resource_reservation_request_values(
         if not isinstance(value, (int, float)):
             return None
         values[field] = float(value)
-    return values or None
+    return values
 
 
 def _resource_reservation_matches_request_values(
@@ -1239,7 +1264,7 @@ def _latest_workspace_resource_reservation(existing: Workspace) -> ResourceReser
     return max(reservations, key=lambda item: (item.reserved_at, item.id))
 
 
-def _stored_validation_requested_tier(existing: Workspace) -> int:
+def _stored_validation_requested_tier(existing: Workspace) -> int | None:
     resolved_tier = _resolved_profile_requested_tier(existing)
     if resolved_tier is not None:
         return resolved_tier
@@ -1248,7 +1273,7 @@ def _stored_validation_requested_tier(existing: Workspace) -> int:
         tier = validation_policy.get(VALIDATION_REQUESTED_TIER_POLICY_KEY)
         if isinstance(tier, int):
             return tier
-    return DEFAULT_REQUESTED_VALIDATION_TIER
+    return None
 
 
 def _resolved_profile_requested_tier(existing: Workspace) -> int | None:

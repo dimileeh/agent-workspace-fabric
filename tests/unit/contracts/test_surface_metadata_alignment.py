@@ -52,6 +52,10 @@ STATUS_FILTER_PARITY_CAPABILITIES = (
     "merge_queue",
     "locks",
 )
+OPERATION_TYPE_FILTER_PARITY_CAPABILITIES = (
+    "workspace_operations",
+    "global_operations",
+)
 
 
 @pytest.mark.unit
@@ -112,6 +116,19 @@ def test_implemented_mcp_status_filter_names_match_rest_alias(
     assert "status" in capability.rest_query_fields
     assert "status" in capability.mcp_request_fields
     assert "workspace_status" not in capability.mcp_request_fields
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", OPERATION_TYPE_FILTER_PARITY_CAPABILITIES)
+def test_implemented_mcp_operation_type_filter_name_matches_rest_alias(
+    capability_name: str,
+) -> None:
+    capability = CAPABILITIES_BY_NAME[capability_name]
+
+    assert capability.mcp_tool is not None
+    assert "type" in capability.rest_query_fields
+    assert "type" in capability.mcp_request_fields
+    assert "operation_type" not in capability.mcp_request_fields
 
 
 @pytest.mark.unit

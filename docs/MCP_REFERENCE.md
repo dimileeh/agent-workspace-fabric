@@ -103,7 +103,7 @@ Example runtime and operation observability calls:
 `awf_list_workspace_operations` arguments:
 
 ```json
-{"workspace_id": "ws_abc123", "limit": 25, "status": "running", "operation_type": "validate"}
+{"workspace_id": "ws_abc123", "limit": 25, "status": "running", "type": "validate"}
 ```
 
 **Breaking change:** `awf_list_workspace_operations` now returns a
