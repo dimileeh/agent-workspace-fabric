@@ -183,6 +183,50 @@ async def test_older_open_candidate_blocks_later_same_repo_base_candidate(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("older_owned_paths", "later_owned_paths"),
+    [
+        ([], ["src/shared/**"]),
+        (["src/shared/**"], []),
+        ([], []),
+    ],
+)
+async def test_missing_owned_paths_block_later_same_repo_base_candidate(
+    factory: async_sessionmaker[AsyncSession],
+    older_owned_paths: list[str],
+    later_owned_paths: list[str],
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    async with factory() as session:
+        older_workspace_id, _older_attempt_id, older_candidate_id = await _seed_candidate(
+            session,
+            title="Older unscoped candidate",
+            pr_number=17,
+            created_at=now,
+            owned_paths=older_owned_paths,
+        )
+        _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_candidate(
+            session,
+            title="Later candidate",
+            pr_number=18,
+            created_at=now + timedelta(minutes=5),
+            owned_paths=later_owned_paths,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id=later_candidate_id,
+        )
+
+    assert len(blockers) == 1
+    assert blockers[0].candidate_id == older_candidate_id
+    assert blockers[0].workspace_id == older_workspace_id
+    assert blockers[0].blocker_state == "merge_eligible"
+
+
+@pytest.mark.unit
 async def test_disjoint_owned_paths_do_not_block_later_candidate(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -576,7 +620,7 @@ async def test_batch_blocker_lookup_filters_same_candidate_newer_and_nonblocking
 
 
 @pytest.mark.unit
-def test_merge_queue_private_policy_helpers_cover_false_paths() -> None:
+def test_merge_queue_private_policy_helpers_cover_policy_edges() -> None:
     now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     target = _candidate(candidate_id="later", created_at=now)
 
@@ -613,9 +657,13 @@ def test_merge_queue_private_policy_helpers_cover_false_paths() -> None:
         )
         is None
     )
-    assert not merge_queue._candidate_blocks_target(  # noqa: SLF001
+    assert merge_queue._candidate_blocks_target(  # noqa: SLF001
         _candidate(candidate_id="unowned", created_at=now, owned_paths=[]),
         target,
+    )
+    assert merge_queue._candidate_blocks_target(  # noqa: SLF001
+        target,
+        _candidate(candidate_id="unowned", created_at=now, owned_paths=[]),
     )
 
 
