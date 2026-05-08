@@ -441,8 +441,14 @@ async def test_readyz_egress_audit_timeout_not_delayed_by_session_cleanup(
     body = response.json()
 
     assert response.status_code == 200
+    assert set(body) == {"service", "version", "status", "checks", "agent_readiness"}
+    assert body["service"] == "awf"
+    assert body["version"] == __version__
     assert body["status"] == "ok"
-    egress_audit = body["checks"]["egress_audit"]
+    assert body["agent_readiness"]["status"] == "ok"
+    checks = body["checks"]
+    assert "egress_audit" in checks
+    egress_audit = checks["egress_audit"]
     assert egress_audit["ok"] is True
     assert egress_audit["status"] == "unknown"
     assert egress_audit["reason"] == "EGRESS_AUDIT_TIMEOUT"
