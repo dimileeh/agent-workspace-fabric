@@ -3737,13 +3737,12 @@ class WorkspaceExecutor:
         handoff: _PlanningValidationHandoff,
         validation_run_id: str,
     ) -> _PlanningRunFailure | None:
+        # Post-validation conformance is strictly report-only, regardless of
+        # ordinary planning unexplained-deviation policy.
+        del profile
         evidence = await self._validation_run_evidence_for_conformance(validation_run_id)
         before_compare = await self._changed_paths(worktree_path)
-        before_compare_head = (
-            await self._git_rev_parse_head(worktree_path)
-            if profile.planning.fail_on_unexplained_deviation
-            else None
-        )
+        before_compare_head = await self._git_rev_parse_head(worktree_path)
         # A stale handoff report may still be present at this path; prefer
         # stdout unless the conformance rerun actually refreshed the file.
         report_path = worktree_path / handoff.report_path
@@ -3764,24 +3763,23 @@ class WorkspaceExecutor:
             workspace_id=workspace.id,
         )
         after_compare = await self._changed_paths(worktree_path)
-        if profile.planning.fail_on_unexplained_deviation:
-            committed_compare = (
-                await self._committed_paths_since(worktree_path, before_compare_head)
-                if before_compare_head is not None
-                else set()
+        committed_compare = (
+            await self._committed_paths_since(worktree_path, before_compare_head)
+            if before_compare_head is not None
+            else set()
+        )
+        compare_paths = after_compare | committed_compare
+        extra = sorted(compare_paths - before_compare - {handoff.report_path})
+        if extra:
+            return _build_planning_scope_failure(
+                scope_phase="conformance",
+                required_paths=(handoff.report_path,),
+                offending_paths=extra,
+                summary=(
+                    "post-validation conformance phase changed files outside "
+                    f"`{handoff.report_path}`"
+                ),
             )
-            compare_paths = after_compare | committed_compare
-            extra = sorted(compare_paths - before_compare - {handoff.report_path})
-            if extra:
-                return _build_planning_scope_failure(
-                    scope_phase="conformance",
-                    required_paths=(handoff.report_path,),
-                    offending_paths=extra,
-                    summary=(
-                        "post-validation conformance phase changed files outside "
-                        f"`{handoff.report_path}`"
-                    ),
-                )
 
         report_text = _read_text_if_present(report_path)
         report_from_fresh_file = (
