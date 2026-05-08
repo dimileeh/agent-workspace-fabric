@@ -9,6 +9,7 @@ concurrency, so end-to-end is the most useful test.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -75,6 +76,10 @@ PRESERVED_EXECUTION_SUBPHASE = "runtime_preserved_after_restart"
 
 def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+async def _pending_execution_task() -> None:
+    await asyncio.Event().wait()
 
 
 @pytest.fixture
@@ -6902,27 +6907,30 @@ async def test_db_connection_closed_event_skips_stale_workspace(
 async def test_dispatch_helpers_respect_limits_and_existing_tasks(
     worker: ControlWorker,
 ) -> None:
-    existing_task = asyncio.create_task(asyncio.sleep(0))
-    await existing_task
-    worker._execution_tasks["existing"] = existing_task  # noqa: SLF001
+    existing_task = asyncio.create_task(_pending_execution_task())
+    try:
+        worker._execution_tasks["existing"] = existing_task  # noqa: SLF001
 
-    assert worker._dispatchable_execution_ids(["new"], limit=0) == []  # noqa: SLF001
-    assert (
-        worker._dispatchable_execution_ids(["existing", "new"], limit=2)  # noqa: SLF001
-        == ["new"]
-    )
-    assert worker._dispatch_ready_executions(["new"], limit=0) == set()  # noqa: SLF001
-    assert (
-        worker._dispatch_ready_executions(["existing"], limit=1)  # noqa: SLF001
-        == set()
-    )
-    assert worker._dispatch_monitor_resumes(["new"], limit=0) == set()  # noqa: SLF001
-    assert (
-        worker._dispatch_monitor_resumes(["existing"], limit=1)  # noqa: SLF001
-        == set()
-    )
-
-    worker._execution_tasks.clear()  # noqa: SLF001
+        assert worker._dispatchable_execution_ids(["new"], limit=0) == []  # noqa: SLF001
+        assert (
+            worker._dispatchable_execution_ids(["existing", "new"], limit=2)  # noqa: SLF001
+            == ["new"]
+        )
+        assert worker._dispatch_ready_executions(["new"], limit=0) == set()  # noqa: SLF001
+        assert (
+            worker._dispatch_ready_executions(["existing"], limit=1)  # noqa: SLF001
+            == set()
+        )
+        assert worker._dispatch_monitor_resumes(["new"], limit=0) == set()  # noqa: SLF001
+        assert (
+            worker._dispatch_monitor_resumes(["existing"], limit=1)  # noqa: SLF001
+            == set()
+        )
+    finally:
+        existing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await existing_task
+        worker._execution_tasks.clear()  # noqa: SLF001
 
 
 @pytest.mark.unit
@@ -7026,18 +7034,21 @@ async def test_claim_monitoring_pr_ids_respects_limit_and_existing_tasks(
     )
     assert claim_calls == ["first"]
 
-    existing_task = asyncio.create_task(asyncio.sleep(0))
-    await existing_task
-    worker._execution_tasks["existing"] = existing_task  # noqa: SLF001
-    claim_calls.clear()
+    existing_task = asyncio.create_task(_pending_execution_task())
+    try:
+        worker._execution_tasks["existing"] = existing_task  # noqa: SLF001
+        claim_calls.clear()
 
-    assert (
-        await worker._claim_monitoring_pr_ids(["existing", "next"], limit=2)  # noqa: SLF001
-        == ["next"]
-    )
-    assert claim_calls == ["next"]
-
-    worker._execution_tasks.clear()  # noqa: SLF001
+        assert (
+            await worker._claim_monitoring_pr_ids(["existing", "next"], limit=2)  # noqa: SLF001
+            == ["next"]
+        )
+        assert claim_calls == ["next"]
+    finally:
+        existing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await existing_task
+        worker._execution_tasks.clear()  # noqa: SLF001
 
 
 @pytest.mark.unit
