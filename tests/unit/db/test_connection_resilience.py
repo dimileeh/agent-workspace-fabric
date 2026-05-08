@@ -19,7 +19,12 @@ from tests.postgres import postgres_empty_test_url, postgres_test_engine
 
 
 def _closed_connection_error() -> InterfaceError:
-    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
+    return InterfaceError(
+        "SELECT 1",
+        {},
+        RuntimeError("connection is closed"),
+        connection_invalidated=True,
+    )
 
 
 @pytest.mark.unit
