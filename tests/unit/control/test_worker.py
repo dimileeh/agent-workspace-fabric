@@ -6767,6 +6767,11 @@ async def test_safe_worker_paths_swallow_runtime_failures(
             assert workspace_id == "ws_provision"
             raise RuntimeError("provision failed")
 
+    class RaisingExecutor(_RecordingExecutor):
+        async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+            assert workspace_id == "ws_execute"
+            raise RuntimeError("execute failed")
+
     class RaisingMonitorExecutor(_RecordingExecutor):
         async def resume_pr_monitor(self, workspace_id: str) -> None:
             assert workspace_id == "ws_monitor"
@@ -6790,7 +6795,6 @@ async def test_safe_worker_paths_swallow_runtime_failures(
     )
 
     await worker._safely_provision_claimed("ws_provision")  # noqa: SLF001
-    await worker._safely_execute("ws_execute")  # noqa: SLF001
     await worker._safely_resume_pr_monitor(  # noqa: SLF001
         "ws_monitor",
         recovery_operation_id="op_no_executor",
@@ -6805,6 +6809,14 @@ async def test_safe_worker_paths_swallow_runtime_failures(
             "error_message": "Worker has no executor configured.",
         }
     ]
+
+    execute_worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=RaisingExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    await execute_worker._safely_execute("ws_execute")  # noqa: SLF001
 
     raising_worker = ControlWorker(
         session_factory=session_factory,
