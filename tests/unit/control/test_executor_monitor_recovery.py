@@ -1549,6 +1549,85 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
 
 
 @pytest.mark.unit
+async def test_rebase_only_recovery_with_conformance_handoff_pushes_report_commit(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        recovery_mode="rebase_only",
+        resolved_profile={
+            "name": "planned-rebase-recovery",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+            },
+            "phases": {"validate": ["pytest -q"]},
+        },
+        recovery_payload_overrides={
+            "conformance": {
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "summary": "Rebased recovery needs AWF-owned validation evidence.",
+                "gaps": ["AWF-owned validation evidence is missing for pytest."],
+            }
+        },
+    )
+
+    report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+    rebased_head = "c" * 40
+    report_head = "f" * 40
+    _queue_rebase_recovery(fake)
+    _queue_validation_head(fake, head=rebased_head)
+    fake.queue_result(returncode=0, stdout="tests ok")
+    fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+    fake.queue_result(returncode=0, stdout=f"{rebased_head}\n")  # conformance scope HEAD
+    fake.queue_result(
+        returncode=0,
+        stdout='{"status":"satisfied","summary":"validated rebased recovery","gaps":[]}',
+    )
+    fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+    fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+    _queue_post_validation_conformance_report_commit(fake, report_path)
+    fake.queue_result(returncode=0, stdout=f"{report_head}\n")  # post-report HEAD
+    fake.queue_result(returncode=0, stdout=f"src/awf/onboarding.py\n{report_path}\n")
+    _queue_existing_pr_push(fake, head=report_head)
+
+    await executor.execute(ws_id)
+
+    git_push_calls = [
+        call.args
+        for call in fake.calls
+        if call.args and call.args[0] == "git" and "push" in call.args
+    ]
+    assert any("--force-with-lease" in call for call in git_push_calls)
+    assert any("--force-with-lease" not in call for call in git_push_calls)
+    assert not any(
+        call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake)
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.completed.value
+    assert ws.monitor_last_commit_sha == report_head
+    assert runs[-1].workspace_head_sha == rebased_head
+    assert runs[-1].target_head_sha == report_head
+    assert any(
+        event.event_type == "workspace.audit.git_push" and event.reason_code == "REBASE_OK"
+        for event in events
+    )
+    assert any(
+        event.event_type == "workspace.audit.git_push" and event.reason_code == "PR_UPDATED"
+        for event in events
+    )
+
+
+@pytest.mark.unit
 async def test_validate_only_recovery_conformance_failure_fails_without_fix_loop(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

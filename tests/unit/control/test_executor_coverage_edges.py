@@ -43,7 +43,7 @@ from awf.control.executor import (
     _read_text_if_present,
     _RebaseRecoveryResult,
     _recover_missing_head_from_filesystem,
-    _validate_only_recovery_needs_existing_pr_push,
+    _recovery_needs_existing_pr_push,
     _validation_command_count,
     _validation_failure_message,
     _validation_run_command_records,
@@ -130,6 +130,18 @@ def _coverage(
             False,
         ),
         (
+            {"recovery_mode": "rebase_only", "source_head_sha": "old"},
+            "rebased",
+            _RebaseRecoveryResult(base_sha="base", head_sha="rebased"),
+            False,
+        ),
+        (
+            {"recovery_mode": "rebase_only", "source_head_sha": "old"},
+            "post-validation-report",
+            _RebaseRecoveryResult(base_sha="base", head_sha="rebased"),
+            True,
+        ),
+        (
             {"recovery_mode": "validate_only", "source_head_sha": "old"},
             "new",
             _RebaseRecoveryResult(base_sha="base", head_sha="rebased"),
@@ -155,14 +167,14 @@ def _coverage(
         ),
     ],
 )
-def test_validate_only_recovery_needs_existing_pr_push_edges(
+def test_recovery_needs_existing_pr_push_edges(
     recovery_payload: dict[str, object],
     head_sha: str | None,
     rebase_result: _RebaseRecoveryResult | None,
     expected: bool,
 ) -> None:
     assert (
-        _validate_only_recovery_needs_existing_pr_push(
+        _recovery_needs_existing_pr_push(
             recovery_payload,
             validated_workspace_head_sha=head_sha,
             rebase_recovery_result=rebase_result,

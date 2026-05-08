@@ -610,23 +610,31 @@ def _recovery_conformance_gaps(conformance: Mapping[str, Any]) -> tuple[str, ...
     return ()
 
 
-def _validate_only_recovery_needs_existing_pr_push(
+def _recovery_needs_existing_pr_push(
     recovery_payload: Mapping[str, Any],
     *,
     validated_workspace_head_sha: str | None,
     rebase_recovery_result: _RebaseRecoveryResult | None,
 ) -> bool:
     """Return true when recovery produced local commits that are not on the PR yet."""
-    if recovery_payload.get("recovery_mode") != "validate_only":
-        return False
-    if rebase_recovery_result is not None:
-        return False
     if not validated_workspace_head_sha:
         return False
-    source_head_sha = recovery_payload.get("source_head_sha")
-    if not isinstance(source_head_sha, str) or not source_head_sha.strip():
+    validated_head = validated_workspace_head_sha.strip()
+    if not validated_head:
         return False
-    return validated_workspace_head_sha != source_head_sha.strip()
+    recovery_mode = recovery_payload.get("recovery_mode")
+    if recovery_mode == "validate_only":
+        if rebase_recovery_result is not None:
+            return False
+        source_head_sha = recovery_payload.get("source_head_sha")
+        if not isinstance(source_head_sha, str) or not source_head_sha.strip():
+            return False
+        return validated_head != source_head_sha.strip()
+    if recovery_mode == "rebase_only":
+        if rebase_recovery_result is None:
+            return False
+        return validated_head != rebase_recovery_result.head_sha
+    return False
 
 
 def _is_callback_terminal_status(status: str) -> bool:
@@ -2732,11 +2740,12 @@ class WorkspaceExecutor:
         # ── Recovery skip-push guard ───────────────────────────────────────
         # Recovery for a workspace that already has an open PR must NOT
         # re-create the PR. Clean validate-only recovery does not push; if a
-        # fix pass created a new validated local commit, update the existing PR
-        # branch before handing back to the monitor. Rebase-only recovery
-        # already pushed the rebased branch above.
+        # fix pass or handoff report created a new validated local commit,
+        # update the existing PR branch before handing back to the monitor.
+        # Rebase-only recovery already pushed the rebased branch above, but
+        # later validation work can still advance local HEAD.
         if recovery is not None and ws.pr_url:
-            recovery_requires_pr_update = _validate_only_recovery_needs_existing_pr_push(
+            recovery_requires_pr_update = _recovery_needs_existing_pr_push(
                 recovery,
                 validated_workspace_head_sha=successful_validation_workspace_head_sha,
                 rebase_recovery_result=rebase_recovery_result,
