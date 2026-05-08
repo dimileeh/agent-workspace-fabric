@@ -751,6 +751,72 @@ class TestRunOnce:
         assert filter_attempts == 2
         assert retry_attempts == [1]
 
+    @pytest.mark.unit
+    async def test_provider_recovery_filter_keeps_scheduler_locks_until_decision_commit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "filter-keeps-scheduler-locks",
+        )
+        scheduler_read_session_ids: list[int] = []
+        filter_session_ids: list[int] = []
+        original_list = WorkspaceRepository.list_schedulable_workspaces
+
+        async def _list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+            after: tuple[datetime, str] | None = None,
+        ) -> list[Workspace]:
+            scheduler_read_session_ids.append(id(self._session))
+            return await original_list(
+                self,
+                status=status,
+                limit=limit,
+                exclude_ids=exclude_ids,
+                after=after,
+            )
+
+        async def _filter_provider_recovery_suppressed(
+            session: AsyncSession,
+            workspaces: list[Workspace] | list[str],
+        ) -> list[str]:
+            filter_session_ids.append(id(session))
+            assert not isinstance(workspaces[0], str)
+            return [workspace.id for workspace in workspaces]
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._filter_provider_recovery_suppressed = (  # type: ignore[method-assign]
+            _filter_provider_recovery_suppressed
+        )
+
+        assert await worker._list_ready(limit=1) == [ready_id]  # noqa: SLF001
+
+        assert len(scheduler_read_session_ids) == 1
+        assert filter_session_ids == scheduler_read_session_ids
+
 
 class TestRunOnceExecution:
     @pytest.mark.unit
