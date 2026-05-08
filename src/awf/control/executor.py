@@ -2422,6 +2422,7 @@ class WorkspaceExecutor:
                             failure=conformance_failure,
                             workspace_id=workspace_id,
                             artifacts_root=self._config.compose_projects_root,
+                            attempt=post_validation_conformance_fix_attempts,
                         )
                 if conformance_failure is None:
                     successful_validation_run_id = validation_run_id
@@ -5955,13 +5956,13 @@ def _validation_evidence_floor_payload(
     floor_payload = {
         key: _validation_evidence_floor_value(payload[key])
         for key in _VALIDATION_EVIDENCE_CORE_KEYS
-        if key in payload
+        if key in payload and key != "coverage"
     }
+    if "coverage" in payload:
+        floor_payload["coverage"] = _validation_evidence_size_summary(payload["coverage"])
     floor_payload["evidence_truncated"] = True
     floor_payload["truncation_reason"] = "validation_evidence_json_limit"
     floor_payload["oversized_serialized_length"] = oversized_serialized_length
-    if "coverage" in payload:
-        floor_payload["coverage"] = _validation_evidence_size_summary(payload["coverage"])
     floor_payload["commands"] = _validation_evidence_size_summary(payload.get("commands"))
     floor_payload["log_stream_refs"] = _validation_evidence_size_summary(
         payload.get("log_stream_refs")
@@ -6768,11 +6769,22 @@ def _post_validation_conformance_fix_result(
     failure: _PlanningRunFailure,
     workspace_id: str,
     artifacts_root: Path,
+    attempt: int | None = None,
 ) -> ValidationResult:
     artifacts_dir = artifacts_root / workspace_id / "post_validation_conformance"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = artifacts_dir / "post_validation_conformance.stdout"
-    stderr_path = artifacts_dir / "post_validation_conformance.stderr"
+    attempt_value: object = attempt
+    if attempt_value is None and failure.details:
+        attempt_value = failure.details.get("attempt")
+    suffix = (
+        f".{attempt_value}"
+        if isinstance(attempt_value, int)
+        and not isinstance(attempt_value, bool)
+        and attempt_value > 0
+        else ""
+    )
+    stdout_path = artifacts_dir / f"post_validation_conformance{suffix}.stdout"
+    stderr_path = artifacts_dir / f"post_validation_conformance{suffix}.stderr"
     stdout_path.write_text(_post_validation_conformance_failure_text(failure), encoding="utf-8")
     stderr_path.write_text("", encoding="utf-8")
     return ValidationResult(

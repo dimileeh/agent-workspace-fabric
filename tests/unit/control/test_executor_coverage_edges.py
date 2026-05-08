@@ -425,6 +425,42 @@ def test_validation_evidence_json_enforces_limit_on_minimal_fallback() -> None:
 
 
 @pytest.mark.unit
+def test_validation_evidence_floor_payload_special_cases_coverage_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coverage = {
+        "status": "failed",
+        "reason_code": "COVERAGE_BELOW_THRESHOLD",
+        "percent": {f"pkg_{index}": "x" * 1000 for index in range(10)},
+    }
+    payload = {
+        "validation_run_id": "validation-run-1",
+        "status": "failed",
+        "coverage": coverage,
+    }
+    floor_values: list[object] = []
+    original_floor_value = executor_mod._validation_evidence_floor_value
+
+    def record_floor_value(value: object) -> object:
+        floor_values.append(value)
+        return original_floor_value(value)
+
+    monkeypatch.setattr(
+        executor_mod,
+        "_validation_evidence_floor_value",
+        record_floor_value,
+    )
+
+    floor_payload = executor_mod._validation_evidence_floor_payload(
+        payload,
+        oversized_serialized_length=123456,
+    )
+
+    assert coverage not in floor_values
+    assert floor_payload["coverage"] == executor_mod._validation_evidence_size_summary(coverage)
+
+
+@pytest.mark.unit
 def test_validation_evidence_serializer_uses_evidence_limit_for_redaction_expansion() -> None:
     payload = {"output": " ".join(["SECRET=a"] * 2166)}
     raw_length = len(json.dumps(payload, default=str))
@@ -437,6 +473,42 @@ def test_validation_evidence_serializer_uses_evidence_limit_for_redaction_expans
     assert "[redacted]" in evidence
     assert "SECRET=a" not in evidence
     assert evidence.endswith("...[truncated]")
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_fix_result_preserves_attempt_artifacts(
+    tmp_path: Path,
+) -> None:
+    first = executor_mod._post_validation_conformance_fix_result(
+        failure=executor_mod._PlanningRunFailure(
+            message="first conformance gap",
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        ),
+        workspace_id="ws_post",
+        artifacts_root=tmp_path,
+        attempt=1,
+    )
+    second = executor_mod._post_validation_conformance_fix_result(
+        failure=executor_mod._PlanningRunFailure(
+            message="second conformance gap",
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        ),
+        workspace_id="ws_post",
+        artifacts_root=tmp_path,
+        attempt=2,
+    )
+
+    first_command = first.commands[0]
+    second_command = second.commands[0]
+    assert first_command.stdout_path.name == "post_validation_conformance.1.stdout"
+    assert first_command.stderr_path.name == "post_validation_conformance.1.stderr"
+    assert second_command.stdout_path.name == "post_validation_conformance.2.stdout"
+    assert second_command.stderr_path.name == "post_validation_conformance.2.stderr"
+    assert first_command.stdout_path.read_text(encoding="utf-8") == "first conformance gap"
+    assert second_command.stdout_path.read_text(encoding="utf-8") == "second conformance gap"
+    assert not (
+        tmp_path / "ws_post" / "post_validation_conformance" / "post_validation_conformance.stdout"
+    ).exists()
 
 
 @pytest.mark.unit
