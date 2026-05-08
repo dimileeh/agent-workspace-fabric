@@ -47,7 +47,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.resilience import run_db_operation_with_retry
+from awf.db.resilience import is_transient_closed_connection_error, run_db_operation_with_retry
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck, check_disk_space
@@ -496,7 +496,9 @@ async def _get_workspace_response(
     try:
         audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
         egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
-    except Exception:
+    except Exception as exc:
+        if is_transient_closed_connection_error(exc):
+            raise
         _logger.warning("egress audit lookup failed for workspace %s", workspace_id, exc_info=True)
     return workspace_response(
         ws,
