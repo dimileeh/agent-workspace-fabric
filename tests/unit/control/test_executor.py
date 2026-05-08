@@ -39,6 +39,10 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
 )
 from awf.runtime.pr_creator import PullRequestCreator
+from awf.runtime.pr_monitor_operations import (
+    build_monitor_operation_payload,
+    monitor_operation_idempotency_key,
+)
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -139,17 +143,38 @@ async def _insert_validate_handoff_recovery_operation(
     workspace_id: str,
     operation_id: str,
 ) -> None:
-    payload = {
-        "source": "pr_monitor",
-        "recovery_mode": "validate_only",
-        "reason": "planning_conformance_requires_awf_validation",
-        "conformance": {
-            "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-            "summary": "AWF validation evidence is required before conformance can pass.",
-            "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
-        },
-    }
     async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        pr_number = 225
+        source_head_sha = "deadbeef01"
+        remote_branch = workspace.branch_name or f"awf/{workspace_id}"
+        reason = "planning_conformance_requires_awf_validation"
+        workspace.pr_number = pr_number
+        workspace.pr_url = f"https://github.com/dimileeh/aira-agent/pull/{pr_number}"
+        workspace.monitor_last_commit_sha = source_head_sha
+        workspace.remote_push_branch = remote_branch
+        payload = build_monitor_operation_payload(
+            workspace=workspace,
+            action="validate_only",
+            requested_action="validate",
+            reason=reason,
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+            pr_number=pr_number,
+            source_head_sha=source_head_sha,
+            source_base_sha=workspace.base_commit,
+            target_branch=workspace.branch_base,
+            remote_branch=remote_branch,
+            recovery_mode="validate_only",
+            stale_reason=reason,
+            extra={
+                "conformance": {
+                    "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                    "summary": "AWF validation evidence is required before conformance can pass.",
+                    "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
+                },
+            },
+        )
         await session.execute(
             text(
                 """
@@ -159,6 +184,7 @@ async def _insert_validate_handoff_recovery_operation(
                     type,
                     status,
                     payload,
+                    idempotency_key,
                     created_at
                 )
                 VALUES (
@@ -167,6 +193,7 @@ async def _insert_validate_handoff_recovery_operation(
                     'validate',
                     'pending',
                     CAST(:payload AS JSON),
+                    :idempotency_key,
                     :created_at
                 )
                 """
@@ -175,6 +202,14 @@ async def _insert_validate_handoff_recovery_operation(
                 "operation_id": operation_id,
                 "workspace_id": workspace_id,
                 "payload": json.dumps(payload),
+                "idempotency_key": monitor_operation_idempotency_key(
+                    workspace_id=workspace_id,
+                    action="validate_only",
+                    pr_number=pr_number,
+                    reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                    source_head_sha=source_head_sha,
+                    source_base_sha=workspace.base_commit,
+                ),
                 "created_at": datetime.now(UTC),
             },
         )
