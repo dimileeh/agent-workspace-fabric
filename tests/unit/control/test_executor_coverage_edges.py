@@ -361,6 +361,35 @@ async def test_post_validation_report_repairs_git_ownership_before_add(
 
 
 @pytest.mark.unit
+async def test_post_validation_report_unstages_report_when_cached_diff_fails(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(returncode=128, stderr="fatal: index.lock exists")
+    runner.queue_result(returncode=0)  # git reset report
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    with pytest.raises(executor_mod._PostValidationConformanceReportGitError) as exc_info:
+        await executor._commit_post_validation_conformance_report(
+            workspace_id="ws_post",
+            worktree_path=tmp_path / "worktree",
+            report_path=report_path,
+            validation_run_id="validation-run-1",
+        )
+
+    assert exc_info.value.operation == "diff"
+    assert runner.calls[-1].args[-4:] == [
+        "reset",
+        "-q",
+        "--",
+        report_path.as_posix(),
+    ]
+
+
+@pytest.mark.unit
 def test_validation_evidence_json_enforces_limit_on_minimal_fallback() -> None:
     oversized_percent = {f"pkg_{index}": "x" * 1000 for index in range(100)}
     payload = {
@@ -389,6 +418,10 @@ def test_validation_evidence_json_enforces_limit_on_minimal_fallback() -> None:
     assert decoded["evidence_truncated"] is True
     assert decoded["coverage"]["truncated"] is True
     assert "percent" not in decoded["coverage"]
+    assert decoded["oversized_serialized_length"] == len(
+        json.dumps(executor_mod.redact_audit_value(payload), default=str)
+    )
+    assert decoded["oversized_serialized_length"] > len(evidence)
 
 
 @pytest.mark.unit

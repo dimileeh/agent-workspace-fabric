@@ -3970,6 +3970,18 @@ class WorkspaceExecutor:
             [*git_base, "diff", "--cached", "--name-only", "--", report_path_text]
         )
         if not cached.ok:
+            reset_result = await self._runner.run(
+                [*git_base, "reset", "-q", "--", report_path_text]
+            )
+            if not reset_result.ok:
+                _log.warning(
+                    "executor.post_validation_conformance_report_unstage_failed",
+                    workspace_id=workspace_id,
+                    report_path=report_path_text,
+                    triggering_operation="diff",
+                    returncode=reset_result.returncode,
+                    command_reason_code=reset_result.reason_code,
+                )
             raise _PostValidationConformanceReportGitError(
                 operation="diff",
                 result=cached,
@@ -5855,9 +5867,10 @@ def _validation_evidence_json(payload: dict[str, Any]) -> str:
     if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
         return serialized
 
+    oversized_serialized_length = len(json.dumps(safe_payload, default=str))
     floor_payload = _validation_evidence_floor_payload(
         safe_payload,
-        oversized_serialized_length=len(serialized),
+        oversized_serialized_length=oversized_serialized_length,
     )
     serialized = _serialize_validation_evidence_payload(floor_payload)
     if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
@@ -5867,7 +5880,7 @@ def _validation_evidence_json(payload: dict[str, Any]) -> str:
         {
             "evidence_truncated": True,
             "truncation_reason": "validation_evidence_json_limit",
-            "oversized_serialized_length": len(serialized),
+            "oversized_serialized_length": oversized_serialized_length,
         }
     )
 
