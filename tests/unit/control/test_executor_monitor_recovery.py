@@ -1494,7 +1494,16 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
         ops = await OperationRepository(s).list_all(workspace_id=ws_id)
     assert ws is not None
     assert ws.status == WorkspaceStatus.completed.value
-    assert ops[0].status == OperationStatus.succeeded.value
+    recovery_ops = [
+        op
+        for op in ops
+        if op.type == OperationType.validate.value
+        and isinstance(op.payload, dict)
+        and op.payload.get("source") == "pr_monitor"
+        and op.payload.get("recovery_mode") == "validate_only"
+    ]
+    assert len(recovery_ops) == 1
+    assert recovery_ops[0].status == OperationStatus.succeeded.value
 
 
 @pytest.mark.unit
