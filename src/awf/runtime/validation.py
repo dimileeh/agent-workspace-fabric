@@ -63,6 +63,10 @@ _COVERAGE_SUMMARY_RE = re.compile(
 _COVERAGE_FAIL_UNDER_RE = re.compile(
     r"(?i)^\s*FAIL\b.*\bcoverage\b.*\bnot reached\b.*$"
 )
+_COVERAGE_FAIL_UNDER_PERCENT_RE = re.compile(
+    r"(?i)^\s*FAIL\b.*\bnot reached\b.*\btotal\s+coverage:\s*"
+    r"(?P<percent>\d+(?:\.\d+)?)%\s*$"
+)
 _COVERAGE_FILE_LINE_RE = re.compile(
     r"^(?P<file>\S.*?)\s+(?P<stmts>\d+)\s+(?P<miss>\d+)\s+(?P<cover>\d+)%\s*(?P<missing>.*?)\s*$"
 )
@@ -1447,10 +1451,15 @@ def _runs_pytest_under_coverage(token_names: list[str]) -> bool:
 
 def _parse_python_coverage_percent_from_files(paths: list[Path]) -> float | None:
     total_percent: float | None = None
+    fail_under_percent: float | None = None
     summary_percent: float | None = None
     for path in paths:
         with path.open("r", encoding="utf-8", errors="replace") as stream:
             for line in stream:
+                fail_under_match = _COVERAGE_FAIL_UNDER_PERCENT_RE.search(line)
+                if fail_under_match:
+                    fail_under_percent = float(fail_under_match.group("percent"))
+                    continue
                 total_match = _COVERAGE_TOTAL_RE.search(line)
                 if total_match:
                     total_percent = float(total_match.group("percent"))
@@ -1459,6 +1468,8 @@ def _parse_python_coverage_percent_from_files(paths: list[Path]) -> float | None
                 if summary_match:
                     summary_percent = float(summary_match.group("percent"))
 
+    if fail_under_percent is not None:
+        return fail_under_percent
     return total_percent if total_percent is not None else summary_percent
 
 
