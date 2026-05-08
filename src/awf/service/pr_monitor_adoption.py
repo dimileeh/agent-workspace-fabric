@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
+from sqlalchemy import inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import (
@@ -24,17 +25,19 @@ from awf.common.github_client import (
 )
 from awf.common.logging import get_logger
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import MergeCandidate, Workspace
+from awf.db.models import MergeCandidate, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
+    TaskExternalIdConflictError,
     TaskRepository,
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.db.utils import escape_like_pattern as _escape_like_pattern
 from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.validation_observability import validation_freshness_summary
 
@@ -45,6 +48,17 @@ PR_ADOPTION_SUPERSEDED_REASON = "PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
+_LIVE_ADOPTION_STATUSES = frozenset(
+    {
+        WorkspaceStatus.requested.value,
+        WorkspaceStatus.provisioning.value,
+        WorkspaceStatus.ready.value,
+        WorkspaceStatus.running.value,
+        WorkspaceStatus.validating.value,
+        WorkspaceStatus.pushing.value,
+        WorkspaceStatus.monitoring_pr.value,
+    }
+)
 # Keep the public adoption error-code contract present in service source so
 # docs parity tests can cross-reference the matrix against implementation.
 _PR_ADOPTION_ERROR_CODE_CONTRACT = (
@@ -115,10 +129,23 @@ class PullRequestMonitorAdoptionService:
             repo_slug=repo.slug(),
             pr_number=pr_number,
         )
+        task_external_id = _adoption_external_id(repo_slug=repo.slug(), pr_number=pr_number)
         workspace_repo = WorkspaceRepository(self._session)
         await workspace_repo.acquire_idempotency_key_lock(idempotency_key)
         # Re-read under the transaction lock so a concurrent adopter that won
         # the race attaches here instead of surfacing the unique constraint.
+        adoption_history = await workspace_repo.list_pr_adoption_history(
+            task_external_id=task_external_id,
+            idempotency_key=idempotency_key,
+            task_kind=PR_ADOPTION_TASK_KIND,
+            repo_slug=repo.slug(),
+            pr_number=pr_number,
+        )
+        live_adoption = _select_live_adoption_workspace(adoption_history)
+        if live_adoption is not None:
+            _raise_if_policy_conflicts(live_adoption, request, repo=repo)
+            return await self._response(live_adoption, attached_existing=True)
+
         existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             _raise_if_existing_workspace_is_not_requested_adoption(
@@ -130,29 +157,30 @@ class PullRequestMonitorAdoptionService:
                 _raise_if_policy_conflicts(existing, request, repo=repo)
                 return await self._response(existing, attached_existing=True)
 
-            metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+        metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+        previous_terminal_adoptions = await _terminal_adoption_lineage(
+            self._session,
+            adoption_history,
+        )
+        superseded_adoption: dict[str, Any] | None = None
+        superseded_workspace: Workspace | None = None
+        if existing is not None:
             superseded_adoption = await self._supersede_previous_adoption(
                 workspace=existing,
                 idempotency_key=idempotency_key,
                 repo=repo,
                 pr_number=pr_number,
             )
-            workspace = await self._create_adoption_workspace(
-                request=request,
-                repo=repo,
-                metadata=metadata,
-                idempotency_key=idempotency_key,
-                superseded_adoption=superseded_adoption,
-                superseded_workspace=existing,
-            )
-            return await self._response(workspace, attached_existing=False)
-
-        metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+            superseded_workspace = existing
         workspace = await self._create_adoption_workspace(
             request=request,
             repo=repo,
             metadata=metadata,
             idempotency_key=idempotency_key,
+            logical_idempotency_key=idempotency_key,
+            previous_terminal_adoptions=previous_terminal_adoptions,
+            superseded_adoption=superseded_adoption,
+            superseded_workspace=superseded_workspace,
         )
         return await self._response(workspace, attached_existing=False)
 
@@ -245,6 +273,8 @@ class PullRequestMonitorAdoptionService:
         repo: RepoRef,
         metadata: PullRequestAdoptionMetadata,
         idempotency_key: str,
+        logical_idempotency_key: str,
+        previous_terminal_adoptions: list[dict[str, str | None]],
         superseded_adoption: dict[str, Any] | None = None,
         superseded_workspace: Workspace | None = None,
     ) -> Workspace:
@@ -255,6 +285,10 @@ class PullRequestMonitorAdoptionService:
             metadata=metadata,
             request=request,
             repo_url=repo_url,
+            lineage=_adoption_lineage_payload(
+                logical_idempotency_key=logical_idempotency_key,
+                previous_terminal_adoptions=previous_terminal_adoptions,
+            ),
         )
         operator_reason = _redacted_optional_text(request.reason)
         workspace_repo = WorkspaceRepository(self._session)
@@ -295,16 +329,61 @@ class PullRequestMonitorAdoptionService:
             else None
         )
 
-        task = await TaskRepository(self._session).create_or_get(
-            repo_url=workspace.repo_url,
-            base_branch=workspace.branch_base,
-            title=workspace.task_title,
-            prompt=workspace.task_prompt,
-            external_id=workspace.task_external_id,
-            idempotency_key=idempotency_key,
-            task_class=workspace.task_class,
-            owned_paths=list(workspace.owned_paths),
-        )
+        task_repo = TaskRepository(self._session)
+
+        async def _create_or_get_task(
+            *,
+            external_id: str | None,
+            task_idempotency_key: str | None,
+        ) -> Task:
+            return await task_repo.create_or_get(
+                repo_url=workspace.repo_url,
+                base_branch=workspace.branch_base,
+                title=workspace.task_title,
+                prompt=workspace.task_prompt,
+                external_id=external_id,
+                idempotency_key=task_idempotency_key,
+                task_class=workspace.task_class,
+                owned_paths=list(workspace.owned_paths),
+            )
+
+        async def _create_generated_task() -> Task:
+            task_external_id = workspace.task_external_id or _adoption_external_id(
+                repo_slug=repo.slug(),
+                pr_number=metadata.number,
+            )
+            task_generation_idempotency_key = await _next_adoption_task_idempotency_key(
+                self._session,
+                logical_idempotency_key=logical_idempotency_key,
+                task_external_id=task_external_id,
+            )
+            workspace.task_external_id = _adoption_generation_external_id(
+                repo_slug=repo.slug(),
+                pr_number=metadata.number,
+                logical_idempotency_key=logical_idempotency_key,
+                workspace_idempotency_key=task_generation_idempotency_key,
+            )
+            return await _create_or_get_task(
+                external_id=workspace.task_external_id,
+                task_idempotency_key=task_generation_idempotency_key,
+            )
+
+        try:
+            task = await _create_or_get_task(
+                external_id=workspace.task_external_id,
+                task_idempotency_key=idempotency_key,
+            )
+        except TaskExternalIdConflictError:
+            if not previous_terminal_adoptions:
+                raise
+            task = await _create_generated_task()
+        else:
+            if (
+                previous_terminal_adoptions
+                and task.idempotency_key == logical_idempotency_key
+                and await _task_has_existing_attempt(self._session, task.id)
+            ):
+                task = await _create_generated_task()
         attempt = await TaskAttemptRepository(self._session).create_for_workspace(
             task=task,
             workspace=workspace,
@@ -353,6 +432,9 @@ class PullRequestMonitorAdoptionService:
             "pr_url": metadata.url,
             "auto_merge": request.auto_merge,
             "reason": operator_reason,
+            "logical_idempotency_key": logical_idempotency_key,
+            "workspace_idempotency_key": idempotency_key,
+            "previous_terminal_adoptions": previous_terminal_adoptions,
         }
         if superseded_payload is not None:
             operation_payload["superseded_adoption"] = superseded_payload
@@ -376,6 +458,9 @@ class PullRequestMonitorAdoptionService:
             "base_sha": metadata.base_sha,
             "auto_merge": request.auto_merge,
             "reason": operator_reason,
+            "logical_idempotency_key": logical_idempotency_key,
+            "workspace_idempotency_key": idempotency_key,
+            "previous_terminal_adoptions": previous_terminal_adoptions,
         }
         if superseded_payload is not None:
             event_payload["superseded_adoption"] = superseded_payload
@@ -460,6 +545,180 @@ async def _default_metadata_fetcher(
         repo=repo,
         pr_number=pr_number,
     )
+
+
+def _select_live_adoption_workspace(workspaces: list[Workspace]) -> Workspace | None:
+    live_workspaces = [
+        workspace for workspace in workspaces if _is_live_adoption_status(workspace.status)
+    ]
+    if not live_workspaces:
+        return None
+    return max(live_workspaces, key=lambda workspace: (workspace.created_at, workspace.id))
+
+
+def _is_live_adoption_status(status: str) -> bool:
+    return status in _LIVE_ADOPTION_STATUSES
+
+
+async def _next_adoption_workspace_idempotency_key(
+    workspace_repo: WorkspaceRepository,
+    *,
+    logical_idempotency_key: str,
+    known_workspace_keys: Iterable[str] | None = None,
+    reserved_idempotency_keys: Iterable[str] = (),
+    require_generation: bool = False,
+) -> str:
+    workspace_keys = set(
+        await workspace_repo.list_idempotency_key_family(logical_idempotency_key)
+    )
+    if known_workspace_keys is not None:
+        workspace_keys.update(known_workspace_keys)
+    if not require_generation and not workspace_keys:
+        return logical_idempotency_key
+
+    existing_keys = set(workspace_keys)
+    existing_keys.update(reserved_idempotency_keys)
+
+    for generation in range(1, 1000):
+        candidate = f"{logical_idempotency_key}:g{generation}"
+        if candidate not in existing_keys:
+            return candidate
+    raise RuntimeError("Could not allocate a fresh PR adoption workspace idempotency key.")
+
+
+async def _task_idempotency_key_family(
+    session: AsyncSession,
+    *,
+    logical_idempotency_key: str,
+) -> list[str]:
+    generation_pattern = f"{_escape_like_pattern(logical_idempotency_key)}:g%"
+    stmt = (
+        select(Task.idempotency_key)
+        .where(
+            or_(
+                Task.idempotency_key == logical_idempotency_key,
+                Task.idempotency_key.like(generation_pattern, escape="\\"),
+            )
+        )
+        .order_by(Task.idempotency_key.asc())
+    )
+    keys = (await session.execute(stmt)).scalars().all()
+    return [key for key in keys if key is not None]
+
+
+async def _task_external_id_family_idempotency_keys(
+    session: AsyncSession,
+    *,
+    logical_idempotency_key: str,
+    task_external_id: str,
+) -> list[str]:
+    generation_pattern = f"{_escape_like_pattern(task_external_id)}:g%"
+    stmt = (
+        select(Task.external_id)
+        .where(
+            or_(
+                Task.external_id == task_external_id,
+                Task.external_id.like(generation_pattern, escape="\\"),
+            )
+        )
+        .order_by(Task.external_id.asc())
+    )
+    external_ids = (await session.execute(stmt)).scalars().all()
+    reserved_keys: list[str] = []
+    generation_prefix = f"{task_external_id}:"
+    for external_id in external_ids:
+        if external_id == task_external_id:
+            reserved_keys.append(logical_idempotency_key)
+            continue
+        if external_id is None or not external_id.startswith(generation_prefix):
+            continue
+        generation = external_id[len(generation_prefix) :]
+        if _is_adoption_generation_suffix(generation):
+            reserved_keys.append(f"{logical_idempotency_key}:{generation}")
+    return list(dict.fromkeys(reserved_keys))
+
+
+async def _next_adoption_task_idempotency_key(
+    session: AsyncSession,
+    *,
+    logical_idempotency_key: str,
+    task_external_id: str,
+) -> str:
+    existing_keys = set(
+        await _task_idempotency_key_family(
+            session,
+            logical_idempotency_key=logical_idempotency_key,
+        )
+    )
+    existing_keys.update(
+        await _task_external_id_family_idempotency_keys(
+            session,
+            logical_idempotency_key=logical_idempotency_key,
+            task_external_id=task_external_id,
+        )
+    )
+    for generation in range(1, 1000):
+        candidate = f"{logical_idempotency_key}:g{generation}"
+        if candidate not in existing_keys:
+            return candidate
+    raise RuntimeError("Could not allocate a fresh PR adoption task idempotency key.")
+
+
+async def _task_has_existing_attempt(session: AsyncSession, task_id: str) -> bool:
+    stmt = select(TaskAttempt.id).where(TaskAttempt.task_id == task_id).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+def _is_adoption_generation_suffix(value: str) -> bool:
+    return value.startswith("g") and value[1:].isdigit()
+
+
+async def _terminal_adoption_lineage(
+    session: AsyncSession,
+    workspaces: list[Workspace],
+) -> list[dict[str, str | None]]:
+    terminal_workspaces = [
+        workspace for workspace in workspaces if not _is_live_adoption_status(workspace.status)
+    ]
+    attempts_by_workspace_id: dict[str, TaskAttempt | None] = {}
+    unloaded_workspace_ids: list[str] = []
+    for workspace in terminal_workspaces:
+        if "task_attempt" in inspect(workspace).unloaded:
+            unloaded_workspace_ids.append(workspace.id)
+        else:
+            attempts_by_workspace_id[workspace.id] = workspace.task_attempt
+    if unloaded_workspace_ids:
+        stmt = select(TaskAttempt).where(TaskAttempt.workspace_id.in_(unloaded_workspace_ids))
+        attempts = (await session.execute(stmt)).scalars()
+        attempts_by_workspace_id.update(
+            {attempt.workspace_id: attempt for attempt in attempts}
+        )
+
+    lineage: list[dict[str, str | None]] = []
+    for workspace in terminal_workspaces:
+        attempt = attempts_by_workspace_id.get(workspace.id)
+        lineage.append(
+            {
+                "workspace_id": workspace.id,
+                "status": workspace.status,
+                "task_id": attempt.task_id if attempt is not None else None,
+                "attempt_id": attempt.id if attempt is not None else None,
+            }
+        )
+    return lineage
+
+
+def _adoption_lineage_payload(
+    *,
+    logical_idempotency_key: str,
+    previous_terminal_adoptions: list[dict[str, str | None]],
+) -> dict[str, object] | None:
+    if not previous_terminal_adoptions:
+        return None
+    return {
+        "logical_idempotency_key": logical_idempotency_key,
+        "previous_terminal_adoptions": previous_terminal_adoptions,
+    }
 
 
 def pr_adoption_idempotency_key(*, repo_slug: str, pr_number: int) -> str:
@@ -547,8 +806,9 @@ def _adoption_task_policy(
     metadata: PullRequestAdoptionMetadata,
     request: PullRequestMonitorAdoptionRequest,
     repo_url: str,
+    lineage: dict[str, object] | None = None,
 ) -> dict[str, Any]:
-    return {
+    policy: dict[str, Any] = {
         "task_kind": PR_ADOPTION_TASK_KIND,
         "pr_adoption": {
             "repo_slug": repo.slug(),
@@ -568,6 +828,9 @@ def _adoption_task_policy(
             "source": "existing_github_pr",
         },
     }
+    if lineage is not None:
+        policy["pr_adoption"]["lineage"] = lineage
+    return policy
 
 
 def _adoption_task_prompt(
@@ -596,6 +859,32 @@ def _superseded_adoption_external_id(*, external_id: str, workspace_id: str) -> 
     return f"{external_id}:superseded:{workspace_id}"
 
 
+def _adoption_generation_external_id(
+    *,
+    repo_slug: str,
+    pr_number: int,
+    logical_idempotency_key: str,
+    workspace_idempotency_key: str,
+) -> str:
+    base_external_id = _adoption_external_id(repo_slug=repo_slug, pr_number=pr_number)
+    generation = _adoption_generation_suffix(
+        logical_idempotency_key=logical_idempotency_key,
+        workspace_idempotency_key=workspace_idempotency_key,
+    )
+    return f"{base_external_id}:{generation}"
+
+
+def _adoption_generation_suffix(
+    *,
+    logical_idempotency_key: str,
+    workspace_idempotency_key: str,
+) -> str:
+    prefix = f"{logical_idempotency_key}:"
+    if workspace_idempotency_key.startswith(prefix):
+        return workspace_idempotency_key[len(prefix) :]
+    return "g1"
+
+
 def _adoption_repo_url(*, request: PullRequestMonitorAdoptionRequest, repo: RepoRef) -> str:
     return request.repo_url or repo.ssh_url()
 
@@ -605,6 +894,8 @@ def _github_repo_url_like(repo_url: str, repo_slug: str) -> str:
 
 
 def _adoption_workspace_is_resumable(workspace: Workspace) -> bool:
+    if workspace.status == "superseded":
+        return False
     try:
         status = WorkspaceStatus(workspace.status)
     except ValueError:

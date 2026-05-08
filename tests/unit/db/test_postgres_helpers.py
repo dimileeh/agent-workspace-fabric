@@ -11,11 +11,29 @@ import tests.postgres as postgres
 
 
 class _FakeConnection:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
     async def __aenter__(self) -> _FakeConnection:
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
         return None
+
+    async def execute(self, _statement: Any, params: dict[str, object] | None = None) -> None:
+        statement = str(_statement)
+        if statement.startswith("CREATE SCHEMA IF NOT EXISTS "):
+            self._events.append(
+                f"ensure_schema:{statement.removeprefix('CREATE SCHEMA IF NOT EXISTS ')}"
+            )
+        if statement.startswith("SET search_path TO "):
+            self._events.append(f"set_search_path:{statement.removeprefix('SET search_path TO ')}")
+        if params and "search_path" in params:
+            self._events.append(f"set_search_path:{params['search_path']}")
+
+    async def scalar(self, _statement: Any) -> str:
+        self._events.append("verify_schema")
+        return "awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     async def run_sync(self, fn: Any) -> None:
         fn(self)
@@ -27,7 +45,7 @@ class _FakeEngine:
         self._events = events
 
     def begin(self) -> _FakeConnection:
-        return _FakeConnection()
+        return _FakeConnection(self._events)
 
     async def dispose(self) -> None:
         self._events.append(f"dispose:{self.name}")
@@ -121,6 +139,11 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
         events.append("create_all")
 
     monkeypatch.setattr(postgres, "postgres_test_database_url", lambda: "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setattr(
+        postgres,
+        "_new_postgres_test_schema",
+        lambda: "awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
     monkeypatch.setattr(postgres, "make_engine", fake_make_engine)
     monkeypatch.setattr(postgres, "_postgres_schema_ddl_lock", fake_lock, raising=False)
     monkeypatch.setattr(postgres, "_create_schema", fake_create_schema)
@@ -134,6 +157,9 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
         "lock:admin",
         "create:admin",
         "unlock:admin",
+        'ensure_schema:"awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+        'set_search_path:"awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+        "verify_schema",
         "create_all",
         "yield:schema",
         "dispose:schema",

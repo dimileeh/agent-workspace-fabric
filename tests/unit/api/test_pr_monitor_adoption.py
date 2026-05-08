@@ -260,6 +260,85 @@ async def test_adopt_pr_supersedes_cancelled_previous_adoption(
 
 
 @pytest.mark.unit
+async def test_adopt_pr_ignores_destroyed_prior_adoption_and_creates_fresh_monitor(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    client, fetcher = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+
+    first = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+    )
+    assert first.status_code == 202
+    old_workspace_id = first.json()["workspace_id"]
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(old_workspace_id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.destroyed.value
+        await session.commit()
+
+    second = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={"repo_slug": "dimileeh/aira-web", "pr_number": 277},
+    )
+
+    assert second.status_code == 202
+    body = second.json()
+    assert body["attached_existing"] is False
+    assert body["workspace_id"] != old_workspace_id
+    assert body["status"] == "requested"
+    assert fetcher.calls == [("dimileeh/aira-web", 277), ("dimileeh/aira-web", 277)]
+
+    async with session_factory() as session:
+        rows = list((await session.execute(select(Workspace))).scalars())
+    assert len(rows) == 2
+    assert sorted(workspace.status for workspace in rows) == ["destroyed", "requested"]
+
+
+@pytest.mark.unit
+async def test_adopt_pr_active_policy_mismatch_returns_structured_conflict(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+) -> None:
+    client, _fetcher = adoption_client
+    headers = {"Authorization": "Bearer secret"}
+
+    first = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "auto_merge": False,
+        },
+    )
+    assert first.status_code == 202
+
+    conflict = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers=headers,
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "auto_merge": True,
+        },
+    )
+
+    assert conflict.status_code == 409
+    body = conflict.json()
+    assert body["error_code"] == "PR_ADOPTION_POLICY_CONFLICT"
+    assert body["detail"] == {
+        "workspace_id": first.json()["workspace_id"],
+        "existing_auto_merge": False,
+        "requested_auto_merge": True,
+    }
+
+
+@pytest.mark.unit
 async def test_adopt_pr_returns_structured_terminal_pr_error(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,

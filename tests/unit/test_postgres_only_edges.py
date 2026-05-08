@@ -385,7 +385,7 @@ async def test_postgres_context_helpers_lock_ddl_and_drop_after_metadata_dispose
             assert isinstance(yielded, str)
             assert schema_engine.disposed is True
 
-    metadata_lock_depth = 0
+    metadata_lock_depth = 0 if helper_name == "postgres_test_engine" else 1
     assert admin_engine.dispose_count == 1
     assert schema_engine.dispose_count == 1
     assert ("metadata", False, metadata_lock_depth) in events

@@ -969,6 +969,99 @@ class TestIdempotency:
         repo = WorkspaceRepository(session)
         assert await repo.get_by_idempotency_key("never-used") is None
 
+    @pytest.mark.unit
+    async def test_list_idempotency_key_family_returns_exact_and_generation_keys(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        logical_key = "adopt_%:key"
+        for index, idempotency_key in enumerate(
+            [
+                logical_key,
+                f"{logical_key}:g1",
+                f"{logical_key}:g2",
+                f"{logical_key}:retry",
+                "adoptX%:key:g1",
+                "adopt_%:other:g1",
+            ],
+            start=1,
+        ):
+            await repo.create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="development",
+                task_title=f"t {index}",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                idempotency_key=idempotency_key,
+            )
+        await session.commit()
+
+        assert await repo.list_idempotency_key_family(logical_key) == [
+            logical_key,
+            f"{logical_key}:g1",
+            f"{logical_key}:g2",
+        ]
+
+
+class TestPrAdoptionHistory:
+    @pytest.mark.unit
+    async def test_pr_number_fallback_is_scoped_to_adoption_repo_policy(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        target = await repo.create(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="development",
+            task_title="adopt target",
+            task_prompt="monitor target PR",
+            agent="codex",
+            test_commands=[],
+            task_external_id="adopt-target-external",
+            idempotency_key="adopt-target-key",
+            task_kind="sync_feature_pr",
+            task_policy={"pr_adoption": {"repo_slug": "DIMILEEH/AIRA-WEB", "pr_number": 277}},
+        )
+        target.pr_number = 277
+        unrelated = await repo.create(
+            repo_url="https://github.com/example/other.git",
+            branch_base="development",
+            task_title="adopt unrelated",
+            task_prompt="monitor unrelated PR",
+            agent="codex",
+            test_commands=[],
+            task_external_id="adopt-other-external",
+            idempotency_key="adopt-other-key",
+            task_kind="sync_feature_pr",
+            task_policy={"pr_adoption": {"repo_slug": "example/other", "pr_number": 277}},
+        )
+        unrelated.pr_number = 277
+        await session.commit()
+        session.expunge_all()
+
+        loaded_workspace_ids: list[str] = []
+
+        def capture_workspace_load(workspace: Workspace, _context: object) -> None:
+            loaded_workspace_ids.append(workspace.id)
+
+        event.listen(Workspace, "load", capture_workspace_load)
+        try:
+            history = await WorkspaceRepository(session).list_pr_adoption_history(
+                task_external_id="adopt-target-external",
+                idempotency_key="adopt-target-key",
+                task_kind="sync_feature_pr",
+                repo_slug="dimileeh/aira-web",
+                pr_number=277,
+            )
+        finally:
+            event.remove(Workspace, "load", capture_workspace_load)
+
+        assert [workspace.id for workspace in history] == [target.id]
+        assert target.id in loaded_workspace_ids
+        assert unrelated.id not in loaded_workspace_ids
+
 
 class TestExists:
     @pytest.mark.unit
