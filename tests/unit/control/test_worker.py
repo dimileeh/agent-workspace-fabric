@@ -466,7 +466,12 @@ def _live_agent_snapshot(*, container_id: str = "agent") -> RuntimeSnapshot:
 
 
 def _closed_connection_error() -> InterfaceError:
-    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
+    return InterfaceError(
+        "SELECT 1",
+        {},
+        RuntimeError("connection is closed"),
+        connection_invalidated=True,
+    )
 
 
 class _HealthyRuntimeInspector:
@@ -6611,10 +6616,16 @@ async def test_secret_lease_expiration_scan_skips_transient_closed_connection(
 
     worker._next_secret_lease_expiration_scan_at = 0.0  # noqa: SLF001
     worker._expire_due_secret_leases = _raise_expiration_failure  # type: ignore[method-assign]
+    scan_interval = max(
+        0.0,
+        worker._config.secret_lease_expiration_scan_interval_seconds,  # noqa: SLF001
+    )
 
     await worker._maybe_expire_due_secret_leases()  # noqa: SLF001
 
-    assert worker._next_secret_lease_expiration_scan_at == 1_060.0  # noqa: SLF001
+    expected_next_scan_at = current_time + scan_interval
+    actual_next_scan_at = worker._next_secret_lease_expiration_scan_at  # noqa: SLF001
+    assert actual_next_scan_at == expected_next_scan_at
 
     await worker._maybe_expire_due_secret_leases()  # noqa: SLF001
 
