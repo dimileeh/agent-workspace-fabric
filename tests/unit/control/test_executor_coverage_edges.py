@@ -35,6 +35,7 @@ from awf.control.executor import (
     _git_error_indicates_missing_head_object,
     _GitObjectRecoveryResult,
     _MonitorRebaseRecoveryError,
+    _planning_validation_handoff_from_recovery_payload,
     _profile_with_planning_iteration_default,
     _raw_profile_has_explicit_planning_max_iterations,
     _read_ref_sha,
@@ -63,6 +64,7 @@ from awf.db.session import make_session_factory
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PLAN_CONFORMANCE_UNSATISFIED,
 )
 from awf.runtime.validation import (
@@ -164,6 +166,50 @@ def test_validate_only_recovery_needs_existing_pr_push_edges(
         )
         is expected
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conformance_fields", "payload_fields", "expected_iteration", "expected_max_iterations"),
+    [
+        ({"iteration": 2, "max_iterations": 5}, {}, 2, 5),
+        ({}, {"iteration": 1, "max_iterations": 0}, 1, 0),
+    ],
+)
+def test_recovery_conformance_handoff_preserves_iteration_budget(
+    conformance_fields: dict[str, object],
+    payload_fields: dict[str, object],
+    expected_iteration: int,
+    expected_max_iterations: int,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planned",
+            "planning": {
+                "required": True,
+                "max_iterations": 3,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+            },
+        }
+    )
+    handoff = _planning_validation_handoff_from_recovery_payload(
+        workspace_id="ws123",
+        profile=profile,
+        recovery_payload={
+            **payload_fields,
+            "conformance": {
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "summary": "AWF validation evidence is required.",
+                "gaps": ["rerun pytest under AWF"],
+                **conformance_fields,
+            },
+        },
+    )
+
+    assert handoff is not None
+    assert handoff.iteration == expected_iteration
+    assert handoff.max_iterations == expected_max_iterations
 
 
 class _PlanningAdapter:

@@ -507,6 +507,12 @@ def _planning_validation_handoff_from_recovery_payload(
         if isinstance(summary_value, str) and summary_value.strip()
         else "Conformance requires AWF-owned validation evidence."
     )
+    iteration = _int_or_none(conformance.get("iteration"))
+    if iteration is None:
+        iteration = _int_or_none(recovery_payload.get("iteration"))
+    max_iterations = _int_or_none(conformance.get("max_iterations"))
+    if max_iterations is None:
+        max_iterations = _int_or_none(recovery_payload.get("max_iterations"))
     return _PlanningValidationHandoff(
         report=PlanConformanceReport(
             status=PlanConformanceStatus.needs_iteration,
@@ -516,8 +522,10 @@ def _planning_validation_handoff_from_recovery_payload(
         ),
         plan_path=plan_path,
         report_path=report_path,
-        iteration=0,
-        max_iterations=profile.planning.max_iterations,
+        iteration=iteration if iteration is not None else 0,
+        max_iterations=(
+            max_iterations if max_iterations is not None else profile.planning.max_iterations
+        ),
     )
 
 
