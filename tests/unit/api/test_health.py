@@ -440,6 +440,8 @@ async def test_readyz_egress_audit_timeout_not_delayed_by_session_cleanup(
     response = await asyncio.wait_for(client.get("/readyz"), timeout=1.0)
     body = response.json()
 
+    assert response.status_code == 200
+    assert body["status"] == "ok"
     egress_audit = body["checks"]["egress_audit"]
     assert egress_audit["ok"] is True
     assert egress_audit["status"] == "unknown"
