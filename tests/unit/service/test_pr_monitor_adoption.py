@@ -27,7 +27,12 @@ from awf.db.models import (
     Workspace,
     WorkspaceEvent,
 )
-from awf.db.repositories import TaskAttemptRepository, WorkspaceRepository
+from awf.db.repositories import (
+    TaskAttemptRepository,
+    TaskExternalIdConflictError,
+    TaskRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.service import pr_monitor_adoption as adoption_module
 from awf.service.pr_monitor_adoption import (
@@ -2052,7 +2057,10 @@ class TestPullRequestMonitorAdoptionService:
     @pytest.mark.parametrize(
         ("reason_code", "status_code"),
         [
+            ("PR_NOT_FOUND", 404),
             ("PR_ALREADY_CLOSED", 409),
+            ("PR_ALREADY_MERGED", 409),
+            ("INVALID_GITHUB_REPO", 422),
             ("PR_ADOPTION_INPUT_REQUIRED", 422),
             ("PR_METADATA_FETCH_FAILED", 502),
             ("PR_METADATA_INVALID", 502),
@@ -2076,6 +2084,41 @@ class TestPullRequestMonitorAdoptionService:
     @pytest.mark.unit
     def test_inline_profile_name_handles_missing_profile(self) -> None:
         assert adoption_module._inline_profile_name(None) is None
+
+    @pytest.mark.unit
+    def test_redacted_optional_text_preserves_only_present_text(self) -> None:
+        assert adoption_module._redacted_optional_text(None) is None
+        assert adoption_module._redacted_optional_text("") is None
+        assert adoption_module._redacted_optional_text("operator note") == "operator note"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (True, None),
+            (17, 17),
+            (" 42 ", 42),
+            ("not-a-number", None),
+            ("", None),
+            (["277"], None),
+        ],
+    )
+    def test_optional_int_parses_only_scalar_integers(
+        self,
+        value: object,
+        expected: int | None,
+    ) -> None:
+        assert adoption_module._optional_int(value) == expected
+
+    @pytest.mark.unit
+    def test_adoption_generation_suffix_defaults_for_non_family_key(self) -> None:
+        assert (
+            adoption_module._adoption_generation_suffix(
+                logical_idempotency_key="pr-adopt:logical",
+                workspace_idempotency_key="other-family-key",
+            )
+            == "g1"
+        )
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -2320,6 +2363,231 @@ class TestPullRequestMonitorAdoptionService:
             },
         ]
         assert task_attempt_selects == []
+
+    @pytest.mark.unit
+    async def test_terminal_lineage_loads_unloaded_task_attempts_in_bulk(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async with factory() as session:
+            first = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert workspace is not None
+            workspace.status = WorkspaceStatus.destroyed.value
+            await session.flush()
+            session.expire(workspace, ["task_attempt"])
+
+            lineage = await adoption_module._terminal_adoption_lineage(session, [workspace])
+
+        assert lineage == [
+            {
+                "workspace_id": first.workspace_id,
+                "status": WorkspaceStatus.destroyed.value,
+                "task_id": first.task_id,
+                "attempt_id": first.attempt_id,
+            }
+        ]
+
+    @pytest.mark.unit
+    async def test_supersede_previous_adoption_without_attempt_updates_workspace_only(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        logical_key = _canonical_key()
+        adoption_external_id = adoption_module._adoption_external_id(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:dimileeh/aira-web.git",
+                branch_base="development",
+                task_title="detached adoption",
+                task_prompt="recover detached adoption",
+                task_external_id=adoption_external_id,
+                agent="codex",
+                test_commands=[],
+                idempotency_key=logical_key,
+                task_kind=adoption_module.PR_ADOPTION_TASK_KIND,
+            )
+            workspace.status = WorkspaceStatus.destroyed.value
+
+            payload = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )._supersede_previous_adoption(
+                workspace=workspace,
+                idempotency_key=logical_key,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+            await session.commit()
+
+        assert payload["previous_workspace_id"] == workspace.id
+        assert payload["previous_idempotency_key"] == logical_key
+
+        async with factory() as session:
+            superseded = await WorkspaceRepository(session).get(workspace.id)
+            assert superseded is not None
+            assert superseded.idempotency_key is not None
+            assert superseded.idempotency_key.startswith(f"{logical_key}:superseded:")
+            assert superseded.task_external_id == adoption_module._superseded_adoption_external_id(
+                external_id=adoption_external_id,
+                workspace_id=workspace.id,
+            )
+            assert await _count(session, TaskAttempt) == 0
+
+    @pytest.mark.unit
+    async def test_create_adoption_workspace_reraises_unexpected_task_conflict(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _raise_task_conflict(
+            _repo: TaskRepository,
+            **kwargs: object,
+        ) -> Task:
+            raise TaskExternalIdConflictError(str(kwargs["external_id"]))
+
+        monkeypatch.setattr(TaskRepository, "create_or_get", _raise_task_conflict)
+
+        metadata = _metadata()
+        logical_key = _canonical_key()
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(metadata),
+            )
+            with pytest.raises(TaskExternalIdConflictError):
+                await service._create_adoption_workspace(
+                    request=PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                    ),
+                    repo=RepoRef(owner="dimileeh", name="aira-web"),
+                    metadata=metadata,
+                    idempotency_key=logical_key,
+                    logical_idempotency_key=logical_key,
+                    previous_terminal_adoptions=[],
+                )
+
+    @pytest.mark.unit
+    async def test_task_external_id_family_filters_generated_adoption_ids(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        logical_key = "pr-adopt:github:dimileeh/aira-web:277"
+        task_external_id = "pr-adopt:github:dimileeh/aira-web:277"
+        async with factory() as session:
+            session.add_all(
+                [
+                    Task(
+                        id="task-family-base",
+                        external_id=task_external_id,
+                        idempotency_key=logical_key,
+                        repo_url="git@github.com:dimileeh/aira-web.git",
+                        base_branch="development",
+                        title="base",
+                        prompt="base prompt",
+                        owned_paths=[],
+                    ),
+                    Task(
+                        id="task-family-g2",
+                        external_id=f"{task_external_id}:g2",
+                        idempotency_key=None,
+                        repo_url="git@github.com:dimileeh/aira-web.git",
+                        base_branch="development",
+                        title="generated",
+                        prompt="generated prompt",
+                        owned_paths=[],
+                    ),
+                    Task(
+                        id="task-family-invalid",
+                        external_id=f"{task_external_id}:garbage",
+                        idempotency_key=None,
+                        repo_url="git@github.com:dimileeh/aira-web.git",
+                        base_branch="development",
+                        title="invalid generation",
+                        prompt="invalid prompt",
+                        owned_paths=[],
+                    ),
+                    Task(
+                        id="task-family-other",
+                        external_id="pr-adopt:github:dimileeh/other:277:g9",
+                        idempotency_key=None,
+                        repo_url="git@github.com:dimileeh/other.git",
+                        base_branch="development",
+                        title="other",
+                        prompt="other prompt",
+                        owned_paths=[],
+                    ),
+                    Task(
+                        id="task-family-null",
+                        external_id=None,
+                        idempotency_key="unrelated-null",
+                        repo_url="git@github.com:dimileeh/aira-web.git",
+                        base_branch="development",
+                        title="null",
+                        prompt="null prompt",
+                        owned_paths=[],
+                    ),
+                ]
+            )
+            await session.flush()
+
+            reserved = await adoption_module._task_external_id_family_idempotency_keys(
+                session,
+                logical_idempotency_key=logical_key,
+                task_external_id=task_external_id,
+            )
+
+        assert reserved == [logical_key, f"{logical_key}:g2"]
+
+    @pytest.mark.unit
+    async def test_adoption_task_idempotency_key_exhaustion_is_explicit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _reserved_task_keys(
+            _session: AsyncSession,
+            *,
+            logical_idempotency_key: str,
+        ) -> list[str]:
+            return [
+                logical_idempotency_key,
+                *(f"{logical_idempotency_key}:g{generation}" for generation in range(1, 1000)),
+            ]
+
+        async def _reserved_external_keys(
+            _session: AsyncSession,
+            *,
+            logical_idempotency_key: str,
+            task_external_id: str,
+        ) -> list[str]:
+            del logical_idempotency_key, task_external_id
+            return []
+
+        monkeypatch.setattr(adoption_module, "_task_idempotency_key_family", _reserved_task_keys)
+        monkeypatch.setattr(
+            adoption_module,
+            "_task_external_id_family_idempotency_keys",
+            _reserved_external_keys,
+        )
+
+        with pytest.raises(RuntimeError, match="fresh PR adoption task idempotency key"):
+            await adoption_module._next_adoption_task_idempotency_key(
+                None,  # type: ignore[arg-type]
+                logical_idempotency_key="pr-adopt:exhausted",
+                task_external_id="pr-adopt:external",
+            )
 
     @pytest.mark.unit
     async def test_adoption_workspace_idempotency_key_merges_known_keys_with_family(

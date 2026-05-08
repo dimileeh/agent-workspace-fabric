@@ -858,18 +858,6 @@ def _adoption_generation_external_id(
     return f"{base_external_id}:{generation}"
 
 
-def _adoption_generation_idempotency_key(
-    *,
-    logical_idempotency_key: str,
-    workspace_idempotency_key: str,
-) -> str:
-    generation = _adoption_generation_suffix(
-        logical_idempotency_key=logical_idempotency_key,
-        workspace_idempotency_key=workspace_idempotency_key,
-    )
-    return f"{logical_idempotency_key}:{generation}"
-
-
 def _adoption_generation_suffix(
     *,
     logical_idempotency_key: str,
