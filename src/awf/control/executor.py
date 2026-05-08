@@ -2150,6 +2150,7 @@ class WorkspaceExecutor:
                 coverage_evidence_source_run_id=coverage_evidence.source_run_id,
             )
             if val_result.all_passed:
+                conformance_failure: _PlanningRunFailure | None = None
                 if planning_validation_handoff is not None:
                     try:
                         conformance_failure = await self._run_post_validation_conformance_check(
@@ -2223,43 +2224,60 @@ class WorkspaceExecutor:
                         )
                         return
                     if conformance_failure is not None:
-                        await self._finish_pending_validate_operations(
+                        if pass_number >= max_fix_passes:
+                            await self._finish_pending_validate_operations(
+                                workspace_id=workspace_id,
+                                status=OperationStatus.failed,
+                                validation_run_id=validation_run_id,
+                                requested_tier=validation_tier,
+                                reason_code=conformance_failure.reason_code
+                                or PLAN_CONFORMANCE_UNSATISFIED,
+                                coverage=validation_coverage,
+                                error_message=conformance_failure.message,
+                            )
+                            await self._mark_failed(
+                                workspace_id=workspace_id,
+                                from_status=WorkspaceStatus.validating,
+                                failure_reason=FailureReason.agent_failure,
+                                message=conformance_failure.message[:2000],
+                                reason_code=conformance_failure.reason_code,
+                                details=conformance_failure.details,
+                            )
+                            return
+                        _log.info(
+                            "executor.post_validation_conformance_needs_fix_pass",
                             workspace_id=workspace_id,
-                            status=OperationStatus.failed,
                             validation_run_id=validation_run_id,
-                            requested_tier=validation_tier,
-                            reason_code=conformance_failure.reason_code
-                            or PLAN_CONFORMANCE_UNSATISFIED,
-                            coverage=validation_coverage,
-                            error_message=conformance_failure.message,
+                            fix_pass=pass_number,
+                            max_fix_passes=max_fix_passes,
+                            reason_code=(
+                                conformance_failure.reason_code
+                                or PLAN_CONFORMANCE_UNSATISFIED
+                            ),
                         )
-                        await self._mark_failed(
+                        val_result = _post_validation_conformance_fix_result(
+                            failure=conformance_failure,
                             workspace_id=workspace_id,
-                            from_status=WorkspaceStatus.validating,
-                            failure_reason=FailureReason.agent_failure,
-                            message=conformance_failure.message[:2000],
-                            reason_code=conformance_failure.reason_code,
-                            details=conformance_failure.details,
+                            artifacts_root=self._config.compose_projects_root,
                         )
-                        # This return keeps successful_validation_* assignments unreachable.
-                        return
-                successful_validation_run_id = validation_run_id
-                successful_validation_workspace_head_sha = validation_workspace_head_sha
-                await self._finish_pending_validate_operations(
-                    workspace_id=workspace_id,
-                    status=OperationStatus.succeeded,
-                    validation_run_id=validation_run_id,
-                    requested_tier=validation_tier,
-                    reason_code="VALIDATION_OK",
-                    coverage=validation_coverage,
-                )
-                if pass_number > 0:
-                    _log.info(
-                        "executor.validation_recovered",
+                if conformance_failure is None:
+                    successful_validation_run_id = validation_run_id
+                    successful_validation_workspace_head_sha = validation_workspace_head_sha
+                    await self._finish_pending_validate_operations(
                         workspace_id=workspace_id,
-                        fix_passes_used=pass_number,
+                        status=OperationStatus.succeeded,
+                        validation_run_id=validation_run_id,
+                        requested_tier=validation_tier,
+                        reason_code="VALIDATION_OK",
+                        coverage=validation_coverage,
                     )
-                break
+                    if pass_number > 0:
+                        _log.info(
+                            "executor.validation_recovered",
+                            workspace_id=workspace_id,
+                            fix_passes_used=pass_number,
+                        )
+                    break
 
             first_fail = val_result.first_failure
             _log.info(
@@ -6238,6 +6256,54 @@ def _validation_failure_message(
             details += f"; logs: {log_hint}"
         return details
     return f"validation failed: {first_fail.command}" if first_fail else "validation failed"
+
+
+def _post_validation_conformance_fix_result(
+    *,
+    failure: _PlanningRunFailure,
+    workspace_id: str,
+    artifacts_root: Path,
+) -> ValidationResult:
+    artifacts_dir = artifacts_root / workspace_id / "post_validation_conformance"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = artifacts_dir / "post_validation_conformance.stdout"
+    stderr_path = artifacts_dir / "post_validation_conformance.stderr"
+    stdout_path.write_text(_post_validation_conformance_failure_text(failure), encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    return ValidationResult(
+        commands=[
+            ValidationCommandResult(
+                command="post-validation plan conformance",
+                returncode=1,
+                duration_seconds=0.0,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                phase="conformance",
+                reason_code=failure.reason_code or PLAN_CONFORMANCE_UNSATISFIED,
+                policy_failed=True,
+            )
+        ]
+    )
+
+
+def _post_validation_conformance_failure_text(failure: _PlanningRunFailure) -> str:
+    lines = [failure.message]
+    details = failure.details or {}
+    conformance = details.get("conformance")
+    if isinstance(conformance, Mapping):
+        summary = conformance.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            lines.append(f"Summary: {summary.strip()}")
+        report_reason = conformance.get("report_reason_code")
+        if isinstance(report_reason, str) and report_reason.strip():
+            lines.append(f"Report reason code: {report_reason.strip()}")
+        gaps = conformance.get("gaps")
+        if isinstance(gaps, list):
+            gap_lines = [str(gap).strip() for gap in gaps if str(gap).strip()]
+            if gap_lines:
+                lines.append("Remaining conformance gaps:")
+                lines.extend(f"- {gap}" for gap in gap_lines)
+    return "\n".join(lines)
 
 
 def _post_validation_conformance_agent_failure_message(exc: AgentRunError) -> str:
