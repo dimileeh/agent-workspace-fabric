@@ -494,6 +494,7 @@ class ControlWorker:
                 session,
                 workspaces,
                 limit=len(workspaces),
+                scoring_at=scoring_at,
             )
             workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
             for workspace_id in page_dispatchable_ids:
@@ -501,7 +502,8 @@ class ControlWorker:
                 if workspace is not None:
                     dispatchable_workspaces_by_id.setdefault(workspace_id, workspace)
             ordered_workspaces = _order_scheduler_workspaces(
-                list(dispatchable_workspaces_by_id.values())
+                list(dispatchable_workspaces_by_id.values()),
+                now=scoring_at,
             )
             if len(workspaces) < candidate_limit:
                 break
@@ -524,6 +526,7 @@ class ControlWorker:
         candidate_workspaces: list[Workspace],
         *,
         limit: int,
+        scoring_at: datetime | None = None,
     ) -> list[str]:
         if not candidate_workspaces:
             return []
@@ -538,7 +541,10 @@ class ControlWorker:
             workspace = workspaces_by_id.get(workspace_id)
             if workspace is not None:
                 eligible_workspaces_by_id.setdefault(workspace_id, workspace)
-        ordered_workspaces = _order_scheduler_workspaces(list(eligible_workspaces_by_id.values()))
+        ordered_workspaces = _order_scheduler_workspaces(
+            list(eligible_workspaces_by_id.values()),
+            now=scoring_at,
+        )
         return [workspace.id for workspace in ordered_workspaces[:limit]]
 
     async def _filter_provider_recovery_suppressed(
@@ -2036,11 +2042,15 @@ async def _record_scheduler_queue_decision(
     )
 
 
-def _order_scheduler_workspaces(workspaces: list[Workspace]) -> list[Workspace]:
-    now = datetime.now(UTC)
+def _order_scheduler_workspaces(
+    workspaces: list[Workspace],
+    *,
+    now: datetime | None = None,
+) -> list[Workspace]:
+    scoring_at = now or datetime.now(UTC)
     scored = sorted(
         (
-            (scheduler_score_from_workspace(workspace, now=now), workspace)
+            (scheduler_score_from_workspace(workspace, now=scoring_at), workspace)
             for workspace in workspaces
         ),
         key=lambda item: scheduler_order_key(item[0]),

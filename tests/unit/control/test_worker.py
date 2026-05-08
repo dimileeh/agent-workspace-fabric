@@ -20,6 +20,7 @@ from sqlalchemy import event, select, update
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.control.worker as worker_module
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
@@ -59,7 +60,11 @@ from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.controls import WorkspaceControlService
-from awf.service.scheduler import SchedulerOrderCursor, scheduler_score_from_workspace
+from awf.service.scheduler import (
+    SchedulerOrderCursor,
+    scheduler_order_key,
+    scheduler_score_from_workspace,
+)
 from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
 from tests.postgres import postgres_test_engine
 
@@ -1165,6 +1170,114 @@ class TestRunOnceExecution:
 
         assert executor.calls == [urgent_id]
         assert not set(low_ids).intersection(executor.calls)
+
+    @pytest.mark.unit
+    async def test_ready_refill_keeps_final_order_on_frozen_scoring_timestamp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        frozen_scoring_at = datetime(2026, 1, 1, 0, 14, 59, tzinfo=UTC)
+        drifted_scoring_at = frozen_scoring_at + timedelta(seconds=1)
+        older_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "age-boost-after-frozen-score",
+            task_class="docs_task",
+            task_policy={"scheduler": {"base_priority": 0}},
+        )
+        priority_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "priority-at-frozen-score",
+            task_class="docs_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        older_created_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        priority_created_at = older_created_at + timedelta(minutes=1)
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == older_id)
+                .values(created_at=older_created_at, updated_at=older_created_at)
+            )
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == priority_id)
+                .values(created_at=priority_created_at, updated_at=priority_created_at)
+            )
+            await session.commit()
+
+        class DriftedDateTime(datetime):
+            calls = 0
+
+            @classmethod
+            def now(cls, tz: object = None) -> datetime:
+                del tz
+                cls.calls += 1
+                if cls.calls == 1:
+                    return frozen_scoring_at
+                return drifted_scoring_at
+
+        async def _list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
+        ) -> list[Workspace]:
+            del exclude_ids, after
+            assert status == WorkspaceStatus.ready
+            assert scoring_at == frozen_scoring_at
+            result = await self._session.execute(
+                select(Workspace).where(Workspace.id.in_([older_id, priority_id]))
+            )
+            rows = list(result.scalars())
+            scored = sorted(
+                (
+                    (scheduler_score_from_workspace(workspace, now=scoring_at), workspace)
+                    for workspace in rows
+                ),
+                key=lambda item: scheduler_order_key(item[0]),
+            )
+            return [workspace for _score, workspace in scored][:limit]
+
+        async def _allow_all_scheduler_candidates(
+            session: AsyncSession,
+            workspaces: list[Workspace],
+            *,
+            limit: int,
+            scoring_at: datetime | None = None,
+        ) -> list[str]:
+            del session, limit, scoring_at
+            return [workspace.id for workspace in workspaces]
+
+        monkeypatch.setattr(worker_module, "datetime", DriftedDateTime)
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
+            raising=False,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._filter_scheduler_candidate_workspaces = (  # type: ignore[method-assign]
+            _allow_all_scheduler_candidates
+        )
+
+        assert await worker._list_ready(limit=1) == [priority_id]  # noqa: SLF001
 
     @pytest.mark.unit
     async def test_ready_scan_stops_after_dispatch_slots_are_filled(
