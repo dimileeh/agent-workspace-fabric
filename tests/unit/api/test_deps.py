@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import structlog
 from fastapi import HTTPException
 
 import awf.api.deps as deps
@@ -72,6 +73,46 @@ async def test_get_db_session_close_error_does_not_mask_route_error() -> None:
         await generator.athrow(ValueError("route failed"))
 
     assert session.calls == ["rollback", "close"]
+
+
+@pytest.mark.unit
+async def test_get_db_session_logs_close_error_after_route_error() -> None:
+    session = _RecordingSession(close_error=RuntimeError("close failed"))
+    request = _request_with_factory(lambda: session)
+
+    generator = deps.get_db_session(request)  # type: ignore[arg-type]
+    yielded = await generator.__anext__()
+    assert yielded is session
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(ValueError, match="route failed"),
+    ):
+        await generator.athrow(ValueError("route failed"))
+
+    assert session.calls == ["rollback", "close"]
+    assert any(
+        entry.get("event") == "get_db_session.close_failed_during_exception"
+        and entry.get("log_level") == "warning"
+        and entry.get("error_type") == "RuntimeError"
+        and entry.get("error") == "close failed"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_get_db_session_close_error_propagates_after_success() -> None:
+    session = _RecordingSession(close_error=RuntimeError("close failed"))
+    request = _request_with_factory(lambda: session)
+
+    generator = deps.get_db_session(request)  # type: ignore[arg-type]
+    yielded = await generator.__anext__()
+    assert yielded is session
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await generator.__anext__()
+
+    assert session.calls == ["commit", "close"]
 
 
 @pytest.mark.unit

@@ -94,6 +94,7 @@ _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE = (
     "workspace.stale_active_execution_cleanup_failed"
 )
 _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE = "STALE_ACTIVE_EXECUTION_CLEANUP_FAILED"
+_STALE_ACTIVE_EXECUTION_RECOVERY_FAILED_REASON_CODE = "STALE_ACTIVE_EXECUTION_RECOVERY_FAILED"
 _ACTIVE_EXECUTION_PRESERVED_SOURCE = "worker_restart"
 _ACTIVE_EXECUTION_PRESERVED_OWNER = "control_worker"
 _ACTIVE_EXECUTION_PRESERVED_SUBPHASE = "runtime_preserved_after_restart"
@@ -762,17 +763,25 @@ class ControlWorker:
             try:
                 await self._recover_stale_active_execution(candidate)
             except Exception as exc:
-                if not is_transient_closed_connection_error(exc):
-                    raise
-                _log.warning(
-                    "worker.stale_active_execution_db_connection_closed",
+                if is_transient_closed_connection_error(exc):
+                    _log.warning(
+                        "worker.stale_active_execution_db_connection_closed",
+                        workspace_id=candidate.workspace_id,
+                        status=candidate.status.value,
+                        reason_code=DB_CONNECTION_CLOSED_REASON,
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:240],
+                    )
+                    await self._record_db_connection_closed_event(candidate, exc)
+                    continue
+                _log.exception(
+                    "worker.stale_active_execution_recovery_failed",
                     workspace_id=candidate.workspace_id,
                     status=candidate.status.value,
-                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    reason_code=_STALE_ACTIVE_EXECUTION_RECOVERY_FAILED_REASON_CODE,
                     error_type=type(exc).__name__,
                     error=str(exc)[:240],
                 )
-                await self._record_db_connection_closed_event(candidate, exc)
 
     async def _record_db_connection_closed_event(
         self,

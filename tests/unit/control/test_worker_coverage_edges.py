@@ -253,6 +253,57 @@ async def test_transient_db_retry_log_uses_attempt_reason_code() -> None:
 
 
 @pytest.mark.unit
+async def test_stale_active_execution_recovery_continues_after_candidate_error() -> None:
+    candidates = [
+        _ActiveExecutionCandidate(
+            workspace_id="ws_bad",
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_bad",
+        ),
+        _ActiveExecutionCandidate(
+            workspace_id="ws_good",
+            status=WorkspaceStatus.validating,
+            compose_project_name="awf_good",
+        ),
+    ]
+    recovered: list[str] = []
+    worker = ControlWorker(
+        session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+        provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+        config=WorkerConfig(node_id="node-1"),
+    )
+
+    async def _list_candidates(
+        *,
+        exclude_ids: set[str],
+    ) -> list[_ActiveExecutionCandidate]:
+        assert exclude_ids == set()
+        return candidates
+
+    async def _recover(candidate: _ActiveExecutionCandidate) -> None:
+        recovered.append(candidate.workspace_id)
+        if candidate.workspace_id == "ws_bad":
+            raise RuntimeError("candidate recovery failed")
+
+    worker._list_stale_active_execution_candidates = _list_candidates  # type: ignore[method-assign]
+    worker._recover_stale_active_execution = _recover  # type: ignore[method-assign]
+
+    with structlog.testing.capture_logs() as captured:
+        await worker._recover_stale_active_executions()
+
+    assert recovered == ["ws_bad", "ws_good"]
+    assert any(
+        event.get("event") == "worker.stale_active_execution_recovery_failed"
+        and event.get("log_level") == "error"
+        and event.get("workspace_id") == "ws_bad"
+        and event.get("status") == WorkspaceStatus.running.value
+        and event.get("error_type") == "RuntimeError"
+        and event.get("error") == "candidate recovery failed"
+        for event in captured
+    )
+
+
+@pytest.mark.unit
 async def test_provider_recovery_filter_skips_stale_scheduler_ids(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

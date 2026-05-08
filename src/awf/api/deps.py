@@ -7,14 +7,16 @@ without monkeypatching module-level globals.
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import AsyncIterator
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings, get_settings
+from awf.common.logging import get_logger
 from awf.db.resilience import invalidate_or_rollback_session
+
+_log = get_logger(__name__)
 
 
 def _get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -42,15 +44,29 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
     """Yield a per-request async DB session, committing on success and rolling back on error."""
     factory = _get_session_factory(request)
     session = factory()
+    scope_exc: BaseException | None = None
     try:
         yield session
         await session.commit()
     except Exception as exc:
+        scope_exc = exc
+        await invalidate_or_rollback_session(session, exc)
+        raise
+    except BaseException as exc:
+        scope_exc = exc
         await invalidate_or_rollback_session(session, exc)
         raise
     finally:
-        with contextlib.suppress(Exception):
+        try:
             await session.close()
+        except Exception as close_exc:
+            if scope_exc is None:
+                raise
+            _log.warning(
+                "get_db_session.close_failed_during_exception",
+                error_type=type(close_exc).__name__,
+                error=str(close_exc)[:240],
+            )
 
 
 def require_api_token(
