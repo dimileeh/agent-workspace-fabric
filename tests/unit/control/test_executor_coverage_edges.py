@@ -772,6 +772,75 @@ async def test_post_validation_conformance_rejects_pre_dirty_committed_paths(
 
 
 @pytest.mark.unit
+async def test_post_validation_conformance_rejects_edits_to_pre_dirty_paths(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktree"
+    dirty_path = worktree_path / "src" / "unvalidated.py"
+    dirty_path.parent.mkdir(parents=True)
+    dirty_path.write_text("validation dirty content", encoding="utf-8")
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=0,
+        stdout=" M src/unvalidated.py\n",
+    )  # changed paths before conformance
+    runner.queue_result(
+        returncode=0,
+        stdout=" M src/unvalidated.py\n",
+    )  # same path remains dirty after conformance
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._git_rev_parse_head = AsyncMock(return_value="validated-head")  # type: ignore[method-assign]
+    executor._committed_paths_since = AsyncMock(return_value=set())  # type: ignore[method-assign]
+    executor._commit_post_validation_conformance_report = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    class _SamePathEditingAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            dirty_path.write_text("conformance-only edit", encoding="utf-8")
+            return await super().run(**kwargs)
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_SamePathEditingAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is not None
+    assert failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert failure.details is not None
+    assert failure.details["planning_scope"]["offending_paths"] == ["src/unvalidated.py"]
+    executor._commit_post_validation_conformance_report.assert_not_awaited()  # type: ignore[attr-defined]
+    executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
 async def test_post_validation_conformance_rejects_committed_paths_when_deviation_guard_disabled(
     tmp_path: Path,
 ) -> None:

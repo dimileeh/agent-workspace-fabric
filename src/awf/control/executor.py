@@ -3819,6 +3819,13 @@ class WorkspaceExecutor:
         # made during the report-only conformance command.
         before_compare = await self._changed_paths(worktree_path)
         before_compare_head = await self._git_rev_parse_head(worktree_path)
+        allowed_paths = {handoff.report_path}
+        # Path-set subtraction misses edits to already-dirty paths, so keep a
+        # content snapshot for every pre-dirty non-report path.
+        before_dirty_digests = {
+            path: self._digest_dirty_content(worktree_path, {path})
+            for path in before_compare - allowed_paths
+        }
         # A stale handoff report may still be present at this path; prefer
         # stdout unless the conformance rerun actually refreshed the file.
         report_path = worktree_path / handoff.report_path
@@ -3844,10 +3851,14 @@ class WorkspaceExecutor:
             if before_compare_head is not None
             else set()
         )
-        allowed_paths = {handoff.report_path}
+        edited_pre_dirty_extra = {
+            path
+            for path, digest in before_dirty_digests.items()
+            if self._digest_dirty_content(worktree_path, {path}) != digest
+        }
         dirty_extra = after_compare - before_compare - allowed_paths
         committed_extra = committed_compare - allowed_paths
-        extra = sorted(dirty_extra | committed_extra)
+        extra = sorted(dirty_extra | committed_extra | edited_pre_dirty_extra)
         if extra:
             return _build_planning_scope_failure(
                 scope_phase="conformance",
