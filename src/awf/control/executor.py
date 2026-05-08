@@ -2314,7 +2314,9 @@ class WorkspaceExecutor:
                         )
                         return
                     if conformance_failure is not None:
-                        if pass_number >= max_fix_passes:
+                        # Recovery skips feature execution; retrying this
+                        # conformance miss would only rerun validation.
+                        if recovery is not None or pass_number >= max_fix_passes:
                             await self._finish_pending_validate_operations(
                                 workspace_id=workspace_id,
                                 status=OperationStatus.failed,

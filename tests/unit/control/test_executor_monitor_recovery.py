@@ -37,7 +37,10 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
-from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
+from awf.runtime.planning import (
+    CONFORMANCE_REQUIRES_AWF_VALIDATION,
+    PLAN_CONFORMANCE_UNSATISFIED,
+)
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationRunner
 from tests.postgres import postgres_test_engine
@@ -1543,6 +1546,101 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
     ]
     assert len(recovery_ops) == 1
     assert recovery_ops[0].status == OperationStatus.succeeded.value
+
+
+@pytest.mark.unit
+async def test_validate_only_recovery_conformance_failure_fails_without_fix_loop(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        max_fix_passes=1,
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        resolved_profile={
+            "name": "planned-recovery",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+            },
+            "phases": {"validate": ["pytest -q"]},
+        },
+        recovery_payload_overrides={
+            "conformance": {
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "summary": "Recovery needs AWF-owned validation evidence.",
+                "gaps": ["AWF-owned validation evidence is missing for pytest."],
+            }
+        },
+    )
+
+    source_head = "d" * 40
+    unsatisfied_report = (
+        '{"status":"needs_iteration",'
+        '"summary":"validation evidence still does not satisfy the plan",'
+        '"reason_code":"PLAN_CONFORMANCE_VALIDATION_EVIDENCE_GAP",'
+        '"gaps":["profile validation evidence is still insufficient"]}'
+    )
+    _queue_validation_head(fake, head=source_head)
+    fake.queue_result(returncode=0, stdout="tests ok")
+    fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+    fake.queue_result(returncode=0, stdout=f"{source_head}\n")  # conformance scope HEAD
+    fake.queue_result(returncode=0, stdout=unsatisfied_report)
+    fake.queue_result(returncode=0, stdout="")  # post-validation conformance after status
+    fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+
+    # These entries document the old, wasteful path: a synthetic validation
+    # failure drove a fix prompt and a second full validation run. They must
+    # remain unused.
+    fake.queue_result(returncode=0, stdout="attempted fix")  # adapter.run (fix pass)
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="")  # git diff --cached --name-only
+    _queue_validation_head(fake, head=source_head)
+    fake.queue_result(returncode=0, stdout="tests ok again")
+    fake.queue_result(returncode=0, stdout="")
+    fake.queue_result(returncode=0, stdout=f"{source_head}\n")
+    fake.queue_result(returncode=0, stdout=unsatisfied_report)
+    fake.queue_result(returncode=0, stdout="")
+    fake.queue_result(returncode=0, stdout="")
+
+    await executor.execute(ws_id)
+
+    adapter_args = _all_adapter_args(fake)
+    assert len(adapter_args) == 1
+    assert "## Conformance phase" in adapter_args[0][-1]
+    assert "Validation failed after your previous pass" not in adapter_args[0][-1]
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+        runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    assert ws.failure_reason == "agent_failure"
+    assert ws.failure_message is not None
+    assert "post-validation plan conformance was not satisfied" in ws.failure_message
+    assert len(runs) == 1
+    assert runs[0].status == "succeeded"
+    recovery_ops = [
+        op
+        for op in ops
+        if op.type == OperationType.validate.value
+        and isinstance(op.payload, dict)
+        and op.payload.get("source") == "pr_monitor"
+        and op.payload.get("recovery_mode") == "validate_only"
+    ]
+    assert len(recovery_ops) == 1
+    assert recovery_ops[0].status == OperationStatus.failed.value
+    assert recovery_ops[0].error_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert isinstance(recovery_ops[0].result, dict)
+    assert recovery_ops[0].result.get("reason_code") == PLAN_CONFORMANCE_UNSATISFIED
 
 
 @pytest.mark.unit

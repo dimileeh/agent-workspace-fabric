@@ -349,7 +349,8 @@ def conformance_requires_awf_validation(report: PlanConformanceReport) -> bool:
 
     if report.status != PlanConformanceStatus.needs_iteration:
         return False
-    if report.reason_code != CONFORMANCE_REQUIRES_AWF_VALIDATION:
+    normalized_reason = report.reason_code.strip().upper().replace("-", "_")
+    if normalized_reason != CONFORMANCE_REQUIRES_AWF_VALIDATION:
         return False
     if not report.gaps:
         return False

@@ -20,6 +20,7 @@ from awf.runtime.planning import (
     ConformanceStallEvidence,
     ConformanceStallKind,
     ConformanceStallPolicy,
+    PlanConformanceReport,
     PlanConformanceStatus,
     _evidence_strings,
     _gaps_from_payload,
@@ -233,6 +234,18 @@ def test_conformance_requires_awf_validation_accepts_validation_evidence_only_ga
         '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
         '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
         '"gaps":["AWF-owned validation evidence is missing for the required pytest gate."]}'
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+def test_conformance_requires_awf_validation_accepts_hyphenated_reason_code() -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation appears complete; AWF validation evidence is missing.",
+        reason_code="CONFORMANCE-REQUIRES-AWF-VALIDATION",
+        gaps=("AWF-owned validation evidence is missing for the required pytest gate.",),
     )
 
     assert conformance_requires_awf_validation(report)
