@@ -373,6 +373,34 @@ async def test_readyz_egress_audit_timeout_is_degraded_not_failure(
 
 
 @pytest.mark.unit
+async def test_readyz_egress_audit_timeout_drains_completed_session_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = asyncio.Event()
+
+    class _Session:
+        async def close(self) -> None:
+            await asyncio.sleep(0)
+            closed.set()
+
+    class _SlowEgressAuditRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            await asyncio.sleep(1)
+            return {}
+
+    monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _SlowEgressAuditRepository)
+
+    with pytest.raises(TimeoutError):
+        await health_route._egress_audit_summary_counts_with_timeout(_Session)
+
+    assert closed.is_set()
+
+
+@pytest.mark.unit
 async def test_readyz_egress_audit_timeout_not_delayed_by_session_cleanup(
     ready_app_and_client: tuple[Any, AsyncClient],
     monkeypatch: pytest.MonkeyPatch,

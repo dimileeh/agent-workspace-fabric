@@ -142,6 +142,7 @@ async def release_readiness(
 # behind the default uvicorn worker. 5s is generous for local docker calls; tune
 # down once we have latency telemetry.
 _CHECK_TIMEOUT_SECONDS = 5.0
+_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS = 0.1
 
 
 def _get_command_runner_for_request(request: Request) -> AsyncCommandRunner:
@@ -354,6 +355,15 @@ def _consume_task_result(task: asyncio.Task[Any]) -> None:
     task.add_done_callback(_consume)
 
 
+async def _drain_cancelled_task_result(task: asyncio.Task[Any], *, timeout: float) -> None:
+    done, _pending = await asyncio.wait({task}, timeout=timeout)
+    if task in done:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+        return
+    _consume_task_result(task)
+
+
 async def _egress_audit_summary_counts(factory: Any) -> dict[str, int]:
     session = factory()
     try:
@@ -378,7 +388,10 @@ async def _egress_audit_summary_counts_with_timeout(factory: Any) -> dict[str, i
         return task.result()
 
     task.cancel()
-    _consume_task_result(task)
+    await _drain_cancelled_task_result(
+        task,
+        timeout=_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS,
+    )
     raise TimeoutError
 
 
