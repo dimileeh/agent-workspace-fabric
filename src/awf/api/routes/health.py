@@ -346,6 +346,42 @@ async def _workspace_view_for_readyz(
                 await close()
 
 
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    def _consume(completed: asyncio.Task[Any]) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            completed.result()
+
+    task.add_done_callback(_consume)
+
+
+async def _egress_audit_summary_counts(factory: Any) -> dict[str, int]:
+    session = factory()
+    try:
+        return await EgressAuditRepository(session).summary_counts_by_posture()
+    finally:
+        close = getattr(session, "close", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await close()
+
+
+async def _egress_audit_summary_counts_with_timeout(factory: Any) -> dict[str, int]:
+    task = asyncio.create_task(_egress_audit_summary_counts(factory))
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=_CHECK_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        task.cancel()
+        _consume_task_result(task)
+        raise
+
+    if task in done:
+        return task.result()
+
+    task.cancel()
+    _consume_task_result(task)
+    raise TimeoutError
+
+
 async def _check_orphan_resources(
     *,
     runner: AsyncCommandRunner,
@@ -473,9 +509,7 @@ async def readyz(
         if factory is None:
             return CheckResult(ok=True, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail="No session factory available")
         try:
-            async with factory() as session:
-                repo = EgressAuditRepository(session)
-                counts = await asyncio.wait_for(repo.summary_counts_by_posture(), timeout=_CHECK_TIMEOUT_SECONDS)
+            counts = await _egress_audit_summary_counts_with_timeout(factory)
             posture_counts = {str(posture): int(count) for posture, count in counts.items()}
             total = sum(posture_counts.values())
             return CheckResult(

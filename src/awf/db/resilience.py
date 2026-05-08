@@ -73,13 +73,13 @@ async def run_db_operation_with_retry[T](
     *,
     attempts: int = 2,
     commit: bool = False,
-    retry_commit_failures: bool = True,
+    retry_commit_failures: bool = False,
     on_retry: Callable[[BaseException, int], Awaitable[None]] | None = None,
 ) -> T:
     """Run a bounded DB operation, retrying stale closed connections with fresh sessions.
 
-    Set ``retry_commit_failures`` to False for operations that make non-idempotent
-    writes before commit, where a commit exception may be an ambiguous boundary.
+    Set ``retry_commit_failures`` to True only for idempotent writes where
+    replaying after an ambiguous commit boundary is safe.
     """
 
     if attempts < 1:

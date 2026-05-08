@@ -373,6 +373,52 @@ async def test_readyz_egress_audit_timeout_is_degraded_not_failure(
 
 
 @pytest.mark.unit
+async def test_readyz_egress_audit_timeout_not_delayed_by_session_cleanup(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+    monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
+
+    class _Session:
+        slow_close = False
+
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            await self.close()
+
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def close(self) -> None:
+            if self.slow_close:
+                await asyncio.Event().wait()
+
+    class _TimeoutEgressAuditRepository:
+        def __init__(self, session: _Session) -> None:
+            session.slow_close = True
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            raise TimeoutError("egress audit timed out")
+
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _TimeoutEgressAuditRepository)
+    app.state.db_session_factory = _Session
+
+    response = await asyncio.wait_for(client.get("/readyz"), timeout=1.0)
+    body = response.json()
+
+    egress_audit = body["checks"]["egress_audit"]
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unknown"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_TIMEOUT"
+
+
+@pytest.mark.unit
 async def test_readyz_egress_audit_error_is_degraded_not_failure(
     ready_app_and_client: tuple[Any, AsyncClient],
     monkeypatch: pytest.MonkeyPatch,

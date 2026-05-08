@@ -226,3 +226,69 @@ async def test_db_retry_can_avoid_ambiguous_commit_replays(
 
     assert calls == 1
     assert commits == 1
+
+
+@pytest.mark.unit
+async def test_db_retry_does_not_replay_commit_failures_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        calls = 0
+        commits = 0
+
+        async def _operation(_session: object) -> str:
+            nonlocal calls
+            calls += 1
+            return "created"
+
+        async def _failing_commit(_session: AsyncSession) -> None:
+            nonlocal commits
+            commits += 1
+            raise _closed_connection_error()
+
+        monkeypatch.setattr(AsyncSession, "commit", _failing_commit)
+
+        with pytest.raises(InterfaceError, match="connection is closed"):
+            await run_db_operation_with_retry(
+                factory,
+                _operation,
+                commit=True,
+            )
+
+    assert calls == 1
+    assert commits == 1
+
+
+@pytest.mark.unit
+async def test_db_retry_replays_commit_failures_when_explicitly_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        calls = 0
+        commits = 0
+
+        async def _operation(_session: object) -> str:
+            nonlocal calls
+            calls += 1
+            return "refreshed"
+
+        async def _flaky_commit(_session: AsyncSession) -> None:
+            nonlocal commits
+            commits += 1
+            if commits == 1:
+                raise _closed_connection_error()
+
+        monkeypatch.setattr(AsyncSession, "commit", _flaky_commit)
+
+        result = await run_db_operation_with_retry(
+            factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=True,
+        )
+
+    assert result == "refreshed"
+    assert calls == 2
+    assert commits == 2

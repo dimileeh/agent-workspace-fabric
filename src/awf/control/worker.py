@@ -1864,6 +1864,7 @@ class ControlWorker:
             self._session_factory,
             _operation,
             commit=True,
+            retry_commit_failures=True,
             on_retry=self._log_transient_db_retry,
         )
 
@@ -1882,6 +1883,7 @@ class ControlWorker:
             self._session_factory,
             _operation,
             commit=True,
+            retry_commit_failures=True,
             on_retry=self._log_transient_db_retry,
         )
 
