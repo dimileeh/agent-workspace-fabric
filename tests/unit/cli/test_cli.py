@@ -924,6 +924,35 @@ class TestWorkspaceList:
         assert kwargs["params"] == {"limit": 7}
 
     @pytest.mark.unit
+    def test_forwards_fleet_filters_as_query_params(self) -> None:
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "list",
+                    "--status",
+                    "ready",
+                    "--agent",
+                    "gemini",
+                    "--repo-url",
+                    "git@github.com:example/app.git",
+                    "--limit",
+                    "9",
+                ],
+            )
+
+        assert result.exit_code == 0
+        kwargs = mock.call_args.kwargs
+        assert kwargs["params"] == {
+            "limit": 9,
+            "status": "ready",
+            "agent": "gemini",
+            "repo_url": "git@github.com:example/app.git",
+        }
+
+    @pytest.mark.unit
     def test_pretty_prints_separators_between_items(self) -> None:
         response = _mock_response(
             status_code=200,

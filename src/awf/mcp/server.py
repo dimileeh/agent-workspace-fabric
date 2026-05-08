@@ -29,15 +29,19 @@ from awf.api.schemas import (
     OperationResponse,
     OwnedPath,
     PullRequestMonitorAdoptionRequest,
+    WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
     WorkspaceLockListResponse,
     WorkspaceLockResponse,
+    WorkspaceLogListResponse,
+    WorkspaceLogReadResponse,
     WorkspaceOverlapGraphResponse,
 )
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.repositories import TaskExternalIdConflictError
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
@@ -48,7 +52,7 @@ from awf.service.artifacts import (
 )
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.controls import WorkspaceControlError
-from awf.service.disk import DiskCheck
+from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.local_capacity import detect_local_capacity
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
 from awf.service.merge_queue import InvalidMergeQueueCursorError, list_merge_queue_response
@@ -85,6 +89,8 @@ from awf.service.workspace_observability import (
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import (
+    WorkspaceCreateIdempotencyConflictError,
+    WorkspaceCreateInsufficientDiskError,
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
     WorkspaceService,
@@ -197,8 +203,12 @@ def build_mcp_server(
         task_external_id: str | None = Field(
             default=None, description="Optional caller-side task ID for correlation."
         ),
-    ) -> dict[str, Any]:
-        """Create a new AWF workspace. Returns the initial workspace state (async)."""
+        idempotency_key: str | None = Field(
+            default=None,
+            description="Optional replay key matching the REST Idempotency-Key header.",
+        ),
+    ) -> StructuredToolResult:
+        """Create a new AWF workspace. Returns the accepted workspace payload."""
         req = WorkspaceCreateRequest(
             repo_url=repo_url,
             branch_base=branch_base,
@@ -210,7 +220,14 @@ def build_mcp_server(
             env_profile=env_profile,
             task_external_id=task_external_id,
         )
-        return (await service.create(req)).model_dump(mode="json")
+        try:
+            response = await service.create(
+                req,
+                idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
+            )
+        except WorkspaceCreateIdempotencyConflictError as exc:
+            return _workspace_error_result(exc)
+        return _tool_result(_workspace_accepted_payload(response))
 
     @mcp.tool(name="awf_create_workspace_v2")
     async def awf_create_workspace_v2(
@@ -282,6 +299,10 @@ def build_mcp_server(
             max_length=512,
             description="Audit reason for provider_readiness_override.",
         ),
+        idempotency_key: str | None = Field(
+            default=None,
+            description="Optional replay key matching the REST Idempotency-Key header.",
+        ),
     ) -> StructuredToolResult:
         """Create a new AWF workspace using the clean v2 contract."""
         req = WorkspaceCreateV2Request(
@@ -305,8 +326,23 @@ def build_mcp_server(
                 "provider_readiness_override_reason": provider_readiness_override_reason,
             },
         )
+
+        async def resolve_disk_check() -> DiskCheck:
+            return await _workspace_admission_disk_check(
+                disk_check_provider=disk_check_provider,
+                settings=settings_value,
+            )
+
         try:
-            ws = await service.create_v2(req)
+            ws = await service.create_v2(
+                req,
+                idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
+                disk_check_factory=resolve_disk_check,
+            )
+        except WorkspaceCreateIdempotencyConflictError as exc:
+            return _workspace_error_result(exc)
+        except WorkspaceCreateInsufficientDiskError as exc:
+            return _workspace_error_result(exc)
         except ProfileResolutionError as exc:
             error = ErrorResponse(
                 error_code="INVALID_PROFILE",
@@ -314,9 +350,11 @@ def build_mcp_server(
                 detail=exc.detail,
             )
             return _tool_result(error.model_dump(mode="json"), is_error=True)
+        except TaskExternalIdConflictError as exc:
+            return _task_external_id_conflict_result(exc)
         except WorkspaceProviderReadinessBlockedError as exc:
             return _provider_readiness_blocked_result(exc)
-        return _tool_result(ws.model_dump(mode="json"))
+        return _tool_result(_workspace_accepted_payload(ws))
 
     @mcp.tool(name="awf_retry_workspace")
     async def awf_retry_workspace(
@@ -354,10 +392,29 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_list_workspaces")
     async def awf_list_workspaces(
+        status: WorkspaceStatus | None = Field(
+            default=None,
+            description="Optional workspace status filter.",
+        ),
+        agent: AgentRuntime | None = Field(
+            default=None,
+            description="Optional agent runtime filter.",
+        ),
+        repo_url: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="Optional repository URL filter.",
+        ),
         limit: int = Field(default=50, ge=1, le=500),
     ) -> list[dict[str, Any]]:
         """List workspaces, newest first."""
-        rows = await service.list(limit=limit)
+        rows = await service.list(
+            workspace_status=status,
+            agent=agent,
+            repo_url=repo_url,
+            limit=limit,
+        )
         return [r.model_dump(mode="json") for r in rows]
 
     @mcp.tool(name="awf_wait_for_workspace")
@@ -406,7 +463,7 @@ def build_mcp_server(
             description="Also stop the workspace compose stack after requesting cancellation.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -440,7 +497,7 @@ def build_mcp_server(
             description="Optional operator reason to record with the stop request.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -481,7 +538,7 @@ def build_mcp_server(
             description="Remove the workspace git worktree during cleanup.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -570,16 +627,23 @@ def build_mcp_server(
     @mcp.tool(name="awf_list_workspace_logs")
     async def awf_list_workspace_logs(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
-    ) -> list[dict[str, Any]] | None:
-        """List indexed durable log streams for one workspace."""
+    ) -> CallToolResult:
+        """List indexed durable log streams for one workspace using the REST envelope."""
         rows = await service.list_logs(workspace_id)
-        return [row.model_dump(mode="json") for row in rows] if rows is not None else None
+        if rows is None:
+            return _null_tool_result()
+        response = WorkspaceLogListResponse(
+            items=rows,
+            limit=len(rows),
+            cursor=None,
+        )
+        return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_list_merge_queue")
     async def awf_list_merge_queue(
         repo_url: str | None = Field(default=None, min_length=1, max_length=512),
         base_branch: str | None = Field(default=None, min_length=1, max_length=256),
-        workspace_status: WorkspaceStatus | None = Field(default=None),
+        status: WorkspaceStatus | None = Field(default=None),
         limit: int = Field(default=50, ge=1, le=500),
         cursor: str | None = Field(default=None, max_length=128),
     ) -> StructuredToolResult:
@@ -590,7 +654,7 @@ def build_mcp_server(
                     session,
                     repo_url=repo_url,
                     base_branch=base_branch,
-                    workspace_status=workspace_status,
+                    workspace_status=status,
                     limit=limit,
                     cursor=cursor,
                 )
@@ -600,7 +664,7 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_list_workspace_overview")
     async def awf_list_workspace_overview(
-        workspace_status: WorkspaceStatus | None = Field(default=None),
+        status: WorkspaceStatus | None = Field(default=None),
         agent: AgentRuntime | None = Field(default=None),
         repo_url: str | None = Field(default=None, min_length=1, max_length=512),
         limit: int = Field(default=50, ge=1, le=500),
@@ -611,7 +675,7 @@ def build_mcp_server(
             try:
                 response = await list_workspace_overview_response(
                     session,
-                    workspace_status=workspace_status,
+                    workspace_status=status,
                     agent=agent,
                     repo_url=repo_url,
                     limit=limit,
@@ -868,12 +932,21 @@ def build_mcp_server(
         ),
     ) -> dict[str, Any] | None:
         """Read a bounded chunk from an indexed durable log stream."""
-        return await service.read_log(
+        result = await service.read_log(
             workspace_id,
             stream_id,
             offset=offset,
             limit_bytes=limit_bytes,
         )
+        if result is None:
+            return None
+        return WorkspaceLogReadResponse(
+            stream_id=str(result["stream_id"]),
+            offset=int(result["offset"]),
+            next_offset=int(result["next_offset"]),
+            eof=bool(result["eof"]),
+            data=str(result["text"]),
+        ).model_dump(mode="json")
 
     @mcp.tool(name="awf_list_tasks")
     async def awf_list_tasks(
@@ -934,7 +1007,7 @@ def build_mcp_server(
             default=None,
             description="Optional task class filter.",
         ),
-        workspace_status: WorkspaceStatus | None = Field(
+        status: WorkspaceStatus | None = Field(
             default=None,
             description="Optional workspace status filter.",
         ),
@@ -952,7 +1025,7 @@ def build_mcp_server(
                     session,
                     repo_url=repo_url,
                     task_class=task_class,
-                    status=workspace_status,
+                    status=status,
                     limit=limit,
                     cursor=cursor,
                 )
@@ -1148,7 +1221,7 @@ def build_mcp_server(
             description="Optional operator reason to record with the remonitor request.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -1190,7 +1263,7 @@ def build_mcp_server(
             description="Optional validation tier hint.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -1227,7 +1300,7 @@ def build_mcp_server(
             description="Optional operator reason for refresh.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -1263,7 +1336,7 @@ def build_mcp_server(
             description="Optional operator reason for rebase.",
         ),
         idempotency_key: str | None = Field(
-            default=None,
+            ...,
             max_length=128,
             json_schema_extra={"minLength": 1},
             description="Required idempotency key for safe retries after timeout or dropped response.",
@@ -1331,6 +1404,19 @@ def _provider_readiness_blocked_result(
     return _workspace_error_result(exc)
 
 
+def _task_external_id_conflict_result(exc: TaskExternalIdConflictError) -> CallToolResult:
+    error = ErrorResponse(
+        error_code="TASK_EXTERNAL_ID_CONFLICT",
+        message=(
+            "Task external_id is already associated with a different "
+            "repo/base/task-class/owned-path scope; use a unique "
+            "external_id for this backlog slice or retry the original scope."
+        ),
+        detail={"external_id": exc.external_id},
+    )
+    return _tool_result(error.model_dump(mode="json"), is_error=True)
+
+
 def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
     error = ErrorResponse(
         error_code=exc.error_code,
@@ -1351,8 +1437,33 @@ def _required_idempotency_key(idempotency_key: str | None) -> str | None:
     return idempotency_key if idempotency_key.strip() else None
 
 
+def _normalize_mcp_idempotency_key(idempotency_key: str | None) -> str | None:
+    if idempotency_key is None:
+        return None
+    normalized = idempotency_key.strip()
+    return normalized or None
+
+
 def _idempotency_key_error() -> CallToolResult:
     return _error_result("INVALID_REQUEST", _IDEMPOTENCY_KEY_REQUIRED_MESSAGE)
+
+
+def _workspace_accepted_payload(ws: Any) -> dict[str, Any]:
+    workspace_id = ws.id
+    warnings = [
+        warning.model_dump(mode="json") if hasattr(warning, "model_dump") else warning
+        for warning in ws.coordination_warnings
+    ]
+    return WorkspaceAcceptedResponse(
+        workspace_id=workspace_id,
+        status=ws.status,
+        version=ws.version,
+        status_url=f"/v1/workspaces/{workspace_id}",
+        events_url=f"/v1/workspaces/{workspace_id}/events",
+        accepted_at=ws.created_at,
+        warnings=warnings,
+        provider_readiness_preflight=ws.provider_readiness_preflight,
+    ).model_dump(mode="json")
 
 
 def _null_tool_result() -> CallToolResult:
@@ -1370,6 +1481,24 @@ async def _provided_disk_check(
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+async def _workspace_admission_disk_check(
+    *,
+    disk_check_provider: DiskCheckProvider | None,
+    settings: Settings,
+) -> DiskCheck:
+    provided = await _provided_disk_check(
+        disk_check_provider=disk_check_provider,
+        settings=settings,
+    )
+    if provided is not None:
+        return provided
+    return await asyncio.to_thread(
+        check_disk_space,
+        settings.work_dir,
+        min_free_bytes=settings.min_free_disk_bytes,
+    )
 
 
 async def _provided_local_capacity(

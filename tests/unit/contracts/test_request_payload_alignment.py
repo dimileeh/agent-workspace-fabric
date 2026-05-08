@@ -8,21 +8,34 @@ backend call — which is the single source of truth for downstream behavior.
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from awf.api.schemas import (
     PullRequestMonitorAdoptionRequest,
+    PullRequestMonitorAdoptionResponse,
     WorkspaceControlResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
+    WorkspaceRetryResponse,
 )
-from awf.db.enums import OperationStatus, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Operation
 from awf.mcp.server import build_mcp_server
-from awf.service.workspaces import WorkspaceService
+from awf.service.workspaces import WorkspaceRetryResult, WorkspaceService
 from tests.unit.contracts._capabilities import CAPABILITIES_BY_NAME
+from tests.unit.contracts._control_scenarios import (
+    CONTROL_CAPABILITY_NAMES,
+    call_mcp_control,
+    call_rest_control,
+    response_operation_id_field,
+)
 from tests.unit.contracts._stack import ContractStack
+
+REQUEST_PAYLOAD_CONTROL_CAPABILITY_NAMES = (*CONTROL_CAPABILITY_NAMES, "retry_workspace")
 
 
 def _stub_control_response(workspace_id: str, operation_id: str = "op_stub") -> WorkspaceControlResponse:
@@ -32,6 +45,22 @@ def _stub_control_response(workspace_id: str, operation_id: str = "op_stub") -> 
         operation_status=OperationStatus.succeeded,
         status=WorkspaceStatus.cancelled,
         message="stub",
+    )
+
+
+def _stub_retry_response(
+    source_workspace_id: str,
+    operation_id: str = "op_retry_contract",
+) -> WorkspaceRetryResponse:
+    new_workspace_id = f"{source_workspace_id}_retry"
+    return WorkspaceRetryResponse(
+        source_workspace_id=source_workspace_id,
+        new_workspace_id=new_workspace_id,
+        operation_id=operation_id,
+        status=WorkspaceStatus.requested,
+        attempt_number=2,
+        status_url=f"/v1/workspaces/{new_workspace_id}",
+        events_url=f"/v1/workspaces/{new_workspace_id}/events",
     )
 
 
@@ -146,6 +175,46 @@ class _RequestRecordingService:
         self.create_calls: list[WorkspaceCreateRequest] = []
         self.create_v2_calls: list[WorkspaceCreateV2Request] = []
         self.adopt_calls: list[PullRequestMonitorAdoptionRequest] = []
+
+    async def create_v2(
+        self,
+        req: WorkspaceCreateV2Request,
+        *,
+        idempotency_key: str | None = None,
+        disk_check: Any | None = None,
+        disk_check_factory: Any | None = None,
+    ) -> SimpleNamespace:
+        self.create_v2_calls.append(req)
+        return SimpleNamespace(
+            id="ws_mcp_create_v2_contract",
+            status=WorkspaceStatus.requested,
+            version=1,
+            coordination_warnings=[],
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            provider_readiness_preflight=None,
+        )
+
+    async def adopt_pull_request_monitor(
+        self,
+        req: PullRequestMonitorAdoptionRequest,
+    ) -> PullRequestMonitorAdoptionResponse:
+        self.adopt_calls.append(req)
+        return PullRequestMonitorAdoptionResponse(
+            workspace_id="ws_mcp_adopt_contract",
+            status=WorkspaceStatus.requested,
+            version=1,
+            repo_slug=req.repo_slug or "owner/repo",
+            repo_url=req.repo_url or "git@github.com:owner/repo.git",
+            pr_number=req.pr_number or 42,
+            pr_url=req.pr_url or "https://github.com/owner/repo/pull/42",
+            head_ref="feature",
+            base_ref="main",
+            auto_merge=req.auto_merge,
+            attached_existing=True,
+            status_url="/v1/workspaces/ws_mcp_adopt_contract",
+            events_url="/v1/workspaces/ws_mcp_adopt_contract/events",
+            logs_url="/v1/workspaces/ws_mcp_adopt_contract/logs",
+        )
 
 
 @pytest.mark.unit
@@ -326,27 +395,35 @@ async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
     }
     rest_request = WorkspaceCreateV2Request.model_validate(rest_payload)
 
-    mcp_request = WorkspaceCreateV2Request(
-        repo={"url": "git@github.com:example/x.git", "base_branch": "main"},
-        task={
-            "title": "Contract title",
-            "prompt": "Contract prompt.",
-            "kind": "feature_branch_pr",
+    recorder = _RequestRecordingService()
+    mcp = build_mcp_server(service=cast(WorkspaceService, recorder))
+
+    result = await mcp.call_tool(
+        "awf_create_workspace_v2",
+        {
+            "repo_url": "git@github.com:example/x.git",
+            "base_branch": "main",
+            "task_title": "Contract title",
+            "task_prompt": "Contract prompt.",
+            "task_kind": "feature_branch_pr",
             "agent": "codex",
             "model": None,
-            "external_id": None,
+            "task_external_id": None,
             "task_class": None,
             "owned_paths": [],
+            "profile_ref": "auto",
+            "profile": None,
+            "validation_commands": ["pytest -q"],
+            "requested_tier": 1,
             "auto_merge": True,
             "initial_review_grace_period_seconds": None,
-        },
-        workspace={"profile_ref": "auto", "profile": None},
-        validation={"commands": ["pytest -q"], "requested_tier": 1},
-        preflight={
             "provider_readiness_override": False,
             "provider_readiness_override_reason": None,
         },
     )
+    assert getattr(result, "isError", False) is False
+    assert len(recorder.create_v2_calls) == 1
+    mcp_request = recorder.create_v2_calls[0]
     assert rest_request.model_dump(mode="json") == mcp_request.model_dump(mode="json")
 
 
@@ -368,18 +445,29 @@ async def test_mcp_adoption_hydrates_canonical_request_model() -> None:
     }
     rest_request = PullRequestMonitorAdoptionRequest.model_validate(rest_payload)
 
-    mcp_request = PullRequestMonitorAdoptionRequest(
-        repo_slug="owner/repo",
-        pr_number=42,
-        agent="codex",
-        profile_ref="auto",
-        profile=None,
-        auto_merge=True,
-        initial_review_grace_period_seconds=None,
-        task_title=None,
-        task_prompt=None,
-        reason=None,
+    recorder = _RequestRecordingService()
+    mcp = build_mcp_server(service=cast(WorkspaceService, recorder))
+
+    result = await mcp.call_tool(
+        "awf_adopt_pull_request_monitor",
+        {
+            "repo_url": None,
+            "repo_slug": "owner/repo",
+            "pr_number": 42,
+            "pr_url": None,
+            "agent": "codex",
+            "profile_ref": "auto",
+            "profile": None,
+            "auto_merge": True,
+            "initial_review_grace_period_seconds": None,
+            "task_title": None,
+            "task_prompt": None,
+            "reason": None,
+        },
     )
+    assert getattr(result, "isError", False) is False
+    assert len(recorder.adopt_calls) == 1
+    mcp_request = recorder.adopt_calls[0]
     assert rest_request.model_dump(mode="json", exclude_none=True) == (
         mcp_request.model_dump(mode="json", exclude_none=True)
     )
@@ -420,3 +508,410 @@ async def test_mcp_destroy_invokes_service_with_canonical_kwargs(
             },
         )
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("path", "body", "method_name", "operation_type", "expected_status"),
+    [
+        (
+            "/v1/workspaces/ws_canonical/stop",
+            {"reason": "operator recovery", "stop_stack": False},
+            "stop_workspace",
+            None,
+            200,
+        ),
+        (
+            "/v1/workspaces/ws_canonical/remonitor",
+            {"reason": "operator recovery", "stop_stack": False},
+            "remonitor_workspace",
+            None,
+            200,
+        ),
+        (
+            "/v1/workspaces/ws_canonical/refresh",
+            {"reason": "operator recovery", "requested_tier": 2},
+            "request_refresh_workspace",
+            OperationType.refresh,
+            202,
+        ),
+        (
+            "/v1/workspaces/ws_canonical/rebase",
+            {"reason": "operator recovery", "requested_tier": 2},
+            "request_rebase_workspace",
+            OperationType.rebase,
+            202,
+        ),
+    ],
+)
+async def test_rest_controls_ignore_deprecated_body_fields(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    body: dict[str, object],
+    method_name: str,
+    operation_type: OperationType | None,
+    expected_status: int,
+) -> None:
+    """REST still accepts deprecated no-op fields while calling the canonical backend."""
+    from awf.service import controls as controls_module
+
+    calls: list[dict[str, Any]] = []
+
+    async def record_request(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse | Operation:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        if operation_type is not None:
+            return _stub_operation(workspace_id, operation_type)
+        return _stub_control_response(workspace_id, operation_id="op_legacy_contract")
+
+    monkeypatch.setattr(controls_module.WorkspaceControlService, method_name, record_request)
+
+    response = await contract_stack.client.post(
+        path,
+        headers={
+            **contract_stack.auth_headers,
+            "Idempotency-Key": "ignored-field",
+            "If-Match": "5",
+        },
+        json=body,
+    )
+
+    assert response.status_code == expected_status, response.text
+    assert calls == [
+        {
+            "workspace_id": "ws_canonical",
+            "reason": "operator recovery",
+            "idempotency_key": "ignored-field",
+            "expected_version": 5,
+        }
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("path", "body", "method_name", "operation_type"),
+    [
+        (
+            "/v1/workspaces/ws_canonical/stop",
+            {"reason": "operator recovery", "unknown_legacy_field": True},
+            "stop_workspace",
+            None,
+        ),
+        (
+            "/v1/workspaces/ws_canonical/remonitor",
+            {"reason": "operator recovery", "unknown_legacy_field": True},
+            "remonitor_workspace",
+            None,
+        ),
+        (
+            "/v1/workspaces/ws_canonical/refresh",
+            {"reason": "operator recovery", "unknown_legacy_field": True},
+            "request_refresh_workspace",
+            OperationType.refresh,
+        ),
+        (
+            "/v1/workspaces/ws_canonical/rebase",
+            {"reason": "operator recovery", "unknown_legacy_field": True},
+            "request_rebase_workspace",
+            OperationType.rebase,
+        ),
+    ],
+)
+async def test_rest_controls_reject_unknown_body_fields(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    body: dict[str, object],
+    method_name: str,
+    operation_type: OperationType | None,
+) -> None:
+    """REST rejects fields that were never part of the compatibility contract."""
+    from awf.service import controls as controls_module
+
+    calls: list[dict[str, Any]] = []
+
+    async def record_request(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse | Operation:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        if operation_type is not None:
+            return _stub_operation(workspace_id, operation_type)
+        return _stub_control_response(workspace_id, operation_id="op_legacy_contract")
+
+    monkeypatch.setattr(controls_module.WorkspaceControlService, method_name, record_request)
+
+    response = await contract_stack.client.post(
+        path,
+        headers={
+            **contract_stack.auth_headers,
+            "Idempotency-Key": "unknown-field",
+            "If-Match": "5",
+        },
+        json=body,
+    )
+
+    assert response.status_code == 422, response.text
+    assert calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", REQUEST_PAYLOAD_CONTROL_CAPABILITY_NAMES)
+async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Every registered control normalizes REST headers/body/query and MCP args alike."""
+    from awf.api.routes import workspaces as workspaces_route
+    from awf.service import controls as controls_module
+
+    calls: list[dict[str, Any]] = []
+
+    async def record_cancel(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        stop_stack: bool,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "stop_stack": stop_stack,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_control_response(workspace_id, operation_id="op_cancel_contract")
+
+    async def record_stop_or_remonitor(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_control_response(workspace_id, operation_id=f"op_{capability_name}")
+
+    async def record_destroy(
+        self: Any,
+        workspace_id: str,
+        *,
+        force: bool,
+        remove_volumes: bool,
+        remove_worktree: bool,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "force": force,
+                "remove_volumes": remove_volumes,
+                "remove_worktree": remove_worktree,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_control_response(workspace_id, operation_id="op_destroy_contract")
+
+    async def record_refresh(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_operation(workspace_id, OperationType.refresh)
+
+    async def record_validate(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        requested_tier: int | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "requested_tier": requested_tier,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_operation(workspace_id, OperationType.validate)
+
+    async def record_rebase(
+        self: Any,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+                "expected_version": expected_version,
+            }
+        )
+        return _stub_operation(workspace_id, OperationType.rebase)
+
+    async def record_retry_row(
+        session: Any,
+        workspace_id: str,
+        *,
+        provider_readiness_override: bool = False,
+        provider_readiness_override_reason: str | None = None,
+        settings: Any | None = None,
+        provider_environ: Any | None = None,
+        run_subprocess: Any | None = None,
+        http_get: Any | None = None,
+    ) -> WorkspaceRetryResult:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "provider_readiness_override": provider_readiness_override,
+                "provider_readiness_override_reason": provider_readiness_override_reason,
+            }
+        )
+        response = _stub_retry_response(workspace_id)
+        return WorkspaceRetryResult(
+            source_workspace_id=response.source_workspace_id,
+            new_workspace=SimpleNamespace(
+                id=response.new_workspace_id,
+                status=response.status,
+                task_policy={},
+            ),
+            operation=SimpleNamespace(id=response.operation_id),
+            attempt_number=response.attempt_number,
+        )
+
+    async def record_retry_service(
+        self: Any,
+        workspace_id: str,
+        *,
+        provider_readiness_override: bool = False,
+        provider_readiness_override_reason: str | None = None,
+    ) -> WorkspaceRetryResponse:
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "provider_readiness_override": provider_readiness_override,
+                "provider_readiness_override_reason": provider_readiness_override_reason,
+            }
+        )
+        return _stub_retry_response(workspace_id)
+
+    monkeypatch.setattr(controls_module.WorkspaceControlService, "cancel_workspace", record_cancel)
+    monkeypatch.setattr(controls_module.WorkspaceControlService, "stop_workspace", record_stop_or_remonitor)
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService,
+        "remonitor_workspace",
+        record_stop_or_remonitor,
+    )
+    monkeypatch.setattr(controls_module.WorkspaceControlService, "destroy_workspace", record_destroy)
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService,
+        "request_refresh_workspace",
+        record_refresh,
+    )
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService,
+        "request_validate_workspace",
+        record_validate,
+    )
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService,
+        "request_rebase_workspace",
+        record_rebase,
+    )
+    monkeypatch.setattr(workspaces_route, "retry_workspace_row", record_retry_row)
+    monkeypatch.setattr(WorkspaceService, "retry_workspace", record_retry_service)
+
+    rest_response = await call_rest_control(
+        contract_stack,
+        capability_name,
+        workspace_id="ws_canonical",
+        idempotency_key="shared-key",
+        expected_version=11,
+    )
+    mcp_response = await call_mcp_control(
+        contract_stack,
+        capability_name,
+        workspace_id="ws_canonical",
+        idempotency_key="shared-key",
+        expected_version=11,
+    )
+
+    assert rest_response.status_code in {200, 202}, rest_response.text
+    assert mcp_response.isError is False, mcp_response.structuredContent
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    operation_field = response_operation_id_field(capability_name)
+    assert operation_field in rest_response.json()
+    assert operation_field in mcp_response.structuredContent
+
+
+def _stub_operation(workspace_id: str, operation_type: OperationType) -> Operation:
+    return Operation(
+        id=f"op_{operation_type.value}_contract",
+        workspace_id=workspace_id,
+        type=operation_type.value,
+        status=OperationStatus.pending.value,
+        payload={"source": "contract"},
+        idempotency_key="shared-key",
+        created_at=datetime.now(UTC),
+    )

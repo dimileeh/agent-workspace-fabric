@@ -24,7 +24,15 @@ from awf.db.repositories import WorkspaceRepository
 from tests.unit.contracts._capabilities import (
     CAPABILITIES_BY_NAME,
     control_capabilities,
+    normalize_mcp_error_body,
     normalize_rest_error_body,
+)
+from tests.unit.contracts._control_scenarios import (
+    CONTROL_CAPABILITY_NAMES,
+    call_mcp_control,
+    call_rest_control,
+    install_control_side_effect_stubs,
+    seed_workspace_for_control,
 )
 from tests.unit.contracts._stack import ContractStack
 
@@ -198,3 +206,104 @@ async def test_rest_stale_if_match_does_not_mutate(
         assert ws is not None
         assert ws.version == version, "stale If-Match must not mutate workspace"
         assert ws.status != "cancelled"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+async def test_rest_stale_if_match_returns_version_conflict_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Every registered versioned control rejects stale REST ``If-Match``."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, version = await seed_workspace_for_control(
+        contract_stack.factory,
+        capability_name,
+    )
+    stale = version + 1
+
+    response = await call_rest_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=f"{capability_name}-stale-rest",
+        expected_version=stale,
+    )
+
+    assert response.status_code == 409, response.text
+    envelope = normalize_rest_error_body(response.json())
+    assert envelope["error_code"] == "VERSION_CONFLICT"
+    assert envelope["detail"] == {"expected_version": stale, "actual_version": version}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+async def test_mcp_stale_expected_version_returns_version_conflict_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Every registered versioned control rejects stale MCP ``expected_version``."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, version = await seed_workspace_for_control(
+        contract_stack.factory,
+        capability_name,
+    )
+    stale = version + 1
+
+    result = await call_mcp_control(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=f"{capability_name}-stale-mcp",
+        expected_version=stale,
+    )
+
+    assert result.isError is True, result.structuredContent
+    envelope = normalize_mcp_error_body(result.structuredContent)
+    assert envelope["error_code"] == "VERSION_CONFLICT"
+    assert envelope["detail"] == {"expected_version": stale, "actual_version": version}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", CONTROL_CAPABILITY_NAMES)
+async def test_rest_malformed_if_match_returns_invalid_request_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Malformed REST ``If-Match`` is a shared invalid-request envelope for controls."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, _version = await seed_workspace_for_control(
+        contract_stack.factory,
+        capability_name,
+    )
+    capability = CAPABILITIES_BY_NAME[capability_name]
+
+    response = await contract_stack.client.request(
+        capability.rest_method,
+        capability.rest_path.format(workspace_id=workspace_id),
+        headers={
+            **contract_stack.auth_headers,
+            "Idempotency-Key": f"{capability_name}-malformed-rest",
+            "If-Match": "not-a-version",
+        },
+        json=(
+            {"reason": "malformed", "stop_stack": True}
+            if capability_name == "cancel_workspace"
+            else {"reason": "malformed"}
+        )
+        if capability.rest_method != "DELETE"
+        else None,
+        params=(
+            {"force": True, "remove_volumes": True, "remove_worktree": False}
+            if capability_name == "destroy_workspace"
+            else None
+        ),
+    )
+
+    assert response.status_code == 400, response.text
+    envelope = normalize_rest_error_body(response.json())
+    assert envelope["error_code"] == "INVALID_REQUEST"
+    assert "If-Match" in envelope["message"]

@@ -32,7 +32,7 @@ import typer
 from click.core import ParameterSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
@@ -1650,16 +1650,26 @@ def workspace_adopt_pr(
 
 @workspace_app.command("list")
 def workspace_list(
+    status: WorkspaceStatus | None = typer.Option(None, "--status"),
+    agent: AgentRuntime | None = typer.Option(None, "--agent"),
+    repo_url: str | None = typer.Option(None, "--repo-url"),
     limit: int = typer.Option(50, "--limit"),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """List workspaces (newest first)."""
+    params: dict[str, Any] = {"limit": limit}
+    if status is not None:
+        params["status"] = status.value
+    if agent is not None:
+        params["agent"] = agent.value
+    if repo_url is not None:
+        params["repo_url"] = repo_url
     response = _call(
         "GET",
         "/v1/workspaces",
         base_url=_base_url(base_url),
-        params={"limit": limit},
+        params=params,
     )
     _handle_response(response, fmt)
 

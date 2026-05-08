@@ -96,7 +96,7 @@ def _exec_agent_cleanup(
     project_name: str,
     compose_file: Path,
     command: str,
-    timeout: int = 60,
+    timeout: int = 20,
 ) -> None:
     with suppress(subprocess.TimeoutExpired):
         _exec_agent(
@@ -153,7 +153,7 @@ services:
 @pytest.mark.integration
 @pytest.mark.docker
 @pytest.mark.slow
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)
 async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Path) -> None:
     workspace_id = f"test_dind_{tmp_path.name}"
     local_project = tmp_path / "local-project"

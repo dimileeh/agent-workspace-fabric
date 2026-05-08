@@ -40,6 +40,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.service import workspaces as workspaces_service
 from awf.service.disk import DiskCheck
 
 pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
@@ -188,7 +189,7 @@ def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() ->
     payload = WorkspaceCreateV2Request.model_validate(body)
     existing = SimpleNamespace(task_policy={})
 
-    assert workspaces_route._requested_task_provider_recovery_policy(payload) == {
+    assert workspaces_service._requested_task_provider_recovery_policy(payload) == {  # noqa: SLF001
         "fallbacks": [
             {
                 "agent": "opencode",
@@ -198,7 +199,7 @@ def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() ->
         ],
         "max_fallback_attempts": 1,
     }
-    assert workspaces_route._stored_task_provider_readiness_override(existing) == (
+    assert workspaces_service._stored_task_provider_readiness_override(existing) == (  # noqa: SLF001
         False,
         None,
     )
@@ -206,12 +207,12 @@ def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() ->
 
 @pytest.mark.unit
 def test_provider_readiness_override_reason_match_redaction_edges() -> None:
-    assert workspaces_route._override_reasons_match("same", "same") is True
-    assert workspaces_route._override_reasons_match(None, "reason") is False
-    assert workspaces_route._override_reasons_match("reason", None) is False
-    assert workspaces_route._override_reasons_match("stored", "requested") is False
+    assert workspaces_service._override_reasons_match("same", "same") is True  # noqa: SLF001
+    assert workspaces_service._override_reasons_match(None, "reason") is False  # noqa: SLF001
+    assert workspaces_service._override_reasons_match("reason", None) is False  # noqa: SLF001
+    assert workspaces_service._override_reasons_match("stored", "requested") is False  # noqa: SLF001
     assert (
-        workspaces_route._override_reasons_match(
+        workspaces_service._override_reasons_match(  # noqa: SLF001
             "stored",
             "prefix-secret-suffix",
             stored_redaction_parts=["prefix-", "-suffix"],
@@ -234,15 +235,21 @@ def test_provider_readiness_override_reason_match_redaction_edges() -> None:
     )
 
     assert (
-        workspaces_route._stored_task_provider_readiness_override_redaction_parts(missing_preflight)
+        workspaces_service._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+            missing_preflight
+        )
         is None
     )
     assert (
-        workspaces_route._stored_task_provider_readiness_override_redaction_parts(malformed_parts)
+        workspaces_service._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+            malformed_parts
+        )
         is None
     )
     assert (
-        workspaces_route._stored_task_provider_readiness_override_redaction_parts(non_string_parts)
+        workspaces_service._stored_task_provider_readiness_override_redaction_parts(  # noqa: SLF001
+            non_string_parts
+        )
         is None
     )
 
@@ -893,6 +900,90 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
+class TestCreateWorkspaceV2ResourceIdempotency:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("resources", "expected_steady_cpu"),
+        [
+            pytest.param({}, 2.0, id="all-defaulted"),
+            pytest.param({"steady_state_cpu_cores": 4.0}, 4.0, id="partial-defaulted"),
+        ],
+    )
+    async def test_idempotent_replay_preserves_resource_defaults_after_settings_change(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        resources: dict[str, object],
+        expected_steady_cpu: float,
+    ) -> None:
+        app, client = disk_app_and_client
+        old_settings = Settings(
+            _env_file=None,
+            workspace_steady_cpu=2.0,
+            workspace_steady_memory_gb=6.0,
+            workspace_peak_cpu=3.0,
+            workspace_peak_memory_gb=8.0,
+        )
+        new_settings = Settings(
+            _env_file=None,
+            workspace_steady_cpu=7.0,
+            workspace_steady_memory_gb=14.0,
+            workspace_peak_cpu=9.0,
+            workspace_peak_memory_gb=18.0,
+        )
+        active_settings = old_settings
+        app.dependency_overrides[get_settings] = lambda: active_settings
+        payload = {**_V2_MINIMAL_BODY, "resources": resources}
+        headers = {
+            "Idempotency-Key": f"resource-default-replay-{expected_steady_cpu:g}",
+        }
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        active_settings = new_settings
+        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+
+        detail = await client.get(f"/v1/workspaces/{first.json()['workspace_id']}")
+        reservation = detail.json()["active_resource_reservation"]
+        assert reservation["steady_cpu"] == expected_steady_cpu
+        assert reservation["steady_memory_gb"] == 6.0
+        assert reservation["peak_cpu"] == 3.0
+        assert reservation["peak_memory_gb"] == 8.0
+
+    @pytest.mark.unit
+    async def test_defaulted_resource_create_conflicts_with_explicit_default_replay(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: Settings(
+            _env_file=None,
+            workspace_steady_cpu=2.0,
+            workspace_steady_memory_gb=6.0,
+            workspace_peak_cpu=3.0,
+            workspace_peak_memory_gb=8.0,
+        )
+        headers = {"Idempotency-Key": "resource-default-explicit-conflict"}
+        replay_payload = {
+            **_V2_MINIMAL_BODY,
+            "resources": {
+                "steady_state_cpu_cores": 2.0,
+                "steady_state_memory_gb": 6.0,
+                "peak_cpu_cores": 3.0,
+                "peak_memory_gb": 8.0,
+            },
+        }
+
+        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 409
+        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
 class TestWorkspaceCreateProviderReadinessPreflight:
     @pytest.fixture(autouse=True)
     def _clear_provider_auth_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1200,12 +1291,45 @@ class TestWorkspaceCreateProviderReadinessPreflight:
                 settings=Settings(_env_file=None),
                 session=session,
             )
+            tier_conflict = await workspaces_route.create_workspace_v2(
+                WorkspaceCreateV2Request.model_validate(
+                    {
+                        **_V2_MINIMAL_BODY,
+                        "validation": {
+                            **_V2_MINIMAL_BODY["validation"],
+                            "requested_tier": 2,
+                        },
+                    }
+                ),
+                _request_with_disk_check(),
+                idempotency_key="direct-v2-replay",
+                settings=Settings(_env_file=None),
+                session=session,
+            )
+            resource_conflict = await workspaces_route.create_workspace_v2(
+                WorkspaceCreateV2Request.model_validate(
+                    {
+                        **_V2_MINIMAL_BODY,
+                        "resources": {"steady_state_cpu_cores": 4.0},
+                    }
+                ),
+                _request_with_disk_check(),
+                idempotency_key="direct-v2-replay",
+                settings=Settings(_env_file=None),
+                session=session,
+            )
 
         assert replay.workspace_id == first.json()["workspace_id"]
         assert replay.warnings == []
         assert isinstance(conflict, JSONResponse)
         assert conflict.status_code == 409
         assert json.loads(conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
+        assert isinstance(tier_conflict, JSONResponse)
+        assert tier_conflict.status_code == 409
+        assert json.loads(tier_conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
+        assert isinstance(resource_conflict, JSONResponse)
+        assert resource_conflict.status_code == 409
+        assert json.loads(resource_conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
     async def test_v2_rejects_external_id_reuse_for_different_scope(
@@ -1951,6 +2075,44 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("field", "first_value", "replay_value"),
+        [
+            ("priority", 25, 26),
+            ("human_boost", 2, 3),
+        ],
+    )
+    async def test_idempotency_conflicts_when_scheduler_policy_changes(
+        self,
+        client: AsyncClient,
+        field: str,
+        first_value: int,
+        replay_value: int,
+    ) -> None:
+        headers = {"Idempotency-Key": f"scheduler-policy-{field}-key"}
+        first_payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                field: first_value,
+            },
+        }
+        replay_payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                field: replay_value,
+            },
+        }
+
+        first = await client.post("/v2/workspaces", json=first_payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 409
+        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
     async def test_accepts_task_out_of_scope_change_policy_metadata(
         self,
         client: AsyncClient,
@@ -2013,19 +2175,23 @@ class TestCreateWorkspaceV2PolicyMetadata:
         )
         payload = WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY)
 
-        assert workspaces_route._resolved_profile_requested_tier(workspace) == 2  # type: ignore[arg-type]
-        assert workspaces_route._resolved_profile_requested_tier(malformed_workspace) is None  # type: ignore[arg-type]
-        assert workspaces_route._resolved_profile_requested_tier(missing_profile_workspace) is None  # type: ignore[arg-type]
+        assert workspaces_service._resolved_profile_requested_tier(workspace) == 2  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._resolved_profile_requested_tier(malformed_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._resolved_profile_requested_tier(missing_profile_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
         assert (
-            workspaces_route._resolved_profile_requested_tier(malformed_validation_workspace)
+            workspaces_service._resolved_profile_requested_tier(  # noqa: SLF001
+                malformed_validation_workspace
+            )
             is None
         )  # type: ignore[arg-type]
-        assert workspaces_route._stored_task_agent_model(workspace) == "gpt-test"  # type: ignore[arg-type]
-        assert workspaces_route._stored_task_agent_model(malformed_workspace) is None  # type: ignore[arg-type]
-        assert workspaces_route._stored_task_out_of_scope_policy(workspace) == {"mode": "warn"}  # type: ignore[arg-type]
-        assert workspaces_route._stored_task_out_of_scope_policy(malformed_workspace) is None  # type: ignore[arg-type]
-        assert workspaces_route._requested_task_out_of_scope_policy(payload) is None
-        assert workspaces_route._requested_task_out_of_scope_policy(policy_payload) == {
+        assert workspaces_service._stored_task_agent_model(workspace) == "gpt-test"  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._stored_task_agent_model(malformed_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._stored_task_out_of_scope_policy(workspace) == {  # type: ignore[arg-type]  # noqa: SLF001
+            "mode": "warn"
+        }
+        assert workspaces_service._stored_task_out_of_scope_policy(malformed_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
+        assert workspaces_service._requested_task_out_of_scope_policy(payload) is None  # noqa: SLF001
+        assert workspaces_service._requested_task_out_of_scope_policy(policy_payload) == {  # noqa: SLF001
             "mode": "block",
             "allowlist_patterns": [],
         }

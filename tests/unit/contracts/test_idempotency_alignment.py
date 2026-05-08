@@ -1,8 +1,8 @@
 """Idempotency contract: REST + MCP replay/conflict semantics, CLI header forwarding.
 
 REST cancel/stop/destroy/remonitor/validate/refresh/rebase require the
-``Idempotency-Key`` header. MCP variants require the same key as a tool
-arg and replay through the same backend coalescing path. CLI commands that
+``Idempotency-Key`` header. MCP variants require the same key as a tool arg
+and replay through the same backend coalescing path. CLI commands that
 declare ``--idempotency-key`` must forward it as ``Idempotency-Key``.
 """
 
@@ -22,8 +22,19 @@ from awf.cli.main import app as cli_app
 from awf.db.repositories import WorkspaceRepository
 from tests.unit.contracts._capabilities import (
     CAPABILITIES_BY_NAME,
+    control_capabilities,
     normalize_mcp_error_body,
     normalize_rest_error_body,
+)
+from tests.unit.contracts._control_scenarios import (
+    ALL_IDEMPOTENT_SURFACES,
+    call_mcp_idempotent_surface,
+    call_rest_idempotent_surface,
+    idempotent_conflict_error_code,
+    idempotent_response_identity_field,
+    idempotent_success_status,
+    install_control_side_effect_stubs,
+    seed_workspace_for_idempotent_surface,
 )
 from tests.unit.contracts._stack import ContractStack
 
@@ -263,6 +274,8 @@ async def test_rest_cancel_requires_idempotency_key_with_invalid_request(
         ),
         ("remonitor_workspace", {"reason": "mcp no-key"}),
         ("request_validation", {"reason": "mcp no-key", "requested_tier": 1}),
+        ("refresh_workspace", {"reason": "mcp no-key"}),
+        ("rebase_workspace", {"reason": "mcp no-key"}),
     ],
 )
 async def test_mcp_control_tools_reject_blank_idempotency_key(
@@ -287,3 +300,161 @@ async def test_mcp_control_tools_reject_blank_idempotency_key(
     envelope = normalize_mcp_error_body(result.structuredContent)
     assert envelope["error_code"] == "INVALID_REQUEST"
     assert envelope["message"] == "Idempotency-Key header is required for this endpoint."
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "capability",
+    control_capabilities(),
+    ids=lambda capability: capability.name,
+)
+async def test_mcp_control_tools_require_idempotency_key_in_schema(
+    contract_stack: ContractStack,
+    capability: Any,
+) -> None:
+    """MCP controls mirror REST's required ``Idempotency-Key`` at the tool boundary."""
+    assert capability.requires_idempotency_key is True
+    tools = {tool.name: tool for tool in await contract_stack.mcp.list_tools()}
+    assert "idempotency_key" in tools[capability.mcp_tool or ""].inputSchema.get("required", [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", ALL_IDEMPOTENT_SURFACES)
+async def test_rest_idempotent_surface_replay_returns_same_identity_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Every registered idempotent surface replays exactly at the REST boundary."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, _version = await seed_workspace_for_idempotent_surface(
+        contract_stack.factory,
+        capability_name,
+    )
+    key = f"{capability_name}-rest-replay"
+
+    first = await call_rest_idempotent_surface(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+    replay = await call_rest_idempotent_surface(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+
+    assert first.status_code == idempotent_success_status(capability_name), first.text
+    assert replay.status_code == idempotent_success_status(capability_name), replay.text
+    identity_field = idempotent_response_identity_field(capability_name, client="rest")
+    assert replay.json()[identity_field] == first.json()[identity_field]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", ALL_IDEMPOTENT_SURFACES)
+async def test_mcp_idempotent_surface_replay_returns_same_identity_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Every registered idempotent surface replays exactly at the MCP boundary."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, _version = await seed_workspace_for_idempotent_surface(
+        contract_stack.factory,
+        capability_name,
+    )
+    key = f"{capability_name}-mcp-replay"
+
+    first = await call_mcp_idempotent_surface(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+    replay = await call_mcp_idempotent_surface(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+
+    assert isinstance(first, CallToolResult)
+    assert isinstance(replay, CallToolResult)
+    assert first.isError is False, first.structuredContent
+    assert replay.isError is False, replay.structuredContent
+    identity_field = idempotent_response_identity_field(capability_name, client="mcp")
+    assert replay.structuredContent[identity_field] == first.structuredContent[identity_field]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", ALL_IDEMPOTENT_SURFACES)
+async def test_rest_idempotent_surface_conflict_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Same idempotency identity plus changed user payload conflicts on every REST surface."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, _version = await seed_workspace_for_idempotent_surface(
+        contract_stack.factory,
+        capability_name,
+    )
+    key = f"{capability_name}-rest-conflict"
+
+    first = await call_rest_idempotent_surface(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+    conflict = await call_rest_idempotent_surface(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+        variant="changed",
+    )
+
+    assert first.status_code == idempotent_success_status(capability_name), first.text
+    assert conflict.status_code == 409, conflict.text
+    envelope = normalize_rest_error_body(conflict.json())
+    assert envelope["error_code"] == idempotent_conflict_error_code(capability_name)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capability_name", ALL_IDEMPOTENT_SURFACES)
+async def test_mcp_idempotent_surface_conflict_for_registry(
+    contract_stack: ContractStack,
+    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+) -> None:
+    """Same idempotency identity plus changed user payload conflicts on every MCP surface."""
+    install_control_side_effect_stubs(contract_stack, monkeypatch)
+    workspace_id, _version = await seed_workspace_for_idempotent_surface(
+        contract_stack.factory,
+        capability_name,
+    )
+    key = f"{capability_name}-mcp-conflict"
+
+    first = await call_mcp_idempotent_surface(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+    )
+    conflict = await call_mcp_idempotent_surface(
+        contract_stack,
+        capability_name,
+        workspace_id=workspace_id,
+        idempotency_key=key,
+        variant="changed",
+    )
+
+    assert isinstance(first, CallToolResult)
+    assert isinstance(conflict, CallToolResult)
+    assert first.isError is False, first.structuredContent
+    assert conflict.isError is True, conflict.structuredContent
+    envelope = normalize_mcp_error_body(conflict.structuredContent)
+    assert envelope["error_code"] == idempotent_conflict_error_code(capability_name)

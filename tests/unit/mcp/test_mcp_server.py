@@ -28,6 +28,7 @@ from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
 from awf.service.controls import WorkspaceControlError
+from awf.service.disk import DiskCheck
 from awf.service.workspaces import OperationRowsPage, WorkspaceRetryError
 from tests.postgres import postgres_test_engine
 
@@ -139,6 +140,38 @@ def _operation_response() -> OperationResponse:
     )
 
 
+def _low_disk_check(settings: Settings) -> DiskCheck:
+    return DiskCheck(
+        path=settings.work_dir,
+        checked_path=settings.work_dir,
+        total_bytes=100,
+        used_bytes=95,
+        free_bytes=5,
+        percent_free=5.0,
+        threshold_bytes=10,
+        ok=False,
+        status="fail",
+        reason="INSUFFICIENT_DISK",
+        detail="free_bytes=5 threshold_bytes=10",
+    )
+
+
+def _ok_disk_check(settings: Settings) -> DiskCheck:
+    return DiskCheck(
+        path=settings.work_dir,
+        checked_path=settings.work_dir,
+        total_bytes=100,
+        used_bytes=20,
+        free_bytes=80,
+        percent_free=80.0,
+        threshold_bytes=10,
+        ok=True,
+        status="ok",
+        reason="SUFFICIENT_DISK",
+        detail=None,
+    )
+
+
 async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
     """Unwrap FastMCP's call_tool payload.
 
@@ -156,6 +189,11 @@ async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
     return payload
 
 
+def _workspace_id(payload: object) -> str:
+    assert isinstance(payload, dict)
+    return str(payload["workspace_id"])
+
+
 def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
     any_of = schema.get("anyOf")
     assert isinstance(any_of, list)
@@ -168,10 +206,10 @@ def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
 
 def _assert_idempotency_key_schema(schema: dict[str, object]) -> None:
     string_schema = _optional_string_schema(schema)
-    assert schema["default"] is None
     assert str(schema["description"]).startswith("Required idempotency key")
     assert schema["minLength"] == 1
     assert string_schema["maxLength"] == 128
+    assert "default" not in schema
 
 
 class TestToolRegistration:
@@ -246,7 +284,7 @@ class TestToolRegistration:
         cancel_required = tools["awf_cancel_workspace"].inputSchema.get("required", [])
         assert cancel_props["reason"]["default"] is None
         assert cancel_props["stop_stack"]["default"] is True
-        assert "idempotency_key" not in cancel_required
+        assert "idempotency_key" in cancel_required
         _assert_idempotency_key_schema(cancel_props["idempotency_key"])
         assert cancel_props["expected_version"]["default"] is None
         assert "expected_version" not in cancel_required
@@ -255,46 +293,52 @@ class TestToolRegistration:
         stop_required = tools["awf_stop_workspace"].inputSchema.get("required", [])
         assert stop_props["reason"]["default"] is None
         assert "stop_stack" not in stop_props
-        assert "idempotency_key" not in stop_required
+        assert "idempotency_key" in stop_required
         _assert_idempotency_key_schema(stop_props["idempotency_key"])
         assert stop_props["expected_version"]["default"] is None
+        assert "expected_version" not in stop_required
 
         destroy_props = tools["awf_destroy_workspace"].inputSchema["properties"]
         destroy_required = tools["awf_destroy_workspace"].inputSchema.get("required", [])
         assert destroy_props["force"]["default"] is False
         assert destroy_props["remove_volumes"]["default"] is True
         assert destroy_props["remove_worktree"]["default"] is True
-        assert "idempotency_key" not in destroy_required
+        assert "idempotency_key" in destroy_required
         _assert_idempotency_key_schema(destroy_props["idempotency_key"])
         assert destroy_props["expected_version"]["default"] is None
+        assert "expected_version" not in destroy_required
 
         remonitor_props = tools["awf_remonitor_workspace"].inputSchema["properties"]
         remonitor_required = tools["awf_remonitor_workspace"].inputSchema.get("required", [])
-        assert "idempotency_key" not in remonitor_required
+        assert "idempotency_key" in remonitor_required
         _assert_idempotency_key_schema(remonitor_props["idempotency_key"])
         assert remonitor_props["expected_version"]["default"] is None
+        assert "expected_version" not in remonitor_required
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
         validate_required = tools["awf_request_workspace_validation"].inputSchema.get(
             "required", []
         )
-        assert "idempotency_key" not in validate_required
+        assert "idempotency_key" in validate_required
         _assert_idempotency_key_schema(validate_props["idempotency_key"])
         assert validate_props["expected_version"]["default"] is None
+        assert "expected_version" not in validate_required
 
         refresh_props = tools["awf_refresh_workspace"].inputSchema["properties"]
         assert "idempotency_key" in refresh_props
         refresh_required = tools["awf_refresh_workspace"].inputSchema.get("required", [])
-        assert "idempotency_key" not in refresh_required
+        assert "idempotency_key" in refresh_required
         _assert_idempotency_key_schema(refresh_props["idempotency_key"])
         assert refresh_props["expected_version"]["default"] is None
+        assert "expected_version" not in refresh_required
 
         rebase_props = tools["awf_rebase_workspace"].inputSchema["properties"]
         assert "idempotency_key" in rebase_props
         rebase_required = tools["awf_rebase_workspace"].inputSchema.get("required", [])
-        assert "idempotency_key" not in rebase_required
+        assert "idempotency_key" in rebase_required
         _assert_idempotency_key_schema(rebase_props["idempotency_key"])
         assert rebase_props["expected_version"]["default"] is None
+        assert "expected_version" not in rebase_required
 
     @pytest.mark.unit
     async def test_create_workspace_v2_owned_paths_declares_item_constraints(self, mcp) -> None:  # type: ignore[no-untyped-def]
@@ -412,6 +456,19 @@ class TestToolRegistration:
     async def test_operator_parity_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]
         tools = {tool.name: tool for tool in await mcp.list_tools()}
 
+        list_workspaces_props = tools["awf_list_workspaces"].inputSchema["properties"]
+        assert list_workspaces_props["limit"]["default"] == 50
+        assert list_workspaces_props["limit"]["minimum"] == 1
+        assert list_workspaces_props["limit"]["maximum"] == 500
+        assert "status" in list_workspaces_props
+        assert list_workspaces_props["status"]["default"] is None
+        assert "workspace_status" not in list_workspaces_props
+        assert "agent" in list_workspaces_props
+        assert list_workspaces_props["agent"]["default"] is None
+        repo_url_schema = _optional_string_schema(list_workspaces_props["repo_url"])
+        assert repo_url_schema["maxLength"] == 512
+        assert repo_url_schema["minLength"] == 1
+
         merge_props = tools["awf_list_merge_queue"].inputSchema["properties"]
         repo_url_schema = _optional_string_schema(merge_props["repo_url"])
         assert repo_url_schema["maxLength"] == 512
@@ -422,10 +479,14 @@ class TestToolRegistration:
         assert merge_props["limit"]["minimum"] == 1
         assert merge_props["limit"]["maximum"] == 500
         assert _optional_string_schema(merge_props["cursor"])["maxLength"] == 128
+        assert "status" in merge_props
+        assert "workspace_status" not in merge_props
 
         overview_props = tools["awf_list_workspace_overview"].inputSchema["properties"]
         assert overview_props["limit"]["default"] == 50
         assert _optional_string_schema(overview_props["cursor"])["maxLength"] == 128
+        assert "status" in overview_props
+        assert "workspace_status" not in overview_props
 
         operations_props = tools["awf_list_operations"].inputSchema["properties"]
         assert "type" in operations_props
@@ -470,6 +531,8 @@ class TestToolRegistration:
         assert locks_props["limit"]["default"] == 50
         assert locks_props["limit"]["minimum"] == 1
         assert locks_props["limit"]["maximum"] == 500
+        assert "status" in locks_props
+        assert "workspace_status" not in locks_props
         cursor_schema = _optional_string_schema(locks_props["cursor"])
         assert cursor_schema["maxLength"] == 256
 
@@ -492,9 +555,9 @@ class TestToolRegistration:
         assert "workspace_id" in remonitor_props
         remonitor_required = tools["awf_remonitor_workspace"].inputSchema.get("required", [])
         assert "workspace_id" in remonitor_required
+        assert "idempotency_key" in remonitor_required
         assert remonitor_props["reason"]["default"] is None
         assert "idempotency_key" in remonitor_props
-        assert "idempotency_key" not in remonitor_required
         _assert_idempotency_key_schema(remonitor_props["idempotency_key"])
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
@@ -503,10 +566,10 @@ class TestToolRegistration:
             "required", []
         )
         assert "workspace_id" in validate_required
+        assert "idempotency_key" in validate_required
         assert validate_props["reason"]["default"] is None
         assert validate_props["requested_tier"]["default"] is None
         assert "idempotency_key" in validate_props
-        assert "idempotency_key" not in validate_required
         _assert_idempotency_key_schema(validate_props["idempotency_key"])
 
 
@@ -638,15 +701,70 @@ class TestOperationTools:
 
 class TestCreateWorkspace:
     @pytest.mark.unit
-    async def test_happy_path_returns_workspace_payload(self, mcp) -> None:  # type: ignore[no-untyped-def]
+    async def test_happy_path_returns_accepted_payload(self, mcp) -> None:  # type: ignore[no-untyped-def]
         payload = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
 
         assert isinstance(payload, dict)
+        workspace_id = str(payload["workspace_id"])
         assert payload["status"] == "requested"
-        assert payload["id"].startswith("ws_")
-        assert payload["task_title"] == _CREATE_ARGS["task_title"]
-        assert payload["agent"] == "codex"
-        assert payload["test_commands"] == ["pytest -q"]
+        assert workspace_id.startswith("ws_")
+        assert payload["status_url"] == f"/v1/workspaces/{workspace_id}"
+        assert payload["events_url"] == f"/v1/workspaces/{workspace_id}/events"
+        assert "accepted_at" in payload
+        assert "id" not in payload
+        assert "task_title" not in payload
+
+    @pytest.mark.unit
+    async def test_idempotency_key_replays_or_conflicts(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        args = {**_CREATE_ARGS, "idempotency_key": "mcp-create-v1-replay"}
+
+        first = await _call(mcp, "awf_create_workspace", args)
+        replay = await _call(mcp, "awf_create_workspace", args)
+        conflict = await mcp.call_tool(
+            "awf_create_workspace",
+            {**args, "task_title": "Changed MCP idempotency title"},
+        )
+
+        assert isinstance(first, dict)
+        assert isinstance(replay, dict)
+        assert _workspace_id(replay) == _workspace_id(first)
+        assert isinstance(conflict, CallToolResult)
+        assert conflict.isError is True
+        assert conflict.structuredContent is not None
+        assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.parametrize(
+        ("changed_field", "changed_value"),
+        [
+            ("env_profile", "profile-b"),
+            ("task_external_id", "TASK-B"),
+        ],
+    )
+    @pytest.mark.unit
+    async def test_v1_idempotency_conflicts_on_profile_and_external_id(
+        self,
+        mcp,
+        changed_field: str,
+        changed_value: str,
+    ) -> None:  # type: ignore[no-untyped-def]
+        args = {
+            **_CREATE_ARGS,
+            "env_profile": "profile-a",
+            "task_external_id": "TASK-A",
+            "idempotency_key": "mcp-create-v1-user-fields",
+        }
+
+        first = await _call(mcp, "awf_create_workspace", args)
+        conflict = await mcp.call_tool(
+            "awf_create_workspace",
+            {**args, changed_field: changed_value},
+        )
+
+        assert isinstance(first, dict)
+        assert isinstance(conflict, CallToolResult)
+        assert conflict.isError is True
+        assert conflict.structuredContent is not None
+        assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
 
     @pytest.mark.unit
     async def test_rejects_unknown_agent(self, mcp) -> None:  # type: ignore[no-untyped-def]
@@ -789,7 +907,7 @@ class TestWorkspaceControls:
                 "workspace_id": "ws_control",
                 "reason": "stale task",
                 "stop_stack": False,
-                "idempotency_key": "cancel-control",
+                "idempotency_key": "ik-cancel",
             },
         )
 
@@ -800,7 +918,7 @@ class TestWorkspaceControls:
                     "workspace_id": "ws_control",
                     "reason": "stale task",
                     "stop_stack": False,
-                    "idempotency_key": "cancel-control",
+                    "idempotency_key": "ik-cancel",
                     "expected_version": None,
                 },
             )
@@ -826,7 +944,7 @@ class TestWorkspaceControls:
             {
                 "workspace_id": "ws_control",
                 "reason": "free local resources",
-                "idempotency_key": "stop-control",
+                "idempotency_key": "ik-stop",
             },
         )
 
@@ -836,7 +954,7 @@ class TestWorkspaceControls:
                 {
                     "workspace_id": "ws_control",
                     "reason": "free local resources",
-                    "idempotency_key": "stop-control",
+                    "idempotency_key": "ik-stop",
                     "expected_version": None,
                 },
             )
@@ -864,7 +982,7 @@ class TestWorkspaceControls:
                 "force": True,
                 "remove_volumes": False,
                 "remove_worktree": False,
-                "idempotency_key": "destroy-control",
+                "idempotency_key": "ik-destroy",
             },
         )
 
@@ -876,7 +994,7 @@ class TestWorkspaceControls:
                     "force": True,
                     "remove_volumes": False,
                     "remove_worktree": False,
-                    "idempotency_key": "destroy-control",
+                    "idempotency_key": "ik-destroy",
                     "expected_version": None,
                 },
             )
@@ -907,7 +1025,7 @@ class TestWorkspaceControls:
 
         result = await mcp.call_tool(
             tool_name,
-            {"workspace_id": "ws_control", "idempotency_key": "error-control"},
+            {"workspace_id": "ws_control", "idempotency_key": "ik-error"},
         )
 
         assert isinstance(result, CallToolResult)
@@ -924,7 +1042,7 @@ class TestWorkspaceControls:
         mcp,
     ) -> None:  # type: ignore[no-untyped-def]
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        workspace_id = str(created["id"])  # type: ignore[index]
+        workspace_id = _workspace_id(created)
 
         payload = await _call(
             mcp,
@@ -933,7 +1051,7 @@ class TestWorkspaceControls:
                 "workspace_id": workspace_id,
                 "reason": "no longer needed",
                 "stop_stack": False,
-                "idempotency_key": "cancel-real-service",
+                "idempotency_key": "ik-real-cancel",
             },
         )
         operations_payload = await _call(
@@ -959,6 +1077,7 @@ class TestWorkspaceControls:
             "requested_action": "cancel",
             "stop_stack": False,
         }
+        assert operations[0]["idempotency_key"] == "ik-real-cancel"
         assert operations[0]["result"] == {"status": "cancelled"}
 
     @pytest.mark.unit
@@ -969,11 +1088,11 @@ class TestWorkspaceControls:
         from mcp.types import CallToolResult
 
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        workspace_id = str(created["id"])  # type: ignore[index]
+        workspace_id = _workspace_id(created)
 
         result = await mcp.call_tool(
             "awf_destroy_workspace",
-            {"workspace_id": workspace_id, "idempotency_key": "destroy-requires-force"},
+            {"workspace_id": workspace_id, "idempotency_key": "ik-destroy-active"},
         )
 
         assert isinstance(result, CallToolResult)
@@ -1025,7 +1144,12 @@ class TestCreateWorkspaceV2:
         )
 
         assert isinstance(payload, dict)
-        ws_id = payload["id"]
+        ws_id = payload["workspace_id"]
+        assert payload["status_url"] == f"/v1/workspaces/{ws_id}"
+        assert payload["events_url"] == f"/v1/workspaces/{ws_id}/events"
+        assert "accepted_at" in payload
+        assert "id" not in payload
+        assert "task_class" not in payload
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(str(ws_id))
 
@@ -1073,12 +1197,10 @@ class TestCreateWorkspaceV2:
         )
 
         assert isinstance(created, dict)
-        ws_id = created["id"]
+        ws_id = created["workspace_id"]
         fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
         listed = await _call(mcp, "awf_list_workspaces", {"limit": 10})
 
-        assert created["task_class"] == "docs_task"
-        assert created["owned_paths"] == ["README.md", "docs/**"]
         assert fetched is not None
         assert fetched["task_class"] == "docs_task"  # type: ignore[index]
         assert fetched["owned_paths"] == ["README.md", "docs/**"]  # type: ignore[index]
@@ -1122,6 +1244,81 @@ class TestCreateWorkspaceV2:
         assert preflight["blocks_launch"] is True
 
     @pytest.mark.unit
+    async def test_create_workspace_v2_rejects_insufficient_disk_without_creating_row(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(
+            _env_file=None,
+            work_dir=str(tmp_path / "awf-state"),
+        )
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, settings=settings),
+            settings=settings,
+            disk_check_provider=_low_disk_check,
+        )
+
+        result = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {
+                "repo_url": "git@github.com:example/docs.git",
+                "base_branch": "main",
+                "task_title": "Document low disk admission",
+                "task_prompt": "Update the docs.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp disk admission test fixture",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INSUFFICIENT_DISK"
+        assert result.structuredContent["detail"]["disk"]["reason"] == "INSUFFICIENT_DISK"
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
+
+    @pytest.mark.unit
+    async def test_create_workspace_v2_idempotency_key_still_checks_disk_for_new_workspace(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(
+            _env_file=None,
+            work_dir=str(tmp_path / "awf-state"),
+        )
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, settings=settings),
+            settings=settings,
+            disk_check_provider=_low_disk_check,
+        )
+
+        result = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {
+                "repo_url": "git@github.com:example/docs.git",
+                "base_branch": "main",
+                "task_title": "Document low disk idempotent admission",
+                "task_prompt": "Update the docs.",
+                "idempotency_key": "mcp-create-v2-low-disk",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp disk admission test fixture",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INSUFFICIENT_DISK"
+        assert result.structuredContent["detail"]["disk"]["reason"] == "INSUFFICIENT_DISK"
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert rows == []
+
+    @pytest.mark.unit
     async def test_create_workspace_v2_override_returns_preflight_summary(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -1157,6 +1354,111 @@ class TestCreateWorkspaceV2:
         assert preflight["override_reason"] == "operator verified local auth"
 
     @pytest.mark.unit
+    async def test_create_workspace_v2_idempotency_key_replays_or_conflicts(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        args = {
+            "repo_url": "git@github.com:example/docs.git",
+            "base_branch": "main",
+            "task_title": "Document MCP idempotency",
+            "task_prompt": "Update the docs.",
+            "idempotency_key": "mcp-create-v2-replay",
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "mcp idempotency test fixture",
+        }
+
+        first = await _call(mcp, "awf_create_workspace_v2", args)
+        replay = await _call(mcp, "awf_create_workspace_v2", args)
+        conflict = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {**args, "task_title": "Changed MCP idempotency title"},
+        )
+
+        assert isinstance(first, dict)
+        assert isinstance(replay, dict)
+        assert replay["workspace_id"] == first["workspace_id"]
+        assert isinstance(conflict, CallToolResult)
+        assert conflict.isError is True
+        assert conflict.structuredContent is not None
+        assert conflict.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
+    async def test_create_workspace_v2_idempotency_replay_skips_disk_check(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(
+            _env_file=None,
+            work_dir=str(tmp_path / "awf-state"),
+        )
+        calls = 0
+
+        def counted_disk_check(settings: Settings) -> DiskCheck:
+            nonlocal calls
+            calls += 1
+            return _ok_disk_check(settings)
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, settings=settings),
+            settings=settings,
+            disk_check_provider=counted_disk_check,
+        )
+        args = {
+            "repo_url": "git@github.com:example/docs.git",
+            "base_branch": "main",
+            "task_title": "Document MCP idempotency disk replay",
+            "task_prompt": "Update the docs.",
+            "idempotency_key": "mcp-create-v2-replay-disk",
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "mcp idempotency disk test fixture",
+        }
+
+        first = await _call(mcp, "awf_create_workspace_v2", args)
+        replay = await _call(mcp, "awf_create_workspace_v2", args)
+
+        assert isinstance(first, dict)
+        assert isinstance(replay, dict)
+        assert replay["workspace_id"] == first["workspace_id"]
+        assert calls == 1
+
+    @pytest.mark.unit
+    async def test_create_workspace_v2_external_id_scope_conflict_returns_structured_error(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        external_id = "mcp-create-v2-external-id-conflict"
+        args = {
+            "repo_url": "git@github.com:example/docs.git",
+            "base_branch": "main",
+            "task_title": "Document external id",
+            "task_prompt": "Update the docs.",
+            "task_external_id": external_id,
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "mcp external id conflict test fixture",
+        }
+
+        created = await _call(mcp, "awf_create_workspace_v2", args)
+        conflict = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {**args, "base_branch": "release/next"},
+        )
+
+        assert isinstance(created, dict)
+        assert isinstance(conflict, CallToolResult)
+        assert conflict.isError is True
+        assert conflict.structuredContent == {
+            "error_code": "TASK_EXTERNAL_ID_CONFLICT",
+            "message": (
+                "Task external_id is already associated with a different "
+                "repo/base/task-class/owned-path scope; use a unique "
+                "external_id for this backlog slice or retry the original scope."
+            ),
+            "detail": {"external_id": external_id},
+        }
+
+    @pytest.mark.unit
     async def test_retry_workspace_provider_preflight_error_and_override(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -1184,7 +1486,7 @@ class TestCreateWorkspaceV2:
             },
         )
         assert isinstance(created, dict)
-        workspace_id = str(created["id"])
+        workspace_id = str(created["workspace_id"])
         async with factory() as session:
             repo = WorkspaceRepository(session)
             workspace = await repo.get(workspace_id)
@@ -1315,7 +1617,7 @@ class TestGetAndList:
     @pytest.mark.unit
     async def test_get_returns_the_workspace_just_created(self, mcp) -> None:  # type: ignore[no-untyped-def]
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = created["id"]  # type: ignore[index]
+        ws_id = _workspace_id(created)
 
         fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
         assert fetched is not None
@@ -1333,11 +1635,95 @@ class TestGetAndList:
         for title in ["first", "second", "third"]:
             args = {**_CREATE_ARGS, "task_title": title}
             created = await _call(mcp, "awf_create_workspace", args)
-            ids.append(created["id"])  # type: ignore[index]
+            ids.append(_workspace_id(created))
 
         listed = await _call(mcp, "awf_list_workspaces", {"limit": 10})
         assert isinstance(listed, list)
         assert [r["id"] for r in listed] == list(reversed(ids))
+
+    @pytest.mark.unit
+    async def test_list_filters_by_status_agent_and_repo_url(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        repo_url = "git@github.com:example/filtered.git"
+        matching = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": repo_url,
+                "task_title": "matching",
+                "agent": "gemini",
+            },
+        )
+        wrong_status = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": repo_url,
+                "task_title": "wrong status",
+                "agent": "gemini",
+            },
+        )
+        wrong_agent = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": repo_url,
+                "task_title": "wrong agent",
+                "agent": "codex",
+            },
+        )
+        wrong_repo = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": "git@github.com:example/other.git",
+                "task_title": "wrong repo",
+                "agent": "gemini",
+            },
+        )
+        assert isinstance(matching, dict)
+        assert isinstance(wrong_status, dict)
+        assert isinstance(wrong_agent, dict)
+        assert isinstance(wrong_repo, dict)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            for workspace_id in (
+                _workspace_id(matching),
+                _workspace_id(wrong_agent),
+                _workspace_id(wrong_repo),
+            ):
+                workspace = await repo.get(str(workspace_id))
+                assert workspace is not None
+                await repo.transition(
+                    workspace,
+                    to=WorkspaceStatus.provisioning,
+                    reason_code="TEST",
+                )
+                await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="TEST")
+            await session.commit()
+
+        listed = await _call(
+            mcp,
+            "awf_list_workspaces",
+            {
+                "status": "ready",
+                "agent": "gemini",
+                "repo_url": repo_url,
+                "limit": 10,
+            },
+        )
+
+        assert isinstance(listed, list)
+        assert [row["id"] for row in listed] == [_workspace_id(matching)]
+        assert _workspace_id(wrong_status) not in [row["id"] for row in listed]
 
 
 class TestWaitForWorkspace:
@@ -1346,7 +1732,7 @@ class TestWaitForWorkspace:
         # Simulate a workspace that's already terminal by creating one and
         # configuring the terminal_statuses to include 'requested'.
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = created["id"]  # type: ignore[index]
+        ws_id = _workspace_id(created)
 
         result = await _call(
             mcp,
@@ -1364,7 +1750,7 @@ class TestWaitForWorkspace:
     @pytest.mark.unit
     async def test_returns_current_state_on_timeout(self, mcp) -> None:  # type: ignore[no-untyped-def]
         created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
-        ws_id = created["id"]  # type: ignore[index]
+        ws_id = _workspace_id(created)
 
         # Pick terminal statuses the workspace will never reach + tight timeout.
         result = await _call(
@@ -1408,8 +1794,8 @@ class TestWorkspaceEvents:
             "awf_create_workspace",
             {**_CREATE_ARGS, "task_title": "second"},
         )
-        first_id = str(first["id"])  # type: ignore[index]
-        second_id = str(second["id"])  # type: ignore[index]
+        first_id = _workspace_id(first)
+        second_id = _workspace_id(second)
         base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
 
         async with factory() as session:
@@ -1673,7 +2059,7 @@ class TestWorkspaceOperations:
             {
                 "workspace_id": workspace.id,
                 "status": "running",
-                "type": "validate",
+                "operation_type": "validate",
             },
         )
 
@@ -1770,10 +2156,11 @@ class TestWorkspaceLogs:
             "awf_list_workspace_logs",
             {"workspace_id": workspace.id},
         )
-        assert isinstance(listed, list)
-        assert [stream["stream_id"] for stream in listed] == ["agent.stdout"]
-        assert listed[0]["byte_count"] == len("alpha\nbeta\n")
-        assert listed[0]["line_count"] == 2
+        assert isinstance(listed, dict)
+        assert [stream["stream_id"] for stream in listed["items"]] == ["agent.stdout"]
+        assert listed["items"][0]["byte_count"] == len("alpha\nbeta\n")
+        assert listed["items"][0]["line_count"] == 2
+        assert listed["limit"] == 1
 
         chunk = await _call(
             mcp,
@@ -1790,7 +2177,7 @@ class TestWorkspaceLogs:
             "offset": 6,
             "next_offset": 10,
             "eof": False,
-            "text": "beta",
+            "data": "beta",
         }
 
         eof = await _call(
@@ -1808,7 +2195,7 @@ class TestWorkspaceLogs:
             "offset": len("alpha\nbeta\n"),
             "next_offset": len("alpha\nbeta\n"),
             "eof": True,
-            "text": "",
+            "data": "",
         }
 
     @pytest.mark.unit

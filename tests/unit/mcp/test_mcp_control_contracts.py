@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -507,13 +508,39 @@ class TestSuccessPaths:
             ),
             (
                 "awf_refresh_workspace",
-                {"workspace_id": "ws_refresh", "reason": "r", "idempotency_key": "ik-8", "expected_version": 8},
-                ("refresh", {"workspace_id": "ws_refresh", "reason": "r", "idempotency_key": "ik-8", "expected_version": 8}),
+                {
+                    "workspace_id": "ws_refresh",
+                    "reason": "r",
+                    "idempotency_key": "ik-8",
+                    "expected_version": 8,
+                },
+                (
+                    "refresh",
+                    {
+                        "workspace_id": "ws_refresh",
+                        "reason": "r",
+                        "idempotency_key": "ik-8",
+                        "expected_version": 8,
+                    },
+                ),
             ),
             (
                 "awf_rebase_workspace",
-                {"workspace_id": "ws_rebase", "reason": "r", "idempotency_key": "ik-9", "expected_version": 9},
-                ("rebase", {"workspace_id": "ws_rebase", "reason": "r", "idempotency_key": "ik-9", "expected_version": 9}),
+                {
+                    "workspace_id": "ws_rebase",
+                    "reason": "r",
+                    "idempotency_key": "ik-9",
+                    "expected_version": 9,
+                },
+                (
+                    "rebase",
+                    {
+                        "workspace_id": "ws_rebase",
+                        "reason": "r",
+                        "idempotency_key": "ik-9",
+                        "expected_version": 9,
+                    },
+                ),
             ),
         ],
     )
@@ -552,8 +579,16 @@ class TestSuccessPaths:
         service = _MockService()
         mcp = build_mcp_server(service=service)
 
-        refresh = await _call(mcp, "awf_refresh_workspace", {"workspace_id": "ws_r", "idempotency_key": "ik-r"})
-        rebase = await _call(mcp, "awf_rebase_workspace", {"workspace_id": "ws_b", "idempotency_key": "ik-b"})
+        refresh = await _call(
+            mcp,
+            "awf_refresh_workspace",
+            {"workspace_id": "ws_r", "idempotency_key": "ik-r"},
+        )
+        rebase = await _call(
+            mcp,
+            "awf_rebase_workspace",
+            {"workspace_id": "ws_b", "idempotency_key": "ik-b"},
+        )
 
         assert isinstance(refresh, dict)
         assert refresh["type"] == "refresh"
@@ -580,12 +615,12 @@ class TestErrorMapping:
             item for item in idempotency_key["anyOf"] if item.get("type") == "string"
         )
 
-        assert "idempotency_key" not in required
+        assert "idempotency_key" in required
         assert idempotency_key["description"].startswith("Required idempotency key")
         assert idempotency_key["minLength"] == 1
         assert string_schema["maxLength"] == 128
         assert any(item.get("type") == "null" for item in idempotency_key["anyOf"])
-        assert idempotency_key["default"] is None
+        assert "default" not in idempotency_key
         assert service.calls == []
 
     @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
@@ -629,21 +664,51 @@ class TestErrorMapping:
         assert service.calls == []
 
     @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
-    async def test_omitted_idempotency_key_returns_structured_mcp_error(
+    async def test_omitted_idempotency_key_is_rejected_by_required_mcp_schema(
         self, tool_name: str
     ) -> None:
         service = _MockService()
         mcp = build_mcp_server(service=service)
 
-        result = await _call_result(mcp, tool_name, {"workspace_id": "ws_x"})
+        with pytest.raises(ToolError, match="idempotency_key"):
+            await _call_result(mcp, tool_name, {"workspace_id": "ws_x"})
+        assert service.calls == []
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "awf_cancel_workspace",
+            "awf_stop_workspace",
+            "awf_destroy_workspace",
+            "awf_remonitor_workspace",
+            "awf_request_workspace_validation",
+            "awf_refresh_workspace",
+            "awf_rebase_workspace",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "args",
+        [
+            {"workspace_id": "ws_x", "idempotency_key": None},
+            {"workspace_id": "ws_x", "idempotency_key": "   "},
+        ],
+    )
+    async def test_missing_idempotency_key_returns_structured_invalid_request(
+        self,
+        tool_name: str,
+        args: dict[str, object],
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        result = await _call_result(mcp, tool_name, args)
 
         assert result.isError is True
-        assert result.structuredContent is not None
-        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
-        assert (
-            result.structuredContent["message"]
-            == "Idempotency-Key header is required for this endpoint."
-        )
+        assert result.structuredContent == {
+            "error_code": "INVALID_REQUEST",
+            "message": "Idempotency-Key header is required for this endpoint.",
+            "detail": None,
+        }
         assert service.calls == []
 
     @pytest.mark.parametrize(
@@ -923,7 +988,7 @@ class TestRealDbPaths:
         payload = await _call(mcp, "awf_request_workspace_validation", {
             "workspace_id": workspace.id,
             "reason": "validate",
-            "idempotency_key": "validate-version",
+            "idempotency_key": "ik-validate-version",
             "expected_version": version,
         })
 

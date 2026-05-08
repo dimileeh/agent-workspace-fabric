@@ -875,6 +875,8 @@ def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> Non
             "mode": "block",
             "allowlist_patterns": ["generated/**"],
         },
+        "resource_reservation_request": {},
+        "validation": {"requested_tier": 1},
     }
     assert unchanged is profile
     assert changed.validation.requested_tier == 3

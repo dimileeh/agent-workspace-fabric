@@ -13,7 +13,7 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 | `awf_create_workspace` | Create a legacy v1 workspace request. |
 | `awf_create_workspace_v2` | Create a profile-driven v2 workspace request. |
 | `awf_get_workspace` | Fetch one workspace by id. |
-| `awf_list_workspaces` | List recent workspaces newest-first. |
+| `awf_list_workspaces` | List recent workspaces newest-first, optionally filtered by status, agent, or repo URL. |
 | `awf_wait_for_workspace` | Poll until a workspace reaches a terminal state or times out. |
 | `awf_get_workspace_runtime` | Fetch one workspace's compose/container runtime snapshot. |
 | `awf_list_merge_queue` | List the REST merge queue envelope for operator review. |
@@ -43,13 +43,39 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 | `awf_destroy_workspace` | Operator control: destroy AWF-managed workspace resources. |
 | `awf_remonitor_workspace` | Operator control: request PR monitor recovery. |
 | `awf_request_workspace_validation` | Operator control: request workspace re-validation. |
+| `awf_refresh_workspace` | Operator control: refresh workspace state after upstream changes. |
+| `awf_rebase_workspace` | Operator control: rebase workspace work onto the current base. |
+| `awf_retry_workspace` | Retry a failed or cancelled workspace as a fresh attempt. |
 
 The observability tools return `null` for a missing workspace, log stream, or
 operation rather than surfacing raw storage errors. Operator observability tools
 are read-only and mirror REST response envelopes; the explicit control tools do
 not provide shell access or arbitrary Docker execution. Known MCP parity backlog
-is documented in the matrix, including refresh, rebase, retry, artifact
-content/download, and `If-Match` concurrency coverage.
+is documented in the matrix, including artifact content/download and global
+workspace event streaming.
+
+The create tools `awf_create_workspace` and `awf_create_workspace_v2` accept a
+schema-optional `idempotency_key` argument. Reusing the same key with the same
+effective create payload returns the existing workspace; reusing the key with a
+changed payload returns structured `IDEMPOTENCY_CONFLICT`.
+
+**MCP control migration note:** The control tools `awf_cancel_workspace`,
+`awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`,
+`awf_request_workspace_validation`, `awf_refresh_workspace`, and
+`awf_rebase_workspace` have a required `idempotency_key` argument. Existing MCP
+clients that omitted this argument or sent `null` must pass a stable non-empty
+key for each operator action. This mirrors the REST `Idempotency-Key`
+requirement for the same control routes; `expected_version` remains optional and
+maps to `If-Match`.
+
+**MCP log and operation response migration note:** `awf_read_workspace_log`
+now returns `WorkspaceLogReadResponse` with `stream_id`, `offset`,
+`next_offset`, `eof`, and `data`; clients should read log content from `data`
+instead of the previous raw `text` key. `awf_list_workspace_logs` now returns
+the `WorkspaceLogListResponse` envelope, and `awf_list_workspace_operations`
+now returns the `OperationListResponse` envelope. Clients that consumed the old
+top-level lists should iterate `items` and honor `has_more`, `limit`, and
+`cursor`.
 
 Example `awf_create_workspace_v2` arguments:
 
@@ -70,7 +96,8 @@ Example `awf_create_workspace_v2` arguments:
   "validation_commands": ["pytest -q"],
   "requested_tier": 1,
   "auto_merge": true,
-  "initial_review_grace_period_seconds": null
+  "initial_review_grace_period_seconds": null,
+  "idempotency_key": "example-task-001"
 }
 ```
 
@@ -85,7 +112,7 @@ Example runtime and operation observability calls:
 `awf_list_workspace_operations` arguments:
 
 ```json
-{"workspace_id": "ws_abc123", "limit": 25, "status": "running", "operation_type": "validate"}
+{"workspace_id": "ws_abc123", "limit": 25, "status": "running", "type": "validate"}
 ```
 
 **Breaking change:** `awf_list_workspace_operations` now returns a

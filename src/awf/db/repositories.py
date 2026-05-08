@@ -2667,7 +2667,11 @@ class WorkspaceRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none() is not None
 
     async def get_by_idempotency_key(self, key: str) -> Workspace | None:
-        stmt = select(Workspace).where(Workspace.idempotency_key == key)
+        stmt = (
+            select(Workspace)
+            .where(Workspace.idempotency_key == key)
+            .options(selectinload(Workspace.task_attempt))
+        )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def acquire_idempotency_key_lock(self, key: str) -> None:

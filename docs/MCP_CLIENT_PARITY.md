@@ -14,6 +14,29 @@ surfaces and a backlog index for explicit parity gaps.
 
 **Note on SDKs (v0.1):** REST, CLI, and MCP are the supported client surfaces for v0.1. AWF does not ship with a supported Python SDK. Integrators must use one of the supported surfaces. Do not import internal AWF modules to build custom API clients.
 
+**MCP control migration note:** The MCP control tools `awf_cancel_workspace`,
+`awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`,
+`awf_request_workspace_validation`, `awf_refresh_workspace`, and
+`awf_rebase_workspace` have a required `idempotency_key` argument. Existing MCP clients that
+omitted this argument or sent `null` must pass a stable non-empty key for each
+operator action. This mirrors the REST `Idempotency-Key` requirement for the
+same control routes; `expected_version` remains optional and maps to `If-Match`.
+
+**MCP create idempotency note:** `awf_create_workspace` and
+`awf_create_workspace_v2` accept a schema-optional `idempotency_key` argument.
+The key maps to REST `Idempotency-Key`: same key and same effective create
+payload returns the existing workspace, while same key and changed payload
+returns structured `IDEMPOTENCY_CONFLICT`.
+
+**MCP log and operation response migration note:** MCP log and operation tools
+now use REST-compatible response models. `awf_read_workspace_log` returns
+`WorkspaceLogReadResponse`, so clients should read log content from `data`
+instead of the previous raw `text` key. `awf_list_workspace_logs` returns a
+`WorkspaceLogListResponse` envelope, and `awf_list_workspace_operations`
+returns an `OperationListResponse` envelope; clients should iterate `items`
+and honor `has_more`, `limit`, and `cursor` instead of treating the result as a
+top-level list.
+
 ## Status Vocabulary
 
 - `MCP implemented`: MCP exposes the same operator data or control intent as
@@ -30,7 +53,9 @@ surfaces and a backlog index for explicit parity gaps.
 
 | Capability | Canonical REST surface | CLI surface | MCP tool name | Schema / Error-Code Contract | Security Boundary | Status | Backlog Slice |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Workspace create, list, and get | `POST /v1/workspaces`, `POST /v2/workspaces`, `GET /v1/workspaces`, `GET /v1/workspaces/{workspace_id}` | `awf workspace create`, `awf workspace list`, `awf workspace show` | `awf_create_workspace`, `awf_create_workspace_v2`, `awf_list_workspaces`, `awf_get_workspace`, `awf_wait_for_workspace` | `WorkspaceAcceptedResponse`; `WorkspaceResponse`; IDEMPOTENCY_CONFLICT, INVALID_PROFILE, TASK_EXTERNAL_ID_CONFLICT, INSUFFICIENT_DISK | `require_api_token`; MCP: no shell, no exec | MCP implemented | — |
+| Workspace create v1 | `POST /v1/workspaces` | CLI absent | `awf_create_workspace` | `WorkspaceAcceptedResponse`; IDEMPOTENCY_CONFLICT | `require_api_token`; MCP create accepts optional `idempotency_key`; no shell, no exec | MCP implemented | — |
+| Workspace create v2 | `POST /v2/workspaces` | `awf workspace create` | `awf_create_workspace_v2` | `WorkspaceAcceptedResponse`; IDEMPOTENCY_CONFLICT, INVALID_PROFILE, TASK_EXTERNAL_ID_CONFLICT, INSUFFICIENT_DISK; MCP v2 create still lacks REST `resources`, `priority`, and `human_boost` inputs | `require_api_token`; MCP create accepts optional `idempotency_key`; no shell, no exec | MCP partial | TODO§P1-mcp-create-v2-full-parity |
+| Workspace list and get | `GET /v1/workspaces`, `GET /v1/workspaces/{workspace_id}` | `awf workspace list`, `awf workspace show` | `awf_list_workspaces`, `awf_get_workspace`, `awf_wait_for_workspace` | `WorkspaceResponse` | `require_api_token`; MCP bounded reads only | MCP implemented | — |
 | Existing PR monitor adoption | `POST /v1/workspaces/adopt-pr` | `awf workspace adopt-pr --repo owner/repo --pr 123`; `awf workspace adopt-pr --pr-url https://github.com/owner/repo/pull/123` | `awf_adopt_pull_request_monitor` | `PullRequestMonitorAdoptionResponse`; PR_ADOPTION_INPUT_REQUIRED, INVALID_GITHUB_REPO, PR_NOT_FOUND, PR_ALREADY_CLOSED, PR_ALREADY_MERGED, PR_METADATA_FETCH_FAILED, PR_METADATA_INVALID, PR_ADOPTION_POLICY_CONFLICT | `require_api_token`; MCP: audited control-plane adoption only, no shell, no exec | MCP implemented | — |
 | Workspace overview | `GET /v1/workspaces/overview` | CLI absent | `awf_list_workspace_overview` | `WorkspaceOverviewListResponse` | `require_api_token` | MCP implemented | — |
 | Merge queue | `GET /v1/merge-queue` | CLI absent | `awf_list_merge_queue` | `MergeQueueListResponse` | `require_api_token` | MCP implemented | — |
@@ -60,7 +85,7 @@ surfaces and a backlog index for explicit parity gaps.
 | Refresh workspace | `POST /v1/workspaces/{workspace_id}/refresh` | `awf workspace refresh --idempotency-key --if-match --reason` | `awf_refresh_workspace` | `OperationResponse`; NOT_FOUND, WORKSPACE_STATE_NOT_REFRESHABLE, VERSION_CONFLICT, IDEMPOTENCY_CONFLICT | `require_api_token`; MCP: audited control-plane operation, not shell access | MCP implemented | — |
 | Rebase workspace | `POST /v1/workspaces/{workspace_id}/rebase` | `awf workspace rebase --idempotency-key --if-match --reason` | `awf_rebase_workspace` | `OperationResponse`; NOT_FOUND, WORKSPACE_STATE_NOT_REBASEABLE, MERGE_CANDIDATE_NOT_FOUND, WORKSPACE_REBASE_CONFLICT, WORKSPACE_OPERATION_CONFLICT, VERSION_CONFLICT, IDEMPOTENCY_CONFLICT | `require_api_token`; MCP: audited control-plane operation, preserves validation provenance | MCP implemented | — |
 | Retry workspace | `POST /v1/workspaces/{workspace_id}/retry` | `awf workspace retry` | `awf_retry_workspace` | `WorkspaceRetryResponse`; WORKSPACE_NOT_FOUND, WORKSPACE_NOT_RETRYABLE, WORKSPACE_RETRY_EXHAUSTED, WORKSPACE_RETRY_SALVAGE_UNAVAILABLE, PROVIDER_READINESS_PRECHECK_FAILED | `require_api_token`; MCP: preserves retry lineage and provider-readiness policy without shell access | MCP implemented | — |
-| Optimistic concurrency on controls | `If-Match` header on REST cancel, stop, destroy, remonitor, refresh, validate, and rebase | `awf workspace cancel --if-match`, `awf workspace stop --if-match`, `awf workspace destroy --if-match`, `awf workspace remonitor --if-match`, `awf workspace refresh --if-match`, `awf workspace validate --if-match`, `awf workspace rebase --if-match` | `awf_cancel_workspace`, `awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`, `awf_request_workspace_validation`, `awf_refresh_workspace`, `awf_rebase_workspace` | `WorkspaceControlResponse`; `OperationResponse`; VERSION_CONFLICT | `require_api_token`; MCP: all 7 control tools expose optional `expected_version`; no shell, no exec, no credential dump | MCP implemented | — |
+| Optimistic concurrency on controls | `If-Match` header on REST cancel, stop, destroy, remonitor, refresh, validate, and rebase | `awf workspace cancel --if-match`, `awf workspace stop --if-match`, `awf workspace destroy --if-match`, `awf workspace remonitor --if-match`, `awf workspace refresh --if-match`, `awf workspace validate --if-match`, `awf workspace rebase --if-match` | `awf_cancel_workspace`, `awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`, `awf_request_workspace_validation`, `awf_refresh_workspace`, `awf_rebase_workspace` | `WorkspaceControlResponse`; `OperationResponse`; VERSION_CONFLICT | `require_api_token`; MCP: all 7 control tools require `idempotency_key` and expose optional `expected_version`; no shell, no exec, no credential dump | MCP implemented | — |
 | Live workspace stream | `WebSocket /v1/workspaces/{workspace_id}/ws` | CLI absent | No streaming MCP tool | N/A (out of scope) | WebSocket excluded: MCP prefers bounded snapshots over streaming transport | Out of scope | — |
 | Secret lease status | `GET /v1/workspaces/{workspace_id}/secret-leases` | CLI absent | No MCP tool | `WorkspaceSecretLeaseListResponse` | Secret and credential material must not flow through MCP responses | Out of scope | — |
 
