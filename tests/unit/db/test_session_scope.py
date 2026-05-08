@@ -11,6 +11,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
+import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -97,12 +98,22 @@ class TestSessionScope:
 
         session = FailingCloseSession()
 
-        with pytest.raises(OriginalError, match="original"):
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(OriginalError, match="original"),
+        ):
             async with session_scope(lambda: session):  # type: ignore[arg-type]
                 raise OriginalError("original")
 
         assert session.rolled_back is True
         assert session.closed is True
+        assert any(
+            entry.get("event") == "session_scope.close_failed_during_exception"
+            and entry.get("log_level") == "warning"
+            and entry.get("error_type") == "CloseError"
+            and entry.get("error") == "close failed"
+            for entry in captured
+        )
 
     @pytest.mark.unit
     async def test_base_exception_runs_cleanup_before_close(self) -> None:

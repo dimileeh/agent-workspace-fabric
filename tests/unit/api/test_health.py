@@ -359,9 +359,7 @@ async def test_readyz_egress_audit_timeout_is_degraded_not_failure(
         async def summary_counts_by_posture(self) -> dict[str, int]:
             raise TimeoutError("egress audit timed out")
 
-    import awf.db.repositories as repositories
-
-    monkeypatch.setattr(repositories, "EgressAuditRepository", _TimeoutEgressAuditRepository)
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _TimeoutEgressAuditRepository)
 
     response = await client.get("/readyz")
     body = response.json()
@@ -396,9 +394,7 @@ async def test_readyz_egress_audit_error_is_degraded_not_failure(
                 f"{'x' * 400}"
             )
 
-    import awf.db.repositories as repositories
-
-    monkeypatch.setattr(repositories, "EgressAuditRepository", _FailingEgressAuditRepository)
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _FailingEgressAuditRepository)
 
     response = await client.get("/readyz")
     body = response.json()

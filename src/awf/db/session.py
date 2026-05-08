@@ -21,12 +21,15 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from awf.common.logging import get_logger
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.resilience import invalidate_or_rollback_session
 from awf.runtime.events import ensure_workspace_event_broadcasting
 
 DEFAULT_POOL_RECYCLE_SECONDS = 1800
 DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
+
+_log = get_logger(__name__)
 
 
 def make_engine(
@@ -211,6 +214,11 @@ async def session_scope(
     finally:
         try:
             await session.close()
-        except Exception:
+        except Exception as close_exc:
             if scope_exc is None:
                 raise
+            _log.warning(
+                "session_scope.close_failed_during_exception",
+                error_type=type(close_exc).__name__,
+                error=str(close_exc)[:240],
+            )

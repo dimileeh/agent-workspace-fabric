@@ -26,6 +26,7 @@ from awf import __version__
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
+from awf.db.repositories import EgressAuditRepository
 from awf.db.resilience import db_connection_failure_reason
 from awf.service.config import resolve_service_settings
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
@@ -473,7 +474,6 @@ async def readyz(
             return CheckResult(ok=True, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail="No session factory available")
         try:
             async with factory() as session:
-                from awf.db.repositories import EgressAuditRepository
                 repo = EgressAuditRepository(session)
                 counts = await asyncio.wait_for(repo.summary_counts_by_posture(), timeout=_CHECK_TIMEOUT_SECONDS)
             posture_counts = {str(posture): int(count) for posture, count in counts.items()}
