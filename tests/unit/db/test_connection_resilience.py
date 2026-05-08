@@ -113,12 +113,18 @@ def test_closed_connection_classifier_matches_asyncpg_interface_error_names() ->
         RuntimeError("connection is closed"),
         None,
     )
+    cursor_interface_error = InterfaceError(
+        "SELECT 1",
+        {},
+        RuntimeError("fetch called when no statement executed"),
+    )
     unrelated = DBAPIError("SELECT 1", {}, UnrelatedError("syntax problem"), None)
 
     assert is_transient_closed_connection_error(_closed_connection_error()) is True
     assert is_transient_closed_connection_error(invalidated) is True
     assert is_transient_closed_connection_error(asyncpg_named) is True
     assert is_transient_closed_connection_error(generic_dbapi_closed) is True
+    assert is_transient_closed_connection_error(cursor_interface_error) is False
     assert is_transient_closed_connection_error(unrelated) is False
     assert is_transient_closed_connection_error(ValueError("not a DB failure")) is False
 

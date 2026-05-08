@@ -6,7 +6,6 @@ import contextlib
 from collections.abc import Awaitable, Callable, Iterator
 
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.exc import InterfaceError as SQLAlchemyInterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DB_CONNECTION_CLOSED_REASON = "DB_CONNECTION_CLOSED"
@@ -15,7 +14,6 @@ DB_CONNECTION_TRANSIENT_RECOVERED_REASON = "DB_CONNECTION_TRANSIENT_RECOVERED"
 
 _CLOSED_CONNECTION_ERROR_NAMES = frozenset(
     {
-        "InterfaceError",
         "PostgresConnectionError",
         "ConnectionDoesNotExistError",
         "ConnectionFailureError",
@@ -37,8 +35,6 @@ def is_transient_closed_connection_error(exc: BaseException) -> bool:
 
     for current in _exception_chain(exc):
         if isinstance(current, DBAPIError) and current.connection_invalidated:
-            return True
-        if isinstance(current, SQLAlchemyInterfaceError):
             return True
         if current.__class__.__name__ in _CLOSED_CONNECTION_ERROR_NAMES:
             return True
