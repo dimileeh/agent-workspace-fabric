@@ -216,6 +216,42 @@ def test_recovery_conformance_handoff_preserves_iteration_budget(
     assert handoff.max_iterations == expected_max_iterations
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("invalid_path_field", ["plan_path", "report_path"])
+def test_recovery_conformance_handoff_falls_back_when_payload_path_escapes_workspace(
+    invalid_path_field: str,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planned",
+            "planning": {
+                "required": True,
+                "max_iterations": 3,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+            },
+        }
+    )
+    conformance = {
+        "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        "summary": "AWF validation evidence is required.",
+        "gaps": ["rerun pytest under AWF"],
+        "plan_path": "docs/custom-plan.md",
+        "report_path": "docs/custom-report.json",
+        invalid_path_field: "../outside.json",
+    }
+
+    handoff = _planning_validation_handoff_from_recovery_payload(
+        workspace_id="ws123",
+        profile=profile,
+        recovery_payload={"conformance": conformance},
+    )
+
+    assert handoff is not None
+    assert handoff.plan_path == Path("docs/awf-plans/ws123.md")
+    assert handoff.report_path == Path("docs/awf-plans/ws123.conformance.json")
+
+
 class _PlanningAdapter:
     def __init__(self, *stdout_values: str) -> None:
         self.stdout_values = list(stdout_values)

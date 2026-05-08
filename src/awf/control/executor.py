@@ -515,7 +515,14 @@ def _planning_validation_handoff_from_recovery_payload(
             workspace_id=workspace_id,
         )
     except ValueError:
-        return None
+        plan_path = render_workspace_path(
+            profile.planning.plan_path,
+            workspace_id=workspace_id,
+        )
+        report_path = render_workspace_path(
+            profile.planning.conformance_report_path,
+            workspace_id=workspace_id,
+        )
     gaps = _recovery_conformance_gaps(conformance)
     summary_value = conformance.get("summary")
     summary = (
