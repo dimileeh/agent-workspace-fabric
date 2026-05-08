@@ -176,14 +176,14 @@ def test_closed_connection_classifier_bounds_long_message_fragment_scan() -> Non
 
 @pytest.mark.unit
 async def test_db_retry_rejects_invalid_attempt_count() -> None:
-    async with postgres_test_engine() as engine:
-        factory = make_session_factory(engine)
+    def _factory() -> object:
+        raise AssertionError("session factory should not be called when attempts=0")
 
-        async def _operation(_session: object) -> int:
-            return 1
+    async def _operation(_session: object) -> int:
+        return 1
 
-        with pytest.raises(ValueError, match="attempts must be at least 1"):
-            await run_db_operation_with_retry(factory, _operation, attempts=0)
+    with pytest.raises(ValueError, match="attempts must be at least 1"):
+        await run_db_operation_with_retry(_factory, _operation, attempts=0)
 
 
 @pytest.mark.unit
