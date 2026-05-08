@@ -7,6 +7,7 @@ exception, always close. We verify all three paths.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
@@ -102,6 +103,31 @@ class TestSessionScope:
 
         assert session.rolled_back is True
         assert session.closed is True
+
+    @pytest.mark.unit
+    async def test_base_exception_runs_cleanup_before_close(self) -> None:
+        class TrackingSession:
+            events: list[str]
+
+            def __init__(self) -> None:
+                self.events = []
+
+            async def commit(self) -> None:
+                raise AssertionError("commit should not run after body cancellation")
+
+            async def rollback(self) -> None:
+                self.events.append("rollback")
+
+            async def close(self) -> None:
+                self.events.append("close")
+
+        session = TrackingSession()
+
+        with pytest.raises(asyncio.CancelledError, match="cancelled"):
+            async with session_scope(lambda: session):  # type: ignore[arg-type]
+                raise asyncio.CancelledError("cancelled")
+
+        assert session.events == ["rollback", "close"]
 
     @pytest.mark.unit
     async def test_close_error_propagates_after_clean_body(self) -> None:

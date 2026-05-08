@@ -8,6 +8,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.db import resilience as resilience_mod
 from awf.db import session as session_mod
 from awf.db.resilience import (
     is_transient_closed_connection_error,
@@ -151,6 +152,18 @@ def test_closed_connection_classifier_ignores_suppressed_context() -> None:
     assert wrapped.__suppress_context__ is True
     assert wrapped.__context__ is not None
     assert is_transient_closed_connection_error(wrapped) is False
+
+
+@pytest.mark.unit
+def test_closed_connection_classifier_bounds_long_message_fragment_scan() -> None:
+    early_fragment = RuntimeError("prefix connection is closed")
+    late_fragment = RuntimeError(
+        ("x" * (resilience_mod._MAX_CLOSED_CONNECTION_MESSAGE_SCAN_CHARS + 1))
+        + " connection is closed"
+    )
+
+    assert is_transient_closed_connection_error(early_fragment) is True
+    assert is_transient_closed_connection_error(late_fragment) is False
 
 
 @pytest.mark.unit

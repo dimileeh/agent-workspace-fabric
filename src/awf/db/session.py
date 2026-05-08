@@ -206,6 +206,7 @@ async def session_scope(
         raise
     except BaseException as exc:
         scope_exc = exc
+        await invalidate_or_rollback_session(session, exc)
         raise
     finally:
         try:

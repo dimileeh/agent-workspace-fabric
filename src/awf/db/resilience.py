@@ -29,6 +29,8 @@ _CLOSED_CONNECTION_MESSAGE_FRAGMENTS = (
     "closed connection",
     "server closed the connection",
 )
+_MAX_CLOSED_CONNECTION_MESSAGE_SCAN_CHARS = 512
+
 
 def is_transient_closed_connection_error(exc: BaseException) -> bool:
     """Return True when an exception represents a stale/closed DB connection."""
@@ -38,7 +40,9 @@ def is_transient_closed_connection_error(exc: BaseException) -> bool:
             return True
         if current.__class__.__name__ in _CLOSED_CONNECTION_ERROR_NAMES:
             return True
-        if _message_indicates_closed_connection(str(current)):
+        if _message_indicates_closed_connection(
+            str(current)[:_MAX_CLOSED_CONNECTION_MESSAGE_SCAN_CHARS]
+        ):
             return True
     return False
 
