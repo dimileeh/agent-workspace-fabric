@@ -2314,7 +2314,7 @@ class WorkspaceExecutor:
                         )
                         failure_details: dict[str, Any] = {
                             "validation_run_id": validation_run_id,
-                            "report_path": planning_validation_handoff.report_path.as_posix(),
+                            "report_path": conformance_handoff.report_path.as_posix(),
                             "operation": exc.operation,
                             "returncode": exc.returncode,
                         }
@@ -5860,7 +5860,7 @@ def _validation_evidence_json(payload: dict[str, Any]) -> str:
 
 def _serialize_validation_evidence_payload(payload: Mapping[str, Any]) -> str:
     serialized = json.dumps(payload, default=str)
-    return redact_audit_text(serialized, limit=len(serialized) + 4096)
+    return redact_audit_text(serialized, limit=_VALIDATION_EVIDENCE_JSON_LIMIT)
 
 
 def _validation_evidence_coverage_summary(value: object) -> object:

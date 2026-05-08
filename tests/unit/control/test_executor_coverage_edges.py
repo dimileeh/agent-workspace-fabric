@@ -363,6 +363,21 @@ def test_validation_evidence_json_enforces_limit_on_minimal_fallback() -> None:
 
 
 @pytest.mark.unit
+def test_validation_evidence_serializer_uses_evidence_limit_for_redaction_expansion() -> None:
+    payload = {"output": " ".join(["SECRET=a"] * 2166)}
+    raw_length = len(json.dumps(payload, default=str))
+    assert raw_length < executor_mod._VALIDATION_EVIDENCE_JSON_LIMIT
+
+    evidence = executor_mod._serialize_validation_evidence_payload(payload)
+
+    assert len(evidence) == executor_mod._VALIDATION_EVIDENCE_JSON_LIMIT + len("...[truncated]")
+    assert len(evidence) < raw_length + 4096
+    assert "[redacted]" in evidence
+    assert "SECRET=a" not in evidence
+    assert evidence.endswith("...[truncated]")
+
+
+@pytest.mark.unit
 async def test_satisfied_post_validation_conformance_report_is_committed(
     tmp_path: Path,
 ) -> None:
