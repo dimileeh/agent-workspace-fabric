@@ -138,6 +138,21 @@ def test_closed_connection_classifier_handles_cyclic_exception_chains() -> None:
 
 
 @pytest.mark.unit
+def test_closed_connection_classifier_ignores_suppressed_context() -> None:
+    try:
+        try:
+            raise _closed_connection_error()
+        except InterfaceError:
+            raise RuntimeError("separate application failure") from None
+    except RuntimeError as exc:
+        wrapped = exc
+
+    assert wrapped.__suppress_context__ is True
+    assert wrapped.__context__ is not None
+    assert is_transient_closed_connection_error(wrapped) is False
+
+
+@pytest.mark.unit
 async def test_db_retry_rejects_invalid_attempt_count() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)

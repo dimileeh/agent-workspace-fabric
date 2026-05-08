@@ -112,7 +112,7 @@ def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
             stack.append(orig)
         if current.__cause__ is not None:
             stack.append(current.__cause__)
-        if current.__context__ is not None:
+        if not current.__suppress_context__ and current.__context__ is not None:
             stack.append(current.__context__)
 
 
