@@ -18,8 +18,10 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import awf.api.routes.workspaces as workspaces_route
 from awf.api.routes.workspaces import (
     _get_workspace_response,
     _list_workspace_responses,
@@ -32,7 +34,7 @@ from awf.api.schemas import (
     WorkspaceCreateRequest,
 )
 from awf.db.enums import AgentRuntime
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
 
@@ -58,6 +60,10 @@ def _payload(**overrides: object) -> WorkspaceCreateRequest:
     }
     defaults.update(overrides)
     return WorkspaceCreateRequest(**defaults)  # type: ignore[arg-type]
+
+
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
 
 
 class TestCreateDirect:
@@ -140,6 +146,51 @@ class TestGetDirect:
         result = await _get_workspace_response(created.workspace_id, session)
         assert result.id == created.workspace_id
         assert result.task_title == "look-me-up"
+
+    @pytest.mark.unit
+    async def test_returns_materialized_response_after_same_session_egress_cleanup(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="transient audit cleanup"),
+            idempotency_key=None,
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            assert workspace_id == created.workspace_id
+            raise _closed_connection_error()
+
+        async def _expire_loaded_state(
+            cleanup_session: AsyncSession,
+            exc: BaseException,
+        ) -> None:
+            assert cleanup_session is session
+            assert "connection is closed" in str(exc)
+            cleanup_session.expire_all()
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+        monkeypatch.setattr(
+            workspaces_route,
+            "invalidate_or_rollback_session",
+            _expire_loaded_state,
+        )
+
+        result = await _get_workspace_response(created.workspace_id, session)
+
+        assert result.id == created.workspace_id
+        assert result.task_title == "transient audit cleanup"
+        assert result.egress_audit is None
 
     @pytest.mark.unit
     async def test_raises_404_for_missing(self, session: AsyncSession) -> None:

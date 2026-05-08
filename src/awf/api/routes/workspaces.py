@@ -499,12 +499,18 @@ async def _get_workspace_response(
         validation_runs,
         candidate=latest_merge_candidate(ws),
     )
+    response_without_egress_audit: WorkspaceResponse | None = None
     if egress_audit_session_factory is not None:
         egress_audit = await _retry_optional_egress_audit_lookup(
             workspace_id,
             egress_audit_session_factory,
         )
     else:
+        # Direct-call fallback: serialize before cleanup can expire/invalidate ``ws``.
+        response_without_egress_audit = workspace_response(
+            ws,
+            validation_provenance=validation_provenance,
+        )
         egress_audit = None
         try:
             audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
@@ -523,6 +529,8 @@ async def _get_workspace_response(
                     workspace_id,
                     exc_info=True,
                 )
+    if response_without_egress_audit is not None and egress_audit is None:
+        return response_without_egress_audit
     return workspace_response(
         ws,
         validation_provenance=validation_provenance,
