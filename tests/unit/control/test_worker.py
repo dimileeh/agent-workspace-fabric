@@ -918,6 +918,90 @@ class TestRunOnceExecution:
         assert low_id not in executor.calls
 
     @pytest.mark.unit
+    async def test_monitor_claim_refresh_recomputes_lease_expiry_between_retries(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitor-claim-refresh-fresh-expiry",
+        )
+        base_time = datetime(2026, 5, 8, 12, 0, tzinfo=UTC)
+
+        class _RetryClock:
+            calls = 0
+
+            @classmethod
+            def now(cls, tz: object) -> datetime:
+                assert tz is UTC
+                cls.calls += 1
+                return base_time + timedelta(seconds=cls.calls)
+
+        monkeypatch.setattr("awf.control.worker.datetime", _RetryClock)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                monitor_claim_lease_seconds=120,
+            ),
+        )
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.monitor_claimed_by = worker._worker_id
+            ws.monitor_claim_expires_at = base_time
+            await session.commit()
+
+        original = WorkspaceRepository.refresh_monitoring_pr_claim
+        failures_remaining = 1
+        lease_expiries: list[datetime] = []
+
+        async def _flaky_refresh_monitoring_pr_claim(
+            self: WorkspaceRepository,
+            workspace_id: str,
+            *,
+            owner_id: str,
+            lease_expires_at: datetime,
+        ) -> bool:
+            nonlocal failures_remaining
+            lease_expiries.append(lease_expires_at)
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(
+                self,
+                workspace_id,
+                owner_id=owner_id,
+                lease_expires_at=lease_expires_at,
+            )
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "refresh_monitoring_pr_claim",
+            _flaky_refresh_monitoring_pr_claim,
+        )
+
+        assert await worker._refresh_monitoring_pr_claim(workspace_id) is True
+
+        assert lease_expiries == [
+            base_time + timedelta(seconds=121),
+            base_time + timedelta(seconds=122),
+        ]
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.monitor_claim_expires_at is not None
+            assert ws.monitor_claim_expires_at.replace(tzinfo=UTC) == lease_expiries[-1]
+
+    @pytest.mark.unit
     async def test_execution_claim_refresh_retries_closed_connection_without_losing_owner(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -6514,8 +6598,15 @@ async def test_secret_lease_expiration_scan_surfaces_expiration_failures(
 @pytest.mark.unit
 async def test_secret_lease_expiration_scan_skips_transient_closed_connection(
     worker: ControlWorker,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    current_time = 1_000.0
+    monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+    expiration_attempts = 0
+
     async def _raise_expiration_failure() -> None:
+        nonlocal expiration_attempts
+        expiration_attempts += 1
         raise _closed_connection_error()
 
     worker._next_secret_lease_expiration_scan_at = 0.0  # noqa: SLF001
@@ -6523,7 +6614,11 @@ async def test_secret_lease_expiration_scan_skips_transient_closed_connection(
 
     await worker._maybe_expire_due_secret_leases()  # noqa: SLF001
 
-    assert worker._next_secret_lease_expiration_scan_at == 0.0  # noqa: SLF001
+    assert worker._next_secret_lease_expiration_scan_at == 1_060.0  # noqa: SLF001
+
+    await worker._maybe_expire_due_secret_leases()  # noqa: SLF001
+
+    assert expiration_attempts == 1
 
 
 @pytest.mark.unit

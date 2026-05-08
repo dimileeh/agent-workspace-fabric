@@ -721,6 +721,8 @@ class ControlWorker:
             await self._expire_due_secret_leases()
         except Exception as exc:
             if is_transient_closed_connection_error(exc):
+                interval = max(0.0, self._config.secret_lease_expiration_scan_interval_seconds)
+                self._next_secret_lease_expiration_scan_at = monotonic() + interval
                 _log.warning(
                     "worker.secret_lease_expiration_db_connection_closed",
                     reason_code=DB_CONNECTION_CLOSED_REASON,
@@ -1857,11 +1859,10 @@ class ControlWorker:
                 return
 
     async def _refresh_monitoring_pr_claim(self, workspace_id: str) -> bool:
-        lease_expires_at = datetime.now(UTC) + timedelta(
-            seconds=self._config.monitor_claim_lease_seconds
-        )
-
         async def _operation(session: AsyncSession) -> bool:
+            lease_expires_at = datetime.now(UTC) + timedelta(
+                seconds=self._config.monitor_claim_lease_seconds
+            )
             return await WorkspaceRepository(session).refresh_monitoring_pr_claim(
                 workspace_id,
                 owner_id=self._worker_id,
@@ -1881,10 +1882,11 @@ class ControlWorker:
 
     async def _refresh_execution_claim(self, workspace_id: str) -> bool:
         async def _operation(session: AsyncSession) -> bool:
+            lease_expires_at = self._execution_claim_expires_at()
             return await WorkspaceRepository(session).refresh_execution_claim(
                 workspace_id,
                 owner_id=self._worker_id,
-                lease_expires_at=self._execution_claim_expires_at(),
+                lease_expires_at=lease_expires_at,
             )
 
         return await run_db_operation_with_retry(
