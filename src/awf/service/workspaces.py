@@ -1183,16 +1183,16 @@ def _stored_resource_reservation_matches(
 ) -> bool:
     # Kept for caller compatibility; replay matching must not re-plan mutable defaults.
     del settings
-    reservation = _latest_workspace_resource_reservation(existing)
     requested_values = _requested_resource_reservation_values(payload)
-    stored_dind_slots = _stored_resource_dind_slots(existing, payload)
     stored_values = _stored_resource_reservation_request_values(existing)
     if stored_values is not None:
         return stored_values == requested_values
 
+    reservation = _latest_workspace_resource_reservation(existing)
     if reservation is None:
         return False
 
+    stored_dind_slots = _stored_resource_dind_slots(existing, payload)
     return (
         _resource_reservation_matches_request_values(reservation, requested_values)
         and reservation.dind_slots == stored_dind_slots

@@ -649,6 +649,30 @@ async def test_create_v2_replay_conflicts_when_resources_change(
 
 
 @pytest.mark.unit
+async def test_create_v2_replay_uses_stored_resource_request_when_reservation_is_capped(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-resources-capped-reservation"
+    request = _v2_request(resources={"steady_state_cpu_cores": 2.0})
+
+    created = await service.create_v2(request, idempotency_key=idempotency_key)
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(created.id)
+        reservations[0].steady_cpu = 1.5
+        await session.commit()
+
+    replayed = await service.create_v2(request, idempotency_key=idempotency_key)
+
+    assert replayed.id == created.id
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create_v2(
+            _v2_request(resources={"steady_state_cpu_cores": 1.5}),
+            idempotency_key=idempotency_key,
+        )
+
+
+@pytest.mark.unit
 async def test_create_v2_replay_conflicts_when_resources_change_without_reservation_row(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
