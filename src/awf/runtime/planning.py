@@ -561,7 +561,10 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         return False
     # Migration implementation gaps stay agent-owned; migration-gate evidence
     # gaps are AWF-owned because the profile gate must produce that evidence.
-    if has_marker("migration") and not _has_migration_validation_evidence_context(text):
+    migration_validation_evidence_gap = (
+        has_marker("migration") and _has_migration_validation_evidence_context(text)
+    )
+    if has_marker("migration") and not migration_validation_evidence_gap:
         return False
     deterministic_markers = (
         "api",
@@ -570,9 +573,10 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "wire",
         "function",
         "class",
-        "schema",
     )
     if any(has_marker(marker) for marker in deterministic_markers):
+        return False
+    if has_marker("schema") and not migration_validation_evidence_gap:
         return False
     deterministic_gap_patterns = (
         r"(?:^|[.;:]\s*|(?<![a-z0-9_])please\s+)document(?![a-z0-9_])"

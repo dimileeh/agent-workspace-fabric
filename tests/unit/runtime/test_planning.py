@@ -293,7 +293,9 @@ def test_conformance_requires_awf_validation_accepts_validation_subject_gaps_wit
     "gap",
     (
         "Migration validation evidence is missing.",
+        "Schema migration validation evidence is missing.",
         "AWF validation evidence is missing for the Alembic/profile migration gate.",
+        "Schema migration profile gate logs are missing from the workspace artifacts.",
         "Profile migration gate logs are missing from the workspace artifacts.",
     ),
 )
