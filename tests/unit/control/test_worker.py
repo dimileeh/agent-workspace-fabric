@@ -6512,6 +6512,21 @@ async def test_secret_lease_expiration_scan_surfaces_expiration_failures(
 
 
 @pytest.mark.unit
+async def test_secret_lease_expiration_scan_skips_transient_closed_connection(
+    worker: ControlWorker,
+) -> None:
+    async def _raise_expiration_failure() -> None:
+        raise _closed_connection_error()
+
+    worker._next_secret_lease_expiration_scan_at = 0.0  # noqa: SLF001
+    worker._expire_due_secret_leases = _raise_expiration_failure  # type: ignore[method-assign]
+
+    await worker._maybe_expire_due_secret_leases()  # noqa: SLF001
+
+    assert worker._next_secret_lease_expiration_scan_at == 0.0  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_stale_active_execution_check_preserves_unexpired_execution_claim(
     worker: ControlWorker,
     session_factory: async_sessionmaker[AsyncSession],

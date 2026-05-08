@@ -719,7 +719,15 @@ class ControlWorker:
 
         try:
             await self._expire_due_secret_leases()
-        except Exception:
+        except Exception as exc:
+            if is_transient_closed_connection_error(exc):
+                _log.warning(
+                    "worker.secret_lease_expiration_db_connection_closed",
+                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                )
+                return
             _log.exception(
                 "worker.secret_lease_expiration_failed",
                 reason_code="SECRET_LEASE_EXPIRATION_FAILED",
