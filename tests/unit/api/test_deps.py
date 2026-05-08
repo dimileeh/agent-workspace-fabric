@@ -61,6 +61,24 @@ async def test_get_db_session_rolls_back_and_closes_on_error() -> None:
 
 
 @pytest.mark.unit
+async def test_get_db_session_rolls_back_and_closes_on_base_exception() -> None:
+    session = _RecordingSession()
+    request = _request_with_factory(lambda: session)
+
+    generator = deps.get_db_session(request)  # type: ignore[arg-type]
+    yielded = await generator.__anext__()
+    assert yielded is session
+
+    class _RouteAbort(BaseException):
+        pass
+
+    with pytest.raises(_RouteAbort):
+        await generator.athrow(_RouteAbort("abort"))
+
+    assert session.calls == ["rollback", "close"]
+
+
+@pytest.mark.unit
 async def test_get_db_session_close_error_does_not_mask_route_error() -> None:
     session = _RecordingSession(close_error=RuntimeError("close failed"))
     request = _request_with_factory(lambda: session)

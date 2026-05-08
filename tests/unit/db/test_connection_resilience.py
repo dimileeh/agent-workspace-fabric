@@ -163,6 +163,17 @@ def test_closed_connection_classifier_ignores_suppressed_context() -> None:
 
 
 @pytest.mark.unit
+def test_closed_connection_classifier_walks_unsuppressed_context() -> None:
+    wrapped = RuntimeError("operation wrapper failed")
+    wrapped.__context__ = _closed_connection_error()
+    wrapped.__suppress_context__ = False
+
+    assert wrapped.__suppress_context__ is False
+    assert wrapped.__context__ is not None
+    assert is_transient_closed_connection_error(wrapped) is True
+
+
+@pytest.mark.unit
 def test_closed_connection_classifier_bounds_long_message_fragment_scan() -> None:
     early_fragment = RuntimeError("prefix connection is closed")
     late_fragment = RuntimeError(
@@ -321,6 +332,40 @@ async def test_db_retry_does_not_replay_commit_failures_by_default(
 
 
 @pytest.mark.unit
+async def test_db_retry_reports_retry_hook_for_replayed_commit_failures() -> None:
+    sessions: list[_RetrySession] = []
+    retries: list[tuple[BaseException, int]] = []
+
+    def _factory() -> _RetrySession:
+        session = _RetrySession(fail_commit=not sessions)
+        sessions.append(session)
+        return session
+
+    async def _operation(_session: _RetrySession) -> str:
+        return "committed"
+
+    async def _on_retry(exc: BaseException, attempt: int) -> None:
+        retries.append((exc, attempt))
+
+    result = await run_db_operation_with_retry(
+        _factory,
+        _operation,
+        attempts=2,
+        commit=True,
+        retry_commit_failures=True,
+        on_retry=_on_retry,
+    )
+
+    assert result == "committed"
+    assert len(sessions) == 2
+    assert [session.events for session in sessions] == [
+        ["commit", "invalidate", "close"],
+        ["commit", "close"],
+    ]
+    assert [(type(exc), attempt) for exc, attempt in retries] == [(InterfaceError, 1)]
+
+
+@pytest.mark.unit
 async def test_db_retry_replays_commit_failures_when_explicitly_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -352,3 +397,23 @@ async def test_db_retry_replays_commit_failures_when_explicitly_enabled(
     assert result == "refreshed"
     assert calls == 2
     assert commits == 2
+
+
+class _RetrySession:
+    def __init__(self, *, fail_commit: bool) -> None:
+        self.fail_commit = fail_commit
+        self.events: list[str] = []
+
+    async def commit(self) -> None:
+        self.events.append("commit")
+        if self.fail_commit:
+            raise _closed_connection_error()
+
+    async def invalidate(self) -> None:
+        self.events.append("invalidate")
+
+    async def rollback(self) -> None:
+        self.events.append("rollback")
+
+    async def close(self) -> None:
+        self.events.append("close")

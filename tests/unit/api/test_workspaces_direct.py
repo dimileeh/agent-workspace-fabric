@@ -193,6 +193,38 @@ class TestGetDirect:
         assert result.egress_audit is None
 
     @pytest.mark.unit
+    async def test_returns_materialized_response_after_same_session_egress_error(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="non-transient audit cleanup"),
+            idempotency_key=None,
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            assert workspace_id == created.workspace_id
+            raise RuntimeError("audit lookup failed")
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+
+        result = await _get_workspace_response(created.workspace_id, session)
+
+        assert result.id == created.workspace_id
+        assert result.task_title == "non-transient audit cleanup"
+        assert result.egress_audit is None
+
+    @pytest.mark.unit
     async def test_raises_404_for_missing(self, session: AsyncSession) -> None:
         with pytest.raises(HTTPException) as exc:
             await _get_workspace_response("ws_missing_id", session)

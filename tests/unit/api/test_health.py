@@ -401,6 +401,55 @@ async def test_readyz_egress_audit_timeout_drains_completed_session_cleanup(
 
 
 @pytest.mark.unit
+async def test_drain_cancelled_task_result_defers_pending_task_consumption() -> None:
+    release = asyncio.Event()
+
+    async def _pending() -> None:
+        await release.wait()
+
+    task = asyncio.create_task(_pending())
+    await health_route._drain_cancelled_task_result(task, timeout=0)
+
+    assert not task.done()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.unit
+async def test_egress_audit_summary_timeout_consumes_inner_task_on_outer_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class _Session:
+        async def close(self) -> None:
+            pass
+
+    class _HangingEgressAuditRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _HangingEgressAuditRepository)
+
+    task = asyncio.create_task(health_route._egress_audit_summary_counts_with_timeout(_Session))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+
+
+@pytest.mark.unit
 async def test_egress_audit_summary_invalidates_transient_connection_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
