@@ -112,26 +112,26 @@ def test_read_only_operator_rows_are_implementation_backed() -> None:
         assert not backlog.startswith("TODO§"), capability
 
 
-CONTROL_GAP_ROWS = {
-    "Refresh workspace": ("awf workspace refresh", "No awf_refresh_workspace", "TODO§P1-mcp-refresh"),
-    "Rebase workspace": ("awf workspace rebase", "No awf_rebase_workspace", "TODO§P1-mcp-rebase"),
+CONTROL_IMPLEMENTED_ROWS = {
+    "Refresh workspace": ("awf workspace refresh", "awf_refresh_workspace"),
+    "Rebase workspace": ("awf workspace rebase", "awf_rebase_workspace"),
 }
 
 
 @pytest.mark.unit
-def test_control_operations_with_mcp_gaps_are_intentionally_documented() -> None:
+def test_control_operations_with_mcp_tools_are_documented() -> None:
     rows = _parity_rows()
 
-    for capability, (cli_surface, mcp_tool, backlog) in CONTROL_GAP_ROWS.items():
+    for capability, (cli_surface, mcp_tool) in CONTROL_IMPLEMENTED_ROWS.items():
         row = _row_for_capability(rows, capability)
         cli_cell = _strip_backticks(row.get("CLI surface", "")).strip()
         mcp_cell = _strip_backticks(row.get("MCP tool name", "")).strip()
         backlog_cell = _strip_backticks(row.get("Backlog Slice", "")).strip()
 
         assert cli_surface in cli_cell, capability
-        assert row.get("Status", "").strip() == "MCP missing/backlog", capability
-        assert mcp_cell == mcp_tool, capability
-        assert backlog_cell == backlog, capability
+        assert row.get("Status", "").strip() == "MCP implemented", capability
+        assert mcp_tool in mcp_cell, capability
+        assert not backlog_cell.startswith("TODO§"), capability
 
 
 @pytest.mark.unit
