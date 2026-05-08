@@ -486,7 +486,7 @@ class ControlWorker:
         if not candidate_workspaces:
             return []
 
-        async with self._session_factory() as session:
+        async def _operation(session: AsyncSession) -> list[str]:
             eligible = await self._filter_provider_recovery_suppressed(
                 session,
                 candidate_workspaces,
@@ -500,9 +500,14 @@ class ControlWorker:
             ordered_workspaces = _order_scheduler_workspaces(
                 list(eligible_workspaces_by_id.values())
             )
-            ordered_ids = [workspace.id for workspace in ordered_workspaces[:limit]]
-            await session.commit()
-            return ordered_ids
+            return [workspace.id for workspace in ordered_workspaces[:limit]]
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            on_retry=self._log_transient_db_retry,
+        )
 
     async def _filter_provider_recovery_suppressed(
         self,
