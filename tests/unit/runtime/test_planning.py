@@ -252,6 +252,18 @@ def test_conformance_requires_awf_validation_accepts_hyphenated_reason_code() ->
 
 
 @pytest.mark.unit
+def test_conformance_requires_awf_validation_rejects_empty_gaps_even_with_reason_code() -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"No explicit gaps were provided.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        '"gaps":[]}'
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "gap",
     (
