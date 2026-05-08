@@ -2062,8 +2062,7 @@ class WorkspaceExecutor:
             max(
                 0,
                 planning_validation_handoff.max_iterations
-                - planning_validation_handoff.iteration
-                - 1,
+                - planning_validation_handoff.iteration,
             )
             if planning_validation_handoff is not None and recovery is None
             else 0
@@ -2432,7 +2431,7 @@ class WorkspaceExecutor:
                         remaining_conformance_iterations = max(
                             0,
                             conformance_handoff.max_iterations
-                            - (conformance_handoff.iteration + 1),
+                            - conformance_handoff.iteration,
                         )
                         # Recovery skips feature execution; retrying this
                         # conformance miss would only rerun validation.
