@@ -2041,10 +2041,25 @@ class WorkspaceExecutor:
         last_failure_message: str | None = None
         successful_validation_run_id: str | None = None
         successful_validation_workspace_head_sha: str | None = None
+        validation_fix_passes_used = 0
         post_validation_conformance_fix_attempts = 0
-        for pass_number in range(max_fix_passes + 1):
-            # pass_number == 0 is the initial run (already-committed agent
-            # work). 1..N are fix attempts driven by the retry prompt.
+        post_validation_conformance_fix_pass_budget = (
+            max(
+                0,
+                planning_validation_handoff.max_iterations
+                - planning_validation_handoff.iteration
+                - 1,
+            )
+            if planning_validation_handoff is not None and recovery is None
+            else 0
+        )
+        max_validation_attempts = (
+            max_fix_passes + post_validation_conformance_fix_pass_budget + 1
+        )
+        for pass_number in range(max_validation_attempts):
+            # This loop covers the initial validation plus any validation or
+            # post-validation conformance fix prompts. The per-category
+            # counters below enforce their separate budgets.
             if not await self._recheck_status(
                 workspace_id,
                 expected=WorkspaceStatus.validating,
@@ -2368,7 +2383,6 @@ class WorkspaceExecutor:
                         # conformance miss would only rerun validation.
                         if (
                             recovery is not None
-                            or pass_number >= max_fix_passes
                             or remaining_conformance_iterations <= 0
                         ):
                             await self._finish_pending_validate_operations(
@@ -2394,8 +2408,9 @@ class WorkspaceExecutor:
                             "executor.post_validation_conformance_needs_fix_pass",
                             workspace_id=workspace_id,
                             validation_run_id=validation_run_id,
-                            fix_pass=pass_number,
-                            max_fix_passes=max_fix_passes,
+                            fix_pass=post_validation_conformance_fix_attempts + 1,
+                            max_fix_passes=post_validation_conformance_fix_pass_budget,
+                            validation_fix_passes_used=validation_fix_passes_used,
                             remaining_conformance_iterations=remaining_conformance_iterations,
                             reason_code=(
                                 conformance_failure.reason_code
@@ -2430,28 +2445,46 @@ class WorkspaceExecutor:
                         reason_code="VALIDATION_OK",
                         coverage=validation_coverage,
                     )
-                    if pass_number > 0:
+                    if validation_fix_passes_used or post_validation_conformance_fix_attempts:
                         _log.info(
                             "executor.validation_recovered",
                             workspace_id=workspace_id,
-                            fix_passes_used=pass_number,
+                            fix_passes_used=validation_fix_passes_used,
+                            post_validation_conformance_fix_attempts=(
+                                post_validation_conformance_fix_attempts
+                            ),
                         )
                     break
 
             first_fail = val_result.first_failure
+            is_post_validation_conformance_fix_pass = (
+                first_fail is not None
+                and first_fail.phase == "conformance"
+                and first_fail.command == "post-validation plan conformance"
+            )
             _log.info(
                 "executor.validation_failed",
                 workspace_id=workspace_id,
                 failed_command=first_fail.command if first_fail else None,
                 fix_pass=pass_number,
                 max_fix_passes=max_fix_passes,
+                validation_fix_passes_used=validation_fix_passes_used,
+                post_validation_conformance_fix_attempts=(
+                    post_validation_conformance_fix_attempts
+                ),
             )
             last_failure_message = _validation_failure_message(
                 val_result,
                 baseline_coverage=baseline_coverage,
             )
 
-            if pass_number >= max_fix_passes or first_fail is None:
+            if (
+                first_fail is None
+                or (
+                    not is_post_validation_conformance_fix_pass
+                    and validation_fix_passes_used >= max_fix_passes
+                )
+            ):
                 # Exhausted our budget (or no failure details to anchor a
                 # fix prompt on) — mark failed and let the operator triage.
                 # If a post-validation conformance fix already consumed a
@@ -2488,13 +2521,21 @@ class WorkspaceExecutor:
 
             # Fire a fix pass: re-invoke the coding CLI with the failure
             # context, then re-commit whatever it changed.
+            if is_post_validation_conformance_fix_pass:
+                fix_pass_number = max(1, post_validation_conformance_fix_attempts)
+                fix_pass_total_passes = max(1, post_validation_conformance_fix_pass_budget)
+                fix_pass_kind = "post-validation conformance"
+            else:
+                fix_pass_number = validation_fix_passes_used + 1
+                fix_pass_total_passes = max_fix_passes
+                fix_pass_kind = "validation"
             fix_context = ValidationFixContext(
                 failed_command=first_fail.command,
                 returncode=first_fail.returncode,
                 stdout_tail=read_output_tail(first_fail.stdout_path),
                 stderr_tail=read_output_tail(first_fail.stderr_path),
-                pass_number=pass_number + 1,
-                total_passes=max_fix_passes,
+                pass_number=fix_pass_number,
+                total_passes=fix_pass_total_passes,
                 test_commands=test_commands_tuple,
                 reason_code=_validation_run_reason_code(val_result),
                 coverage_percent=val_result.coverage.percent if val_result.coverage else None,
@@ -2519,8 +2560,9 @@ class WorkspaceExecutor:
             _log.info(
                 "executor.fix_pass_start",
                 workspace_id=workspace_id,
-                pass_number=pass_number + 1,
-                max_fix_passes=max_fix_passes,
+                pass_number=fix_pass_number,
+                max_fix_passes=fix_pass_total_passes,
+                fix_pass_kind=fix_pass_kind,
                 failed_command=first_fail.command,
             )
             if not await self._recheck_status(
@@ -2557,7 +2599,8 @@ class WorkspaceExecutor:
                 _log.error(
                     "executor.fix_pass_cleanup_failed",
                     workspace_id=workspace_id,
-                    pass_number=pass_number + 1,
+                    pass_number=fix_pass_number,
+                    fix_pass_kind=fix_pass_kind,
                     source=exc.source,
                     label=exc.label,
                     invocation_id=exc.invocation_id,
@@ -2600,10 +2643,14 @@ class WorkspaceExecutor:
                 _log.warning(
                     "executor.fix_pass_agent_nonzero_exit",
                     workspace_id=workspace_id,
-                    pass_number=pass_number + 1,
+                    pass_number=fix_pass_number,
+                    fix_pass_kind=fix_pass_kind,
                     returncode=exc.result.returncode,
                     reason_code=exc.reason_code,
                 )
+
+            if not is_post_validation_conformance_fix_pass:
+                validation_fix_passes_used += 1
 
             if not await self._recheck_status(
                 workspace_id,
@@ -2732,10 +2779,10 @@ class WorkspaceExecutor:
                     requested_tier=validation_tier,
                 ):
                     return
-                commit_msg = f"awf: fix pass {pass_number + 1} for {ws.task_title}"[:72]
+                commit_msg = f"awf: fix pass {fix_pass_number} for {ws.task_title}"[:72]
                 commit_body = (
-                    f"AWF validation fix pass {pass_number + 1} of "
-                    f"{max_fix_passes} for workspace {workspace_id} "
+                    f"AWF {fix_pass_kind} fix pass {fix_pass_number} of "
+                    f"{fix_pass_total_passes} for workspace {workspace_id} "
                     f"(agent: {ws.agent}). Failed command: "
                     f"{first_fail.command}."
                 )

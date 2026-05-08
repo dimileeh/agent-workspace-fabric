@@ -265,6 +265,9 @@ _TERMINAL_WORKSPACE_STATUSES = {
     WorkspaceStatus.destroyed.value,
 }
 _PLANNING_VALIDATION_HANDOFF_EVENT = "workspace.planning_conformance_requires_awf_validation"
+_POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT = (
+    "workspace.post_validation_conformance_satisfied"
+)
 
 
 def _normalize_conformance_handoff_reason_code(value: object) -> str | None:
@@ -277,7 +280,10 @@ def _monitor_recovery_conformance_payload(workspace: Workspace) -> dict[str, Any
     """Return conformance handoff context for monitor-dispatched validation recovery."""
     events = getattr(workspace, "events", None) or []
     for event in reversed(events):
-        if getattr(event, "event_type", None) != _PLANNING_VALIDATION_HANDOFF_EVENT:
+        event_type = getattr(event, "event_type", None)
+        if event_type == _POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT:
+            return None
+        if event_type != _PLANNING_VALIDATION_HANDOFF_EVENT:
             continue
         raw_payload = getattr(event, "payload", None)
         payload = raw_payload if isinstance(raw_payload, Mapping) else {}

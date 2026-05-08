@@ -3696,6 +3696,66 @@ async def test_monitor_recovery_dispatch_preserves_planning_validation_handoff_c
 
 
 @pytest.mark.unit
+async def test_monitor_recovery_dispatch_ignores_resolved_planning_validation_handoff(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 79
+    head_sha = "f" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    await _mark_refactor_task(factory, workspace_id)
+    async with factory() as session:
+        workspace_repo = WorkspaceRepository(session)
+        workspace = await workspace_repo.get(workspace_id)
+        assert workspace is not None
+        await workspace_repo.add_event(
+            workspace,
+            event_type="workspace.planning_conformance_requires_awf_validation",
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+            payload={
+                "summary": "AWF validation evidence is required before conformance can pass.",
+                "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
+                "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "plan_path": f"docs/awf-plans/{workspace_id}.md",
+                "report_path": f"docs/awf-plans/{workspace_id}.conformance.json",
+                "iteration": 0,
+                "max_iterations": 3,
+            },
+        )
+        await workspace_repo.add_event(
+            workspace,
+            event_type="workspace.post_validation_conformance_satisfied",
+            reason_code="PLAN_CONFORMANCE_SATISFIED",
+            payload={
+                "summary": "validation evidence satisfied the plan",
+                "plan_path": f"docs/awf-plans/{workspace_id}.md",
+                "report_path": f"docs/awf-plans/{workspace_id}.conformance.json",
+                "validation_run_id": "val-resolved",
+            },
+        )
+        await session.commit()
+
+    terminal = await _dispatch_merge_recovery(
+        factory=factory,
+        tmp_path=tmp_path,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert terminal is True
+    assert len(operations) == 1
+    assert "conformance" not in operations[0].payload
+
+
+@pytest.mark.unit
 async def test_monitor_runner_loads_persisted_state_on_resume(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

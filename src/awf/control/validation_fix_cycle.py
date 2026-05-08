@@ -55,9 +55,9 @@ class ValidationFixContext:
     """1-indexed — "this is attempt 1 of N". Never 0."""
 
     total_passes: int
-    """The configured ``max_validation_fix_passes``. The coding CLI
-    sees both counters so it can pace itself (conservative on attempt
-    1, more aggressive near the cap)."""
+    """The retry budget for this failure category. The coding CLI sees
+    both counters so it can pace itself (conservative on attempt 1,
+    more aggressive near the cap)."""
 
     test_commands: tuple[str, ...]
     """All validation commands that will run on the NEXT pass —

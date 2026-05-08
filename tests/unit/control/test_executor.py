@@ -1677,6 +1677,158 @@ class TestHappyPath:
         assert [run["reason_code"] for run in runs] == ["COMMAND_FAILED", "VALIDATION_OK"]
 
     @pytest.mark.unit
+    async def test_post_validation_conformance_fix_does_not_consume_validation_fix_budget(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE),
+            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts"),
+            pr_creator=PullRequestCreator(fake),
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                default_models={AgentRuntime.codex: "gpt-5"},
+                max_validation_fix_passes=1,
+            ),
+        )
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 3,
+                    "enforce_plan_only_changes": True,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        handoff_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Only AWF validation evidence is missing.",
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": ["AWF-owned validation evidence is missing for pytest."],
+            }
+        )
+        post_validation_gap_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Validation passed, but the implementation still misses the plan.",
+                "gaps": ["Add the saved API behavior required by the plan."],
+            }
+        )
+        satisfied_report = json.dumps(
+            {
+                "status": "satisfied",
+                "summary": "implementation and validation evidence satisfy the plan",
+                "gaps": [],
+            }
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # changed paths before planning
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                f"?? docs/awf-plans/{ws_id}.md\n"
+                f"?? {report_path}\n"
+                " M src/x.py\n"
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="src/x.py\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        _queue_validation_head(fake, head="b" * 40)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=post_validation_gap_report)
+        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="implemented conformance fix")  # fix adapter
+        fake.queue_result(returncode=0)  # fix git add
+        fake.queue_result(returncode=0, stdout="src/x.py\n")  # fix cached diff
+        fake.queue_result(returncode=0)  # fix commit
+        _queue_validation_head(fake, head="c" * 40)
+        fake.queue_result(returncode=1, stderr="pytest: failed after conformance fix")
+        fake.queue_result(returncode=0, stdout="fixed pytest")  # validation fix adapter
+        fake.queue_result(returncode=0)  # validation fix git add
+        fake.queue_result(returncode=0, stdout="tests/test_x.py\n")  # validation fix diff
+        fake.queue_result(returncode=0)  # validation fix commit
+        _queue_validation_head(fake, head="d" * 40)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout=f"{'d' * 40}\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
+        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        _queue_post_validation_conformance_report_commit(fake, report_path)
+        _queue_pre_push_diagnostics(fake, head="d" * 40)
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        adapter_prompts = [
+            call.args[-1]
+            for call in fake.calls
+            if call.args[:2] == ["docker", "compose"] and "codex" in call.args
+        ]
+        fix_prompts = [
+            prompt
+            for prompt in adapter_prompts
+            if "Validation failed after your previous pass" in prompt
+        ]
+
+        assert len(fix_prompts) == 2
+        assert "post-validation plan conformance" in fix_prompts[0]
+        assert "pytest -q" in fix_prompts[1]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            runs = (
+                (
+                    await s.execute(
+                        text(
+                            "SELECT status, reason_code FROM validation_runs "
+                            "WHERE workspace_id = :workspace_id ORDER BY started_at"
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+        assert [run["status"] for run in runs] == ["succeeded", "failed", "succeeded"]
+        assert [run["reason_code"] for run in runs] == [
+            "VALIDATION_OK",
+            "COMMAND_FAILED",
+            "VALIDATION_OK",
+        ]
+
+    @pytest.mark.unit
     async def test_planning_profile_iterates_when_conformance_reports_gaps(
         self,
         executor: WorkspaceExecutor,
