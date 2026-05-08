@@ -280,7 +280,10 @@ def _policy_int(
             return fallback
         if "." in stripped:
             stripped = stripped.split(".", maxsplit=1)[0]
-        return int(stripped)
+        try:
+            return int(stripped)
+        except ValueError:
+            return fallback
     return fallback
 
 

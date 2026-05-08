@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -372,6 +373,25 @@ def test_scheduler_score_from_workspace_parses_integer_valued_decimal_strings() 
     assert score_input.human_boost == 5
     assert score_input.retry_attempt_number == 2
     assert score.effective_score == 105
+
+
+@pytest.mark.unit
+def test_scheduler_policy_parsing_falls_back_for_oversized_numeric_text() -> None:
+    previous_limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)
+    try:
+        oversized_digits = "9" * 641
+
+        assert (
+            scheduler._policy_int(
+                {"priority": oversized_digits},
+                "priority",
+                fallback=17,
+            )
+            == 17
+        )
+    finally:
+        sys.set_int_max_str_digits(previous_limit)
 
 
 @pytest.mark.unit
