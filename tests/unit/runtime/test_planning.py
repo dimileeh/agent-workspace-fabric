@@ -9,6 +9,7 @@ import pytest
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
 from awf.db.enums import AgentRuntime
+from awf.runtime import planning as planning_mod
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
@@ -264,6 +265,18 @@ def test_conformance_requires_awf_validation_rejects_empty_gaps_even_with_reason
 
 
 @pytest.mark.unit
+def test_conformance_requires_awf_validation_rejects_satisfied_reports() -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="Validation evidence is still missing, but status is final.",
+        gaps=("AWF validation evidence is missing for the required pytest gate.",),
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "gap",
     (
@@ -395,6 +408,28 @@ def test_conformance_requires_awf_validation_rejects_mixed_or_ordinary_gaps() ->
 
     assert not conformance_requires_awf_validation(mixed)
     assert not conformance_requires_awf_validation(ordinary)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "Missing approval artifact for the handoff.",
+        "Schema evidence is missing for the generated artifact.",
+        "AWF validation evidence is missing for code review logs.",
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_non_validation_artifact_gaps(
+    gap: str,
+) -> None:
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.needs_iteration,
+        summary="Implementation appears complete.",
+        gaps=(gap,),
+        reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+    )
+
+    assert not conformance_requires_awf_validation(report)
 
 
 @pytest.mark.unit
@@ -1032,6 +1067,26 @@ def test_classify_conformance_stall_redacts_secrets_in_last_output_excerpt() -> 
     )
     assert leaked_token not in payload["last_output_excerpt"]
     assert "<redacted>" in payload["last_output_excerpt"]
+
+
+@pytest.mark.unit
+def test_stall_output_excerpt_falls_back_to_redacted_exception_text() -> None:
+    record = ConformanceIterationRecord(
+        iteration=1,
+        elapsed_seconds=1,
+        report_digest=None,
+        worktree_changed=False,
+        stdout="",
+        stderr="",
+    )
+
+    excerpt = planning_mod._stall_output_excerpt(  # noqa: SLF001
+        RuntimeError("provider failed with sk-test-secret"),
+        record,
+    )
+
+    assert "<redacted>" in excerpt
+    assert "sk-test-secret" not in excerpt
 
 
 @pytest.mark.unit

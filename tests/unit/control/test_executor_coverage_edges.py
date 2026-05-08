@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 import awf.control.executor as executor_mod
-from awf.adapters.base import AgentDefaults
-from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
+from awf.adapters.base import AgentDefaults, AgentRunError
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.control.executor import (
     GIT_OBJECT_MISSING_REASON_CODE,
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
@@ -53,7 +53,14 @@ from awf.control.executor import (
     _validation_run_reason_code,
     _validation_tier_for_workspace,
 )
-from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    WorkspaceStatus,
+)
 from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
@@ -3337,6 +3344,78 @@ def test_validation_failure_message_carries_coverage_context(tmp_path: Path) -> 
         )
         == "validation failed"
     )
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_result_uses_attempt_from_failure_details(
+    tmp_path: Path,
+) -> None:
+    failure = executor_mod._PlanningRunFailure(  # noqa: SLF001
+        message="Plan conformance still requires validation evidence.",
+        details={
+            "attempt": 2,
+            "conformance": {
+                "summary": "AWF validation evidence is missing.",
+                "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": ["pytest coverage evidence is stale", "  ", 42],
+            },
+        },
+    )
+
+    result = executor_mod._post_validation_conformance_fix_result(  # noqa: SLF001
+        failure=failure,
+        workspace_id="ws_conformance",
+        artifacts_root=tmp_path,
+    )
+
+    command = result.commands[0]
+    assert command.stdout_path.name == "post_validation_conformance.2.stdout"
+    assert command.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    text = command.stdout_path.read_text(encoding="utf-8")
+    assert "Summary: AWF validation evidence is missing." in text
+    assert f"Report reason code: {CONFORMANCE_REQUIRES_AWF_VALIDATION}" in text
+    assert "- pytest coverage evidence is stale" in text
+    assert "- 42" in text
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_agent_failure_details_include_output_and_agent_details() -> None:
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=2, stdout="stdout detail", stderr="stderr detail"),
+        reason_code="",
+        details={"provider": "codex", "retry": True},
+    )
+
+    details = executor_mod._post_validation_conformance_agent_failure_details(  # noqa: SLF001
+        exc,
+        validation_run_id="vr_123",
+    )
+
+    assert details["validation_run_id"] == "vr_123"
+    assert details["conformance"] == {
+        "phase": "post_validation",
+        "reason_code": "AGENT_CLI_FAILED",
+        "returncode": 2,
+        "stdout": "stdout detail",
+        "stderr": "stderr detail",
+    }
+    assert details["agent"] == {"provider": "codex", "retry": True}
+
+    stdout_only = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=1, stdout="stdout only", stderr=""),
+    )
+    stdout_only_details = executor_mod._post_validation_conformance_agent_failure_details(  # noqa: SLF001
+        stdout_only,
+        validation_run_id="vr_456",
+    )
+    assert stdout_only_details["conformance"] == {
+        "phase": "post_validation",
+        "reason_code": "AGENT_CLI_FAILED",
+        "returncode": 1,
+        "stdout": "stdout only",
+    }
 
 
 @pytest.mark.unit

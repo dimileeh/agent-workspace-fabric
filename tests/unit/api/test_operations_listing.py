@@ -1,3 +1,5 @@
+import base64
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
@@ -9,6 +11,7 @@ from awf.api.schemas import OperationResponse
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.operations import build_operation_list_response, decode_operation_list_cursor
 from awf.service.workspaces import OperationRowsPage
 
@@ -46,6 +49,17 @@ def test_operation_list_response_uses_keyset_cursor_from_last_returned_row() -> 
     assert decoded is not None
     assert decoded.created_at == operation.created_at
     assert decoded.operation_id == operation.id
+
+
+@pytest.mark.unit
+def test_decode_operation_list_cursor_rejects_empty_operation_id() -> None:
+    payload = {"c": datetime(2026, 1, 1, tzinfo=UTC).isoformat(), "i": ""}
+    cursor = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+    with pytest.raises(InvalidBoundedListCursorError):
+        decode_operation_list_cursor(cursor)
 
 
 @pytest.fixture
@@ -348,6 +362,22 @@ async def test_list_operations_invalid_cursor_returns_structured_400(
     client: AsyncClient,
 ) -> None:
     response = await client.get("/v1/operations?cursor=not-a-cursor")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "error_code": "INVALID_CURSOR",
+        "message": "Invalid operation list cursor.",
+    }
+
+
+@pytest.mark.unit
+async def test_list_workspace_operations_invalid_cursor_returns_structured_400(
+    client: AsyncClient,
+    sample_data,
+) -> None:
+    ws1, _ws2 = sample_data
+
+    response = await client.get(f"/v1/workspaces/{ws1.id}/operations?cursor=not-a-cursor")
 
     assert response.status_code == 400
     assert response.json()["detail"] == {

@@ -27,7 +27,9 @@ from awf.runtime.validation import (
     _healthcheck_attempt_timeout,
     _healthcheck_cli_args,
     _healthcheck_failure_reason,
+    _parse_coverage_provider_failure_evidence_from_files,
     _parse_python_coverage_percent_from_files,
+    _runs_pytest_under_coverage,
     profile_phase_command_plan,
 )
 from awf.runtime.validation_identity import (
@@ -2430,6 +2432,27 @@ class TestCoverageEnforcement:
         assert _parse_python_coverage_percent_from_files([coverage_output]) == 98
         assert _parse_python_coverage_percent_from_files([summary_only]) == 87.5
         assert _parse_python_coverage_percent_from_files([no_coverage]) is None
+
+    @pytest.mark.unit
+    def test_pytest_under_coverage_scan_continues_past_non_run_coverage_token(self) -> None:
+        assert _runs_pytest_under_coverage(
+            ["coverage", "report", "coverage", "run", "pytest"]
+        )
+
+    @pytest.mark.unit
+    def test_provider_failure_evidence_parser_skips_missing_and_blank_lines(
+        self, tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "missing.txt"
+        output = tmp_path / "coverage.txt"
+        output.write_text(
+            "\nFAIL Required test coverage of 99.0% not reached. Total coverage: 98.84%\n",
+            encoding="utf-8",
+        )
+
+        assert _parse_coverage_provider_failure_evidence_from_files([missing, output]) == [
+            "FAIL Required test coverage of 99.0% not reached. Total coverage: 98.84%"
+        ]
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
