@@ -529,6 +529,10 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     )
     if not any(has_marker(marker) for marker in validation_subject_markers):
         return False
+    # Migration implementation gaps stay agent-owned; migration-gate evidence
+    # gaps are AWF-owned because the profile gate must produce that evidence.
+    if has_marker("migration") and not _has_migration_validation_evidence_context(text):
+        return False
     deterministic_markers = (
         "api",
         "endpoint",
@@ -537,7 +541,6 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "function",
         "class",
         "schema",
-        "migration",
     )
     if any(has_marker(marker) for marker in deterministic_markers):
         return False
@@ -584,6 +587,16 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
             continue
         return False
     return True
+
+
+def _has_migration_validation_evidence_context(text: str) -> bool:
+    patterns = (
+        r"(?<![a-z0-9_])migration\s+validation\s+"
+        r"(?:evidence|provenance|logs?|runs?)(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:(?:alembic(?:[/ -]profile)?|profile)\s+)?"
+        r"migration\s+(?:profile\s+)?gates?(?![a-z0-9_])",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def build_conformance_stall_failure_evidence(

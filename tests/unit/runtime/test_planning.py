@@ -265,6 +265,28 @@ def test_conformance_requires_awf_validation_accepts_validation_subject_gaps_wit
 @pytest.mark.parametrize(
     "gap",
     (
+        "Migration validation evidence is missing.",
+        "AWF validation evidence is missing for the Alembic/profile migration gate.",
+        "Profile migration gate logs are missing from the workspace artifacts.",
+    ),
+)
+def test_conformance_requires_awf_validation_accepts_migration_gate_evidence_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Implementation appears complete; AWF migration gate evidence is missing.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
         "AWF validation run code coverage evidence is missing.",
         "AWF-owned validation run code coverage has not been generated.",
         "AWF-owned validation evidence is missing for the required reason_code.",
@@ -359,6 +381,27 @@ def test_conformance_requires_awf_validation_rejects_plan_and_documentation_arti
     report = parse_conformance_report(
         '{"status":"needs_iteration",'
         '"summary":"Plan or documentation artifact work remains.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "Migration implementation is missing validation evidence.",
+        "Migration validation logic is missing.",
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_migration_implementation_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Migration implementation work remains.",'
         '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
         f'"gaps":["{gap}"]}}'
     )
