@@ -570,6 +570,7 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "api",
         "endpoint",
         "implement",
+        "implementation",
         "wire",
         "function",
         "class",

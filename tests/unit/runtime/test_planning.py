@@ -444,6 +444,7 @@ def test_conformance_requires_awf_validation_rejects_plan_and_documentation_arti
     "gap",
     (
         "Migration implementation is missing validation evidence.",
+        "Migration profile gate implementation is missing.",
         "Migration validation logic is missing.",
     ),
 )
