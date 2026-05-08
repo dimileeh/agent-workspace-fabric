@@ -29,6 +29,7 @@ from awf.db.repositories import (
     validation_command_set_hash,
 )
 from awf.db.session import make_engine, make_session_factory
+from awf.service.scheduler import SchedulerOrderCursor
 from tests.postgres import (
     create_postgres_test_engine,
     postgres_empty_test_url,
@@ -1439,7 +1440,9 @@ class TestOwnedPathOverlapLookup:
         assert session.executed == []
 
     @pytest.mark.unit
-    async def test_postgres_scheduler_cursor_uses_keyset_without_offset(self) -> None:
+    async def test_postgres_scheduler_cursor_uses_scheduler_order_keyset_without_offset(
+        self,
+    ) -> None:
         cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
         session = _RecordingSchedulerSession(
             "postgresql",
@@ -1450,7 +1453,12 @@ class TestOwnedPathOverlapLookup:
         listed = await repo.list_schedulable_workspaces(
             status=WorkspaceStatus.ready,
             limit=1,
-            after=(cursor_created_at, "ws_cursor"),
+            after=SchedulerOrderCursor(
+                class_priority=2,
+                effective_score=42,
+                queued_at=cursor_created_at,
+                workspace_id="ws_cursor",
+            ),
         )
 
         assert [workspace.id for workspace in listed] == ["ws_after"]
@@ -1464,6 +1472,8 @@ class TestOwnedPathOverlapLookup:
         assert "FOR UPDATE" in sql
         assert "SKIP LOCKED" in sql
         assert "OFFSET" not in sql
+        assert "< 2" in sql
+        assert "< 42" in sql
         assert "workspaces.created_at >" in sql
         assert "workspaces.created_at =" in sql
         assert "workspaces.id > 'ws_cursor'" in sql

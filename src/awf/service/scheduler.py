@@ -62,6 +62,14 @@ class SchedulerScore:
     score_summary: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class SchedulerOrderCursor:
+    class_priority: int
+    effective_score: int
+    queued_at: datetime
+    workspace_id: str
+
+
 def task_class_priority(task_class: str | None) -> int:
     return TASK_CLASS_PRIORITIES.get(task_class or "", 0)
 

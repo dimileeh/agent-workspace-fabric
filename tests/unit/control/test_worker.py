@@ -59,7 +59,7 @@ from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.controls import WorkspaceControlService
-from awf.service.scheduler import scheduler_score_from_workspace
+from awf.service.scheduler import SchedulerOrderCursor, scheduler_score_from_workspace
 from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
 from tests.postgres import postgres_test_engine
 
@@ -843,8 +843,10 @@ class TestRunOnce:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
-            after: tuple[datetime, str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
         ) -> list[Workspace]:
+            del scoring_at
             scheduler_read_session_ids.append(id(self._session))
             return await original_list(
                 self,
@@ -1123,6 +1125,48 @@ class TestRunOnceExecution:
         assert not set(low_ids).intersection(executor.calls)
 
     @pytest.mark.unit
+    async def test_ready_execution_scores_beyond_priority_refill_page(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        low_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"refill-window-low-priority-{index}",
+                task_class="docs_task",
+                task_policy={"scheduler": {"base_priority": 0}},
+            )
+            for index in range(_scheduler_candidate_fetch_limit(1) * 2)
+        ]
+        urgent_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "urgent-ready-after-refill-window",
+            task_class="migration_task",
+            task_policy={"scheduler": {"base_priority": 100, "human_boost": 5}},
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [urgent_id]
+        assert not set(low_ids).intersection(executor.calls)
+
+    @pytest.mark.unit
     async def test_ready_scan_stops_after_dispatch_slots_are_filled(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1170,7 +1214,7 @@ class TestRunOnceExecution:
                     .values(created_at=created_at, updated_at=created_at)
                 )
             await session.commit()
-        query_cursors: list[tuple[datetime, str] | None] = []
+        query_cursors: list[SchedulerOrderCursor | None] = []
 
         async def _list_schedulable_workspaces(
             self: WorkspaceRepository,
@@ -1178,8 +1222,10 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
-            after: tuple[datetime, str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
         ) -> list[Workspace]:
+            del scoring_at
             assert status == WorkspaceStatus.ready
             assert limit == candidate_limit
             excluded = set(exclude_ids or set())
@@ -1189,7 +1235,8 @@ class TestRunOnceExecution:
                 visible = [
                     workspace_id
                     for workspace_id in visible
-                    if (created_at_by_id[workspace_id], workspace_id) > after
+                    if (created_at_by_id[workspace_id], workspace_id)
+                    > (after.queued_at, after.workspace_id)
                 ]
             visible = visible[:limit]
             if not visible:
@@ -1217,11 +1264,12 @@ class TestRunOnceExecution:
         )
 
         assert await worker._list_ready(limit=1) == [urgent_id]  # noqa: SLF001
-        assert query_cursors == [
-            None,
-            (created_at_by_id[low_ids[-1]], low_ids[-1]),
-        ]
-        assert all(cursor is None or cursor[1] not in tail_ids for cursor in query_cursors)
+        assert len(query_cursors) == 2
+        assert query_cursors[0] is None
+        assert query_cursors[1] is not None
+        assert query_cursors[1].queued_at == created_at_by_id[low_ids[-1]]
+        assert query_cursors[1].workspace_id == low_ids[-1]
+        assert all(cursor is None or cursor.workspace_id not in tail_ids for cursor in query_cursors)
 
     @pytest.mark.unit
     async def test_human_boosted_ready_workspace_wins_equal_priority_dispatch(
@@ -1701,7 +1749,7 @@ class TestRunOnceExecution:
                     .values(created_at=created_at, updated_at=created_at)
                 )
             await session.commit()
-        queries: list[tuple[tuple[datetime, str] | None, set[str]]] = []
+        queries: list[tuple[SchedulerOrderCursor | None, set[str]]] = []
 
         async def _list_schedulable_workspaces(
             self: WorkspaceRepository,
@@ -1709,8 +1757,10 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
-            after: tuple[datetime, str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
         ) -> list[Workspace]:
+            del scoring_at
             assert status == WorkspaceStatus.ready
             excluded = set(exclude_ids or set())
             queries.append((after, excluded))
@@ -1719,7 +1769,8 @@ class TestRunOnceExecution:
                 visible = [
                     workspace_id
                     for workspace_id in visible
-                    if (created_at_by_id[workspace_id], workspace_id) > after
+                    if (created_at_by_id[workspace_id], workspace_id)
+                    > (after.queued_at, after.workspace_id)
                 ]
             visible = visible[:limit]
             if not visible:
@@ -1747,16 +1798,12 @@ class TestRunOnceExecution:
         )
 
         assert await worker._list_ready(limit=1, exclude_ids=base_exclude_ids) == [allowed_id]
-        assert queries == [
-            (None, base_exclude_ids),
-            (
-                (
-                    created_at_by_id[suppressed_ids[-1]],
-                    suppressed_ids[-1],
-                ),
-                base_exclude_ids,
-            ),
-        ]
+        assert len(queries) == 2
+        assert queries[0] == (None, base_exclude_ids)
+        assert queries[1][0] is not None
+        assert queries[1][0].queued_at == created_at_by_id[suppressed_ids[-1]]
+        assert queries[1][0].workspace_id == suppressed_ids[-1]
+        assert queries[1][1] == base_exclude_ids
 
     @pytest.mark.unit
     async def test_provider_model_circuit_defer_records_decision_and_fills_limit(
@@ -2152,9 +2199,10 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
-            after: tuple[datetime, str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
         ) -> list[Workspace]:
-            del self, after
+            del self, after, scoring_at
             queries.append((status, limit, set(exclude_ids or set())))
             return []
 
@@ -6534,15 +6582,20 @@ def test_stale_execution_helper_defaults_for_non_runtime_statuses() -> None:
 
 
 @pytest.mark.unit
-def test_scheduler_candidate_cursor_handles_empty_and_orders_by_created_at_then_id() -> None:
+def test_scheduler_candidate_cursor_handles_empty_and_uses_last_page_row() -> None:
+    scoring_at = datetime(2026, 5, 2, 12, 2, tzinfo=UTC)
     first = SimpleNamespace(id="ws_b", created_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC))
     second = SimpleNamespace(id="ws_a", created_at=datetime(2026, 5, 2, 12, 1, tzinfo=UTC))
     third = SimpleNamespace(id="ws_c", created_at=datetime(2026, 5, 2, 12, 1, tzinfo=UTC))
 
-    assert _scheduler_candidate_cursor([]) is None
-    assert _scheduler_candidate_cursor([first, second, third]) == (
-        third.created_at,
-        "ws_c",
+    assert _scheduler_candidate_cursor([], scoring_at=scoring_at) is None
+    assert _scheduler_candidate_cursor([first, second, third], scoring_at=scoring_at) == (
+        SchedulerOrderCursor(
+            class_priority=0,
+            effective_score=0,
+            queued_at=third.created_at,
+            workspace_id="ws_c",
+        )
     )
 
 

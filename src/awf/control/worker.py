@@ -55,6 +55,7 @@ from awf.service.provider_recovery import (
     provider_for_agent_model,
 )
 from awf.service.scheduler import (
+    SchedulerOrderCursor,
     scheduler_order_key,
     scheduler_score_from_workspace,
     score_summary_with_suppression,
@@ -474,7 +475,8 @@ class ControlWorker:
     ) -> list[str]:
         dispatchable_workspaces_by_id: dict[str, Workspace] = {}
         candidate_limit = _scheduler_candidate_fetch_limit(limit)
-        candidate_after: tuple[datetime, str] | None = None
+        candidate_after: SchedulerOrderCursor | None = None
+        scoring_at = datetime.now(UTC)
         priority_refill_pages_remaining: int | None = None
         ordered_workspaces: list[Workspace] = []
         repo = WorkspaceRepository(session)
@@ -484,6 +486,7 @@ class ControlWorker:
                 limit=candidate_limit,
                 exclude_ids=exclude_ids,
                 after=candidate_after,
+                scoring_at=scoring_at,
             )
             if not workspaces:
                 break
@@ -512,7 +515,7 @@ class ControlWorker:
                 if priority_refill_pages_remaining <= 0:
                     break
                 priority_refill_pages_remaining -= 1
-            candidate_after = _scheduler_candidate_cursor(workspaces)
+            candidate_after = _scheduler_candidate_cursor(workspaces, scoring_at=scoring_at)
         return [workspace.id for workspace in ordered_workspaces[:limit]]
 
     async def _filter_scheduler_candidate_workspaces(
@@ -2065,11 +2068,21 @@ def _scheduler_candidate_fetch_limit(limit: int) -> int:
     return max(limit, widened_fetch_limit)
 
 
-def _scheduler_candidate_cursor(workspaces: list[Workspace]) -> tuple[datetime, str] | None:
+def _scheduler_candidate_cursor(
+    workspaces: list[Workspace],
+    *,
+    scoring_at: datetime,
+) -> SchedulerOrderCursor | None:
     if not workspaces:
         return None
-    latest = max(workspaces, key=lambda workspace: (workspace.created_at, workspace.id))
-    return latest.created_at, latest.id
+    last = workspaces[-1]
+    score = scheduler_score_from_workspace(last, now=scoring_at)
+    return SchedulerOrderCursor(
+        class_priority=score.class_priority,
+        effective_score=score.effective_score,
+        queued_at=score.queued_at,
+        workspace_id=last.id,
+    )
 
 
 def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:
