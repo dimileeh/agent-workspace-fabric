@@ -1193,6 +1193,22 @@ class TestHappyPath:
                 .mappings()
                 .one()
             )
+            extra_validate_recovery_ops = (
+                await s.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM operations
+                        WHERE workspace_id = :workspace_id
+                          AND type = 'validate'
+                          AND status IN ('pending', 'running')
+                          AND id <> :operation_id
+                          AND idempotency_key LIKE 'pr_monitor:validate_only:%'
+                        """
+                    ),
+                    {"workspace_id": ws_id, "operation_id": operation_id},
+                )
+            ).scalar_one()
 
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
@@ -1222,6 +1238,7 @@ class TestHappyPath:
         result = _json_value(operation["result"])
         assert result["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
         assert result["requested_tier"] == 1
+        assert extra_validate_recovery_ops == 0
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_cleanup_failure_finishes_validate_operation(
