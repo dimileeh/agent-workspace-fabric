@@ -521,10 +521,21 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "class",
         "schema",
         "migration",
-        "document",
-        "docs",
     )
     if any(marker in text for marker in deterministic_markers):
+        return False
+    documentation_work_patterns = (
+        r"(?:^|[.;:]\s*|(?<![a-z0-9_])please\s+)document(?![a-z0-9_])"
+        r"\s+(?:the\s+)?",
+        r"(?<![a-z0-9_])(?:must|should|need|needs|required)\s+"
+        r"(?:to\s+)?document(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:add|create|update|write|revise)\s+"
+        r"(?:the\s+)?(?:docs|documentation|document|guide|readme)(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:docs|documentation|document|guide|readme)(?![a-z0-9_])"
+        r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
+        r"need|needs|must|should|required|missing|absent|stale|outdated)",
+    )
+    if any(re.search(pattern, text) for pattern in documentation_work_patterns):
         return False
     for match in re.finditer(r"(?<![a-z0-9_])code(?![a-z0-9_])", text):
         if re.match(r"[\s-]+coverage\b", text[match.end() :]):

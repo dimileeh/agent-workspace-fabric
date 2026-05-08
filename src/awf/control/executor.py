@@ -2126,25 +2126,22 @@ class WorkspaceExecutor:
                 val_result,
                 baseline_coverage=baseline_coverage,
             )
+            validation_coverage = _validation_run_coverage_metadata(
+                val_result,
+                baseline_coverage=baseline_coverage,
+            )
             await self._finish_validation_run(
                 validation_run_id,
                 status="succeeded" if val_result.all_passed else "failed",
                 reason_code=_validation_run_reason_code(val_result),
                 retry_count=val_result.total_retries,
-                coverage=_validation_run_coverage_metadata(
-                    val_result,
-                    baseline_coverage=baseline_coverage,
-                ),
+                coverage=validation_coverage,
                 command_retries=[c.retry_count for c in val_result.commands],
                 coverage_evidence_status=coverage_evidence.evidence_status,
                 coverage_evidence_reason_code=coverage_evidence.reason_code,
                 coverage_evidence_source_run_id=coverage_evidence.source_run_id,
             )
             if val_result.all_passed:
-                validation_coverage = _validation_run_coverage_metadata(
-                    val_result,
-                    baseline_coverage=baseline_coverage,
-                )
                 if planning_validation_handoff is not None:
                     try:
                         conformance_failure = await self._run_post_validation_conformance_check(

@@ -261,6 +261,28 @@ def test_conformance_requires_awf_validation_accepts_code_coverage_evidence_gaps
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "AWF validation evidence is missing; see docs for profile gate configuration.",
+        "AWF validation evidence is missing; see the document for profile gate configuration.",
+        "AWF-owned validation evidence is missing, see documented profile gates.",
+    ),
+)
+def test_conformance_requires_awf_validation_accepts_documentation_context_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 def test_conformance_requires_awf_validation_rejects_mixed_or_ordinary_gaps() -> None:
     mixed = parse_conformance_report(
         '{"status":"needs_iteration",'
@@ -277,6 +299,27 @@ def test_conformance_requires_awf_validation_rejects_mixed_or_ordinary_gaps() ->
 
     assert not conformance_requires_awf_validation(mixed)
     assert not conformance_requires_awf_validation(ordinary)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "Document the validation provenance behavior before the gap is satisfied.",
+        "Update docs for the validation profile gate before the gap is satisfied.",
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_documentation_work_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Documentation work remains.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert not conformance_requires_awf_validation(report)
 
 
 @pytest.mark.unit
