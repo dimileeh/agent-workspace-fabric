@@ -1321,6 +1321,45 @@ class TestOwnedPathOverlapLookup:
         assert listed == [migration.id, old_refactor.id, young_refactor.id, docs.id]
 
     @pytest.mark.unit
+    async def test_scheduler_orders_integer_valued_decimal_policy_strings(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        decimal_string = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="decimal string priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": "100.0", "human_boost": "5.00"}},
+        )
+        lower_priority = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="lower priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 20}},
+        )
+        decimal_string.created_at = scoring_at
+        lower_priority.created_at = scoring_at
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=2,
+            scoring_at=scoring_at,
+        )
+
+        assert listed == [decimal_string.id, lower_priority.id]
+
+    @pytest.mark.unit
     async def test_scheduler_keeps_owned_path_overlap_advisory_only(
         self,
         session: AsyncSession,

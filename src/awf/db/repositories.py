@@ -102,6 +102,7 @@ from awf.service.scheduler import (
     AGE_BOOST_INTERVAL_SECONDS,
     AGE_BOOST_MAX,
     HUMAN_BOOST_MAX,
+    POLICY_INT_TEXT_PATTERN,
     RETRY_BONUS_INFRASTRUCTURE_FAILURE,
     SCHEDULER_POLICY_KEY,
     TASK_CLASS_BIASES,
@@ -3786,7 +3787,7 @@ def _scheduler_json_int_expr(
         text_value = func.nullif(func.trim(_scheduler_json_path_expr(path).as_string()), "")
         return case(
             (
-                text_value.op("~")(r"^-?[0-9]+(\.0+)?$"),
+                text_value.op("~")(POLICY_INT_TEXT_PATTERN),
                 sql_cast(sql_cast(text_value, Numeric), Integer),
             ),
             else_=None,
@@ -3796,14 +3797,30 @@ def _scheduler_json_int_expr(
         json_type = func.json_type(Workspace.task_policy, json_path)
         json_value = func.json_extract(Workspace.task_policy, json_path)
         text_value = func.trim(json_value)
+        decimal_pos = func.instr(text_value, ".")
+        whole_text = case(
+            (decimal_pos > 0, func.substr(text_value, 1, decimal_pos - 1)),
+            else_=text_value,
+        )
+        fraction_text = func.substr(text_value, decimal_pos + 1)
         unsigned_text_int = and_(
-            text_value != "",
-            text_value.op("GLOB")("[0-9]*"),
-            ~text_value.op("GLOB")("*[^0-9]*"),
+            whole_text != "",
+            whole_text.op("GLOB")("[0-9]*"),
+            ~whole_text.op("GLOB")("*[^0-9]*"),
         )
         signed_text_int = and_(
-            text_value.op("GLOB")("-[0-9]*"),
-            ~func.substr(text_value, 2).op("GLOB")("*[^0-9]*"),
+            whole_text.op("GLOB")("-[0-9]*"),
+            ~func.substr(whole_text, 2).op("GLOB")("*[^0-9]*"),
+        )
+        integer_valued_text = and_(
+            or_(unsigned_text_int, signed_text_int),
+            or_(
+                decimal_pos == 0,
+                and_(
+                    fraction_text != "",
+                    ~fraction_text.op("GLOB")("*[^0]*"),
+                ),
+            ),
         )
         return case(
             (json_type == "integer", sql_cast(json_value, Integer)),
@@ -3815,7 +3832,7 @@ def _scheduler_json_int_expr(
                 sql_cast(json_value, Integer),
             ),
             (
-                and_(json_type == "text", or_(unsigned_text_int, signed_text_int)),
+                and_(json_type == "text", integer_valued_text),
                 sql_cast(json_value, Integer),
             ),
             else_=None,

@@ -350,6 +350,31 @@ def test_scheduler_score_from_workspace_parses_policy_fallbacks_and_recovery_sta
 
 
 @pytest.mark.unit
+def test_scheduler_score_from_workspace_parses_integer_valued_decimal_strings() -> None:
+    queued_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_decimal_policy",
+        task_class=TaskClass.docs_task.value,
+        created_at=queued_at,
+        task_policy={
+            "scheduler": {
+                "base_priority": "100.0",
+                "human_boost": "5.00",
+                "retry_attempt_number": "2.0",
+            }
+        },
+    )
+
+    score_input = scheduler_score_input_from_workspace(workspace)
+    score = scheduler_score_from_workspace(workspace, now=queued_at)
+
+    assert score_input.base_priority == 100
+    assert score_input.human_boost == 5
+    assert score_input.retry_attempt_number == 2
+    assert score.effective_score == 105
+
+
+@pytest.mark.unit
 def test_scheduler_policy_parsing_rejects_invalid_scalar_values() -> None:
     queued_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
     workspace = SimpleNamespace(
