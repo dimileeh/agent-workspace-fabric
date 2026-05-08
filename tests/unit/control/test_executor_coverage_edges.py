@@ -317,6 +317,70 @@ async def test_satisfied_post_validation_conformance_report_is_committed(
 
 
 @pytest.mark.unit
+async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    report_file.write_text(
+        (
+            '{"status":"needs_iteration","summary":"AWF validation evidence is missing.",'
+            f'"reason_code":"{CONFORMANCE_REQUIRES_AWF_VALIDATION}",'
+            '"gaps":["Run AWF validation."]}'
+        ),
+        encoding="utf-8",
+    )
+    satisfied_stdout = (
+        '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+    )
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="validated-head\n")
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
+    runner.queue_result(returncode=0)
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(satisfied_stdout),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is None
+    assert "validated evidence satisfies plan" in report_file.read_text(encoding="utf-8")
+    executor._record_post_validation_conformance_event.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
 async def test_post_validation_conformance_rejects_committed_implementation_paths(
     tmp_path: Path,
 ) -> None:

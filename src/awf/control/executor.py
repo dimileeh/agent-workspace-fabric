@@ -3654,6 +3654,11 @@ class WorkspaceExecutor:
             if profile.planning.fail_on_unexplained_deviation
             else None
         )
+        # A stale handoff report may still be present at this path; prefer
+        # stdout unless the conformance rerun actually refreshed the file.
+        report_path = worktree_path / handoff.report_path
+        before_report_text = _read_text_if_present(report_path)
+        before_report_digest = _digest_text(before_report_text) if before_report_text else None
         await self._update_subphase(workspace.id, "conformance")
         compare_result = await adapter.run(
             compose_project=compose_project,
@@ -3688,10 +3693,15 @@ class WorkspaceExecutor:
                     ),
                 )
 
-        report_text = _read_text_if_present(worktree_path / handoff.report_path)
+        report_text = _read_text_if_present(report_path)
+        report_from_fresh_file = (
+            report_text is not None and _digest_text(report_text) != before_report_digest
+        )
+        if not report_from_fresh_file and compare_result.stdout:
+            report_text = compare_result.stdout
         report = parse_conformance_report(report_text or compare_result.stdout)
         if report.satisfied:
-            if report_text is None:
+            if not report_from_fresh_file:
                 self._write_satisfied_post_validation_conformance_report(
                     worktree_path=worktree_path,
                     report_path=handoff.report_path,
