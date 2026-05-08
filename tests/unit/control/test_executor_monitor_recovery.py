@@ -1447,7 +1447,7 @@ async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
 
 
 @pytest.mark.unit
-async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_check(
+async def test_validate_only_recovery_with_conformance_handoff_pushes_report_commit(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1474,10 +1474,12 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
     )
 
     report_path = f"docs/awf-plans/{ws_id}.conformance.json"
-    _queue_validation_head(fake)
+    source_head = "d" * 40
+    report_head = "f" * 40
+    _queue_validation_head(fake, head=source_head)
     fake.queue_result(returncode=0, stdout="tests ok")
     fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
+    fake.queue_result(returncode=0, stdout=f"{source_head}\n")  # conformance scope HEAD
     fake.queue_result(
         returncode=0,
         stdout='{"status":"satisfied","summary":"validated recovery","gaps":[]}',
@@ -1488,6 +1490,9 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
     )
     fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
     _queue_post_validation_conformance_report_commit(fake, report_path)
+    fake.queue_result(returncode=0, stdout=f"{report_head}\n")  # post-report HEAD
+    fake.queue_result(returncode=0, stdout=f"src/awf/onboarding.py\n{report_path}\n")
+    _queue_existing_pr_push(fake, head=report_head)
 
     await executor.execute(ws_id)
 
@@ -1509,12 +1514,25 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
         and call[-1] == report_path
         for call in git_calls
     )
+    assert any(call[0] == "git" and "push" in call for call in git_calls)
+    assert not any(
+        call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake)
+    )
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+        runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
     assert ws is not None
     assert ws.status == WorkspaceStatus.completed.value
+    assert ws.monitor_last_commit_sha == report_head
+    assert runs[-1].workspace_head_sha == source_head
+    assert runs[-1].target_head_sha == report_head
+    assert any(
+        event.event_type == "workspace.audit.git_push" and event.reason_code == "PR_UPDATED"
+        for event in events
+    )
     recovery_ops = [
         op
         for op in ops

@@ -2353,6 +2353,17 @@ class WorkspaceExecutor:
                 if conformance_failure is None:
                     successful_validation_run_id = validation_run_id
                     successful_validation_workspace_head_sha = validation_workspace_head_sha
+                    if (
+                        recovery is not None
+                        and ws.pr_url
+                        and planning_validation_handoff is not None
+                    ):
+                        post_conformance_head_sha = await self._capture_workspace_head_sha(
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                        )
+                        if post_conformance_head_sha:
+                            successful_validation_workspace_head_sha = post_conformance_head_sha
                     await self._finish_pending_validate_operations(
                         workspace_id=workspace_id,
                         status=OperationStatus.succeeded,
