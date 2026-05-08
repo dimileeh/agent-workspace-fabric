@@ -22,6 +22,7 @@ from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, FakeCommandRunner
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.executor import (
     POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
+    POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
     ExecutorConfig,
     WorkspaceExecutor,
     _apply_baseline_coverage_ratchet,
@@ -1441,6 +1442,139 @@ class TestHappyPath:
             == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
         )
         assert result["validation_run_id"]
+
+    @pytest.mark.unit
+    async def test_planning_validation_handoff_report_write_failure_finishes_validate_operation(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned-recovery",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 2,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        operation_id = "op_pv_report_write_failed"
+        await _insert_validate_handoff_recovery_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id=operation_id,
+        )
+
+        def fail_write(**_: object) -> None:
+            raise OSError("disk full")
+
+        executor._write_satisfied_post_validation_conformance_report = fail_write  # type: ignore[method-assign]
+
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        satisfied_report = json.dumps(
+            {
+                "status": "satisfied",
+                "summary": "implementation and validation evidence satisfy the plan",
+                "gaps": [],
+            }
+        )
+
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance after status
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            run = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, reason_code
+                            FROM validation_runs
+                            WHERE workspace_id = :workspace_id
+                            """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            operation = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, error_code, error_message, result, finished_at
+                            FROM operations
+                            WHERE id = :operation_id
+                            """
+                        ),
+                        {"operation_id": operation_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            event = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT reason_code, payload
+                            FROM workspace_events
+                            WHERE workspace_id = :workspace_id
+                              AND event_type = 'workspace.state_changed'
+                              AND new_state = 'failed'
+                            ORDER BY occurred_at DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "post-validation conformance report write failed" in (
+            ws.failure_message or ""
+        )
+        assert "disk full" in (ws.failure_message or "")
+        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
+        assert operation["status"] == "failed"
+        assert (
+            operation["error_code"]
+            == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
+        )
+        assert operation["finished_at"] is not None
+        assert "disk full" in operation["error_message"]
+        result = _json_value(operation["result"])
+        assert (
+            result["reason_code"]
+            == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
+        )
+        assert result["validation_run_id"]
+        assert event["reason_code"] == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
+        event_payload = _json_value(event["payload"])
+        assert event_payload["details"]["operation"] == "write"
+        assert event_payload["details"]["error_type"] == "OSError"
+        assert event_payload["details"]["report_path"] == report_path
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_unexpected_post_validation_error_finishes_validate_operation(

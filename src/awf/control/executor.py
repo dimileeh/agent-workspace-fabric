@@ -193,6 +193,9 @@ GIT_OBJECT_MISSING_RECOVERED_REASON_CODE = "GIT_OBJECT_MISSING_RECOVERED"
 POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE = (
     "POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED"
 )
+POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE = (
+    "POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED"
+)
 POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE = "POST_VALIDATION_CONFORMANCE_FAILED"
 _PR_MONITOR_ADOPTED_EVENT = "workspace.pr_monitor_adopted"
 _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
@@ -258,6 +261,18 @@ class _PostValidationConformanceReportGitError(RuntimeError):
         self.operation = operation
         self.returncode = result.returncode
         self.command_reason_code = result.reason_code
+
+
+class _PostValidationConformanceReportWriteError(RuntimeError):
+    def __init__(self, *, report_path: Path, error: OSError) -> None:
+        message = (
+            "post-validation conformance report write failed for "
+            f"{report_path.as_posix()}: {error}"
+        )
+        super().__init__(message)
+        self.report_path = report_path
+        self.error_type = type(error).__name__
+        self.errno = error.errno
 
 
 @dataclass(frozen=True)
@@ -2345,6 +2360,46 @@ class WorkspaceExecutor:
                             details=failure_details,
                         )
                         return
+                    except _PostValidationConformanceReportWriteError as exc:
+                        reason_code = (
+                            POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
+                        )
+                        message = str(exc)
+                        _log.error(
+                            "executor.post_validation_conformance_report_write_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            report_path=exc.report_path.as_posix(),
+                            error_type=exc.error_type,
+                            errno=exc.errno,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        write_failure_details: dict[str, Any] = {
+                            "validation_run_id": validation_run_id,
+                            "report_path": exc.report_path.as_posix(),
+                            "operation": "write",
+                            "error_type": exc.error_type,
+                        }
+                        if exc.errno is not None:
+                            write_failure_details["errno"] = exc.errno
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=reason_code,
+                            details=write_failure_details,
+                        )
+                        return
                     except Exception as exc:
                         reason_code = POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE
                         message = (
@@ -3929,11 +3984,17 @@ class WorkspaceExecutor:
         report = parse_conformance_report(report_text or "")
         if report.satisfied:
             if not report_from_fresh_file:
-                self._write_satisfied_post_validation_conformance_report(
-                    worktree_path=worktree_path,
-                    report_path=handoff.report_path,
-                    report=report,
-                )
+                try:
+                    self._write_satisfied_post_validation_conformance_report(
+                        worktree_path=worktree_path,
+                        report_path=handoff.report_path,
+                        report=report,
+                    )
+                except OSError as exc:
+                    raise _PostValidationConformanceReportWriteError(
+                        report_path=handoff.report_path,
+                        error=exc,
+                    ) from exc
             await self._commit_post_validation_conformance_report(
                 workspace_id=workspace.id,
                 worktree_path=worktree_path,
