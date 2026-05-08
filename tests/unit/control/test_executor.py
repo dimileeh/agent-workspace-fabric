@@ -1086,6 +1086,13 @@ class TestHappyPath:
                 "gaps": ["Wire the API endpoint required by the saved plan."],
             }
         )
+        second_post_validation_gap_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Validation passed, but the API docs are still incomplete.",
+                "gaps": ["Document the API endpoint required by the saved plan."],
+            }
+        )
         satisfied_report = json.dumps(
             {
                 "status": "satisfied",
@@ -1136,6 +1143,20 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers
         fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
         fake.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=second_post_validation_gap_report)
+        fake.queue_result(
+            returncode=0,
+            stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
+        )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="fixed second post-validation gap")
+        fake.queue_result(returncode=0)  # second fix git add
+        fake.queue_result(returncode=0, stdout="docs/api.md\n")  # second fix cached diff
+        fake.queue_result(returncode=0)  # second fix commit
+        _queue_validation_head(fake, head="c" * 40)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers again
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=satisfied_report)
         fake.queue_result(
             returncode=0,
@@ -1161,8 +1182,19 @@ class TestHappyPath:
             for prompt in adapter_prompts
             if "post-validation plan conformance" in prompt
         )
+        post_validation_conformance_prompts = [
+            prompt
+            for prompt in adapter_prompts
+            if "Conformance phase" in prompt and "### Validation evidence" in prompt
+        ]
 
         assert "Wire the API endpoint required by the saved plan." in fix_prompt
+        assert [
+            line
+            for prompt in post_validation_conformance_prompts
+            for line in prompt.splitlines()
+            if line.startswith("Iteration: ")
+        ] == ["Iteration: 1", "Iteration: 2", "Iteration: 3"]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             runs = (
@@ -1197,8 +1229,12 @@ class TestHappyPath:
 
         assert ws is not None
         assert ws.status == WorkspaceStatus.completed.value
-        assert [run["status"] for run in runs] == ["succeeded", "succeeded"]
-        assert [run["reason_code"] for run in runs] == ["VALIDATION_OK", "VALIDATION_OK"]
+        assert [run["status"] for run in runs] == ["succeeded", "succeeded", "succeeded"]
+        assert [run["reason_code"] for run in runs] == [
+            "VALIDATION_OK",
+            "VALIDATION_OK",
+            "VALIDATION_OK",
+        ]
         assert operation["status"] == "succeeded"
         assert operation["error_code"] is None
         assert operation["finished_at"] is not None

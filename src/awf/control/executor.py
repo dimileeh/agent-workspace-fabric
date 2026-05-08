@@ -2038,6 +2038,7 @@ class WorkspaceExecutor:
         last_failure_message: str | None = None
         successful_validation_run_id: str | None = None
         successful_validation_workspace_head_sha: str | None = None
+        post_validation_conformance_fix_attempts = 0
         for pass_number in range(max_fix_passes + 1):
             # pass_number == 0 is the initial run (already-committed agent
             # work). 1..N are fix attempts driven by the retry prompt.
@@ -2209,6 +2210,15 @@ class WorkspaceExecutor:
                 conformance_failure: _PlanningRunFailure | None = None
                 if planning_validation_handoff is not None:
                     try:
+                        conformance_handoff = planning_validation_handoff
+                        if post_validation_conformance_fix_attempts:
+                            conformance_handoff = replace(
+                                planning_validation_handoff,
+                                iteration=(
+                                    planning_validation_handoff.iteration
+                                    + post_validation_conformance_fix_attempts
+                                ),
+                            )
                         conformance_failure = await self._run_post_validation_conformance_check(
                             adapter=adapter,
                             workspace=ws,
@@ -2217,7 +2227,7 @@ class WorkspaceExecutor:
                             compose_file=compose_file,
                             worktree_path=worktree_path,
                             model=default_model,
-                            handoff=planning_validation_handoff,
+                            handoff=conformance_handoff,
                             validation_run_id=validation_run_id,
                         )
                     except ComposeExecCleanupError as exc:
@@ -2379,6 +2389,7 @@ class WorkspaceExecutor:
                                 or PLAN_CONFORMANCE_UNSATISFIED
                             ),
                         )
+                        post_validation_conformance_fix_attempts += 1
                         val_result = _post_validation_conformance_fix_result(
                             failure=conformance_failure,
                             workspace_id=workspace_id,
@@ -2430,6 +2441,9 @@ class WorkspaceExecutor:
             if pass_number >= max_fix_passes or first_fail is None:
                 # Exhausted our budget (or no failure details to anchor a
                 # fix prompt on) — mark failed and let the operator triage.
+                # If a post-validation conformance fix already consumed a
+                # prior successful run, this terminal path intentionally
+                # reports coverage from the fresh failing validation result.
                 await self._finish_pending_validate_operations(
                     workspace_id=workspace_id,
                     status=OperationStatus.failed,
@@ -3787,6 +3801,9 @@ class WorkspaceExecutor:
         # ordinary planning unexplained-deviation policy.
         del profile
         evidence = await self._validation_run_evidence_for_conformance(validation_run_id)
+        # Snapshot before the adapter run and before any AWF-synthesized
+        # satisfied report write below; this scope check only polices changes
+        # made during the report-only conformance command.
         before_compare = await self._changed_paths(worktree_path)
         before_compare_head = await self._git_rev_parse_head(worktree_path)
         # A stale handoff report may still be present at this path; prefer
