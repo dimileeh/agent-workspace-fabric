@@ -633,6 +633,8 @@ def _recovery_needs_existing_pr_push(
     if recovery_mode == "rebase_only":
         if rebase_recovery_result is None:
             return False
+        # Push only when AWF-owned work, such as validation fixes or a
+        # conformance report commit, advanced HEAD past the pushed rebase commit.
         return validated_head != rebase_recovery_result.head_sha
     return False
 
@@ -4048,6 +4050,8 @@ class WorkspaceExecutor:
                     "tier": run.tier,
                     "retry_count": run.retry_count,
                     "command_set_hash": run.command_set_hash,
+                    # Command records are metadata-only; stdout/stderr stay in log refs.
+                    # If that changes, update evidence compaction before passing them through.
                     "commands": list(run.commands or []),
                     "log_stream_refs": log_stream_refs,
                     "profile_name": run.profile_name,

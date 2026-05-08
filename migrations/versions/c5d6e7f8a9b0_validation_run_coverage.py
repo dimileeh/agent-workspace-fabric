@@ -19,10 +19,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("validation_runs") as batch:
-        batch.add_column(sa.Column("coverage", sa.JSON(), nullable=True))
+    op.add_column("validation_runs", sa.Column("coverage", sa.JSON(), nullable=True))
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("validation_runs") as batch:
-        batch.drop_column("coverage")
+    op.drop_column("validation_runs", "coverage")
