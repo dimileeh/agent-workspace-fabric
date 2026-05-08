@@ -282,7 +282,7 @@ def _monitor_recovery_conformance_payload(workspace: Workspace) -> dict[str, Any
     for event in reversed(events):
         event_type = getattr(event, "event_type", None)
         if event_type == _POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT:
-            return None
+            continue
         if event_type != _PLANNING_VALIDATION_HANDOFF_EVENT:
             continue
         raw_payload = getattr(event, "payload", None)
