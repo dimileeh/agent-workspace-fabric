@@ -286,6 +286,9 @@ def test_conformance_requires_awf_validation_rejects_satisfied_reports() -> None
         "AWF unit test suite coverage evidence is missing.",
         "AWF validation test suite evidence is missing.",
         "AWF test runner coverage not found.",
+        "AWF validation tests evidence is missing.",
+        "Validation test logs are absent.",
+        "AWF test provenance is missing.",
         "AWF coverage classification log is missing.",
     ),
 )

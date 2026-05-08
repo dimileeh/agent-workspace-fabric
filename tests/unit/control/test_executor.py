@@ -1330,7 +1330,7 @@ class TestHappyPath:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "failing_git_operation",
-        ["add", "diff", "commit"],
+        ["add", "diff", "diff_reset", "commit"],
     )
     async def test_planning_validation_handoff_report_commit_failure_finishes_validate_operation(
         self,
@@ -1378,9 +1378,15 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
         if failing_git_operation == "add":
             fake.queue_result(returncode=1, stderr=failure_message)
-        elif failing_git_operation == "diff":
+        elif failing_git_operation in {"diff", "diff_reset"}:
             fake.queue_result(returncode=0)  # git add report
             fake.queue_result(returncode=1, stderr=failure_message)
+            if failing_git_operation == "diff_reset":
+                fake.queue_result(
+                    returncode=129,
+                    stderr="reset failed",
+                    reason_code="GIT_RESET_FAILED",
+                )
         else:
             fake.queue_result(returncode=0)  # git add report
             fake.queue_result(returncode=0, stdout=f"{report_path}\n")  # cached report diff
@@ -1422,6 +1428,15 @@ class TestHappyPath:
                 .mappings()
                 .one()
             )
+            failure_event = next(
+                event
+                for event in await WorkspaceEventRepository(s).list(
+                    workspace_id=ws_id,
+                    event_type="workspace.state_changed",
+                    limit=10,
+                )
+                if event.new_state == WorkspaceStatus.failed.value
+            )
 
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
@@ -1442,6 +1457,21 @@ class TestHappyPath:
             == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
         )
         assert result["validation_run_id"]
+        failure_payload = _json_value(failure_event.payload)
+        expected_operation = (
+            "diff" if failing_git_operation == "diff_reset" else failing_git_operation
+        )
+        assert failure_payload["details"]["operation"] == expected_operation
+        if failing_git_operation == "diff_reset":
+            assert failure_payload["details"]["cleanup_operation"] == "reset"
+            assert failure_payload["details"]["cleanup_returncode"] == 129
+            assert (
+                failure_payload["details"]["cleanup_command_reason_code"]
+                == "GIT_RESET_FAILED"
+            )
+            assert failure_payload["details"]["report_left_staged"] is True
+        else:
+            assert "cleanup_operation" not in failure_payload["details"]
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_report_write_failure_finishes_validate_operation(

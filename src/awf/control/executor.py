@@ -251,16 +251,36 @@ class _RebaseRecoveryResult:
 
 
 class _PostValidationConformanceReportGitError(RuntimeError):
-    def __init__(self, *, operation: str, result: CommandResult) -> None:
+    def __init__(
+        self,
+        *,
+        operation: str,
+        result: CommandResult,
+        cleanup_operation: str | None = None,
+        cleanup_result: CommandResult | None = None,
+    ) -> None:
         output = (result.stderr or result.stdout or "").strip()
         message = (
             f"post-validation conformance report git {operation} failed "
             f"(exit={result.returncode}): {output}"
         )
+        if cleanup_operation is not None and cleanup_result is not None:
+            cleanup_output = (cleanup_result.stderr or cleanup_result.stdout or "").strip()
+            message = (
+                f"{message}; cleanup git {cleanup_operation} failed "
+                f"(exit={cleanup_result.returncode}): {cleanup_output}"
+            )
         super().__init__(message)
         self.operation = operation
         self.returncode = result.returncode
         self.command_reason_code = result.reason_code
+        self.cleanup_operation = cleanup_operation
+        self.cleanup_returncode = (
+            cleanup_result.returncode if cleanup_result is not None else None
+        )
+        self.cleanup_command_reason_code = (
+            cleanup_result.reason_code if cleanup_result is not None else None
+        )
 
 
 class _PostValidationConformanceReportWriteError(RuntimeError):
@@ -2350,6 +2370,14 @@ class WorkspaceExecutor:
                         }
                         if exc.command_reason_code is not None:
                             failure_details["command_reason_code"] = exc.command_reason_code
+                        if exc.cleanup_operation is not None:
+                            failure_details["cleanup_operation"] = exc.cleanup_operation
+                            failure_details["cleanup_returncode"] = exc.cleanup_returncode
+                            failure_details["report_left_staged"] = True
+                        if exc.cleanup_command_reason_code is not None:
+                            failure_details["cleanup_command_reason_code"] = (
+                                exc.cleanup_command_reason_code
+                            )
                         await self._mark_failed(
                             workspace_id=workspace_id,
                             from_status=WorkspaceStatus.validating,
@@ -4093,6 +4121,8 @@ class WorkspaceExecutor:
             raise _PostValidationConformanceReportGitError(
                 operation="diff",
                 result=cached,
+                cleanup_operation="reset" if not reset_result.ok else None,
+                cleanup_result=reset_result if not reset_result.ok else None,
             )
         staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
         if report_path_text not in staged_paths:
