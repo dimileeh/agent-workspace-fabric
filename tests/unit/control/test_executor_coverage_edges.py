@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -289,6 +290,76 @@ class _CoverageValidation:
         self.calls.append(phase)
         self.kwargs.append(dict(_kwargs))
         return self.coverage
+
+
+@pytest.mark.unit
+async def test_post_validation_report_repairs_git_ownership_before_add(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
+    runner.queue_result(returncode=0)  # git commit report
+    executor = _executor_with_runner(runner, tmp_path)
+    repair_events: list[tuple[str, int]] = []
+
+    async def record_repair(**kwargs: object) -> bool:
+        reason = kwargs["reason"]
+        assert isinstance(reason, str)
+        repair_events.append((reason, len(runner.calls)))
+        return True
+
+    executor._repair_agent_git_ownership = record_repair  # type: ignore[method-assign]
+
+    committed = await executor._commit_post_validation_conformance_report(
+        workspace_id="ws_post",
+        worktree_path=tmp_path / "worktree",
+        report_path=report_path,
+        validation_run_id="validation-run-1",
+    )
+
+    add_call_index = next(
+        index
+        for index, call in enumerate(runner.calls)
+        if call.args[-3:] == ["add", "--", report_path.as_posix()]
+    )
+    assert committed is True
+    assert repair_events[0] == (
+        "post_validation_conformance_report_git_add",
+        add_call_index,
+    )
+
+
+@pytest.mark.unit
+def test_validation_evidence_json_enforces_limit_on_minimal_fallback() -> None:
+    oversized_percent = {f"pkg_{index}": "x" * 1000 for index in range(100)}
+    payload = {
+        "validation_run_id": "validation-run-1",
+        "status": "failed",
+        "reason_code": "COVERAGE_BELOW_THRESHOLD",
+        "coverage": {
+            "status": "failed",
+            "reason_code": "COVERAGE_BELOW_THRESHOLD",
+            "percent": oversized_percent,
+            "minimum_percent": 99,
+            "enforce": True,
+            "provider": "python",
+        },
+        "workspace_head_sha": "validated-head",
+        "target_branch": "main",
+        "commands": [{"command": "pytest", "stdout": "x" * 100000}],
+        "log_stream_refs": {"stdout": "x" * 100000},
+        "raw_output": "x" * 100000,
+    }
+
+    evidence = executor_mod._validation_evidence_json(payload)
+
+    assert len(evidence) <= executor_mod._VALIDATION_EVIDENCE_JSON_LIMIT
+    decoded = json.loads(evidence)
+    assert decoded["evidence_truncated"] is True
+    assert decoded["coverage"]["truncated"] is True
+    assert "percent" not in decoded["coverage"]
 
 
 @pytest.mark.unit

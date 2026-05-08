@@ -3928,12 +3928,12 @@ class WorkspaceExecutor:
             "-C",
             str(worktree_path),
         ]
-        add_result = await self._runner.run([*git_base, "add", "--", report_path_text])
         await self._repair_agent_git_ownership(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             reason="post_validation_conformance_report_git_add",
         )
+        add_result = await self._runner.run([*git_base, "add", "--", report_path_text])
         if not add_result.ok:
             raise _PostValidationConformanceReportGitError(
                 operation="add",
@@ -5823,7 +5823,25 @@ def _validation_evidence_json(payload: dict[str, Any]) -> str:
     minimal_payload["log_stream_refs"] = _validation_evidence_size_summary(
         safe_payload.get("log_stream_refs")
     )
-    return _serialize_validation_evidence_payload(minimal_payload)
+    serialized = _serialize_validation_evidence_payload(minimal_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    floor_payload = _validation_evidence_floor_payload(
+        safe_payload,
+        oversized_serialized_length=len(serialized),
+    )
+    serialized = _serialize_validation_evidence_payload(floor_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    return _serialize_validation_evidence_payload(
+        {
+            "evidence_truncated": True,
+            "truncation_reason": "validation_evidence_json_limit",
+            "oversized_serialized_length": len(serialized),
+        }
+    )
 
 
 def _serialize_validation_evidence_payload(payload: Mapping[str, Any]) -> str:
@@ -5839,6 +5857,38 @@ def _validation_evidence_coverage_summary(value: object) -> object:
         if key in value:
             summary[key] = value[key]
     return summary
+
+
+def _validation_evidence_floor_payload(
+    payload: Mapping[str, Any],
+    *,
+    oversized_serialized_length: int,
+) -> dict[str, Any]:
+    floor_payload = {
+        key: _validation_evidence_floor_value(payload[key])
+        for key in _VALIDATION_EVIDENCE_CORE_KEYS
+        if key in payload
+    }
+    floor_payload["evidence_truncated"] = True
+    floor_payload["truncation_reason"] = "validation_evidence_json_limit"
+    floor_payload["oversized_serialized_length"] = oversized_serialized_length
+    if "coverage" in payload:
+        floor_payload["coverage"] = _validation_evidence_size_summary(payload["coverage"])
+    floor_payload["commands"] = _validation_evidence_size_summary(payload.get("commands"))
+    floor_payload["log_stream_refs"] = _validation_evidence_size_summary(
+        payload.get("log_stream_refs")
+    )
+    return floor_payload
+
+
+def _validation_evidence_floor_value(value: object) -> object:
+    if isinstance(value, str):
+        if len(value) <= 512:
+            return value
+        return _validation_evidence_size_summary(value)
+    if isinstance(value, int | float | bool) or value is None:
+        return value
+    return _validation_evidence_size_summary(value)
 
 
 def _validation_evidence_size_summary(value: object) -> dict[str, Any]:
