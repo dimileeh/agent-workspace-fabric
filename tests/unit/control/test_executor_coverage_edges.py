@@ -230,6 +230,35 @@ def test_recovery_conformance_handoff_preserves_iteration_budget(
 
 
 @pytest.mark.unit
+def test_recovery_conformance_handoff_reads_persisted_report_reason_code() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planned",
+            "planning": {
+                "required": True,
+                "max_iterations": 3,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+            },
+        }
+    )
+    handoff = _planning_validation_handoff_from_recovery_payload(
+        workspace_id="ws123",
+        profile=profile,
+        recovery_payload={
+            "conformance": {
+                "report_reason_code": " conformance-requires-awf-validation ",
+                "summary": "AWF validation evidence is required.",
+                "gaps": ["rerun pytest under AWF"],
+            },
+        },
+    )
+
+    assert handoff is not None
+    assert handoff.report.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("invalid_path_field", ["plan_path", "report_path"])
 def test_recovery_conformance_handoff_falls_back_when_payload_path_escapes_workspace(
     invalid_path_field: str,

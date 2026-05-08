@@ -582,6 +582,7 @@ def _recovery_conformance_reason_code(
     conformance: Mapping[str, Any],
 ) -> str | None:
     for value in (
+        conformance.get("report_reason_code"),
         conformance.get("reason_code"),
         recovery_payload.get("conformance_reason_code"),
         recovery_payload.get("conformance_handoff_reason_code"),
