@@ -10,6 +10,7 @@ needed from that report.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -516,7 +517,6 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "endpoint",
         "implement",
         "wire",
-        "code",
         "function",
         "class",
         "schema",
@@ -524,7 +524,13 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "document",
         "docs",
     )
-    return not any(marker in text for marker in deterministic_markers)
+    if any(marker in text for marker in deterministic_markers):
+        return False
+    for match in re.finditer(r"(?<![a-z0-9_])code(?![a-z0-9_])", text):
+        if re.match(r"[\s-]+coverage\b", text[match.end() :]):
+            continue
+        return False
+    return True
 
 
 def build_conformance_stall_failure_evidence(

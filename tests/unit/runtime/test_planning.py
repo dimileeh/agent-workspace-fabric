@@ -239,6 +239,28 @@ def test_conformance_requires_awf_validation_accepts_validation_evidence_only_ga
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "AWF validation run code coverage evidence is missing.",
+        "AWF-owned validation run code coverage has not been generated.",
+        "AWF-owned validation evidence is missing for the required reason_code.",
+    ),
+)
+def test_conformance_requires_awf_validation_accepts_code_coverage_evidence_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 def test_conformance_requires_awf_validation_rejects_mixed_or_ordinary_gaps() -> None:
     mixed = parse_conformance_report(
         '{"status":"needs_iteration",'
