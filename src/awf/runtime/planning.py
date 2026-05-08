@@ -491,11 +491,15 @@ def classify_conformance_stall(
 
 def _is_awf_validation_evidence_gap(gap: str) -> bool:
     text = gap.strip().lower()
-    if "validation" not in text:
-        return False
+
+    def has_marker(marker: str) -> bool:
+        return re.search(rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])", text) is not None
+
     evidence_markers = (
         "evidence",
         "provenance",
+        "log",
+        "logs",
         "missing",
         "stale",
         "insufficient",
@@ -510,7 +514,20 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "profile gate",
         "profile gates",
     )
-    if not any(marker in text for marker in evidence_markers):
+    if not any(has_marker(marker) for marker in evidence_markers):
+        return False
+    validation_subject_markers = (
+        "validation",
+        "coverage",
+        "profile",
+        "profile gate",
+        "profile gates",
+        "evidence",
+        "provenance",
+        "log",
+        "logs",
+    )
+    if not any(has_marker(marker) for marker in validation_subject_markers):
         return False
     deterministic_markers = (
         "api",
@@ -524,18 +541,35 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     )
     if any(marker in text for marker in deterministic_markers):
         return False
-    documentation_work_patterns = (
+    deterministic_gap_patterns = (
         r"(?:^|[.;:]\s*|(?<![a-z0-9_])please\s+)document(?![a-z0-9_])"
         r"\s+(?:the\s+)?",
         r"(?<![a-z0-9_])(?:must|should|need|needs|required)\s+"
         r"(?:to\s+)?document(?![a-z0-9_])",
         r"(?<![a-z0-9_])(?:add|create|update|write|revise)\s+"
-        r"(?:the\s+)?(?:docs|documentation|document|guide|readme)(?![a-z0-9_])",
-        r"(?<![a-z0-9_])(?:docs|documentation|document|guide|readme)(?![a-z0-9_])"
+        r"(?:the\s+)?(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])"
         r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
         r"need|needs|must|should|required|missing|absent|stale|outdated)",
+        r"(?<![a-z0-9_])(?:add|create|update|write|revise)\s+"
+        r"(?:the\s+)?(?:saved\s+)?plan(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
+        r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
+        r"need|needs|must|should|required|missing|absent|stale|outdated|lacks?)",
+        r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
+        r"(?:saved\s+)?plan(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
+        r"(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
+        r"[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
+        r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
+        r"not found|not run|has not run)\b",
+        r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)"
+        r"(?![a-z0-9_])[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
+        r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
+        r"not found|not run|has not run)\b",
     )
-    if any(re.search(pattern, text) for pattern in documentation_work_patterns):
+    if any(re.search(pattern, text) for pattern in deterministic_gap_patterns):
         return False
     for match in re.finditer(r"(?<![a-z0-9_])code(?![a-z0-9_])", text):
         if re.match(r"[\s-]+coverage\b", text[match.end() :]):

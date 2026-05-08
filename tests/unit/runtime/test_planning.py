@@ -242,6 +242,27 @@ def test_conformance_requires_awf_validation_accepts_validation_evidence_only_ga
 @pytest.mark.parametrize(
     "gap",
     (
+        "AWF-owned coverage evidence is stale.",
+        "Required profile gate logs are missing from the workspace artifacts.",
+    ),
+)
+def test_conformance_requires_awf_validation_accepts_validation_subject_gaps_without_literal_validation(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
         "AWF validation run code coverage evidence is missing.",
         "AWF-owned validation run code coverage has not been generated.",
         "AWF-owned validation evidence is missing for the required reason_code.",
@@ -315,6 +336,27 @@ def test_conformance_requires_awf_validation_rejects_documentation_work_gaps(
     report = parse_conformance_report(
         '{"status":"needs_iteration",'
         '"summary":"Documentation work remains.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "AWF validation evidence is missing from the saved plan.",
+        "AWF validation evidence is missing from the README documentation.",
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_plan_and_documentation_artifact_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Plan or documentation artifact work remains.",'
         '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
         f'"gaps":["{gap}"]}}'
     )
