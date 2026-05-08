@@ -743,14 +743,10 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
         fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
-        fake.queue_result(
-            returncode=0,
-            stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
-        )
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        _queue_post_validation_conformance_report_commit(
-            fake, f"docs/awf-plans/{ws_id}.conformance.json"
-        )
+        _queue_post_validation_conformance_report_commit(fake, report_path)
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -785,6 +781,14 @@ class TestHappyPath:
         assert "Validation evidence" in prompts[-1]
         assert "VALIDATION_OK" in prompts[-1]
         assert "validation.01_validate.stdout" in prompts[-1]
+        git_calls = [call.args for call in fake.calls if call.args and call.args[0] == "git"]
+        assert any(call[-3:] == ["add", "--", report_path] for call in git_calls)
+        assert any(
+            "commit" in call
+            and "awf: post-validation conformance report" in call
+            and call[-1] == report_path
+            for call in git_calls
+        )
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
