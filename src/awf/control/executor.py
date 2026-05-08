@@ -2235,6 +2235,7 @@ class WorkspaceExecutor:
                             reason_code=conformance_failure.reason_code,
                             details=conformance_failure.details,
                         )
+                        # This return keeps successful_validation_* assignments unreachable.
                         return
                 successful_validation_run_id = validation_run_id
                 successful_validation_workspace_head_sha = validation_workspace_head_sha
