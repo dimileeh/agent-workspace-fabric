@@ -88,6 +88,9 @@ async def test_closed_pooled_postgres_connection_is_replaced_on_next_checkout() 
 
             async with pooled_engine.connect() as conn:
                 assert await conn.scalar(text("SELECT 1")) == 1
+                replacement_pid = await conn.scalar(text("SELECT pg_backend_pid()"))
+            assert replacement_pid is not None
+            assert replacement_pid != backend_pid
         finally:
             await terminator_engine.dispose()
             await pooled_engine.dispose()
