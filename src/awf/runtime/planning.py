@@ -618,7 +618,8 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     # around test/test(s) remain validation evidence.
     for match in re.finditer(r"(?<![a-z0-9_])tests?(?![a-z0-9_])", text):
         if re.match(
-            r"[\s-]+(?:coverage|(?:suites?|runners?|runs?|reports?)[\s-]+coverage)\b",
+            r"[\s-]+(?:coverage|(?:suites?|runners?|runs?|reports?)[\s-]+"
+            r"(?:coverage|evidence|provenance|logs?))\b",
             text[match.end() :],
         ):
             continue
