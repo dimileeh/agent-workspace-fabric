@@ -23,13 +23,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
+    _active_execution_preservation_claim_cleanup_payload,
     _ActiveExecutionCandidate,
     _candidate_claim_is_stale,
     _claim_recheck_conditions,
+    _execution_claim_is_stale,
+    _has_running_agent_runtime,
+    _json_datetime,
+    _monitor_claim_is_stale,
     _monitor_recovery_claim_cleanup_payload,
     _scheduler_candidate_cursor,
     _scheduler_candidate_fetch_limit,
     _stale_active_execution_failure_message,
+    _utc_datetime,
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
@@ -6565,6 +6571,33 @@ def test_monitor_recovery_claim_payload_derives_execution_cleanup_when_omitted()
 
 
 @pytest.mark.unit
+def test_worker_helper_branches_normalize_naive_datetimes() -> None:
+    cutoff = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    stale_execution = SimpleNamespace(
+        execution_claimed_by="worker",
+        execution_claim_expires_at=datetime(2026, 5, 2, 11, 59),
+    )
+    stale_monitor = SimpleNamespace(
+        monitor_claimed_by="monitor",
+        monitor_claim_expires_at=datetime(2026, 5, 2, 11, 59),
+    )
+    fresh_execution = SimpleNamespace(
+        execution_claimed_by="worker",
+        execution_claim_expires_at=cutoff + timedelta(minutes=5),
+    )
+
+    assert _execution_claim_is_stale(stale_execution, cutoff) is True
+    assert _monitor_claim_is_stale(stale_monitor, cutoff) is True
+    assert _has_running_agent_runtime(RuntimeSnapshot(stack_state="exited")) is False
+    assert _json_datetime(datetime(2026, 5, 2, 12, 0)) == "2026-05-02T12:00:00+00:00"
+    assert _utc_datetime(datetime(2026, 5, 2, 12, 0)) == cutoff
+    assert _active_execution_preservation_claim_cleanup_payload(
+        fresh_execution,
+        claim_cutoff=cutoff,
+    )["action"] == "preserved_unexpired"
+
+
+@pytest.mark.unit
 async def test_list_by_status_uses_repository_alias_for_non_scheduler_statuses(
     worker: ControlWorker,
 ) -> None:
@@ -6584,6 +6617,332 @@ async def test_provider_recovery_filter_short_circuits_empty_input(
 ) -> None:
     async with session_factory() as session:
         assert await worker._filter_provider_recovery_suppressed(session, []) == []  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_run_forever_stops_after_idle_iteration_and_list_pending_alias(
+    worker: ControlWorker,
+) -> None:
+    assert await worker._list_pending() == []  # noqa: SLF001
+
+    run_once_calls = 0
+
+    async def _run_once() -> int:
+        nonlocal run_once_calls
+        run_once_calls += 1
+        worker.request_stop()
+        return 0
+
+    worker.run_once = _run_once  # type: ignore[method-assign]
+
+    await worker.run_forever()
+
+    assert run_once_calls == 1
+
+
+@pytest.mark.unit
+async def test_scheduler_filter_handles_string_ids_and_missing_rows(
+    worker: ControlWorker,
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    ready_id = await _create_ready(
+        session_factory,
+        origin_repo,
+        "gemini-ready-without-open-circuit",
+        agent="gemini",
+        task_policy={"agent_model": "gemini-2.5-pro"},
+    )
+
+    async with session_factory() as session:
+        allowed = await worker._filter_provider_recovery_suppressed(  # noqa: SLF001
+            session,
+            [ready_id, "missing-workspace"],
+        )
+
+    assert allowed == [ready_id]
+
+
+@pytest.mark.unit
+async def test_scheduler_candidate_filter_short_circuits_empty_page(
+    worker: ControlWorker,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        assert (
+            await worker._filter_scheduler_candidate_workspaces(  # noqa: SLF001
+                session,
+                [],
+                limit=10,
+            )
+            == []
+        )
+
+
+@pytest.mark.unit
+async def test_db_connection_closed_event_skips_stale_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingSession:
+        committed = False
+        closed = False
+
+        async def commit(self) -> None:
+            self.committed = True
+
+        async def rollback(self) -> None:
+            raise AssertionError("stale event skip should not roll back")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class StaleWorkspaceRepository:
+        def __init__(self, session: RecordingSession) -> None:
+            assert session is recording_session
+
+        async def get(self, workspace_id: str) -> SimpleNamespace:
+            assert workspace_id == "ws_stale_event"
+            return SimpleNamespace(status=WorkspaceStatus.ready.value)
+
+        async def add_event(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("stale workspace should not receive an event")
+
+    recording_session = RecordingSession()
+    worker = ControlWorker(
+        session_factory=lambda: recording_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    monkeypatch.setattr(
+        "awf.control.worker.WorkspaceRepository",
+        StaleWorkspaceRepository,
+    )
+
+    await worker._record_db_connection_closed_event(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id="ws_stale_event",
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_ws_stale_event",
+        ),
+        _closed_connection_error(),
+    )
+
+    assert recording_session.committed is True
+    assert recording_session.closed is True
+
+
+@pytest.mark.unit
+async def test_dispatch_helpers_respect_limits_and_existing_tasks(
+    worker: ControlWorker,
+) -> None:
+    existing_task = asyncio.create_task(asyncio.sleep(0))
+    await existing_task
+    worker._execution_tasks["existing"] = existing_task  # noqa: SLF001
+
+    assert worker._dispatchable_execution_ids(["new"], limit=0) == []  # noqa: SLF001
+    assert (
+        worker._dispatchable_execution_ids(["existing", "new"], limit=2)  # noqa: SLF001
+        == ["new"]
+    )
+    assert worker._dispatch_ready_executions(["new"], limit=0) == set()  # noqa: SLF001
+    assert (
+        worker._dispatch_ready_executions(["existing"], limit=1)  # noqa: SLF001
+        == set()
+    )
+    assert worker._dispatch_monitor_resumes(["new"], limit=0) == set()  # noqa: SLF001
+    assert (
+        worker._dispatch_monitor_resumes(["existing"], limit=1)  # noqa: SLF001
+        == set()
+    )
+
+    worker._execution_tasks.clear()  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_safe_worker_paths_swallow_runtime_failures(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    class RaisingProvisioner:
+        async def provision_claimed(self, workspace_id: str) -> None:
+            assert workspace_id == "ws_provision"
+            raise RuntimeError("provision failed")
+
+    class RaisingMonitorExecutor(_RecordingExecutor):
+        async def resume_pr_monitor(self, workspace_id: str) -> None:
+            assert workspace_id == "ws_monitor"
+            raise RuntimeError("resume failed")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=RaisingProvisioner(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    finish_calls: list[dict[str, object]] = []
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> None:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    await worker._safely_provision_claimed("ws_provision")  # noqa: SLF001
+    await worker._safely_execute("ws_execute")  # noqa: SLF001
+    await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_no_executor",
+    )
+
+    assert finish_calls == [
+        {
+            "workspace_id": "ws_monitor",
+            "operation_id": "op_no_executor",
+            "status": OperationStatus.failed,
+            "error_code": "MONITOR_RECOVERY_NO_EXECUTOR",
+            "error_message": "Worker has no executor configured.",
+        }
+    ]
+
+    raising_worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=RaisingMonitorExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    finish_calls.clear()
+    raising_worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    await raising_worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_resume_failed",
+    )
+
+    assert finish_calls[0]["workspace_id"] == "ws_monitor"
+    assert finish_calls[0]["operation_id"] == "op_resume_failed"
+    assert finish_calls[0]["status"] == OperationStatus.failed
+    assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_FAILED"
+    assert "resume failed" in str(finish_calls[0]["error_message"])
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_ids_respects_limit_and_existing_tasks(
+    worker: ControlWorker,
+) -> None:
+    claim_calls: list[str] = []
+
+    async def _claim_monitoring_pr(workspace_id: str) -> bool:
+        claim_calls.append(workspace_id)
+        return True
+
+    worker._claim_monitoring_pr = _claim_monitoring_pr  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert (
+        await worker._claim_monitoring_pr_ids(["first", "second"], limit=1)  # noqa: SLF001
+        == ["first"]
+    )
+    assert claim_calls == ["first"]
+
+    existing_task = asyncio.create_task(asyncio.sleep(0))
+    await existing_task
+    worker._execution_tasks["existing"] = existing_task  # noqa: SLF001
+    claim_calls.clear()
+
+    assert (
+        await worker._claim_monitoring_pr_ids(["existing", "next"], limit=2)  # noqa: SLF001
+        == ["next"]
+    )
+    assert claim_calls == ["next"]
+
+    worker._execution_tasks.clear()  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_finish_monitor_recovery_operation_handles_missing_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EmptyOperationSession:
+        entered = False
+        exited = False
+
+        async def __aenter__(self) -> EmptyOperationSession:
+            self.entered = True
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            self.exited = True
+
+    class EmptyOperationRepository:
+        def __init__(self, session: EmptyOperationSession) -> None:
+            assert session is empty_session
+
+        async def get(self, operation_id: str) -> None:
+            assert operation_id == "missing-op"
+            return
+
+    empty_session = EmptyOperationSession()
+    worker = ControlWorker(
+        session_factory=lambda: empty_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        "ws_monitor",
+        operation_id=None,
+        status=OperationStatus.succeeded,
+    )
+    assert empty_session.entered is False
+
+    monkeypatch.setattr(
+        "awf.control.worker.OperationRepository",
+        EmptyOperationRepository,
+    )
+    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        "ws_monitor",
+        operation_id="missing-op",
+        status=OperationStatus.succeeded,
+    )
+    assert empty_session.entered is True
+    assert empty_session.exited is True
+
+    class RaisingSession:
+        entered = False
+
+        async def __aenter__(self) -> None:
+            self.entered = True
+            raise RuntimeError("session failed")
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            raise AssertionError("enter failure should skip exit")
+
+    raising_session = RaisingSession()
+    failing_worker = ControlWorker(
+        session_factory=lambda: raising_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    await failing_worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        "ws_monitor",
+        operation_id="op-session-failed",
+        status=OperationStatus.failed,
+    )
+    assert raising_session.entered is True
 
 
 @pytest.mark.unit
