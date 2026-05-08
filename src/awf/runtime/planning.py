@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
 PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
+CONFORMANCE_REQUIRES_AWF_VALIDATION = "CONFORMANCE_REQUIRES_AWF_VALIDATION"
 AGENT_PLAN_PHASE_SCOPE_VIOLATION = "AGENT_PLAN_PHASE_SCOPE_VIOLATION"
 AGENT_STALLED_IN_CONFORMANCE = "AGENT_STALLED_IN_CONFORMANCE"
 AGENT_IDLE_TIMEOUT_REASON_CODE = "AGENT_IDLE_TIMEOUT"
@@ -285,7 +286,13 @@ def build_conformance_prompt(
     plan_path: Path,
     report_path: Path,
     iteration: int,
+    validation_evidence: str | None = None,
 ) -> str:
+    validation_evidence_section = (
+        f"### Validation evidence\n{validation_evidence.strip()}\n\n"
+        if validation_evidence and validation_evidence.strip()
+        else ""
+    )
     return (
         "## Conformance phase\n\n"
         f"Compare the current workspace implementation against `{plan_path.as_posix()}`.\n"
@@ -296,10 +303,16 @@ def build_conformance_prompt(
         "logs, validation summaries, git diff, and artifacts instead. If validation "
         "evidence is missing, stale, or insufficient, report `needs_iteration` with "
         "a specific gap asking AWF to run the missing validation under the validation "
-        "phase.\n\n"
+        "phase. Set `reason_code` to `CONFORMANCE_REQUIRES_AWF_VALIDATION` only when "
+        "every remaining gap is missing, stale, or insufficient AWF-owned validation "
+        "evidence. Do not use it for implementation, API, plan, or documentation gaps.\n\n"
+        f"{validation_evidence_section}"
         f"Write a JSON object to `{report_path.as_posix()}` and also print the same JSON object "
         "as your final response. The object must have this shape:\n\n"
-        '```json\n{"status":"satisfied|needs_iteration","summary":"...","gaps":["..."]}\n```\n\n'
+        "```json\n"
+        '{"status":"satisfied|needs_iteration","summary":"...",'
+        '"gaps":["..."],"reason_code":"optional reason code"}\n'
+        "```\n\n"
         "Use `satisfied` only when the implementation fully achieves the saved plan. "
         "Use `needs_iteration` when any planned behavior, test, validation, or documented "
         "non-goal handling is missing. Keep gaps actionable and specific.\n\n"
@@ -328,6 +341,18 @@ def build_conformance_failure_evidence(
         "plan_path": plan_path.as_posix(),
         "report_path": report_path.as_posix(),
     }
+
+
+def conformance_requires_awf_validation(report: PlanConformanceReport) -> bool:
+    """Return true only for explicit validation-evidence-only conformance gaps."""
+
+    if report.status != PlanConformanceStatus.needs_iteration:
+        return False
+    if report.reason_code != CONFORMANCE_REQUIRES_AWF_VALIDATION:
+        return False
+    if not report.gaps:
+        return False
+    return all(_is_awf_validation_evidence_gap(gap) for gap in report.gaps)
 
 
 def classify_conformance_stall(
@@ -461,6 +486,45 @@ def classify_conformance_stall(
         )
 
     return None
+
+
+def _is_awf_validation_evidence_gap(gap: str) -> bool:
+    text = gap.strip().lower()
+    if "validation" not in text:
+        return False
+    evidence_markers = (
+        "evidence",
+        "provenance",
+        "missing",
+        "stale",
+        "insufficient",
+        "absent",
+        "unavailable",
+        "not available",
+        "not found",
+        "not run",
+        "has not run",
+        "run validation",
+        "validation run",
+        "profile gate",
+        "profile gates",
+    )
+    if not any(marker in text for marker in evidence_markers):
+        return False
+    deterministic_markers = (
+        "api",
+        "endpoint",
+        "implement",
+        "wire",
+        "code",
+        "function",
+        "class",
+        "schema",
+        "migration",
+        "document",
+        "docs",
+    )
+    return not any(marker in text for marker in deterministic_markers)
 
 
 def build_conformance_stall_failure_evidence(

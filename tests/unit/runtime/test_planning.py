@@ -12,6 +12,7 @@ from awf.db.enums import AgentRuntime
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
+    CONFORMANCE_REQUIRES_AWF_VALIDATION,
     MAX_CONFORMANCE_TEXT_CHARS,
     PLAN_CONFORMANCE_REPORTED,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -33,6 +34,7 @@ from awf.runtime.planning import (
     build_planning_scope_retry_prompt,
     changed_paths_from_porcelain,
     classify_conformance_stall,
+    conformance_requires_awf_validation,
     parse_conformance_report,
     render_coordination_warning_section,
     render_workspace_path,
@@ -207,6 +209,52 @@ def test_conformance_prompt_is_evidence_only_and_does_not_rerun_validation() -> 
         "git commit",
     ):
         assert command in prompt
+
+
+@pytest.mark.unit
+def test_conformance_prompt_documents_awf_validation_handoff_reason_code() -> None:
+    prompt = build_conformance_prompt(
+        task_prompt="Add metrics",
+        plan_path=Path("docs/awf-plans/ws_123.md"),
+        report_path=Path("docs/awf-plans/ws_123.conformance.json"),
+        iteration=0,
+    )
+
+    assert '"reason_code"' in prompt
+    assert CONFORMANCE_REQUIRES_AWF_VALIDATION in prompt
+    assert "only when every remaining gap is missing, stale, or insufficient AWF-owned validation evidence" in prompt
+    assert "Do not use it for implementation, API, plan, or documentation gaps" in prompt
+
+
+@pytest.mark.unit
+def test_conformance_requires_awf_validation_accepts_validation_evidence_only_gap() -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Implementation appears complete; AWF validation evidence is missing.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        '"gaps":["AWF-owned validation evidence is missing for the required pytest gate."]}'
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
+def test_conformance_requires_awf_validation_rejects_mixed_or_ordinary_gaps() -> None:
+    mixed = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Validation evidence is missing and the API is incomplete.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        '"gaps":["AWF-owned validation evidence is missing.",'
+        '"Wire the API endpoint required by the plan."]}'
+    )
+    ordinary = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Implementation gap remains.",'
+        '"gaps":["Wire the API endpoint required by the plan."]}'
+    )
+
+    assert not conformance_requires_awf_validation(mixed)
+    assert not conformance_requires_awf_validation(ordinary)
 
 
 @pytest.mark.unit

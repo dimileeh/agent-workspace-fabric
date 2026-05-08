@@ -37,6 +37,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service gc`
 **Docs Link:** [docs/REASON_CATALOG.md#completed_workspace_without_pr](#completed_workspace_without_pr)
 
+### CONFORMANCE_REQUIRES_AWF_VALIDATION
+**Problem:** Plan conformance found no deterministic implementation gap, but AWF-owned validation evidence is missing, stale, or insufficient.
+**Likely Cause:** The agent completed the implementation before AWF ran or persisted the required profile validation gates.
+**Operator Fix:** Let AWF run validation and rerun conformance against the persisted validation provenance and log stream references.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#conformance_requires_awf_validation](#conformance_requires_awf_validation)
+
 ### DISK_USAGE_UNAVAILABLE
 **Problem:** Free disk could not be inspected for the AWF work directory.
 **Likely Cause:** Permission denied or path does not exist.

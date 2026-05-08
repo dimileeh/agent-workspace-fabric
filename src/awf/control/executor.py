@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import re
 import shlex
 import time
@@ -39,7 +40,7 @@ from awf.adapters.base import (
     get_adapter,
 )
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.compose_exec import (
@@ -95,12 +96,14 @@ from awf.runtime.logs import LogStore
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
+    CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PLAN_CONFORMANCE_UNSATISFIED,
     ConformanceIterationRecord,
     ConformanceStallEvidence,
     ConformanceStallKind,
     ConformanceStallPolicy,
     PlanConformanceReport,
+    PlanConformanceStatus,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
@@ -109,6 +112,7 @@ from awf.runtime.planning import (
     build_planning_prompt,
     changed_paths_from_porcelain,
     classify_conformance_stall,
+    conformance_requires_awf_validation,
     parse_conformance_report,
     render_workspace_path,
 )
@@ -233,6 +237,15 @@ class _PlanningRunFailure:
     message: str
     reason_code: str | None = None
     details: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _PlanningValidationHandoff:
+    report: PlanConformanceReport
+    plan_path: Path
+    report_path: Path
+    iteration: int
+    max_iterations: int
 
 
 @dataclass(frozen=True)
@@ -454,6 +467,90 @@ def _is_validate_only_recovery_payload(payload: object) -> bool:
         payload.get("source") in _VALIDATE_ONLY_RECOVERY_SOURCES
         and payload.get("recovery_mode") in _VALIDATE_ONLY_RECOVERY_MODES
     )
+
+
+def _planning_validation_handoff_from_recovery_payload(
+    *,
+    workspace_id: str,
+    profile: WorkspaceProfile,
+    recovery_payload: Mapping[str, Any],
+) -> _PlanningValidationHandoff | None:
+    conformance_payload = recovery_payload.get("conformance")
+    conformance = conformance_payload if isinstance(conformance_payload, Mapping) else {}
+    reason_code = _recovery_conformance_reason_code(recovery_payload, conformance)
+    if reason_code != CONFORMANCE_REQUIRES_AWF_VALIDATION:
+        return None
+    try:
+        plan_path = render_workspace_path(
+            _recovery_conformance_path(
+                conformance,
+                key="plan_path",
+                fallback=profile.planning.plan_path,
+            ),
+            workspace_id=workspace_id,
+        )
+        report_path = render_workspace_path(
+            _recovery_conformance_path(
+                conformance,
+                key="report_path",
+                fallback=profile.planning.conformance_report_path,
+            ),
+            workspace_id=workspace_id,
+        )
+    except ValueError:
+        return None
+    gaps = _recovery_conformance_gaps(conformance)
+    summary_value = conformance.get("summary")
+    summary = (
+        summary_value.strip()
+        if isinstance(summary_value, str) and summary_value.strip()
+        else "Conformance requires AWF-owned validation evidence."
+    )
+    return _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary=summary,
+            gaps=gaps or ("AWF-owned validation evidence is missing or stale.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=plan_path,
+        report_path=report_path,
+        iteration=0,
+        max_iterations=profile.planning.max_iterations,
+    )
+
+
+def _recovery_conformance_reason_code(
+    recovery_payload: Mapping[str, Any],
+    conformance: Mapping[str, Any],
+) -> str | None:
+    for value in (
+        conformance.get("reason_code"),
+        recovery_payload.get("conformance_reason_code"),
+        recovery_payload.get("conformance_handoff_reason_code"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper().replace("-", "_")
+    return None
+
+
+def _recovery_conformance_path(
+    conformance: Mapping[str, Any],
+    *,
+    key: str,
+    fallback: str,
+) -> str:
+    value = conformance.get(key)
+    return value if isinstance(value, str) and value.strip() else fallback
+
+
+def _recovery_conformance_gaps(conformance: Mapping[str, Any]) -> tuple[str, ...]:
+    value = conformance.get("gaps")
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    if isinstance(value, str) and value.strip():
+        return (value.strip(),)
+    return ()
 
 
 def _validate_only_recovery_needs_existing_pr_push(
@@ -1164,6 +1261,7 @@ class WorkspaceExecutor:
         agent_exit_note: str | None = None
         agent_run_reason_code: str | None = None
         agent_run_details: Mapping[str, Any] | None = None
+        planning_validation_handoff: _PlanningValidationHandoff | None = None
         expected_branch = ws.branch_name or f"awf/{workspace_id}"
         adapter: AgentAdapter | None = None
         defaults: AgentDefaults | None = None
@@ -1249,7 +1347,13 @@ class WorkspaceExecutor:
                     model=default_model,
                     command_evidence=agent_command_evidence,
                 )
-                if planning_failure is not None:
+                if isinstance(planning_failure, _PlanningValidationHandoff):
+                    planning_validation_handoff = planning_failure
+                    await self._record_planning_validation_handoff_event(
+                        workspace_id=workspace_id,
+                        handoff=planning_failure,
+                    )
+                elif planning_failure is not None:
                     failure_message = (
                         planning_failure
                         if isinstance(planning_failure, str)
@@ -1286,6 +1390,11 @@ class WorkspaceExecutor:
                     source=recovery.get("source"),
                     recovery_mode=recovery.get("recovery_mode"),
                     reason=recovery.get("reason"),
+                )
+                planning_validation_handoff = _planning_validation_handoff_from_recovery_payload(
+                    workspace_id=workspace_id,
+                    profile=profile,
+                    recovery_payload=recovery,
                 )
         except ComposeExecCleanupError as exc:
             _log.error(
@@ -2031,6 +2140,41 @@ class WorkspaceExecutor:
                 coverage_evidence_source_run_id=coverage_evidence.source_run_id,
             )
             if val_result.all_passed:
+                if planning_validation_handoff is not None:
+                    conformance_failure = await self._run_post_validation_conformance_check(
+                        adapter=adapter,
+                        workspace=ws,
+                        profile=profile,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        worktree_path=worktree_path,
+                        model=default_model,
+                        handoff=planning_validation_handoff,
+                        validation_run_id=validation_run_id,
+                    )
+                    if conformance_failure is not None:
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=conformance_failure.reason_code
+                            or PLAN_CONFORMANCE_UNSATISFIED,
+                            coverage=_validation_run_coverage_metadata(
+                                val_result,
+                                baseline_coverage=baseline_coverage,
+                            ),
+                            error_message=conformance_failure.message,
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.agent_failure,
+                            message=conformance_failure.message[:2000],
+                            reason_code=conformance_failure.reason_code,
+                            details=conformance_failure.details,
+                        )
+                        return
                 successful_validation_run_id = validation_run_id
                 successful_validation_workspace_head_sha = validation_workspace_head_sha
                 await self._finish_pending_validate_operations(
@@ -3380,6 +3524,169 @@ class WorkspaceExecutor:
             return None
         return max(1, int(reservation.steady_cpu))
 
+    async def _record_planning_validation_handoff_event(
+        self,
+        *,
+        workspace_id: str,
+        handoff: _PlanningValidationHandoff,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                return
+            await repo.add_event(
+                workspace,
+                event_type="workspace.planning_conformance_requires_awf_validation",
+                reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                payload={
+                    "summary": handoff.report.summary,
+                    "gaps": list(handoff.report.gaps),
+                    "report_reason_code": handoff.report.reason_code,
+                    "plan_path": handoff.plan_path.as_posix(),
+                    "report_path": handoff.report_path.as_posix(),
+                    "iteration": handoff.iteration,
+                    "max_iterations": handoff.max_iterations,
+                },
+            )
+            await session.commit()
+
+    async def _run_post_validation_conformance_check(
+        self,
+        *,
+        adapter: AgentAdapter,
+        workspace: Workspace,
+        profile: WorkspaceProfile,
+        compose_project: str,
+        compose_file: Path,
+        worktree_path: Path,
+        model: str | None,
+        handoff: _PlanningValidationHandoff,
+        validation_run_id: str,
+    ) -> _PlanningRunFailure | None:
+        evidence = await self._validation_run_evidence_for_conformance(validation_run_id)
+        before_compare = await self._changed_paths(worktree_path)
+        await self._update_subphase(workspace.id, "conformance")
+        compare_result = await adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=build_conformance_prompt(
+                task_prompt=workspace.task_prompt,
+                plan_path=handoff.plan_path,
+                report_path=handoff.report_path,
+                iteration=handoff.iteration + 1,
+                validation_evidence=evidence,
+            ),
+            model=model,
+            workspace_id=workspace.id,
+        )
+        after_compare = await self._changed_paths(worktree_path)
+        if profile.planning.fail_on_unexplained_deviation:
+            extra = sorted(after_compare - before_compare - {handoff.report_path})
+            if extra:
+                return _build_planning_scope_failure(
+                    scope_phase="conformance",
+                    required_paths=(handoff.report_path,),
+                    offending_paths=extra,
+                    summary=(
+                        "post-validation conformance phase changed files outside "
+                        f"`{handoff.report_path}`"
+                    ),
+                )
+
+        report_text = _read_text_if_present(worktree_path / handoff.report_path)
+        report = parse_conformance_report(report_text or compare_result.stdout)
+        if report.satisfied:
+            await self._record_post_validation_conformance_event(
+                workspace_id=workspace.id,
+                handoff=handoff,
+                report=report,
+                validation_run_id=validation_run_id,
+            )
+            return None
+
+        gap_text = "; ".join(report.gaps) or report.summary
+        return _PlanningRunFailure(
+            message=f"post-validation plan conformance was not satisfied: {gap_text}",
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            details={
+                "conformance": build_conformance_failure_evidence(
+                    report=report,
+                    iterations_used=1,
+                    max_iterations=handoff.max_iterations,
+                    plan_path=handoff.plan_path,
+                    report_path=handoff.report_path,
+                ),
+                "validation_run_id": validation_run_id,
+            },
+        )
+
+    async def _record_post_validation_conformance_event(
+        self,
+        *,
+        workspace_id: str,
+        handoff: _PlanningValidationHandoff,
+        report: PlanConformanceReport,
+        validation_run_id: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                return
+            await repo.add_event(
+                workspace,
+                event_type="workspace.post_validation_conformance_satisfied",
+                reason_code=report.reason_code,
+                payload={
+                    "summary": report.summary,
+                    "plan_path": handoff.plan_path.as_posix(),
+                    "report_path": handoff.report_path.as_posix(),
+                    "validation_run_id": validation_run_id,
+                },
+            )
+            await session.commit()
+
+    async def _validation_run_evidence_for_conformance(self, validation_run_id: str) -> str:
+        async with self._session_factory() as session:
+            run = await ValidationRunRepository(session).get(validation_run_id)
+            if run is None:
+                payload: dict[str, Any] = {
+                    "validation_run_id": validation_run_id,
+                    "status": "missing",
+                    "reason_code": "VALIDATION_RUN_NOT_FOUND",
+                }
+            else:
+                log_stream_refs = dict(run.log_stream_refs or {})
+                payload = {
+                    "validation_run_id": run.id,
+                    "status": run.status,
+                    "reason_code": run.reason_code,
+                    "tier": run.tier,
+                    "retry_count": run.retry_count,
+                    "commands": list(run.commands or [])[:20],
+                    "log_stream_refs": log_stream_refs,
+                    "coverage": log_stream_refs.get("coverage"),
+                    "command_set_hash": run.command_set_hash,
+                    "base_commit": run.base_commit,
+                    "base_sha": run.base_sha,
+                    "workspace_head_sha": run.workspace_head_sha,
+                    "target_branch": run.target_branch,
+                    "target_head_sha": run.target_head_sha,
+                    "profile_name": run.profile_name,
+                    "profile_version": run.profile_version,
+                    "profile_source": run.profile_source,
+                    "resolved_profile_digest": run.resolved_profile_digest,
+                    "environment_identity_digest": run.environment_identity_digest,
+                }
+        safe_payload = redact_audit_value(payload)
+        return (
+            "AWF persisted validation run evidence:\n"
+            "```json\n"
+            f"{json.dumps(safe_payload, sort_keys=True, default=str)}\n"
+            "```"
+        )
+
     async def _run_agent_task_with_optional_planning(
         self,
         *,
@@ -3391,7 +3698,7 @@ class WorkspaceExecutor:
         worktree_path: Path,
         model: str | None,
         command_evidence: list[str] | None = None,
-    ) -> str | _PlanningRunFailure | None:
+    ) -> str | _PlanningRunFailure | _PlanningValidationHandoff | None:
         planning = profile.planning
         coordination_warnings = coordination_warnings_from_task_policy(
             getattr(workspace, "task_policy", None)
@@ -3664,6 +3971,23 @@ class WorkspaceExecutor:
                     summary=report.summary,
                 )
                 return None
+
+            if report is not None and conformance_requires_awf_validation(report):
+                _log.info(
+                    "executor.planning_conformance_requires_awf_validation",
+                    workspace_id=workspace.id,
+                    iteration=iteration,
+                    max_iterations=planning.max_iterations,
+                    gaps=list(report.gaps),
+                    reason_code=report.reason_code,
+                )
+                return _PlanningValidationHandoff(
+                    report=report,
+                    plan_path=plan_path,
+                    report_path=report_path,
+                    iteration=iteration,
+                    max_iterations=planning.max_iterations,
+                )
 
             stall = classify_conformance_stall(
                 history=iteration_history,

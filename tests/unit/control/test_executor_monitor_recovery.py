@@ -37,6 +37,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
+from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationRunner
 from tests.postgres import postgres_test_engine
@@ -155,6 +156,8 @@ async def _seed_ready_workspace_with_recovery(
     recovery_mode: str = "validate_only",
     source: str = "pr_monitor",
     operation_type: OperationType = OperationType.validate,
+    resolved_profile: dict[str, Any] | None = None,
+    recovery_payload_overrides: dict[str, Any] | None = None,
 ) -> str:
     """Insert a workspace already in ``ready`` with a pending `pr_monitor`
     validate operation — the shape the monitor's RECOVERY_DISPATCH path
@@ -170,6 +173,7 @@ async def _seed_ready_workspace_with_recovery(
             agent="codex",
             test_commands=["pytest -q"],
             requires_database=False,
+            resolved_profile=resolved_profile,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
         ws.branch_name = f"awf/{ws.id}"
@@ -187,24 +191,27 @@ async def _seed_ready_workspace_with_recovery(
         await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="X")
         await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="X")
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="RECOVERY_DISPATCH")
+        payload = {
+            "owner": source,
+            "source": source,
+            "action": recovery_mode,
+            "requested_action": "rebase" if recovery_mode == "rebase_only" else "validate",
+            "reason": "validation_insufficient_tier",
+            "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+            "recovery_mode": recovery_mode,
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "source_head_sha": ws.monitor_last_commit_sha,
+            "source_base_sha": ws.base_commit,
+            "target_branch": ws.branch_base,
+            "remote_branch": ws.remote_push_branch,
+        }
+        if recovery_payload_overrides:
+            payload.update(recovery_payload_overrides)
         await OperationRepository(s).create(
             workspace_id=ws.id,
             operation_type=operation_type,
-            payload={
-                "owner": source,
-                "source": source,
-                "action": recovery_mode,
-                "requested_action": "rebase" if recovery_mode == "rebase_only" else "validate",
-                "reason": "validation_insufficient_tier",
-                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
-                "recovery_mode": recovery_mode,
-                "pr_number": pr_number,
-                "pr_url": pr_url,
-                "source_head_sha": ws.monitor_last_commit_sha,
-                "source_base_sha": ws.base_commit,
-                "target_branch": ws.branch_base,
-                "remote_branch": ws.remote_push_branch,
-            },
+            payload=payload,
             idempotency_key=f"{source}:{recovery_mode}:{ws.id}",
         )
         await s.commit()
@@ -1429,6 +1436,65 @@ async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
 
     # Note: validation legitimately issues ``docker compose exec`` for profile
     # phase commands; only the *agent adapter* (coding CLI) must be absent.
+
+
+@pytest.mark.unit
+async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_check(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        resolved_profile={
+            "name": "planned-recovery",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+            },
+            "phases": {"validate": ["pytest -q"]},
+        },
+        recovery_payload_overrides={
+            "conformance": {
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "summary": "Recovery needs AWF-owned validation evidence.",
+                "gaps": ["AWF-owned validation evidence is missing for pytest."],
+            }
+        },
+    )
+
+    _queue_validation_head(fake)
+    fake.queue_result(returncode=0, stdout="tests ok")
+    fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+    fake.queue_result(
+        returncode=0,
+        stdout='{"status":"satisfied","summary":"validated recovery","gaps":[]}',
+    )
+    fake.queue_result(
+        returncode=0,
+        stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
+    )
+
+    await executor.execute(ws_id)
+
+    adapter_args = _all_adapter_args(fake)
+    assert len(adapter_args) == 1
+    prompt = adapter_args[0][-1]
+    assert "## Conformance phase" in prompt
+    assert "## Planning phase" not in prompt
+    assert "## Execution phase" not in prompt
+    assert "Validation evidence" in prompt
+    assert "VALIDATION_OK" in prompt
+    assert "validation.01_validate.stdout" in prompt
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.completed.value
+    assert ops[0].status == OperationStatus.succeeded.value
 
 
 @pytest.mark.unit
