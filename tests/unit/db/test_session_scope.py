@@ -72,6 +72,95 @@ class TestSessionScope:
             async with session_scope(factory):
                 raise ValueError("original")
 
+    @pytest.mark.unit
+    async def test_close_error_does_not_mask_original_exception(self) -> None:
+        class OriginalError(Exception):
+            pass
+
+        class CloseError(Exception):
+            pass
+
+        class FailingCloseSession:
+            rolled_back = False
+            closed = False
+
+            async def commit(self) -> None:
+                raise AssertionError("commit should not run after body failure")
+
+            async def rollback(self) -> None:
+                self.rolled_back = True
+
+            async def close(self) -> None:
+                self.closed = True
+                raise CloseError("close failed")
+
+        session = FailingCloseSession()
+
+        with pytest.raises(OriginalError, match="original"):
+            async with session_scope(lambda: session):  # type: ignore[arg-type]
+                raise OriginalError("original")
+
+        assert session.rolled_back is True
+        assert session.closed is True
+
+    @pytest.mark.unit
+    async def test_close_error_propagates_after_clean_body(self) -> None:
+        class CloseError(Exception):
+            pass
+
+        class FailingCloseSession:
+            committed = False
+            closed = False
+
+            async def commit(self) -> None:
+                self.committed = True
+
+            async def close(self) -> None:
+                self.closed = True
+                raise CloseError("close failed")
+
+        session = FailingCloseSession()
+
+        with pytest.raises(CloseError, match="close failed"):
+            async with session_scope(lambda: session):  # type: ignore[arg-type]
+                pass
+
+        assert session.committed is True
+        assert session.closed is True
+
+    @pytest.mark.unit
+    async def test_close_error_propagates_after_clean_body_inside_outer_exception(
+        self,
+    ) -> None:
+        class OuterError(Exception):
+            pass
+
+        class CloseError(Exception):
+            pass
+
+        class FailingCloseSession:
+            committed = False
+            closed = False
+
+            async def commit(self) -> None:
+                self.committed = True
+
+            async def close(self) -> None:
+                self.closed = True
+                raise CloseError("close failed")
+
+        session = FailingCloseSession()
+
+        try:
+            raise OuterError("outer")
+        except OuterError:
+            with pytest.raises(CloseError, match="close failed"):
+                async with session_scope(lambda: session):  # type: ignore[arg-type]
+                    pass
+
+        assert session.committed is True
+        assert session.closed is True
+
 
 @pytest.mark.unit
 def test_make_engine_rejects_non_postgres_urls() -> None:

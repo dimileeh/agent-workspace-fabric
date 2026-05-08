@@ -196,11 +196,20 @@ async def session_scope(
     ``awf.api.deps`` instead; this is for code outside the request cycle.
     """
     session = session_factory()
+    scope_exc: BaseException | None = None
     try:
         yield session
         await session.commit()
     except Exception as exc:
+        scope_exc = exc
         await invalidate_or_rollback_session(session, exc)
         raise
+    except BaseException as exc:
+        scope_exc = exc
+        raise
     finally:
-        await session.close()
+        try:
+            await session.close()
+        except Exception:
+            if scope_exc is None:
+                raise
