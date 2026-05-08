@@ -403,6 +403,7 @@ async def test_rest_and_mcp_retry_invalid_state_reason_code_matches_registry(
 
     rest_response = await contract_stack.client.post(
         capability.rest_path.format(workspace_id=workspace_id),
+        headers=contract_stack.auth_headers,
     )
     assert rest_response.status_code == 409, rest_response.text
     rest_envelope = normalize_rest_error_body(rest_response.json())
