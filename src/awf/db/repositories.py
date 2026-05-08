@@ -4219,6 +4219,8 @@ class OperationRepository:
         status: OperationStatus | str | None = None,
         operation_type: OperationType | str | None = None,
         limit: int = 50,
+        before_created_at: datetime | None = None,
+        before_operation_id: str | None = None,
     ) -> list[Operation]:
         stmt = select(Operation)
         status_value = status.value if isinstance(status, OperationStatus) else status
@@ -4231,6 +4233,16 @@ class OperationRepository:
             stmt = stmt.where(Operation.status == status_value)
         if operation_type_value is not None:
             stmt = stmt.where(Operation.type == operation_type_value)
+        if before_created_at is not None and before_operation_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Operation.created_at < before_created_at,
+                    and_(
+                        Operation.created_at == before_created_at,
+                        Operation.id < before_operation_id,
+                    ),
+                )
+            )
 
         stmt = stmt.order_by(Operation.created_at.desc(), Operation.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
@@ -4242,12 +4254,16 @@ class OperationRepository:
         status: OperationStatus | str | None = None,
         operation_type: OperationType | str | None = None,
         limit: int = 50,
+        before_created_at: datetime | None = None,
+        before_operation_id: str | None = None,
     ) -> list[Operation]:
         return await self.list_all(
             workspace_id=workspace_id,
             status=status,
             operation_type=operation_type,
             limit=limit,
+            before_created_at=before_created_at,
+            before_operation_id=before_operation_id,
         )
 
     async def finish(

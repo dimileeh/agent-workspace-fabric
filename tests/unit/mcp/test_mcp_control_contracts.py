@@ -1,7 +1,7 @@
 """MCP control-tool contract tests for safe operator actions.
 
 Covers: success, replay/idempotency, version conflict, invalid-state errors,
-and auth-like failure mapping for the 8 control tools.
+and auth-like failure mapping for the registered control tools.
 """
 
 from __future__ import annotations
@@ -45,6 +45,16 @@ _CONTROL_TOOLS = [
 ]
 
 _CONTROL_TOOLS_WITH_EXPECTED_VERSION = [
+    "awf_cancel_workspace",
+    "awf_stop_workspace",
+    "awf_destroy_workspace",
+    "awf_remonitor_workspace",
+    "awf_request_workspace_validation",
+    "awf_refresh_workspace",
+    "awf_rebase_workspace",
+]
+
+_IDEMPOTENCY_CONTROL_TOOLS = [
     "awf_cancel_workspace",
     "awf_stop_workspace",
     "awf_destroy_workspace",
@@ -402,28 +412,98 @@ class TestSuccessPaths:
         [
             (
                 "awf_cancel_workspace",
-                {"workspace_id": "ws_cancel", "reason": "r", "stop_stack": False, "expected_version": 3},
-                ("cancel", {"workspace_id": "ws_cancel", "reason": "r", "stop_stack": False, "idempotency_key": None, "expected_version": 3}),
+                {
+                    "workspace_id": "ws_cancel",
+                    "reason": "r",
+                    "stop_stack": False,
+                    "idempotency_key": "ik-3",
+                    "expected_version": 3,
+                },
+                (
+                    "cancel",
+                    {
+                        "workspace_id": "ws_cancel",
+                        "reason": "r",
+                        "stop_stack": False,
+                        "idempotency_key": "ik-3",
+                        "expected_version": 3,
+                    },
+                ),
             ),
             (
                 "awf_stop_workspace",
-                {"workspace_id": "ws_stop", "reason": "r", "expected_version": 4},
-                ("stop", {"workspace_id": "ws_stop", "reason": "r", "idempotency_key": None, "expected_version": 4}),
+                {
+                    "workspace_id": "ws_stop",
+                    "reason": "r",
+                    "idempotency_key": "ik-4",
+                    "expected_version": 4,
+                },
+                (
+                    "stop",
+                    {
+                        "workspace_id": "ws_stop",
+                        "reason": "r",
+                        "idempotency_key": "ik-4",
+                        "expected_version": 4,
+                    },
+                ),
             ),
             (
                 "awf_destroy_workspace",
-                {"workspace_id": "ws_destroy", "force": True, "expected_version": 5},
-                ("destroy", {"workspace_id": "ws_destroy", "force": True, "remove_volumes": True, "remove_worktree": True, "idempotency_key": None, "expected_version": 5}),
+                {
+                    "workspace_id": "ws_destroy",
+                    "force": True,
+                    "idempotency_key": "ik-5",
+                    "expected_version": 5,
+                },
+                (
+                    "destroy",
+                    {
+                        "workspace_id": "ws_destroy",
+                        "force": True,
+                        "remove_volumes": True,
+                        "remove_worktree": True,
+                        "idempotency_key": "ik-5",
+                        "expected_version": 5,
+                    },
+                ),
             ),
             (
                 "awf_remonitor_workspace",
-                {"workspace_id": "ws_remonitor", "expected_version": 6},
-                ("remonitor", {"workspace_id": "ws_remonitor", "reason": None, "idempotency_key": None, "expected_version": 6}),
+                {
+                    "workspace_id": "ws_remonitor",
+                    "idempotency_key": "ik-6",
+                    "expected_version": 6,
+                },
+                (
+                    "remonitor",
+                    {
+                        "workspace_id": "ws_remonitor",
+                        "reason": None,
+                        "idempotency_key": "ik-6",
+                        "expected_version": 6,
+                    },
+                ),
             ),
             (
                 "awf_request_workspace_validation",
-                {"workspace_id": "ws_validate", "reason": "r", "requested_tier": 2, "expected_version": 7},
-                ("validate", {"workspace_id": "ws_validate", "reason": "r", "requested_tier": 2, "idempotency_key": None, "expected_version": 7}),
+                {
+                    "workspace_id": "ws_validate",
+                    "reason": "r",
+                    "requested_tier": 2,
+                    "idempotency_key": "ik-7",
+                    "expected_version": 7,
+                },
+                (
+                    "validate",
+                    {
+                        "workspace_id": "ws_validate",
+                        "reason": "r",
+                        "requested_tier": 2,
+                        "idempotency_key": "ik-7",
+                        "expected_version": 7,
+                    },
+                ),
             ),
             (
                 "awf_refresh_workspace",
@@ -451,6 +531,23 @@ class TestSuccessPaths:
         assert isinstance(payload, dict)
         assert service.calls == [expected_call]
 
+    @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
+    async def test_control_tools_preserve_nonblank_idempotency_key_verbatim(
+        self, tool_name: str
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+        idempotency_key = "  literal mcp key  "
+
+        payload = await _call(
+            mcp,
+            tool_name,
+            {"workspace_id": "ws_x", "idempotency_key": idempotency_key},
+        )
+
+        assert isinstance(payload, dict)
+        assert service.calls[0][1]["idempotency_key"] == idempotency_key
+
     async def test_refresh_and_rebase_return_operation_response_shape(self) -> None:
         service = _MockService()
         mcp = build_mcp_server(service=service)
@@ -468,6 +565,87 @@ class TestSuccessPaths:
 
 @pytest.mark.unit
 class TestErrorMapping:
+    @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
+    async def test_idempotency_key_schema_documents_required_control_contract(
+        self, tool_name: str
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        schema = tools[tool_name].inputSchema
+        required = schema.get("required", [])
+        idempotency_key = schema["properties"]["idempotency_key"]
+        string_schema = next(
+            item for item in idempotency_key["anyOf"] if item.get("type") == "string"
+        )
+
+        assert "idempotency_key" not in required
+        assert idempotency_key["description"].startswith("Required idempotency key")
+        assert idempotency_key["minLength"] == 1
+        assert string_schema["maxLength"] == 128
+        assert any(item.get("type") == "null" for item in idempotency_key["anyOf"])
+        assert idempotency_key["default"] is None
+        assert service.calls == []
+
+    @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
+    async def test_blank_idempotency_key_returns_structured_mcp_error(
+        self, tool_name: str
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        result = await _call_result(
+            mcp, tool_name, {"workspace_id": "ws_x", "idempotency_key": ""}
+        )
+
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        assert (
+            result.structuredContent["message"]
+            == "Idempotency-Key header is required for this endpoint."
+        )
+        assert service.calls == []
+
+    @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
+    async def test_null_idempotency_key_returns_structured_mcp_error(
+        self, tool_name: str
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        result = await _call_result(
+            mcp, tool_name, {"workspace_id": "ws_x", "idempotency_key": None}
+        )
+
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        assert (
+            result.structuredContent["message"]
+            == "Idempotency-Key header is required for this endpoint."
+        )
+        assert service.calls == []
+
+    @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
+    async def test_omitted_idempotency_key_returns_structured_mcp_error(
+        self, tool_name: str
+    ) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        result = await _call_result(mcp, tool_name, {"workspace_id": "ws_x"})
+
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        assert (
+            result.structuredContent["message"]
+            == "Idempotency-Key header is required for this endpoint."
+        )
+        assert service.calls == []
+
     @pytest.mark.parametrize(
         "tool_name",
         [
@@ -484,9 +662,7 @@ class TestErrorMapping:
         service = _FailingMockService()
         mcp = build_mcp_server(service=service)
 
-        args: dict[str, object] = {"workspace_id": "ws_x"}
-        if tool_name in ("awf_refresh_workspace", "awf_rebase_workspace"):
-            args["idempotency_key"] = "ik-x"
+        args: dict[str, object] = {"workspace_id": "ws_x", "idempotency_key": "ik-x"}
 
         result = await _call_result(mcp, tool_name, args)
 
@@ -747,6 +923,7 @@ class TestRealDbPaths:
         payload = await _call(mcp, "awf_request_workspace_validation", {
             "workspace_id": workspace.id,
             "reason": "validate",
+            "idempotency_key": "validate-version",
             "expected_version": version,
         })
 

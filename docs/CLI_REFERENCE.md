@@ -144,6 +144,24 @@ List workspaces:
 uv run --python 3.12 --extra dev awf workspace list --limit 25
 ```
 
+Request workspace control actions:
+
+```bash
+uv run --python 3.12 --extra dev awf workspace cancel ws_123 --reason "No longer needed"
+uv run --python 3.12 --extra dev awf workspace stop ws_123 --reason "Stack unstable"
+uv run --python 3.12 --extra dev awf workspace refresh ws_123 --reason "Target branch advanced"
+uv run --python 3.12 --extra dev awf workspace validate ws_123 --requested-tier 2
+uv run --python 3.12 --extra dev awf workspace rebase ws_123 --reason "Recover merge conflicts"
+uv run --python 3.12 --extra dev awf workspace destroy ws_123 --if-match 7
+```
+
+Control commands send an `Idempotency-Key` header. The CLI generates one when
+`--idempotency-key` is omitted, which is convenient for one-off operator
+commands. If a request times out or the response is dropped, rerun the command
+with an explicit `--idempotency-key <stable-key>` value so AWF can replay the
+same operation instead of starting a fresh one. Pass `--if-match <version>` when
+you want optimistic concurrency against a workspace version or ETag.
+
 Inspect workspace observability data:
 
 ```bash
@@ -151,6 +169,9 @@ uv run --python 3.12 --extra dev awf workspace events ws_123 --limit 50
 uv run --python 3.12 --extra dev awf workspace events ws_123 --event-type workspace.created
 uv run --python 3.12 --extra dev awf workspace runtime ws_123
 uv run --python 3.12 --extra dev awf workspace operations ws_123 --limit 25
+uv run --python 3.12 --extra dev awf workspace operations ws_123 --cursor "$NEXT_CURSOR"
+uv run --python 3.12 --extra dev awf operations list --workspace-id ws_123 --limit 25
+uv run --python 3.12 --extra dev awf operations list --cursor "$NEXT_CURSOR"
 uv run --python 3.12 --extra dev awf workspace logs ws_123
 uv run --python 3.12 --extra dev awf workspace log ws_123 agent.stdout --offset 0 --limit-bytes 65536
 ```
@@ -171,4 +192,3 @@ Preview profile resolution:
 ```bash
 uv run --python 3.12 --extra dev awf profile preview ~/Projects/example-repo --profile auto
 ```
-

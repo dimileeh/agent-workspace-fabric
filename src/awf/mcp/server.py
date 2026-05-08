@@ -20,13 +20,12 @@ from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.routes import metrics as metrics_routes
 from awf.api.schemas import (
     ErrorResponse,
-    OperationListResponse,
     OperationResponse,
     OwnedPath,
     PullRequestMonitorAdoptionRequest,
@@ -65,6 +64,7 @@ from awf.service.metrics import (
     summarize_slo_metrics_for_session,
     summarize_workspace_reliability_for_session,
 )
+from awf.service.operations import build_operation_list_response
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
 from awf.service.pr_monitor_adoption import PRMonitorAdoptionError
@@ -107,6 +107,9 @@ RuntimeHealthSummaryProvider = Callable[
     [Settings, AsyncSession, OrphanResourceSummary],
     WorkspaceRuntimeHealthSummary | Awaitable[WorkspaceRuntimeHealthSummary],
 ]
+
+_IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
+_OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 
 
 class ReadinessProvider(Protocol):
@@ -404,9 +407,9 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
-            min_length=1,
             max_length=128,
-            description="Optional idempotency key for safe retries after timeout or dropped response.",
+            json_schema_extra={"minLength": 1},
+            description="Required idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
             default=None,
@@ -414,12 +417,15 @@ def build_mcp_server(
         ),
     ) -> StructuredToolResult:
         """Operator control: cancel a workspace; this is not shell access."""
+        idempotency_key_value = _required_idempotency_key(idempotency_key)
+        if idempotency_key_value is None:
+            return _idempotency_key_error()
         try:
             result = await service.cancel_workspace(
                 workspace_id,
                 reason=reason,
                 stop_stack=stop_stack,
-                idempotency_key=idempotency_key,
+                idempotency_key=idempotency_key_value,
                 expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
@@ -435,9 +441,9 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
-            min_length=1,
             max_length=128,
-            description="Optional idempotency key for safe retries after timeout or dropped response.",
+            json_schema_extra={"minLength": 1},
+            description="Required idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
             default=None,
@@ -445,11 +451,14 @@ def build_mcp_server(
         ),
     ) -> StructuredToolResult:
         """Operator control: stop a workspace stack; this is not shell access."""
+        idempotency_key_value = _required_idempotency_key(idempotency_key)
+        if idempotency_key_value is None:
+            return _idempotency_key_error()
         try:
             result = await service.stop_workspace(
                 workspace_id,
                 reason=reason,
-                idempotency_key=idempotency_key,
+                idempotency_key=idempotency_key_value,
                 expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
@@ -473,9 +482,9 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
-            min_length=1,
             max_length=128,
-            description="Optional idempotency key for safe retries after timeout or dropped response.",
+            json_schema_extra={"minLength": 1},
+            description="Required idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
             default=None,
@@ -483,13 +492,16 @@ def build_mcp_server(
         ),
     ) -> StructuredToolResult:
         """Operator control: destroy workspace resources; this is not shell access."""
+        idempotency_key_value = _required_idempotency_key(idempotency_key)
+        if idempotency_key_value is None:
+            return _idempotency_key_error()
         try:
             result = await service.destroy_workspace(
                 workspace_id,
                 force=force,
                 remove_volumes=remove_volumes,
                 remove_worktree=remove_worktree,
-                idempotency_key=idempotency_key,
+                idempotency_key=idempotency_key_value,
                 expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
@@ -527,10 +539,33 @@ def build_mcp_server(
     async def awf_list_workspace_operations(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
         limit: int = Field(default=50, ge=1, le=500),
-    ) -> list[dict[str, Any]] | None:
-        """List one workspace's operations newest-first."""
-        rows = await service.list_operations(workspace_id, limit=limit)
-        return [row.model_dump(mode="json") for row in rows] if rows is not None else None
+        status: OperationStatus | None = Field(default=None),
+        operation_type: OperationType | None = Field(
+            default=None,
+            validation_alias=_OPERATION_TYPE_FILTER_ALIAS,
+            serialization_alias="type",
+        ),
+        cursor: str | None = Field(default=None, max_length=128),
+    ) -> CallToolResult:
+        """List one workspace's operations using the REST envelope."""
+        try:
+            page = await service.list_operations_page(
+                workspace_id,
+                status=status,
+                operation_type=operation_type,
+                limit=limit + 1,
+                cursor=cursor,
+            )
+        except InvalidBoundedListCursorError:
+            return _error_result("INVALID_CURSOR", "Invalid operation list cursor.")
+        if page is None:
+            return _error_result("NOT_FOUND", f"No workspace with id {workspace_id}")
+        response = build_operation_list_response(
+            page.rows,
+            limit=limit,
+            cursor=cursor,
+        )
+        return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_list_workspace_logs")
     async def awf_list_workspace_logs(
@@ -764,17 +799,30 @@ def build_mcp_server(
     async def awf_list_operations(
         workspace_id: str | None = Field(default=None),
         status: OperationStatus | None = Field(default=None),
-        operation_type: OperationType | None = Field(default=None),
+        operation_type: OperationType | None = Field(
+            default=None,
+            validation_alias=_OPERATION_TYPE_FILTER_ALIAS,
+            serialization_alias="type",
+        ),
         limit: int = Field(default=50, ge=1, le=500),
+        cursor: str | None = Field(default=None, max_length=128),
     ) -> StructuredToolResult:
         """Read-only operator observability: list operations using the REST envelope."""
-        rows = await service.list_all_operations(
-            workspace_id=workspace_id,
-            status=status,
-            operation_type=operation_type,
-            limit=limit + 1,
-        )
-        response = _operation_list_response(rows, limit=limit)
+        try:
+            page = await service.list_all_operations_page(
+                workspace_id=workspace_id,
+                status=status,
+                operation_type=operation_type,
+                limit=limit + 1,
+                cursor=cursor,
+            )
+            response = build_operation_list_response(
+                page.rows,
+                limit=limit,
+                cursor=cursor,
+            )
+        except InvalidBoundedListCursorError:
+            return _error_result("INVALID_CURSOR", "Invalid operation list cursor.")
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_operation")
@@ -1101,9 +1149,9 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
-            min_length=1,
             max_length=128,
-            description="Optional idempotency key for safe retries after timeout or dropped response.",
+            json_schema_extra={"minLength": 1},
+            description="Required idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
             default=None,
@@ -1111,11 +1159,14 @@ def build_mcp_server(
         ),
     ) -> StructuredToolResult:
         """Operator control: re-trigger PR monitor for a workspace; this is not shell access."""
+        idempotency_key_value = _required_idempotency_key(idempotency_key)
+        if idempotency_key_value is None:
+            return _idempotency_key_error()
         try:
             result = await service.remonitor_workspace(
                 workspace_id,
                 reason=reason,
-                idempotency_key=idempotency_key,
+                idempotency_key=idempotency_key_value,
                 expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
@@ -1140,9 +1191,9 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
-            min_length=1,
             max_length=128,
-            description="Optional idempotency key for safe retries after timeout or dropped response.",
+            json_schema_extra={"minLength": 1},
+            description="Required idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
             default=None,
@@ -1150,12 +1201,15 @@ def build_mcp_server(
         ),
     ) -> StructuredToolResult:
         """Operator control: request workspace re-validation; this is not shell access."""
+        idempotency_key_value = _required_idempotency_key(idempotency_key)
+        if idempotency_key_value is None:
+            return _idempotency_key_error()
         try:
             result = await service.request_validate_workspace(
                 workspace_id,
                 reason=reason,
                 requested_tier=requested_tier,
-                idempotency_key=idempotency_key,
+                idempotency_key=idempotency_key_value,
                 expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
@@ -1172,11 +1226,11 @@ def build_mcp_server(
             max_length=1024,
             description="Optional operator reason for refresh.",
         ),
-        idempotency_key: str = Field(
-            ...,
-            min_length=1,
+        idempotency_key: str | None = Field(
+            default=None,
             max_length=128,
-            description="Idempotency key for safe retries after timeout or dropped response.",
+            json_schema_extra={"minLength": 1},
+            description="Required idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
             default=None,
@@ -1184,11 +1238,14 @@ def build_mcp_server(
         ),
     ) -> StructuredToolResult:
         """Operator control: request workspace refresh; this is not shell access."""
+        idempotency_key_value = _required_idempotency_key(idempotency_key)
+        if idempotency_key_value is None:
+            return _idempotency_key_error()
         try:
             result = await service.request_refresh_workspace(
                 workspace_id,
                 reason=reason,
-                idempotency_key=idempotency_key,
+                idempotency_key=idempotency_key_value,
                 expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
@@ -1205,11 +1262,11 @@ def build_mcp_server(
             max_length=1024,
             description="Optional operator reason for rebase.",
         ),
-        idempotency_key: str = Field(
-            ...,
-            min_length=1,
+        idempotency_key: str | None = Field(
+            default=None,
             max_length=128,
-            description="Idempotency key for safe retries after timeout or dropped response.",
+            json_schema_extra={"minLength": 1},
+            description="Required idempotency key for safe retries after timeout or dropped response.",
         ),
         expected_version: int | None = Field(
             default=None,
@@ -1217,11 +1274,14 @@ def build_mcp_server(
         ),
     ) -> StructuredToolResult:
         """Operator control: request workspace rebase; this is not shell access."""
+        idempotency_key_value = _required_idempotency_key(idempotency_key)
+        if idempotency_key_value is None:
+            return _idempotency_key_error()
         try:
             result = await service.request_rebase_workspace(
                 workspace_id,
                 reason=reason,
-                idempotency_key=idempotency_key,
+                idempotency_key=idempotency_key_value,
                 expected_version=expected_version,
             )
         except WorkspaceControlError as exc:
@@ -1285,19 +1345,14 @@ def _error_result(error_code: str, message: str) -> CallToolResult:
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
-def _operation_list_response(
-    rows: list[OperationResponse],
-    *,
-    limit: int,
-) -> OperationListResponse:
-    page_rows = rows[:limit]
-    return OperationListResponse(
-        items=page_rows,
-        next_cursor=None,
-        has_more=len(rows) > limit,
-        limit=limit,
-        cursor=None,
-    )
+def _required_idempotency_key(idempotency_key: str | None) -> str | None:
+    if idempotency_key is None:
+        return None
+    return idempotency_key if idempotency_key.strip() else None
+
+
+def _idempotency_key_error() -> CallToolResult:
+    return _error_result("INVALID_REQUEST", _IDEMPOTENCY_KEY_REQUIRED_MESSAGE)
 
 
 def _null_tool_result() -> CallToolResult:

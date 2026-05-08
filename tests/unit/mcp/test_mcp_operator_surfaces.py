@@ -1,4 +1,4 @@
-"""MCP parity tests for read-only operator surfaces."""
+"""MCP parity tests for operator surfaces."""
 
 from __future__ import annotations
 
@@ -1585,15 +1585,34 @@ class TestMcpOperatorSurfaceParity:
             },
         )
         detail_response = await operator_stack.client.get(f"/v1/operations/{operation_id}")
+        workspace_response = await operator_stack.client.get(
+            f"/v1/workspaces/{workspace_id}/operations",
+            params={
+                "type": "validate",
+                "status": "succeeded",
+                "limit": 10,
+            },
+        )
         assert list_response.status_code == 200
         assert detail_response.status_code == 200
+        assert workspace_response.status_code == 200
 
         list_mcp = await _call(
             operator_stack.mcp,
             "awf_list_operations",
             {
                 "workspace_id": workspace_id,
-                "operation_type": "validate",
+                "type": "validate",
+                "status": "succeeded",
+                "limit": 10,
+            },
+        )
+        workspace_mcp = await _call(
+            operator_stack.mcp,
+            "awf_list_workspace_operations",
+            {
+                "workspace_id": workspace_id,
+                "type": "validate",
                 "status": "succeeded",
                 "limit": 10,
             },
@@ -1605,6 +1624,7 @@ class TestMcpOperatorSurfaceParity:
         )
 
         assert list_mcp == list_response.json()
+        assert workspace_mcp == workspace_response.json()
         assert detail_mcp == detail_response.json()
         assert detail_response.json()["reason_code"] == "OPERATOR_VALIDATE"
         assert detail_response.json()["log_stream_ids"] == [
@@ -1761,6 +1781,11 @@ class TestMcpOperatorSurfaceParity:
             "awf_list_workspace_overview",
             {"cursor": "not-a-cursor"},
         )
+        operations_result = await _call_result(
+            operator_stack.mcp,
+            "awf_list_operations",
+            {"cursor": "not-a-cursor"},
+        )
 
         assert merge_result.isError is True
         assert merge_result.structuredContent == {
@@ -1772,6 +1797,12 @@ class TestMcpOperatorSurfaceParity:
         assert overview_result.structuredContent == {
             "error_code": "INVALID_CURSOR",
             "message": "Invalid workspace overview cursor.",
+            "detail": None,
+        }
+        assert operations_result.isError is True
+        assert operations_result.structuredContent == {
+            "error_code": "INVALID_CURSOR",
+            "message": "Invalid operation list cursor.",
             "detail": None,
         }
 
@@ -2064,7 +2095,11 @@ class TestMcpOperatorSurfaceParity:
         result = await _call(
             operator_stack.mcp,
             "awf_remonitor_workspace",
-            {"workspace_id": workspace_id, "reason": "PR monitor stuck"},
+            {
+                "workspace_id": workspace_id,
+                "reason": "PR monitor stuck",
+                "idempotency_key": "remonitor-parity",
+            },
         )
 
         assert isinstance(result, dict)
@@ -2086,7 +2121,7 @@ class TestMcpOperatorSurfaceParity:
         result = await _call_result(
             operator_stack.mcp,
             "awf_remonitor_workspace",
-            {"workspace_id": workspace_id},
+            {"workspace_id": workspace_id, "idempotency_key": "remonitor-wrong-state"},
         )
 
         assert result.isError is True
@@ -2152,7 +2187,12 @@ class TestMcpOperatorSurfaceParity:
         result = await _call(
             operator_stack.mcp,
             "awf_request_workspace_validation",
-            {"workspace_id": workspace_id, "reason": "recheck validation", "requested_tier": 2},
+            {
+                "workspace_id": workspace_id,
+                "reason": "recheck validation",
+                "requested_tier": 2,
+                "idempotency_key": "validate-parity",
+            },
         )
 
         assert isinstance(result, dict)
@@ -2174,7 +2214,7 @@ class TestMcpOperatorSurfaceParity:
         result = await _call_result(
             operator_stack.mcp,
             "awf_request_workspace_validation",
-            {"workspace_id": workspace_id},
+            {"workspace_id": workspace_id, "idempotency_key": "validate-wrong-state"},
         )
 
         assert result.isError is True

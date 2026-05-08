@@ -9,6 +9,8 @@ from awf.api.schemas import OperationResponse
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service.operations import build_operation_list_response, decode_operation_list_cursor
+from awf.service.workspaces import OperationRowsPage
 
 
 def _operation_response() -> OperationResponse:
@@ -26,6 +28,24 @@ def _operation_response() -> OperationResponse:
         started_at=None,
         finished_at=None,
     )
+
+
+@pytest.mark.unit
+def test_operation_list_response_uses_keyset_cursor_from_last_returned_row() -> None:
+    operation = _operation_response()
+
+    response = build_operation_list_response(
+        [operation, operation.model_copy(update={"id": "op_next"})],
+        limit=1,
+        cursor="prevalidated-upstream",
+    )
+
+    assert response.cursor == "prevalidated-upstream"
+    assert response.next_cursor is not None
+    decoded = decode_operation_list_cursor(response.next_cursor)
+    assert decoded is not None
+    assert decoded.created_at == operation.created_at
+    assert decoded.operation_id == operation.id
 
 
 @pytest.fixture
@@ -120,7 +140,7 @@ async def test_list_operations_reports_has_more_when_limit_truncates(
     body = response.json()
     assert len(body["items"]) == 2
     assert body["has_more"] is True
-    assert body["next_cursor"] is None
+    assert body["next_cursor"] is not None
     assert body["limit"] == 2
     assert body["cursor"] is None
 
@@ -138,9 +158,202 @@ async def test_list_workspace_operations_reports_has_more_when_limit_truncates(
     body = response.json()
     assert len(body["items"]) == 1
     assert body["has_more"] is True
-    assert body["next_cursor"] is None
+    assert body["next_cursor"] is not None
     assert body["limit"] == 1
     assert body["cursor"] is None
+
+
+@pytest.mark.unit
+async def test_list_operations_next_cursor_fetches_second_page(
+    client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    ws_repo = WorkspaceRepository(session)
+    op_repo = OperationRepository(session)
+    workspace = await ws_repo.create(
+        repo_url="https://github.com/org/repo_paged_ops",
+        branch_base="main",
+        task_title="paged operations",
+        task_prompt="prompt",
+        agent="claude-3-sonnet",
+        test_commands=[],
+    )
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    oldest = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.create,
+        status=OperationStatus.succeeded,
+    )
+    middle = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+    )
+    newest = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.rebase,
+        status=OperationStatus.pending,
+    )
+    oldest.created_at = base
+    middle.created_at = base + timedelta(seconds=1)
+    newest.created_at = base + timedelta(seconds=2)
+    await session.commit()
+
+    first_response = await client.get("/v1/operations?limit=1")
+    assert first_response.status_code == 200
+    first_body = first_response.json()
+    assert [item["id"] for item in first_body["items"]] == [newest.id]
+    assert first_body["has_more"] is True
+    assert first_body["next_cursor"] is not None
+
+    second_response = await client.get(
+        "/v1/operations",
+        params={"limit": 1, "cursor": first_body["next_cursor"]},
+    )
+
+    assert second_response.status_code == 200
+    second_body = second_response.json()
+    assert [item["id"] for item in second_body["items"]] == [middle.id]
+    assert second_body["cursor"] == first_body["next_cursor"]
+    assert second_body["next_cursor"] is not None
+
+
+@pytest.mark.unit
+async def test_list_operations_cursor_is_stable_when_newer_operations_arrive(
+    client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    ws_repo = WorkspaceRepository(session)
+    op_repo = OperationRepository(session)
+    workspace = await ws_repo.create(
+        repo_url="https://github.com/org/repo_live_ops",
+        branch_base="main",
+        task_title="live operations",
+        task_prompt="prompt",
+        agent="claude-3-sonnet",
+        test_commands=[],
+    )
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    oldest = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.create,
+        status=OperationStatus.succeeded,
+    )
+    middle = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+    )
+    newest = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.rebase,
+        status=OperationStatus.pending,
+    )
+    oldest.created_at = base
+    middle.created_at = base + timedelta(seconds=1)
+    newest.created_at = base + timedelta(seconds=2)
+    await session.commit()
+
+    first_response = await client.get(
+        "/v1/operations",
+        params={"workspace_id": workspace.id, "limit": 1},
+    )
+    assert first_response.status_code == 200
+    first_body = first_response.json()
+    assert [item["id"] for item in first_body["items"]] == [newest.id]
+
+    inserted = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.pending,
+    )
+    inserted.created_at = base + timedelta(seconds=3)
+    await session.commit()
+
+    second_response = await client.get(
+        "/v1/operations",
+        params={
+            "workspace_id": workspace.id,
+            "limit": 1,
+            "cursor": first_body["next_cursor"],
+        },
+    )
+
+    assert second_response.status_code == 200
+    second_body = second_response.json()
+    assert [item["id"] for item in second_body["items"]] == [middle.id]
+
+
+@pytest.mark.unit
+async def test_list_workspace_operations_cursor_is_stable_when_newer_operations_arrive(
+    client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    ws_repo = WorkspaceRepository(session)
+    op_repo = OperationRepository(session)
+    workspace = await ws_repo.create(
+        repo_url="https://github.com/org/repo_live_workspace_ops",
+        branch_base="main",
+        task_title="live workspace operations",
+        task_prompt="prompt",
+        agent="claude-3-sonnet",
+        test_commands=[],
+    )
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    oldest = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.create,
+        status=OperationStatus.succeeded,
+    )
+    middle = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+    )
+    newest = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.rebase,
+        status=OperationStatus.pending,
+    )
+    oldest.created_at = base
+    middle.created_at = base + timedelta(seconds=1)
+    newest.created_at = base + timedelta(seconds=2)
+    await session.commit()
+
+    first_response = await client.get(f"/v1/workspaces/{workspace.id}/operations?limit=1")
+    assert first_response.status_code == 200
+    first_body = first_response.json()
+    assert [item["id"] for item in first_body["items"]] == [newest.id]
+
+    inserted = await op_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.pending,
+    )
+    inserted.created_at = base + timedelta(seconds=3)
+    await session.commit()
+
+    second_response = await client.get(
+        f"/v1/workspaces/{workspace.id}/operations",
+        params={"limit": 1, "cursor": first_body["next_cursor"]},
+    )
+
+    assert second_response.status_code == 200
+    second_body = second_response.json()
+    assert [item["id"] for item in second_body["items"]] == [middle.id]
+
+
+@pytest.mark.unit
+async def test_list_operations_invalid_cursor_returns_structured_400(
+    client: AsyncClient,
+) -> None:
+    response = await client.get("/v1/operations?cursor=not-a-cursor")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "error_code": "INVALID_CURSOR",
+        "message": "Invalid operation list cursor.",
+    }
 
 
 @pytest.mark.unit
@@ -154,8 +367,11 @@ async def test_list_operations_uses_prevalidated_service_responses(
         def __init__(self, session_factory) -> None:  # type: ignore[no-untyped-def]
             self.session_factory = session_factory
 
-        async def list_all_operations(self, **kwargs) -> list[OperationResponse]:  # type: ignore[no-untyped-def]
-            return [operation]
+        async def list_all_operations_page(
+            self,
+            **kwargs: object,
+        ) -> OperationRowsPage:
+            return OperationRowsPage(rows=[operation])
 
     def fail_model_validate(cls, value) -> OperationResponse:  # type: ignore[no-untyped-def]
         raise AssertionError("OperationResponse.model_validate should not be called")

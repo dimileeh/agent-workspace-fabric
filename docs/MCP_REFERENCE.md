@@ -85,6 +85,20 @@ Example runtime and operation observability calls:
 `awf_list_workspace_operations` arguments:
 
 ```json
-{"workspace_id": "ws_abc123", "limit": 25}
+{"workspace_id": "ws_abc123", "limit": 25, "status": "running", "operation_type": "validate"}
 ```
 
+**Breaking change:** `awf_list_workspace_operations` now returns a
+`CallToolResult` whose structured content is the REST-compatible
+`OperationListResponse` envelope, not a flat JSON array. Existing MCP clients
+must read operation rows from `items` and handle the pagination fields:
+
+```json
+{
+  "items": [],
+  "has_more": false,
+  "next_cursor": null,
+  "limit": 25,
+  "cursor": null
+}
+```

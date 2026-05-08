@@ -1,7 +1,7 @@
 """Idempotency contract: REST + MCP replay/conflict semantics, CLI header forwarding.
 
 REST cancel/stop/destroy/remonitor/validate/refresh/rebase require the
-``Idempotency-Key`` header. MCP variants accept the same key as an optional tool
+``Idempotency-Key`` header. MCP variants require the same key as a tool
 arg and replay through the same backend coalescing path. CLI commands that
 declare ``--idempotency-key`` must forward it as ``Idempotency-Key``.
 """
@@ -231,7 +231,7 @@ def test_cli_remonitor_forwards_idempotency_key(
 async def test_rest_cancel_requires_idempotency_key_with_invalid_request(
     contract_stack: ContractStack,
 ) -> None:
-    """REST cancel rejects missing key. MCP allows optional key with same backend.
+    """REST cancel rejects missing key with the shared invalid-request envelope.
 
     Pinning REST behavior via the registry's ``supports_idempotency_key`` flag.
     """
@@ -249,25 +249,41 @@ async def test_rest_cancel_requires_idempotency_key_with_invalid_request(
 
 
 @pytest.mark.unit
-async def test_mcp_cancel_accepts_optional_idempotency_key(
+@pytest.mark.parametrize(
+    ("capability_name", "args"),
+    [
+        (
+            "cancel_workspace",
+            {"reason": "mcp no-key", "stop_stack": True},
+        ),
+        ("stop_workspace", {"reason": "mcp no-key"}),
+        (
+            "destroy_workspace",
+            {"force": True, "remove_volumes": True, "remove_worktree": True},
+        ),
+        ("remonitor_workspace", {"reason": "mcp no-key"}),
+        ("request_validation", {"reason": "mcp no-key", "requested_tier": 1}),
+    ],
+)
+async def test_mcp_control_tools_reject_blank_idempotency_key(
     contract_stack: ContractStack,
-    monkeypatch: pytest.MonkeyPatch,
+    capability_name: str,
+    args: dict[str, object],
 ) -> None:
-    """MCP cancel accepts the optional idempotency_key argument without rejecting.
-
-    Preserves today's MCP shape where the key is optional at the tool boundary.
-    """
     async def _stub_project_stopper(_name: str | None) -> None:
         return None
 
     contract_stack.service._project_stopper = _stub_project_stopper  # type: ignore[attr-defined]
 
     workspace_id = await _seed_workspace(contract_stack.factory)
-    capability = CAPABILITIES_BY_NAME["cancel_workspace"]
+    capability = CAPABILITIES_BY_NAME[capability_name]
 
     result = await _call_mcp(
         contract_stack.mcp,
         capability.mcp_tool or "",
-        {"workspace_id": workspace_id, "reason": "mcp no-key", "stop_stack": True},
+        {"workspace_id": workspace_id, "idempotency_key": " ", **args},
     )
-    assert result.isError is False, result.structuredContent
+    assert result.isError is True
+    envelope = normalize_mcp_error_body(result.structuredContent)
+    assert envelope["error_code"] == "INVALID_REQUEST"
+    assert envelope["message"] == "Idempotency-Key header is required for this endpoint."

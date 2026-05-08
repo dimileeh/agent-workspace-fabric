@@ -432,9 +432,12 @@ async def adopt_pull_request_monitor(
     response_model=WorkspaceRetryResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
+        401: {"model": ErrorResponse},
         404: {"model": ErrorResponse},
         409: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
     },
+    dependencies=[Depends(require_api_token)],
 )
 async def retry_workspace(
     workspace_id: str,

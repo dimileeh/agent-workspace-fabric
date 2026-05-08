@@ -24,6 +24,7 @@ from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import click
 import httpx
@@ -55,6 +56,11 @@ _PROVIDER_HELP_PASSTHROUGH = (
     "service bootstrap: github, codex, claude_code, gemini, opencode, "
     "or docker."
 )
+_CONTROL_IDEMPOTENCY_KEY_HELP = (
+    "Idempotency key for this mutating control. When omitted, generated and "
+    "printed to stderr before the request; pass the same value again to safely "
+    "retry after a timeout or dropped response."
+)
 
 
 app = typer.Typer(
@@ -70,11 +76,13 @@ workspace_app = typer.Typer(
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
 locks_app = typer.Typer(help="Owned-path reservation and overlap-risk visibility.")
+operations_app = typer.Typer(help="Global operation history inspection.")
 smoke_app = typer.Typer(help=_DX_HELP)
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
 app.add_typer(service_app, name="service")
 app.add_typer(locks_app, name="locks")
+app.add_typer(operations_app, name="operations")
 app.add_typer(smoke_app, name="smoke")
 
 
@@ -103,6 +111,32 @@ def _api_token_option() -> Any:
         "--api-token",
         help="Bearer token override; defaults to AWF_API_TOKEN when set.",
     )
+
+
+def _control_idempotency_key_option() -> Any:
+    return typer.Option(None, "--idempotency-key", help=_CONTROL_IDEMPOTENCY_KEY_HELP)
+
+
+def _control_headers(
+    *,
+    api_token: str | None,
+    idempotency_key: str | None,
+    if_match: str | None,
+    action: str,
+) -> dict[str, str]:
+    generated = idempotency_key is None
+    resolved_key = (
+        idempotency_key if idempotency_key is not None else f"awf-cli-{action}-{uuid4().hex}"
+    )
+    if generated:
+        typer.echo(f"Generated Idempotency-Key: {resolved_key}", err=True)
+    headers = {
+        **_api_token_headers(api_token),
+        "Idempotency-Key": resolved_key,
+    }
+    if if_match is not None:
+        headers["If-Match"] = if_match
+    return headers
 
 
 def _run_terminal_workspace_compose_teardown(
@@ -1307,30 +1341,242 @@ def workspace_retry(
 def workspace_remonitor(
     workspace_id: str = typer.Argument(...),
     reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
-    idempotency_key: str = typer.Option(
-        ...,
-        "--idempotency-key",
-        help="Required idempotency key for this mutating control.",
-    ),
-    if_match: int | None = typer.Option(
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
         None,
         "--if-match",
-        help="Optional expected workspace version.",
+        help="Optional expected workspace version or ETag.",
     ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Request PR monitor recovery for a monitoring workspace."""
-    headers = {
-        **_api_token_headers(api_token),
-        "Idempotency-Key": idempotency_key,
-    }
-    if if_match is not None:
-        headers["If-Match"] = str(if_match)
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action="remonitor",
+    )
     response = _call(
         "POST",
         f"/v1/workspaces/{workspace_id}/remonitor",
+        base_url=_base_url(base_url),
+        json={"reason": reason},
+        headers=headers,
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("cancel")
+def workspace_cancel(
+    workspace_id: str = typer.Argument(...),
+    reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
+    stop_stack: bool = typer.Option(
+        True,
+        "--stop-stack/--no-stop-stack",
+        help="Whether to stop workspace runtime resources before cancellation.",
+    ),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Request cancellation for one workspace."""
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action="cancel",
+    )
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/cancel",
+        base_url=_base_url(base_url),
+        json={"reason": reason, "stop_stack": stop_stack},
+        headers=headers,
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("stop")
+def workspace_stop(
+    workspace_id: str = typer.Argument(...),
+    reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Request stack stop for one workspace."""
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action="stop",
+    )
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/stop",
+        base_url=_base_url(base_url),
+        json={"reason": reason},
+        headers=headers,
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("destroy")
+def workspace_destroy(
+    workspace_id: str = typer.Argument(...),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Force destroy even when workspace state is active.",
+    ),
+    remove_volumes: bool = typer.Option(
+        True,
+        "--remove-volumes/--no-remove-volumes",
+        help="Whether to remove workspace volumes.",
+    ),
+    remove_worktree: bool = typer.Option(
+        True,
+        "--remove-worktree/--no-remove-worktree",
+        help="Whether to remove workspace worktree.",
+    ),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Request destruction of a workspace and optional related resources."""
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action="destroy",
+    )
+    response = _call(
+        "DELETE",
+        f"/v1/workspaces/{workspace_id}",
+        base_url=_base_url(base_url),
+        params={
+            "force": force,
+            "remove_volumes": remove_volumes,
+            "remove_worktree": remove_worktree,
+        },
+        headers=headers,
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("refresh")
+def workspace_refresh(
+    workspace_id: str = typer.Argument(...),
+    reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Trigger drift refresh for one workspace."""
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action="refresh",
+    )
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/refresh",
+        base_url=_base_url(base_url),
+        json={"reason": reason},
+        headers=headers,
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("validate")
+def workspace_validate(
+    workspace_id: str = typer.Argument(...),
+    reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
+    requested_tier: int | None = typer.Option(
+        None,
+        "--requested-tier",
+        min=1,
+        max=3,
+        help="Optional validation tier (1-3).",
+    ),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Request revalidation for one workspace."""
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action="validate",
+    )
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/validate",
+        base_url=_base_url(base_url),
+        json={"reason": reason, "requested_tier": requested_tier},
+        headers=headers,
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("rebase")
+def workspace_rebase(
+    workspace_id: str = typer.Argument(...),
+    reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Request workspace rebase onto the current target branch."""
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action="rebase",
+    )
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/rebase",
         base_url=_base_url(base_url),
         json={"reason": reason},
         headers=headers,
@@ -1490,6 +1736,7 @@ def workspace_runtime(
 def workspace_operations(
     workspace_id: str = typer.Argument(...),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
+    cursor: str | None = typer.Option(None, "--cursor", "--after"),
     status: OperationStatus | None = typer.Option(None, "--status"),
     operation_type: OperationType | None = typer.Option(None, "--type"),
     api_token: str | None = _api_token_option(),
@@ -1498,6 +1745,8 @@ def workspace_operations(
 ) -> None:
     """List operations for one workspace."""
     params: dict[str, Any] = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
     if status is not None:
         params["status"] = status.value
     if operation_type is not None:
@@ -1507,6 +1756,55 @@ def workspace_operations(
         f"/v1/workspaces/{workspace_id}/operations",
         base_url=_base_url(base_url),
         params=params,
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@operations_app.command("list")
+def operations_list(
+    workspace_id: str | None = typer.Option(None, "--workspace-id"),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    cursor: str | None = typer.Option(None, "--cursor", "--after"),
+    status: OperationStatus | None = typer.Option(None, "--status"),
+    operation_type: OperationType | None = typer.Option(None, "--type"),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """List global operations, optionally filtered by workspace."""
+    params: dict[str, Any] = {"limit": limit}
+    if workspace_id is not None:
+        params["workspace_id"] = workspace_id
+    if cursor is not None:
+        params["cursor"] = cursor
+    if status is not None:
+        params["status"] = status.value
+    if operation_type is not None:
+        params["type"] = operation_type.value
+    response = _call(
+        "GET",
+        "/v1/operations",
+        base_url=_base_url(base_url),
+        params=params,
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@operations_app.command("show")
+def operations_show(
+    operation_id: str = typer.Argument(...),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Fetch one operation by id."""
+    operation_ref = urllib.parse.quote(operation_id, safe="")
+    response = _call(
+        "GET",
+        f"/v1/operations/{operation_ref}",
+        base_url=_base_url(base_url),
         headers=_api_token_headers(api_token),
     )
     _handle_response(response, fmt)

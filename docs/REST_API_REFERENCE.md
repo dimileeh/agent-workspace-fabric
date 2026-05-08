@@ -253,16 +253,19 @@ curl -X POST "http://localhost:8000/v1/workspaces/ws_123/remonitor" \
 ## Retry
 
 Retry a terminal (failed/cancelled) workspace by creating a new workspace
-that inherits repo, branch, and task configuration. No auth required.
+that inherits repo, branch, and task configuration. Auth required when
+`AWF_API_TOKEN` is configured.
 
 ```bash
-curl -X POST "http://localhost:8000/v1/workspaces/ws_123/retry"
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/retry" \
+  -H "Authorization: Bearer $AWF_API_TOKEN"
 ```
 
 Optional query params: `provider_readiness_override`, `provider_readiness_override_reason`.
 
 ```bash
-curl -X POST "http://localhost:8000/v1/workspaces/ws_123/retry?provider_readiness_override=true&provider_readiness_override_reason=Capacity+recovered"
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/retry?provider_readiness_override=true&provider_readiness_override_reason=Capacity+recovered" \
+  -H "Authorization: Bearer $AWF_API_TOKEN"
 ```
 
 ---
@@ -402,6 +405,7 @@ curl "http://localhost:8000/v1/workspaces/ws_123/stale-reasons?include_resolved=
 
 ```bash
 curl "http://localhost:8000/v1/operations?limit=50"
+curl "http://localhost:8000/v1/operations?limit=50&cursor=$NEXT_CURSOR"
 ```
 
 Filter by workspace ID, status, or operation type:
@@ -414,6 +418,7 @@ curl "http://localhost:8000/v1/operations?workspace_id=ws_123&type=rebase&status
 
 ```bash
 curl "http://localhost:8000/v1/workspaces/ws_123/operations?limit=50"
+curl "http://localhost:8000/v1/workspaces/ws_123/operations?limit=50&cursor=$NEXT_CURSOR"
 ```
 
 ### Get a single operation

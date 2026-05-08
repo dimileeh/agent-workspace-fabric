@@ -108,7 +108,7 @@ def _schema_database_url(url: URL, schema_name: str) -> URL:
 
 
 async def _create_schema(url: URL, schema_name: str) -> None:
-    conn = await asyncpg.connect(dsn=_asyncpg_url(url))
+    conn = await asyncpg.connect(dsn=_asyncpg_url(url), command_timeout=30)
     try:
         await conn.execute(f"CREATE SCHEMA {_quote_identifier(schema_name)}")
     finally:
@@ -116,7 +116,7 @@ async def _create_schema(url: URL, schema_name: str) -> None:
 
 
 async def _drop_schema(url: URL, schema_name: str) -> None:
-    conn = await asyncpg.connect(dsn=_asyncpg_url(url))
+    conn = await asyncpg.connect(dsn=_asyncpg_url(url), command_timeout=30)
     try:
         await conn.execute(f"DROP SCHEMA IF EXISTS {_quote_identifier(schema_name)} CASCADE")
     finally:

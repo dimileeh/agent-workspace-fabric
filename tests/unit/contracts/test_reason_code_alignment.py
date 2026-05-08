@@ -1,7 +1,7 @@
 """REST + MCP must agree on reason codes for every shared error scenario.
 
 Each scenario exercises one reason code through both surfaces against the same
-seeded state and asserts the operator-visible envelope (``error_code``,
+seeded state and asserts the operator-visible error envelope (``error_code``,
 ``message``, ``detail``) is byte-identical after envelope normalization.
 """
 
@@ -265,12 +265,11 @@ async def test_rest_and_mcp_agree_on_validate_state_not_validatable(
 
 @pytest.mark.unit
 async def test_rest_and_mcp_agree_on_invalid_request_missing_idempotency_key() -> None:
-    """REST cancel rejects missing key; MCP accepts optional key on the same surface.
+    """REST and MCP reject missing or blank idempotency keys on control surfaces.
 
     The REST control surface treats ``Idempotency-Key`` as required;
-    ``INVALID_REQUEST`` is the agreed-upon code. The contract test asserts the
-    REST envelope shape and the MCP-side observation that the call is allowed
-    without a key (consistent with the parity matrix's documented MCP shape).
+    ``INVALID_REQUEST`` is the agreed-upon code. The MCP adapter normalizes
+    omitted and blank values before calling the control service.
     """
     # Asserted via dedicated REST endpoint test in
     # tests/unit/api/test_workspace_controls_idempotency.py — this contract test

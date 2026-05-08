@@ -28,6 +28,7 @@ from awf.db.session import make_session_factory
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.pricing import PricingMetadata
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.service.operations import build_operation_list_response
 from awf.service.workspace_observability import (
     InvalidWorkspaceOverviewCursorError,
     _decode_overview_cursor,
@@ -471,6 +472,52 @@ async def test_global_operation_helpers_filter_and_get(
     assert operation.id == first_operation.id
     assert operation.type == "create"
     assert missing is None
+
+
+@pytest.mark.unit
+async def test_operation_page_helpers_return_keyset_cursor_pages(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    base = datetime(2026, 4, 25, 14, 0, tzinfo=UTC)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/paged.git",
+            branch_base="main",
+            task_title="Page operations",
+            task_prompt="List paged operations.",
+            agent="codex",
+            test_commands=[],
+        )
+        repo = OperationRepository(session)
+        older = await repo.create(
+            workspace_id=workspace.id,
+            operation_type=OperationType.create,
+            status=OperationStatus.succeeded,
+        )
+        newer = await repo.create(
+            workspace_id=workspace.id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.running,
+        )
+        older.created_at = base
+        newer.created_at = base + timedelta(seconds=1)
+        await session.commit()
+
+    first_page = await service.list_all_operations_page(limit=2)
+    cursor = build_operation_list_response(first_page.rows, limit=1).next_cursor
+    assert cursor is not None
+    page = await service.list_all_operations_page(limit=2, cursor=cursor)
+    workspace_page = await service.list_operations_page(workspace.id, limit=2, cursor=cursor)
+    missing_workspace_page = await service.list_operations_page(
+        "ws_missing",
+        cursor="not-a-cursor",
+    )
+
+    assert [row.id for row in page.rows] == [older.id]
+    assert workspace_page is not None
+    assert [row.id for row in workspace_page.rows] == [older.id]
+    assert missing_workspace_page is None
 
 
 @pytest.mark.unit

@@ -95,6 +95,7 @@ from awf.service.coordination import (
     task_policy_with_coordination_warnings,
 )
 from awf.service.disk import DiskCheck
+from awf.service.operations import decode_operation_list_cursor
 from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
 from awf.service.profile_metadata import network_posture_from_profile_snapshot
 from awf.service.provider_readiness import (
@@ -147,6 +148,11 @@ from awf.service.workspace_runtime_health import (
 
 class RuntimeInspection(Protocol):
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot: ...
+
+
+@dataclass(frozen=True, slots=True)
+class OperationRowsPage:
+    rows: builtins.list[OperationResponse]
 
 
 OWNED_PATH_OVERLAP_RISK_CODE = "OWNED_PATH_OVERLAP_RISK"
@@ -685,18 +691,40 @@ class WorkspaceService:
         status: OperationStatus | str | None = None,
         operation_type: OperationType | str | None = None,
         limit: int = 50,
+        cursor: str | None = None,
     ) -> builtins.list[OperationResponse] | None:
+        page = await self.list_operations_page(
+            workspace_id,
+            status=status,
+            operation_type=operation_type,
+            limit=limit,
+            cursor=cursor,
+        )
+        return page.rows if page is not None else None
+
+    async def list_operations_page(
+        self,
+        workspace_id: str,
+        *,
+        status: OperationStatus | str | None = None,
+        operation_type: OperationType | str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> OperationRowsPage | None:
         async with self._factory() as s:
             workspace_repo = WorkspaceRepository(s)
             if not await workspace_repo.exists(workspace_id):
                 return None
+            decoded_cursor = decode_operation_list_cursor(cursor)
             rows = await OperationRepository(s).list_for_workspace(
                 workspace_id,
                 status=status,
                 operation_type=operation_type,
                 limit=limit,
+                before_created_at=decoded_cursor.created_at if decoded_cursor else None,
+                before_operation_id=decoded_cursor.operation_id if decoded_cursor else None,
             )
-            return [OperationResponse.model_validate(row) for row in rows]
+            return OperationRowsPage(rows=[OperationResponse.model_validate(row) for row in rows])
 
     async def list_all_operations(
         self,
@@ -705,15 +733,37 @@ class WorkspaceService:
         status: OperationStatus | str | None = None,
         operation_type: OperationType | str | None = None,
         limit: int = 50,
+        cursor: str | None = None,
     ) -> builtins.list[OperationResponse]:
+        page = await self.list_all_operations_page(
+            workspace_id=workspace_id,
+            status=status,
+            operation_type=operation_type,
+            limit=limit,
+            cursor=cursor,
+        )
+        return page.rows
+
+    async def list_all_operations_page(
+        self,
+        *,
+        workspace_id: str | None = None,
+        status: OperationStatus | str | None = None,
+        operation_type: OperationType | str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> OperationRowsPage:
         async with self._factory() as s:
+            decoded_cursor = decode_operation_list_cursor(cursor)
             rows = await OperationRepository(s).list_all(
                 workspace_id=workspace_id,
                 status=status,
                 operation_type=operation_type,
                 limit=limit,
+                before_created_at=decoded_cursor.created_at if decoded_cursor else None,
+                before_operation_id=decoded_cursor.operation_id if decoded_cursor else None,
             )
-            return [OperationResponse.model_validate(row) for row in rows]
+            return OperationRowsPage(rows=[OperationResponse.model_validate(row) for row in rows])
 
     async def get_operation(self, operation_id: str) -> OperationResponse | None:
         async with self._factory() as s:

@@ -8,6 +8,7 @@ End-to-end testing against a real server lives in tests/e2e/ (future).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -28,6 +29,16 @@ def _mock_response(*, status_code: int = 202, payload: object = None, text: str 
     response.text = text or (json.dumps(payload) if payload is not None else "")
     response.json.return_value = payload
     return response
+
+
+def _assert_control_headers(
+    headers: dict[str, str],
+    *,
+    idempotency_key: str,
+    if_match: str,
+) -> None:
+    assert headers["Idempotency-Key"] == idempotency_key
+    assert headers["If-Match"] == if_match
 
 
 class TestWorkspaceCreate:
@@ -354,12 +365,469 @@ class TestWorkspaceRemonitor:
         }
 
     @pytest.mark.unit
-    def test_remonitor_cli_requires_idempotency_key_before_http_call(self) -> None:
-        with patch("awf.cli.main.httpx.request") as mock:
+    def test_remonitor_cli_generates_idempotency_key_before_http_call(self) -> None:
+        response = _mock_response(status_code=202, payload={"ok": True})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
             result = _runner.invoke(app, ["workspace", "remonitor", "ws_monitor"])
 
-        assert result.exit_code != 0
-        mock.assert_not_called()
+        assert result.exit_code == 0, result.output
+        generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
+        assert re.fullmatch(r"awf-cli-remonitor-[0-9a-f]{32}", generated_key)
+        assert f"Generated Idempotency-Key: {generated_key}" in result.stderr
+
+
+class TestWorkspaceControlCommandsPresence:
+    @pytest.mark.unit
+    def test_workspace_help_lists_control_commands(self) -> None:
+        result = _runner.invoke(app, ["workspace", "--help"])
+
+        assert result.exit_code == 0
+        for command in ("cancel", "stop", "destroy", "refresh", "validate", "rebase"):
+            assert command in result.stdout
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("cancel", ["ws_cancel", "--reason", "operator requested"]),
+        ("stop", ["ws_stop", "--reason", "stack unstable"]),
+        ("destroy", ["ws_destroy"]),
+        ("refresh", ["ws_refresh", "--reason", "stale branch"]),
+        ("validate", ["ws_validate", "--requested-tier", "2"]),
+        ("rebase", ["ws_rebase", "--reason", "recover merge conflicts"]),
+    ],
+)
+def test_workspace_control_commands_generate_idempotency_key_when_omitted(
+    command: str,
+    args: list[str],
+) -> None:
+    response = _mock_response(status_code=202, payload={"ok": True})
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(app, ["workspace", command, *args])
+
+    assert result.exit_code == 0, result.output
+    generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
+    assert re.fullmatch(rf"awf-cli-{command}-[0-9a-f]{{32}}", generated_key)
+    assert f"Generated Idempotency-Key: {generated_key}" in result.stderr
+
+
+@pytest.mark.unit
+def test_workspace_control_generated_idempotency_key_survives_request_failure() -> None:
+    with patch(
+        "awf.cli.main.httpx.request",
+        side_effect=httpx.ReadTimeout("response dropped"),
+    ) as mock:
+        result = _runner.invoke(
+            app,
+            ["workspace", "cancel", "ws_cancel", "--reason", "operator requested"],
+        )
+
+    assert result.exit_code == 2
+    generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
+    assert re.fullmatch(r"awf-cli-cancel-[0-9a-f]{32}", generated_key)
+    assert f"Generated Idempotency-Key: {generated_key}" in result.stderr
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("cancel", ["ws_cancel", "--reason", "operator requested", "--idempotency-key", "cancel-key"]),
+        (
+            "stop",
+            ["ws_stop", "--reason", "stack unstable", "--idempotency-key", "stop-key"],
+        ),
+        (
+            "destroy",
+            ["ws_destroy", "--idempotency-key", "destroy-key", "--if-match", "1"],
+        ),
+        (
+            "refresh",
+            ["ws_refresh", "--reason", "stale branch", "--idempotency-key", "refresh-key"],
+        ),
+        (
+            "validate",
+            [
+                "ws_validate",
+                "--requested-tier",
+                "2",
+                "--idempotency-key",
+                "validate-key",
+            ],
+        ),
+        (
+            "rebase",
+            ["ws_rebase", "--reason", "recover merge conflicts", "--idempotency-key", "rebase-key"],
+        ),
+    ],
+)
+def test_workspace_control_commands_emit_structured_api_error(
+    command: str,
+    args: list[str],
+) -> None:
+    response = _mock_response(
+        status_code=409,
+        payload={
+            "error_code": "VERSION_CONFLICT",
+            "message": "Workspace version changed while processing control request.",
+            "detail": {"workspace_id": "ws_control"},
+        },
+    )
+    with patch("awf.cli.main.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["workspace", command, *args])
+
+    assert result.exit_code == 1
+    assert "VERSION_CONFLICT" in result.stderr
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("cancel", ["ws_cancel", "--reason", "operator requested", "--idempotency-key", "cancel-key", "--if-match", "bad"]),
+        ("stop", ["ws_stop", "--reason", "stack unstable", "--idempotency-key", "stop-key", "--if-match", "bad"]),
+        ("destroy", ["ws_destroy", "--idempotency-key", "destroy-key", "--if-match", "bad"]),
+        ("refresh", ["ws_refresh", "--reason", "stale branch", "--idempotency-key", "refresh-key", "--if-match", "bad"]),
+        ("validate", ["ws_validate", "--requested-tier", "2", "--idempotency-key", "validate-key", "--if-match", "bad"]),
+        ("rebase", ["ws_rebase", "--reason", "recover merge conflicts", "--idempotency-key", "rebase-key", "--if-match", "bad"]),
+    ],
+)
+def test_workspace_control_commands_surface_invalid_if_match_api_error(
+    command: str,
+    args: list[str],
+) -> None:
+    response = _mock_response(
+        status_code=400,
+        payload={
+            "error_code": "INVALID_REQUEST",
+            "message": "If-Match must be a workspace version integer.",
+        },
+    )
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(app, ["workspace", command, *args])
+
+    assert result.exit_code == 1
+    assert "INVALID_REQUEST" in result.stderr
+    assert mock.call_args.kwargs["headers"]["If-Match"] == "bad"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        (
+            "remonitor",
+            ["ws_monitor", "--reason", "operator recovery", "--idempotency-key", "remonitor-key"],
+        ),
+        (
+            "cancel",
+            ["ws_cancel", "--reason", "operator requested", "--idempotency-key", "cancel-key"],
+        ),
+        ("stop", ["ws_stop", "--reason", "stack unstable", "--idempotency-key", "stop-key"]),
+        ("destroy", ["ws_destroy", "--idempotency-key", "destroy-key"]),
+        (
+            "refresh",
+            ["ws_refresh", "--reason", "stale branch", "--idempotency-key", "refresh-key"],
+        ),
+        (
+            "validate",
+            ["ws_validate", "--requested-tier", "2", "--idempotency-key", "validate-key"],
+        ),
+        (
+            "rebase",
+            ["ws_rebase", "--reason", "recover merge conflicts", "--idempotency-key", "rebase-key"],
+        ),
+    ],
+)
+@pytest.mark.parametrize("if_match", ['"7"', 'W/"7"'])
+def test_workspace_control_commands_forward_etag_if_match_syntax(
+    command: str,
+    args: list[str],
+    if_match: str,
+) -> None:
+    response = _mock_response(status_code=202, payload={"ok": True})
+    with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+        result = _runner.invoke(app, ["workspace", command, *args, "--if-match", if_match])
+
+    assert result.exit_code == 0, result.output
+    assert mock.call_args.kwargs["headers"]["If-Match"] == if_match
+
+
+class TestWorkspaceCancel:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("stop_stack",),
+        [("true",), ("false",)],
+    )
+    def test_posts_cancel_request_with_control_shape(self, stop_stack: str) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "workspace_id": "ws_cancel",
+                "operation_id": "op_cancel",
+                "operation_status": "requested",
+                "status": "cancelling",
+                "message": "workspace cancellation requested",
+            },
+        )
+        flags: list[str] = [
+            "ws_cancel",
+            "--reason",
+            "operator requested",
+            "--idempotency-key",
+            "cancel-key",
+            "--if-match",
+            "7",
+        ]
+        if stop_stack == "true":
+            flags.append("--stop-stack")
+        elif stop_stack == "false":
+            flags.append("--no-stop-stack")
+
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "cancel", *flags])
+
+        assert result.exit_code == 0
+        assert "op_cancel" in result.stdout
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/ws_cancel/cancel",
+        )
+        assert mock.call_args.kwargs["json"] == {
+            "reason": "operator requested",
+            "stop_stack": stop_stack == "true",
+        }
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="cancel-key",
+            if_match="7",
+        )
+
+
+class TestWorkspaceStop:
+    @pytest.mark.unit
+    def test_posts_stop_request_and_output_shape(self) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "workspace_id": "ws_stop",
+                "operation_id": "op_stop",
+                "operation_status": "requested",
+                "status": "stopping",
+                "message": "workspace stop requested",
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "stop",
+                    "ws_stop",
+                    "--reason",
+                    "stack unstable",
+                    "--idempotency-key",
+                    "stop-key",
+                    "--if-match",
+                    "13",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "op_stop" in result.stdout
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/ws_stop/stop",
+        )
+        assert mock.call_args.kwargs["json"] == {"reason": "stack unstable"}
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="stop-key",
+            if_match="13",
+        )
+
+
+class TestWorkspaceDestroy:
+    @pytest.mark.unit
+    def test_posts_destroy_request_with_query_shape(self) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "workspace_id": "ws_destroy",
+                "operation_id": "op_destroy",
+                "operation_status": "requested",
+                "status": "destroying",
+                "message": "workspace destruction requested",
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "destroy",
+                    "ws_destroy",
+                    "--force",
+                    "--no-remove-volumes",
+                    "--no-remove-worktree",
+                    "--idempotency-key",
+                    "destroy-key",
+                    "--if-match",
+                    "19",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "op_destroy" in result.stdout
+        assert mock.call_args[0] == (
+            "DELETE",
+            "http://localhost:8000/v1/workspaces/ws_destroy",
+        )
+        assert mock.call_args.kwargs["params"] == {
+            "force": True,
+            "remove_volumes": False,
+            "remove_worktree": False,
+        }
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="destroy-key",
+            if_match="19",
+        )
+
+
+class TestWorkspaceRefresh:
+    @pytest.mark.unit
+    def test_posts_refresh_request_with_reason_and_version_headers(self) -> None:
+        response = _mock_response(
+            status_code=202,
+            payload={
+                "operation_id": "op_refresh",
+                "operation_status": "requested",
+                "status": "requested",
+                "workspace_id": "ws_refresh",
+                "message": "workspace refresh requested",
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "refresh",
+                    "ws_refresh",
+                    "--reason",
+                    "stale branch",
+                    "--idempotency-key",
+                    "refresh-key",
+                    "--if-match",
+                    "33",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "op_refresh" in result.stdout
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/ws_refresh/refresh",
+        )
+        assert mock.call_args.kwargs["json"] == {"reason": "stale branch"}
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="refresh-key",
+            if_match="33",
+        )
+
+
+class TestWorkspaceValidate:
+    @pytest.mark.unit
+    def test_posts_validate_request_with_requested_tier(self) -> None:
+        response = _mock_response(
+            status_code=202,
+            payload={
+                "operation_id": "op_validate",
+                "operation_status": "requested",
+                "status": "requested",
+                "workspace_id": "ws_validate",
+                "message": "workspace validation requested",
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "validate",
+                    "ws_validate",
+                    "--requested-tier",
+                    "2",
+                    "--reason",
+                    "manual revalidation",
+                    "--idempotency-key",
+                    "validate-key",
+                    "--if-match",
+                    "2",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "op_validate" in result.stdout
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/ws_validate/validate",
+        )
+        assert mock.call_args.kwargs["json"] == {
+            "reason": "manual revalidation",
+            "requested_tier": 2,
+        }
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="validate-key",
+            if_match="2",
+        )
+
+
+class TestWorkspaceRebase:
+    @pytest.mark.unit
+    def test_posts_rebase_request_with_reason(self) -> None:
+        response = _mock_response(
+            status_code=202,
+            payload={
+                "operation_id": "op_rebase",
+                "operation_status": "requested",
+                "status": "rebasing",
+                "workspace_id": "ws_rebase",
+                "message": "workspace rebase requested",
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "rebase",
+                    "ws_rebase",
+                    "--reason",
+                    "recover merge conflicts",
+                    "--idempotency-key",
+                    "rebase-key",
+                    "--if-match",
+                    "11",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "op_rebase" in result.stdout
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/ws_rebase/rebase",
+        )
+        assert mock.call_args.kwargs["json"] == {"reason": "recover merge conflicts"}
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="rebase-key",
+            if_match="11",
+        )
 
 
 class TestWorkspaceAdoptPr:
@@ -567,6 +1035,43 @@ class TestWorkspaceObservability:
         }
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("cursor_flag", ["--cursor", "--after"])
+    def test_operations_forwards_pagination_cursor(self, cursor_flag: str) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "items": [{"id": "op_2", "type": "validate", "status": "running"}],
+                "cursor": "eyJvIjoxfQ",
+                "next_cursor": None,
+                "has_more": False,
+                "limit": 1,
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "operations",
+                    "ws_obs",
+                    "--limit",
+                    "1",
+                    cursor_flag,
+                    "eyJvIjoxfQ",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[0] == (
+            "GET",
+            "http://localhost:8000/v1/workspaces/ws_obs/operations",
+        )
+        assert mock.call_args.kwargs["params"] == {
+            "limit": 1,
+            "cursor": "eyJvIjoxfQ",
+        }
+
+    @pytest.mark.unit
     def test_logs_injects_env_api_token_without_printing_it(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -686,6 +1191,94 @@ class TestWorkspaceObservability:
 
         assert result.exit_code == 1
         assert "upstream failed" in result.stderr
+
+
+class TestOperationCommands:
+    @pytest.mark.unit
+    def test_list_fetches_global_operations_with_filters(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=200,
+            payload={"items": [{"id": "op_1", "type": "validate", "status": "succeeded"}]},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "operations",
+                    "list",
+                    "--workspace-id",
+                    "ws_obs",
+                    "--status",
+                    "succeeded",
+                    "--type",
+                    "validate",
+                    "--limit",
+                    "5",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "validate" in result.stdout
+        assert "env-secret" not in result.stdout
+        assert "env-secret" not in result.stderr
+        assert mock.call_args[0] == ("GET", "http://localhost:8000/v1/operations")
+        assert mock.call_args.kwargs["params"] == {
+            "limit": 5,
+            "workspace_id": "ws_obs",
+            "status": "succeeded",
+            "type": "validate",
+        }
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("cursor_flag", ["--cursor", "--after"])
+    def test_list_forwards_pagination_cursor(self, cursor_flag: str) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "items": [{"id": "op_2", "type": "validate", "status": "running"}],
+                "cursor": "eyJvIjoxfQ",
+                "next_cursor": None,
+                "has_more": False,
+                "limit": 1,
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "operations",
+                    "list",
+                    "--limit",
+                    "1",
+                    cursor_flag,
+                    "eyJvIjoxfQ",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[0] == ("GET", "http://localhost:8000/v1/operations")
+        assert mock.call_args.kwargs["params"] == {
+            "limit": 1,
+            "cursor": "eyJvIjoxfQ",
+        }
+
+    @pytest.mark.unit
+    def test_show_fetches_operation_detail(self) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={"id": "op_1", "workspace_id": "ws_obs", "type": "validate"},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["operations", "show", "op_1"])
+
+        assert result.exit_code == 0, result.output
+        assert "op_1" in result.stdout
+        assert mock.call_args[0] == ("GET", "http://localhost:8000/v1/operations/op_1")
 
 
 class TestBaseUrlResolution:

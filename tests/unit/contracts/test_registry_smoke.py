@@ -88,12 +88,6 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
     "Workspace runtime snapshot": (
         "tests/unit/mcp/test_mcp_server.py::TestWorkspaceRuntime::test_get_workspace_runtime_returns_container_snapshot",
     ),
-    "Workspace operations": (
-        "tests/unit/mcp/test_mcp_server.py::TestWorkspaceOperations::test_list_workspace_operations_respects_limit",
-    ),
-    "Global operations": (
-        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_operations_tool_matches_rest_filters_and_detail",
-    ),
     "Durable workspace logs": (
         "tests/unit/mcp/test_mcp_server.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams",
     ),

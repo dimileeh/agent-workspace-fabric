@@ -112,6 +112,58 @@ def test_read_only_operator_rows_are_implementation_backed() -> None:
         assert not backlog.startswith("TODO§"), capability
 
 
+CONTROL_IMPLEMENTED_ROWS = {
+    "Refresh workspace": ("awf workspace refresh", "awf_refresh_workspace"),
+    "Rebase workspace": ("awf workspace rebase", "awf_rebase_workspace"),
+}
+
+
+@pytest.mark.unit
+def test_control_operations_with_mcp_tools_are_documented() -> None:
+    rows = _parity_rows()
+
+    for capability, (cli_surface, mcp_tool) in CONTROL_IMPLEMENTED_ROWS.items():
+        row = _row_for_capability(rows, capability)
+        cli_cell = _strip_backticks(row.get("CLI surface", "")).strip()
+        mcp_cell = _strip_backticks(row.get("MCP tool name", "")).strip()
+        backlog_cell = _strip_backticks(row.get("Backlog Slice", "")).strip()
+
+        assert cli_surface in cli_cell, capability
+        assert row.get("Status", "").strip() == "MCP implemented", capability
+        assert mcp_tool in mcp_cell, capability
+        assert not backlog_cell.startswith("TODO§"), capability
+
+
+@pytest.mark.unit
+def test_global_operations_safe_read_has_cli_parity() -> None:
+    rows = _parity_rows()
+    row = _row_for_capability(rows, "Global operations")
+    cli_cell = _strip_backticks(row.get("CLI surface", "")).strip()
+    backlog_cell = _strip_backticks(row.get("Backlog Slice", "")).strip()
+
+    assert "CLI absent" not in cli_cell
+    assert "awf operations list" in cli_cell
+    assert "awf operations show" in cli_cell
+    assert row.get("Status", "").strip() == "MCP partial"
+    assert backlog_cell == "TODO§P1-operation-read-auth"
+
+
+@pytest.mark.unit
+def test_operation_read_rows_keep_auth_parity_open() -> None:
+    rows = _parity_rows()
+
+    for capability in ("Workspace operations", "Global operations"):
+        row = _row_for_capability(rows, capability)
+        security_cell = row.get("Security Boundary", "")
+
+        assert "require_api_token" not in security_cell, capability
+        assert "auth parity open" in security_cell, capability
+        assert row.get("Status", "").strip() == "MCP partial", capability
+        assert _strip_backticks(row.get("Backlog Slice", "")).strip() == (
+            "TODO§P1-operation-read-auth"
+        )
+
+
 @pytest.mark.unit
 def test_retry_workspace_row_reflects_registered_mcp_tool() -> None:
     rows = _parity_rows()

@@ -65,6 +65,17 @@ async def test_rest_returns_401_envelope_on_missing_bearer(
 
 
 @pytest.mark.unit
+async def test_rest_retry_workspace_requires_bearer_when_token_configured(
+    contract_stack: ContractStack,
+) -> None:
+    response = await contract_stack.client.post("/v1/workspaces/ws_anything/retry")
+
+    assert response.status_code == 401
+    envelope = normalize_rest_error_body(response.json())
+    assert envelope["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
 async def test_rest_returns_503_envelope_when_api_token_not_configured(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
