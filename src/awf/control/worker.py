@@ -46,6 +46,7 @@ from awf.db.resilience import (
     is_transient_closed_connection_error,
     run_db_operation_with_retry,
 )
+from awf.db.session import session_scope
 from awf.node.cleanup import WorkspaceCleanupResult
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
@@ -741,11 +742,10 @@ class ControlWorker:
         self._next_secret_lease_expiration_scan_at = monotonic() + interval
 
     async def _expire_due_secret_leases(self) -> None:
-        async with self._session_factory() as session:
+        async with session_scope(self._session_factory) as session:
             expired = await SecretLeaseService(session).expire_due_secret_leases()
             expired_count = len(expired)
             workspace_ids = sorted({lease.workspace_id for lease in expired})
-            await session.commit()
 
         if expired_count:
             _log.info(

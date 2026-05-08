@@ -6633,6 +6633,68 @@ async def test_secret_lease_expiration_scan_skips_transient_closed_connection(
 
 
 @pytest.mark.unit
+async def test_expire_due_secret_leases_preserves_commit_error_when_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CloseError(Exception):
+        pass
+
+    class FailingCommitSession:
+        invalidated = False
+        closed = False
+
+        async def __aenter__(self) -> FailingCommitSession:
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            await self.close()
+
+        async def commit(self) -> None:
+            raise commit_error
+
+        async def invalidate(self) -> None:
+            self.invalidated = True
+
+        async def rollback(self) -> None:
+            raise AssertionError("transient commit failure should invalidate session")
+
+        async def close(self) -> None:
+            self.closed = True
+            raise CloseError("close failed")
+
+    class EmptySecretLeaseService:
+        def __init__(self, session: FailingCommitSession) -> None:
+            assert session is failing_session
+
+        async def expire_due_secret_leases(self) -> list[object]:
+            return []
+
+    commit_error = _closed_connection_error()
+    failing_session = FailingCommitSession()
+    worker = ControlWorker(
+        session_factory=lambda: failing_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    monkeypatch.setattr(
+        "awf.control.worker.SecretLeaseService",
+        EmptySecretLeaseService,
+    )
+
+    with pytest.raises(InterfaceError) as exc_info:
+        await worker._expire_due_secret_leases()  # noqa: SLF001
+
+    assert exc_info.value is commit_error
+    assert failing_session.invalidated is True
+    assert failing_session.closed is True
+
+
+@pytest.mark.unit
 async def test_stale_active_execution_check_preserves_unexpired_execution_claim(
     worker: ControlWorker,
     session_factory: async_sessionmaker[AsyncSession],
