@@ -193,6 +193,7 @@ GIT_OBJECT_MISSING_RECOVERED_REASON_CODE = "GIT_OBJECT_MISSING_RECOVERED"
 POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE = (
     "POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED"
 )
+POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE = "POST_VALIDATION_CONFORMANCE_FAILED"
 _PR_MONITOR_ADOPTED_EVENT = "workspace.pr_monitor_adopted"
 _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
@@ -2282,6 +2283,34 @@ class WorkspaceExecutor:
                             message=message,
                             reason_code=reason_code,
                             details=failure_details,
+                        )
+                        return
+                    except Exception as exc:
+                        reason_code = POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE
+                        message = (
+                            f"post-validation conformance check failed: {exc!r}"
+                        )[:2000]
+                        _log.exception(
+                            "executor.post_validation_conformance_unexpected_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=reason_code,
                         )
                         return
                     if conformance_failure is not None:

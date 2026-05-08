@@ -1348,6 +1348,107 @@ class TestHappyPath:
         assert result["validation_run_id"]
 
     @pytest.mark.unit
+    async def test_planning_validation_handoff_unexpected_post_validation_error_finishes_validate_operation(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned-recovery",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 2,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        operation_id = "op_pv_unexpected_failed"
+        await _insert_validate_handoff_recovery_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id=operation_id,
+        )
+
+        async def fail_record_event(**_: object) -> None:
+            raise RuntimeError("event persistence exploded")
+
+        executor._record_post_validation_conformance_event = fail_record_event  # type: ignore[method-assign]
+
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        satisfied_report = json.dumps(
+            {
+                "status": "satisfied",
+                "summary": "implementation and validation evidence satisfy the plan",
+                "gaps": [],
+            }
+        )
+
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
+        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        _queue_post_validation_conformance_report_commit(fake, report_path)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            run = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, reason_code
+                            FROM validation_runs
+                            WHERE workspace_id = :workspace_id
+                            """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            operation = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, error_code, error_message, result, finished_at
+                            FROM operations
+                            WHERE id = :operation_id
+                            """
+                        ),
+                        {"operation_id": operation_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "post-validation conformance check failed" in (ws.failure_message or "")
+        assert "event persistence exploded" in (ws.failure_message or "")
+        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == "POST_VALIDATION_CONFORMANCE_FAILED"
+        assert operation["finished_at"] is not None
+        assert "event persistence exploded" in operation["error_message"]
+        result = _json_value(operation["result"])
+        assert result["reason_code"] == "POST_VALIDATION_CONFORMANCE_FAILED"
+        assert result["validation_run_id"]
+
+    @pytest.mark.unit
     async def test_planning_validation_handoff_uses_validation_fix_cycle_before_rerun(
         self,
         fake: FakeCommandRunner,
