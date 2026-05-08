@@ -3863,9 +3863,11 @@ class WorkspaceExecutor:
         report_from_fresh_file = (
             report_text is not None and _digest_text(report_text) != before_report_digest
         )
-        if not report_from_fresh_file and compare_result.stdout:
+        if not report_from_fresh_file:
+            report_text = None
+        if report_text is None and compare_result.stdout:
             report_text = compare_result.stdout
-        report = parse_conformance_report(report_text or compare_result.stdout)
+        report = parse_conformance_report(report_text or "")
         if report.satisfied:
             if not report_from_fresh_file:
                 self._write_satisfied_post_validation_conformance_report(

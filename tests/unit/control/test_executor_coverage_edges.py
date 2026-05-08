@@ -544,6 +544,64 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
 
 
 @pytest.mark.unit
+async def test_post_validation_conformance_ignores_stale_report_without_stdout(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    report_file.write_text(
+        '{"status":"satisfied","summary":"stale success","gaps":[]}',
+        encoding="utf-8",
+    )
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="validated-head\n")
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._commit_post_validation_conformance_report = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(""),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is not None
+    assert failure.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert "Produce a valid plan-conformance JSON report." in failure.message
+    executor._commit_post_validation_conformance_report.assert_not_awaited()  # type: ignore[attr-defined]
+    executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
 async def test_post_validation_conformance_failure_counts_handoff_iterations(
     tmp_path: Path,
 ) -> None:
