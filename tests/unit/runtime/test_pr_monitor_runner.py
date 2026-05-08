@@ -3696,7 +3696,7 @@ async def test_monitor_recovery_dispatch_preserves_planning_validation_handoff_c
 
 
 @pytest.mark.unit
-async def test_monitor_recovery_dispatch_preserves_satisfied_planning_validation_handoff(
+async def test_monitor_recovery_dispatch_omits_satisfied_planning_validation_handoff(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -3752,17 +3752,7 @@ async def test_monitor_recovery_dispatch_preserves_satisfied_planning_validation
 
     assert terminal is True
     assert len(operations) == 1
-    assert operations[0].payload["conformance"] == {
-        "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-        "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-        "summary": "AWF validation evidence is required before conformance can pass.",
-        "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
-        "plan_path": f"docs/awf-plans/{workspace_id}.md",
-        "report_path": f"docs/awf-plans/{workspace_id}.conformance.json",
-        "iteration": 0,
-        "max_iterations": 3,
-    }
-    assert "validation_run_id" not in operations[0].payload["conformance"]
+    assert "conformance" not in operations[0].payload
 
 
 @pytest.mark.unit
