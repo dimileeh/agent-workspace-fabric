@@ -2140,18 +2140,82 @@ class WorkspaceExecutor:
                 coverage_evidence_source_run_id=coverage_evidence.source_run_id,
             )
             if val_result.all_passed:
+                validation_coverage = _validation_run_coverage_metadata(
+                    val_result,
+                    baseline_coverage=baseline_coverage,
+                )
                 if planning_validation_handoff is not None:
-                    conformance_failure = await self._run_post_validation_conformance_check(
-                        adapter=adapter,
-                        workspace=ws,
-                        profile=profile,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        worktree_path=worktree_path,
-                        model=default_model,
-                        handoff=planning_validation_handoff,
-                        validation_run_id=validation_run_id,
-                    )
+                    try:
+                        conformance_failure = await self._run_post_validation_conformance_check(
+                            adapter=adapter,
+                            workspace=ws,
+                            profile=profile,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            worktree_path=worktree_path,
+                            model=default_model,
+                            handoff=planning_validation_handoff,
+                            validation_run_id=validation_run_id,
+                        )
+                    except ComposeExecCleanupError as exc:
+                        message = cleanup_failure_message(exc)
+                        _log.error(
+                            "executor.post_validation_conformance_cleanup_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            source=exc.source,
+                            label=exc.label,
+                            invocation_id=exc.invocation_id,
+                            reason_code=exc.reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                        )
+                        return
+                    except AgentRunError as exc:
+                        reason_code = exc.reason_code or "AGENT_CLI_FAILED"
+                        message = _post_validation_conformance_agent_failure_message(exc)
+                        _log.warning(
+                            "executor.post_validation_conformance_agent_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            returncode=exc.result.returncode,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.agent_failure,
+                            message=message,
+                            reason_code=reason_code,
+                            details=_post_validation_conformance_agent_failure_details(
+                                exc,
+                                validation_run_id=validation_run_id,
+                            ),
+                        )
+                        return
                     if conformance_failure is not None:
                         await self._finish_pending_validate_operations(
                             workspace_id=workspace_id,
@@ -2160,10 +2224,7 @@ class WorkspaceExecutor:
                             requested_tier=validation_tier,
                             reason_code=conformance_failure.reason_code
                             or PLAN_CONFORMANCE_UNSATISFIED,
-                            coverage=_validation_run_coverage_metadata(
-                                val_result,
-                                baseline_coverage=baseline_coverage,
-                            ),
+                            coverage=validation_coverage,
                             error_message=conformance_failure.message,
                         )
                         await self._mark_failed(
@@ -2183,10 +2244,7 @@ class WorkspaceExecutor:
                     validation_run_id=validation_run_id,
                     requested_tier=validation_tier,
                     reason_code="VALIDATION_OK",
-                    coverage=_validation_run_coverage_metadata(
-                        val_result,
-                        baseline_coverage=baseline_coverage,
-                    ),
+                    coverage=validation_coverage,
                 )
                 if pass_number > 0:
                     _log.info(
@@ -6169,6 +6227,42 @@ def _validation_failure_message(
             details += f"; logs: {log_hint}"
         return details
     return f"validation failed: {first_fail.command}" if first_fail else "validation failed"
+
+
+def _post_validation_conformance_agent_failure_message(exc: AgentRunError) -> str:
+    reason_code = exc.reason_code or "AGENT_CLI_FAILED"
+    output = (exc.result.stderr.strip() or exc.result.stdout.strip() or "<no output>")
+    safe_output = redact_audit_text(output, limit=1000)
+    return (
+        "post-validation conformance agent failed "
+        f"({reason_code}, exit {exc.result.returncode}): {safe_output}"
+    )[:2000]
+
+
+def _post_validation_conformance_agent_failure_details(
+    exc: AgentRunError,
+    *,
+    validation_run_id: str,
+) -> dict[str, Any]:
+    reason_code = exc.reason_code or "AGENT_CLI_FAILED"
+    conformance: dict[str, Any] = {
+        "phase": "post_validation",
+        "reason_code": reason_code,
+        "returncode": exc.result.returncode,
+    }
+    stdout = redact_audit_text(exc.result.stdout.strip(), limit=1000)
+    stderr = redact_audit_text(exc.result.stderr.strip(), limit=1000)
+    if stdout:
+        conformance["stdout"] = stdout
+    if stderr:
+        conformance["stderr"] = stderr
+    details: dict[str, Any] = {
+        "conformance": conformance,
+        "validation_run_id": validation_run_id,
+    }
+    if exc.details:
+        details["agent"] = redact_audit_value(exc.details)
+    return details
 
 
 def _git_name_lines(output: str) -> list[str]:

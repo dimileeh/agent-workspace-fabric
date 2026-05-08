@@ -18,7 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
 from awf.adapters.base import AgentAdapter
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, FakeCommandRunner
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -118,6 +119,54 @@ def _created_pr_body(fake: FakeCommandRunner) -> str:
 
 def _json_value(value: object) -> object:
     return json.loads(value) if isinstance(value, str) else value
+
+
+async def _insert_validate_handoff_recovery_operation(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: str,
+    operation_id: str,
+) -> None:
+    payload = {
+        "source": "pr_monitor",
+        "recovery_mode": "validate_only",
+        "reason": "planning_conformance_requires_awf_validation",
+        "conformance": {
+            "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+            "summary": "AWF validation evidence is required before conformance can pass.",
+            "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
+        },
+    }
+    async with factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO operations (
+                    id,
+                    workspace_id,
+                    type,
+                    status,
+                    payload,
+                    created_at
+                )
+                VALUES (
+                    :operation_id,
+                    :workspace_id,
+                    'validate',
+                    'pending',
+                    CAST(:payload AS JSON),
+                    :created_at
+                )
+                """
+            ),
+            {
+                "operation_id": operation_id,
+                "workspace_id": workspace_id,
+                "payload": json.dumps(payload),
+                "created_at": datetime.now(UTC),
+            },
+        )
+        await session.commit()
 
 
 class TestCoverageBaselineRatchet:
@@ -719,6 +768,171 @@ class TestHappyPath:
             if event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION
         ]
         assert handoff_events
+
+    @pytest.mark.unit
+    async def test_planning_validation_handoff_agent_failure_finishes_validate_operation(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned-recovery",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 2,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        await _insert_validate_handoff_recovery_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id="op_validate_handoff_agent_failed",
+        )
+
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=1, stderr="conformance runner failed")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            run = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, reason_code
+                            FROM validation_runs
+                            WHERE workspace_id = :workspace_id
+                            """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            operation = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, error_code, error_message, result, finished_at
+                            FROM operations
+                            WHERE id = 'op_validate_handoff_agent_failed'
+                            """
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "agent_failure"
+        assert "post-validation conformance agent failed" in (ws.failure_message or "")
+        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == "AGENT_CLI_FAILED"
+        assert operation["finished_at"] is not None
+        assert "post-validation conformance agent failed" in operation["error_message"]
+        result = _json_value(operation["result"])
+        assert result["reason_code"] == "AGENT_CLI_FAILED"
+        assert result["validation_run_id"]
+
+    @pytest.mark.unit
+    async def test_planning_validation_handoff_cleanup_failure_finishes_validate_operation(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned-recovery",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 2,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        await _insert_validate_handoff_recovery_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id="op_validate_handoff_cleanup_failed",
+        )
+
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(
+            returncode=124,
+            stderr="idle timeout exceeded",
+            reason_code=COMMAND_IDLE_TIMEOUT_REASON,
+        )
+        fake.queue_result(returncode=1, stderr="cleanup still saw tagged processes")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            run = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, reason_code
+                            FROM validation_runs
+                            WHERE workspace_id = :workspace_id
+                            """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            operation = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, error_code, error_message, result, finished_at
+                            FROM operations
+                            WHERE id = 'op_validate_handoff_cleanup_failed'
+                            """
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert EXEC_PROCESS_CLEANUP_FAILED in (ws.failure_message or "")
+        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert operation["finished_at"] is not None
+        assert EXEC_PROCESS_CLEANUP_FAILED in operation["error_message"]
+        result = _json_value(operation["result"])
+        assert result["reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert result["validation_run_id"]
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_uses_validation_fix_cycle_before_rerun(
