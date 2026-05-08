@@ -3981,6 +3981,8 @@ class WorkspaceExecutor:
                     "resolved_profile_digest": run.resolved_profile_digest,
                     "environment_identity_digest": run.environment_identity_digest,
                 }
+        # Preserve the complete evidence shape for conformance, then redact both
+        # structured secret values and inline tokens in the serialized payload.
         safe_payload = redact_audit_value(payload)
         serialized_payload = json.dumps(safe_payload, sort_keys=True, default=str)
         safe_serialized_payload = redact_audit_text(serialized_payload, limit=20000)

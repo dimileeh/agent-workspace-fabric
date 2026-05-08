@@ -571,6 +571,8 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     )
     if any(re.search(pattern, text) for pattern in deterministic_gap_patterns):
         return False
+    # Mixed mentions remain agent-owned: only "code coverage" is AWF-validation
+    # evidence, while any other standalone "code" use is a deterministic gap.
     for match in re.finditer(r"(?<![a-z0-9_])code(?![a-z0-9_])", text):
         if re.match(r"[\s-]+coverage\b", text[match.end() :]):
             continue
