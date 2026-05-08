@@ -177,6 +177,7 @@ def test_validate_only_recovery_needs_existing_pr_push_edges(
     [
         ({"iteration": 2, "max_iterations": 5}, {}, 2, 5),
         ({}, {"iteration": 1, "max_iterations": 0}, 1, 0),
+        ({}, {}, 0, 3),
     ],
 )
 def test_recovery_conformance_handoff_preserves_iteration_budget(
