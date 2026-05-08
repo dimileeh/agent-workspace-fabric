@@ -200,6 +200,30 @@ _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
 _PR_ADOPTION_METADATA_MISSING_REASON_CODE = "PR_ADOPTION_METADATA_MISSING"
 _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE = "PR_ADOPTION_MONITOR_UNAVAILABLE"
 _EXCEPTION_TRACEBACK_LIMIT = 4000
+_VALIDATION_EVIDENCE_JSON_LIMIT = 20000
+_VALIDATION_EVIDENCE_COVERAGE_PRIORITY_KEYS = (
+    "status",
+    "reason_code",
+    "percent",
+    "minimum_percent",
+    "enforce",
+    "provider",
+)
+_VALIDATION_EVIDENCE_RETAINED_KEY_COUNT = 5
+_VALIDATION_EVIDENCE_CORE_KEYS = (
+    "validation_run_id",
+    "status",
+    "reason_code",
+    "coverage",
+    "workspace_head_sha",
+    "target_branch",
+    "target_head_sha",
+    "base_commit",
+    "base_sha",
+    "tier",
+    "retry_count",
+    "command_set_hash",
+)
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -3979,28 +4003,27 @@ class WorkspaceExecutor:
                     "validation_run_id": run.id,
                     "status": run.status,
                     "reason_code": run.reason_code,
-                    "tier": run.tier,
-                    "retry_count": run.retry_count,
-                    "commands": list(run.commands or [])[:20],
-                    "log_stream_refs": log_stream_refs,
                     "coverage": coverage,
-                    "command_set_hash": run.command_set_hash,
-                    "base_commit": run.base_commit,
-                    "base_sha": run.base_sha,
                     "workspace_head_sha": run.workspace_head_sha,
                     "target_branch": run.target_branch,
                     "target_head_sha": run.target_head_sha,
+                    "base_commit": run.base_commit,
+                    "base_sha": run.base_sha,
+                    "tier": run.tier,
+                    "retry_count": run.retry_count,
+                    "command_set_hash": run.command_set_hash,
+                    "commands": list(run.commands or [])[:20],
+                    "log_stream_refs": log_stream_refs,
                     "profile_name": run.profile_name,
                     "profile_version": run.profile_version,
                     "profile_source": run.profile_source,
                     "resolved_profile_digest": run.resolved_profile_digest,
                     "environment_identity_digest": run.environment_identity_digest,
                 }
-        # Preserve the complete evidence shape for conformance, then redact both
-        # structured secret values and inline tokens in the serialized payload.
-        safe_payload = redact_audit_value(payload)
-        serialized_payload = json.dumps(safe_payload, sort_keys=True, default=str)
-        safe_serialized_payload = redact_audit_text(serialized_payload, limit=20000)
+        # Preserve the complete evidence shape when it fits. If it does not,
+        # compact bulky fields as JSON values so the fenced evidence stays
+        # parseable while retaining the validation result fields first.
+        safe_serialized_payload = _validation_evidence_json(payload)
         return (
             "AWF persisted validation run evidence:\n"
             "```json\n"
@@ -5735,6 +5758,90 @@ class WorkspaceExecutor:
                 workspace_head_sha=workspace_head_sha,
             )
             await session.commit()
+
+
+def _validation_evidence_json(payload: dict[str, Any]) -> str:
+    safe_payload = cast(dict[str, Any], redact_audit_value(payload))
+    serialized = _serialize_validation_evidence_payload(safe_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    compact_payload = dict(safe_payload)
+    compact_payload["evidence_truncated"] = True
+    compact_payload["commands"] = _validation_evidence_size_summary(
+        safe_payload.get("commands")
+    )
+    compact_payload["log_stream_refs"] = _validation_evidence_size_summary(
+        safe_payload.get("log_stream_refs")
+    )
+    serialized = _serialize_validation_evidence_payload(compact_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    compact_payload["coverage"] = _validation_evidence_coverage_summary(
+        safe_payload.get("coverage")
+    )
+    serialized = _serialize_validation_evidence_payload(compact_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    minimal_payload = {
+        key: compact_payload.get(key)
+        for key in _VALIDATION_EVIDENCE_CORE_KEYS
+        if key in compact_payload
+    }
+    minimal_payload["evidence_truncated"] = True
+    minimal_payload["commands"] = _validation_evidence_size_summary(
+        safe_payload.get("commands")
+    )
+    minimal_payload["log_stream_refs"] = _validation_evidence_size_summary(
+        safe_payload.get("log_stream_refs")
+    )
+    return _serialize_validation_evidence_payload(minimal_payload)
+
+
+def _serialize_validation_evidence_payload(payload: Mapping[str, Any]) -> str:
+    serialized = json.dumps(payload, default=str)
+    return redact_audit_text(serialized, limit=len(serialized) + 4096)
+
+
+def _validation_evidence_coverage_summary(value: object) -> object:
+    if not isinstance(value, Mapping):
+        return _validation_evidence_size_summary(value)
+    summary = _validation_evidence_size_summary(value)
+    for key in _VALIDATION_EVIDENCE_COVERAGE_PRIORITY_KEYS:
+        if key in value:
+            summary[key] = value[key]
+    return summary
+
+
+def _validation_evidence_size_summary(value: object) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        retained_keys = [
+            str(key) for key in list(value)[:_VALIDATION_EVIDENCE_RETAINED_KEY_COUNT]
+        ]
+        return {
+            "truncated": True,
+            "original_type": "mapping",
+            "original_entry_count": len(value),
+            "retained_keys": retained_keys,
+        }
+    if isinstance(value, list):
+        return {
+            "truncated": True,
+            "original_type": "list",
+            "original_length": len(value),
+        }
+    if isinstance(value, str):
+        return {
+            "truncated": True,
+            "original_type": "string",
+            "original_length": len(value),
+        }
+    return {
+        "truncated": True,
+        "original_type": type(value).__name__,
+    }
 
 
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:/|$)")

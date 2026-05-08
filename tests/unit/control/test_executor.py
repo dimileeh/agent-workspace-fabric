@@ -881,6 +881,65 @@ class TestHappyPath:
         assert "[redacted]" in evidence
 
     @pytest.mark.unit
+    async def test_validation_handoff_evidence_keeps_large_payload_json_valid(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+
+        async with factory() as session:
+            repo = ValidationRunRepository(session)
+            run = await repo.start(
+                workspace_id=ws_id,
+                attempt_id=None,
+                tier=1,
+                commands=[
+                    {
+                        "phase": "validate",
+                        "command": f"pytest tests/unit/test_{idx}.py " + ("x" * 1500),
+                    }
+                    for idx in range(25)
+                ],
+                base_commit="base",
+                workspace_head_sha="workspace-head",
+                target_branch="main",
+                target_head_sha="target",
+                log_stream_refs={
+                    f"stream_{idx:02d}": {
+                        "stdout": f"validation.{idx:02d}.stdout",
+                        "stderr": "stderr-" + ("y" * 1500),
+                    }
+                    for idx in range(40)
+                },
+            )
+            await repo.finish(
+                run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                coverage={
+                    "status": "passed",
+                    "reason_code": "COVERAGE_OK",
+                    "percent": 99.4,
+                },
+            )
+            validation_run_id = run.id
+            await session.commit()
+
+        evidence = await executor._validation_run_evidence_for_conformance(validation_run_id)
+        json_text = evidence.split("```json\n", 1)[1].split("\n```", 1)[0]
+        payload = json.loads(json_text)
+        keys = list(payload)
+
+        assert len(json_text) <= 20000
+        assert keys.index("coverage") < keys.index("commands")
+        assert keys.index("workspace_head_sha") < keys.index("commands")
+        assert payload["status"] == "succeeded"
+        assert payload["reason_code"] == "VALIDATION_OK"
+        assert payload["coverage"]["reason_code"] == "COVERAGE_OK"
+        assert payload["workspace_head_sha"] == "workspace-head"
+
+    @pytest.mark.unit
     async def test_planning_validation_handoff_agent_failure_finishes_validate_operation(
         self,
         executor: WorkspaceExecutor,
