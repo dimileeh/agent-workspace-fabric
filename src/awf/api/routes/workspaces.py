@@ -14,7 +14,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
@@ -47,7 +47,11 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.resilience import is_transient_closed_connection_error, run_db_operation_with_retry
+from awf.db.resilience import (
+    invalidate_or_rollback_session,
+    is_transient_closed_connection_error,
+    run_db_operation_with_retry,
+)
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck, check_disk_space
@@ -468,13 +472,19 @@ async def get_workspace(
 ) -> WorkspaceResponse:
     return await run_db_operation_with_retry(
         session_factory,
-        lambda retry_session: _get_workspace_response(workspace_id, retry_session),
+        lambda retry_session: _get_workspace_response(
+            workspace_id,
+            retry_session,
+            egress_audit_session_factory=session_factory,
+        ),
     )
 
 
 async def _get_workspace_response(
     workspace_id: str,
     session: AsyncSession,
+    *,
+    egress_audit_session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> WorkspaceResponse:
     repo = WorkspaceRepository(session)
     ws = await repo.get_with_secret_leases(workspace_id)
@@ -495,13 +505,47 @@ async def _get_workspace_response(
         egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
     except Exception as exc:
         if is_transient_closed_connection_error(exc):
-            raise
-        _logger.warning("egress audit lookup failed for workspace %s", workspace_id, exc_info=True)
+            _logger.warning(
+                "egress audit lookup failed transiently for workspace %s",
+                workspace_id,
+                exc_info=True,
+            )
+            await invalidate_or_rollback_session(session, exc)
+            if egress_audit_session_factory is not None:
+                egress_audit = await _retry_optional_egress_audit_lookup(
+                    workspace_id,
+                    egress_audit_session_factory,
+                )
+        else:
+            _logger.warning("egress audit lookup failed for workspace %s", workspace_id, exc_info=True)
     return workspace_response(
         ws,
         validation_provenance=validation_provenance,
         egress_audit=egress_audit,
     )
+
+
+async def _retry_optional_egress_audit_lookup(
+    workspace_id: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, Any] | None:
+    async def _lookup(session: AsyncSession) -> dict[str, Any] | None:
+        audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
+        return _egress_audit_response(audit_record) if audit_record is not None else None
+
+    try:
+        return await run_db_operation_with_retry(
+            session_factory,
+            _lookup,
+            attempts=1,
+        )
+    except Exception:
+        _logger.warning(
+            "egress audit retry lookup failed for workspace %s",
+            workspace_id,
+            exc_info=True,
+        )
+        return None
 
 
 @router.get("/{workspace_id}/secret-leases", response_model=WorkspaceSecretLeaseListResponse)

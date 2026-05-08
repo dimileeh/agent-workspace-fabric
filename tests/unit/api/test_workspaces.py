@@ -2656,6 +2656,37 @@ class TestGetWorkspace:
         assert response.json()["egress_audit"] is None
 
     @pytest.mark.unit
+    async def test_get_workspace_ignores_transient_egress_audit_lookup_failure(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        calls = 0
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            raise _closed_connection_error()
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert response.json()["egress_audit"] is None
+        assert calls == 2
+
+    @pytest.mark.unit
     async def test_get_workspace_retries_transient_egress_audit_lookup_failure(
         self,
         client: AsyncClient,
