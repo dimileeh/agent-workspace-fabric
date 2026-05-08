@@ -17,16 +17,6 @@ from awf.db.session import make_engine
 from tests.postgres import postgres_empty_test_url
 
 
-def _has_op_call(call_nodes: list[ast.Call], name: str) -> bool:
-    return any(
-        isinstance(node.func, ast.Attribute)
-        and node.func.attr == name
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "op"
-        for node in call_nodes
-    )
-
-
 @pytest.mark.unit
 def test_alembic_revision_graph_has_single_head() -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -54,10 +44,16 @@ def test_validation_run_coverage_migration_uses_metadata_only_column_ops() -> No
         for node in call_nodes
         if isinstance(node.func, ast.Attribute)
     ]
+    op_call_attrs = {
+        node.func.attr
+        for node in call_nodes
+        if isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "op"
+    }
 
     assert "batch_alter_table" not in call_attrs
-    assert _has_op_call(call_nodes, "add_column")
-    assert _has_op_call(call_nodes, "drop_column")
+    assert op_call_attrs == {"add_column", "drop_column"}
 
 
 @pytest.mark.unit
