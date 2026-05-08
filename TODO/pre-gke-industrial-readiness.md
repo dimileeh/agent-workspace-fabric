@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-06
+Last updated: 2026-05-08
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -73,14 +73,9 @@ Status values:
 
 ### Active Slices
 
-| TODO area | Slice | Workspace | PR | Status | Notes |
-| --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_657b484a622544b6aee70924` | [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing the destroyed monitor `ws_941096a4dc4942dcb877656a`; AWF owns conflict, validation, comment, and merge monitoring. Checklist completion remains pending PR #206 merge. |
-| P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_3b90c8728f0c4862a28d82cc` | [#212](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/212) | monitoring_pr | Reattached 2026-05-06 after rebuilding local AWF, clearing stale terminal workspace resources, and replacing cancelled workspace `ws_7e7f6d54bc924c47a5723621`; AWF owns validation, comment, and merge monitoring. |
-| P0 Operation And Recovery Truth | PR adoption terminal idempotency hardening | `ws_e5b86a598da842e0aaf50d1f` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to harden first-class PR adoption after destroyed adoption workspaces retained deterministic repo/PR task/idempotency slots and caused the first clean re-adoption attempt to 500 while reattaching PR #206. |
-| P0 Control-Plane Restart Recovery Hardening | Adopt or preserve active executions after worker restart | `ws_13dd6ba7165141c285bd771e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to prevent worker restarts or transient control-loop loss from killing live `running` / `validating` / `pushing` agent runtimes when only the in-memory task map was lost. Escalated to P0 after `ws_4f44c108a58f46d092f4e411` was failed as `STALE_ACTIVE_EXECUTION` despite no API/worker Docker restart. |
-| P1 API Contract Completion | REST CLI MCP contract parity tests | `ws_3a9bb03983e343e28f462e3e` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to make REST, CLI, and MCP request/response/reason/idempotency/auth/error parity executable through contract tests. |
-| P1 Developer Experience And Public Core Surface | Document and demo existing PR monitor adoption | `ws_e332a1d013c54928863320f0` | _pending_ | running | Codex `gpt-5.5` with AWF default `xhigh`; launched 2026-05-06 to document and demo the supported existing-PR adoption path across CLI, REST, MCP, and console inspection surfaces. |
+No active AWF slices are currently tracked in this ledger. The previously
+active PR-monitor slices for PRs #206, #212, #214, #216, #218, and #219 have
+landed on `codex/awf-post-merge-fixes` and are recorded under Completed Slices.
 
 ### Reschedule Required Slices
 
@@ -93,12 +88,27 @@ not listed here.
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
 | P1 Developer Experience And Public Core Surface | First-run troubleshooting guide by symptom | `ws_4f44c108a58f46d092f4e411` | branch `awf/ws_4f44c108a58f46d092f4e411`, no PR | reschedule_required | Attempt produced local docs commits, but final coverage hit `13` pytest/xdist errors despite 99.02% coverage; AWF then misclassified the terminal state as `STALE_ACTIVE_EXECUTION` after repeated asyncpg `connection is closed` worker failures. Do not count this slice as done; reschedule after DB connection resilience, active-execution adoption, and validation failure-causality fixes land. |
-| P1 Operator Console Completion | Live workspace activity signals | `ws_681eec29b3e44a0daa4a0264` | branch `awf/ws_681eec29b3e44a0daa4a0264`, no PR | reschedule_required | Attempt produced local implementation commits, but AWF failed it as `PLAN_CONFORMANCE_UNSATISFIED` because conformance required AWF-owned validation evidence and there was no orchestration handoff into the validation phase. Terminal runtime resources were also left running. Do not count this slice as done; reschedule after conformance-to-validation handoff and terminal failed-runtime cleanup fixes land. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Developer Experience And Public Core Surface | Document and demo existing PR monitor adoption | `ws_e332a1d013c54928863320f0` | [#214](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/214) | merged | Codex `gpt-5.5`; completed 2026-05-08 after rebase on PR #216 and review feedback. Adds the canonical PR monitor adoption runbook and REST/CLI/MCP docs/demo coverage aligned with terminal retry behavior. |
+| P0 Operation And Recovery Truth | PR adoption terminal idempotency hardening | `ws_e5b86a598da842e0aaf50d1f` | [#216](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/216) | merged | Codex `gpt-5.5`; completed 2026-05-08 and prevents terminal adoption rows from satisfying live PR monitor adoption idempotency. Follow-up [#222](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/222) covers fresh adoption after terminal monitors. |
+| P1 API Contract Completion | REST CLI MCP contract parity tests | `ws_3a9bb03983e343e28f462e3e` | [#218](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/218) | merged | Codex `gpt-5.5`; completed 2026-05-08 and extends executable REST/CLI/MCP contract parity across request/response fields, idempotency, auth/error shapes, and intentional partial surfaces. |
+| P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_5caa27f35e9e4161a312a1b8` | [#206](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/206) | merged | Codex Spark `gpt-5.3-codex-spark`; completed 2026-05-08 and adds CLI coverage for workspace controls plus operations list/show parity. Supersedes the destroyed adoption monitor `ws_657b484a622544b6aee70924`. |
+| P0 Control-Plane Restart Recovery Hardening | Adopt or preserve active executions after worker restart | `ws_13dd6ba7165141c285bd771e` | [#219](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/219) | merged | Codex `gpt-5.5`; completed 2026-05-07 and preserves healthy live agent/validation/push executions across worker restart or in-memory task-map loss instead of tearing them down as stale-active. |
+| P0 Operation And Recovery Truth | PR monitor merge completion observability | `ws_b078879df0dd417784afb8b9` | [#221](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/221) | merged | Codex `gpt-5.5`; completed 2026-05-07 and adds structured pre-merge settle logging plus workspace-level merge SHA persistence. |
+| P0 Operation And Recovery Truth | Allow fresh adoption after terminal PR monitor | `ws_6bdf949938c14ad3b4a1d58e` | [#222](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/222) | merged | Codex `gpt-5.5`; completed 2026-05-07 and keeps cancelled/failed/destroyed adoption rows auditable while allowing a fresh monitor for the still-open PR. |
+| P0 Test Coverage And Quality Gates | Coverage fail-under merge gate | _local_ | [#224](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/224) | merged | Dedicated branch `codex/coverage-command-gate`; completed 2026-05-07 and makes coverage-provider fail-under output authoritative even when rounded total coverage appears to meet the threshold. |
+| P0 Merge Safety And PR Monitor Correctness | Reviewer recovery and merge queue blocker hardening | _local_ | [#223](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/223) | merged | Dedicated branch `codex/pr-monitor-merge-blockers`; completed 2026-05-07 and restricts merge queue blockers to older overlapping candidates while suppressing superseded review-bot bookkeeping noise. |
+| P0 Operation And Recovery Truth | Adopted PR recovery pushes to real head | _local_ | [#220](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/220) | merged | Dedicated branch `codex/sync-feature-pr-recovery-head`; completed 2026-05-07 and makes validate-only recovery for adopted PRs push fixes back to the real remote PR head. |
+| P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_7e7f6d54bc924c47a5723621` | [#212](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/212) | merged | OpenCode/Ollama `deepseek-v4-pro:cloud`; completed 2026-05-06 and records redacted policy-controlled egress audit summaries in service, workspace, MCP, metrics, and console surfaces. |
+| P1 MCP And Project Onboarding Client Parity | MCP safe operator action tools | `ws_524e6b90877a429e9209f70d` | [#211](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/211) | merged | OpenCode/Ollama `kimi-k2.6:cloud`; completed 2026-05-05 and adds bounded MCP tools for retry, remonitor, refresh, validate, rebase, cancel, stop, and destroy. |
+| P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_2f77344b87ba4cf987d62cbe` | [#210](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/210) | merged | OpenCode/Ollama `glm-5.1:cloud`; completed 2026-05-05 and publishes the checked-in OpenAPI artifact plus copy-paste API examples and drift tests. |
+| P1 API Contract Completion | REST CLI MCP contract alignment tests | `ws_72055a2cbe8148b4a7d1468e` | [#209](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/209) | merged | Claude Code `claude-opus-4-7`; completed 2026-05-05 and adds the first contract alignment pass for request/response/reason/idempotency/auth/error parity. |
+| P1 Operator Console Completion | Live workspace activity signals | `ws_ce68a96b836442eb96a1255a` | [#208](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/208) | merged | Gemini `gemini-3.1-pro-preview`; completed 2026-05-05 and surfaces last activity/log times, active subphase, and stale-running warnings. Supersedes failed workspace `ws_681eec29b3e44a0daa4a0264`. |
+| P1 MCP And Project Onboarding Client Parity | Parity matrix status drift guard | `ws_0d178aec82324b7bb8b8bc3a` | [#207](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/207) | merged | Claude Code `claude-opus-4-7`; completed 2026-05-05 and guards the MCP parity matrix against drift from real REST/CLI/MCP surfaces. |
 | P1 Developer Experience And Public Core Surface | Public docs search and readability checks | `ws_0bc1d8f718bc480998d0a08d` | [#217](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/217) | merged | Codex `gpt-5.5`; completed 2026-05-06 and adds public docs discoverability/readability checks for guide links, CLI command references, and copy-paste snippet validity. |
 | P1 MCP And Project Onboarding Client Parity | Docs/status consistency test for the parity matrix | `ws_aeec0296eee64c869d328ae2` | [#215](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/215) | merged | Codex `gpt-5.5`; completed 2026-05-06 and adds executable consistency checks tying parity-matrix implemented/partial/backlog statuses to real REST, CLI, MCP, and contract-test evidence. |
 | P0 Reliability, Cleanup, And SLOs | Readiness retained worktree and service GC root alignment | `ws_e9562a751e4c4cd599a66856` | [#213](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/213) | merged | Dedicated branch `codex/readyz-retained-worktree-gc-root`; completed 2026-05-06 and fixes retained terminal worktrees incorrectly failing `/readyz` plus local service GC resolving the repo `.awf` path instead of the service work root. |
@@ -286,7 +296,7 @@ not listed here.
 - [x] Add optimistic concurrency or equivalent conflict protection for mutating APIs.
 - [x] Persist operation start, finish, owner, reason, result, failure code, and log streams.
 - [x] Ensure cancelled/destroyed workspaces cannot move forward after stale executor or monitor callbacks.
-- [ ] Release deterministic PR adoption task/idempotency slots when an
+- [x] Release deterministic PR adoption task/idempotency slots when an
   adoption workspace is destroyed or otherwise terminal. Regression source: a
   destroyed PR monitor adoption workspace left the deterministic repo/PR
   adoption task/idempotency slot behind, so the first clean re-adoption attempt
@@ -300,7 +310,13 @@ not listed here.
   conflict-safe. Add regression coverage for destroyed, cancelled, failed, and
   superseded prior adoption rows; stale unique task/idempotency records after
   destroy; active idempotent reattach; policy conflict; and concurrent
-  REST/CLI/MCP-visible adoption requests.
+  REST/CLI/MCP-visible adoption requests. Evidence: PR
+  [#216](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/216)
+  hardened terminal adoption idempotency and PR
+  [#222](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/222)
+  proved clean fresh adoption after terminal PR monitors; both merged on
+  2026-05-07/08 with focused PostgreSQL-backed adoption coverage and full
+  coverage gates above 99%.
 - [x] Add recovery for stranded workspaces whose containers exited but DB state is active.
 - [x] Add recovery for active PR workspaces after AWF service restart.
 - [x] Add console controls for safe remonitor/refresh/revalidate once API semantics are stable.
@@ -449,11 +465,14 @@ not listed here.
   package registries such as PyPI/npm/uv indexes, OS package mirrors when
   declared, and documentation domains. New project onboarding should recommend
   restricted mode by default and explain when to choose open mode.
-- [ ] Add outbound egress audit evidence without leaking secrets: record
+- [x] Add outbound egress audit evidence without leaking secrets: record
   workspace id, policy posture, destination host/category, allow/deny decision,
   timestamp, and reason code for policy-controlled network attempts; expose
   summary counts in service status, workspace detail, MCP, metrics, and console
-  security panels.
+  security panels. Evidence: workspace `ws_7e7f6d54bc924c47a5723621` / PR
+  [#212](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/212)
+  merged 2026-05-06 with redacted egress audit evidence across service,
+  workspace, MCP, metrics, and console surfaces.
 - [x] Add prompt-injection boundary controls for untrusted external content:
   GitHub comments, PR review text, issues, webpages, package READMEs, and CI
   logs must be passed to agents as quoted evidence with source provenance, not
@@ -577,7 +596,7 @@ not listed here.
   preserve the active monitor claim, emit an explicit recovery event, and prove
   with regression tests that PR monitoring continues without duplicate monitor
   loops or misleading execution-capacity reservations.
-- [ ] Adopt or safely preserve running agent executions after worker restart
+- [x] Adopt or safely preserve running agent executions after worker restart
   or transient control-loop loss. Regression source:
   `ws_4f44c108a58f46d092f4e411` was failed as `STALE_ACTIVE_EXECUTION` even
   though the API and worker Docker containers had not restarted; the immediate
@@ -598,7 +617,12 @@ not listed here.
   decision auditable; surface the recoverable/preserved state in events,
   operations, status, and runtime health; and add tests for single-workspace and
   multi-workspace restart scenarios, including no-container, live-container,
-  expired-claim, active-claim, and cleanup-failure paths.
+  expired-claim, active-claim, and cleanup-failure paths. Evidence: workspace
+  `ws_13dd6ba7165141c285bd771e` / PR
+  [#219](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/219)
+  merged 2026-05-07 and preserves healthy live agent/validation/push
+  executions instead of tearing them down after worker restart or in-memory
+  execution-task loss.
 
 ## P1: API Contract Completion
 
@@ -754,9 +778,13 @@ coding agent in any project to use AWF for a feature.
   fields, reason codes, idempotency, If-Match/version behavior, auth failure
   shape, structured errors, explicit CLI absence, and MCP safety boundaries.
   The tests exposed MCP control idempotency drift, fixed by requiring
-  `idempotency_key` on all seven idempotent/versioned MCP control tools. Validation:
-  `pytest tests/unit/contracts -q` passed 189 tests and the focused
-  API/CLI/MCP parity suite passed 343 tests.
+  `idempotency_key` on all seven idempotent/versioned MCP control tools.
+  Validation: `pytest tests/unit/contracts -q` passed 189 tests and the
+  focused API/CLI/MCP parity suite passed 343 tests; final iteration
+  `ws_3a9bb03983e343e28f462e3e` / PR
+  [#218](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/218)
+  merged 2026-05-08 after rebase onto the current target branch and full
+  coverage validation.
 - [ ] TODO§P1-operation-read-auth: Close REST auth parity for workspace and
   global operation read endpoints, or keep the parity matrix operation rows
   explicitly marked `MCP partial` until those REST surfaces require the same
@@ -904,10 +932,14 @@ without reading the whole repo.
 - [x] Add merge queue blocker drill-down.
 - [x] Add stale reason and recovery action drill-down.
 - [x] Add safe remonitor/refresh/revalidate controls after API hardening.
-- [ ] Add live workspace activity signals such as `last_activity_at`,
+- [x] Add live workspace activity signals such as `last_activity_at`,
   `last_log_at`, active agent/conformance/validation subphase, and stale-running
   warnings so operators can distinguish a genuinely working agent from a
-  stuck `running` workspace whose row `updated_at` has not changed.
+  stuck `running` workspace whose row `updated_at` has not changed. Evidence:
+  workspace `ws_ce68a96b836442eb96a1255a` / PR
+  [#208](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/208)
+  merged 2026-05-05 and supersedes the failed `ws_681eec29b3e44a0daa4a0264`
+  attempt for this slice.
 - [x] Add security/secret/egress status panels.
 - [x] Add a polished dark theme and accessibility controls for the web console,
   including larger font-size options, high-contrast mode, preserved operator
