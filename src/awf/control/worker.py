@@ -796,7 +796,7 @@ class ControlWorker:
             "error": str(exc)[:240],
         }
         try:
-            async with self._session_factory() as session:
+            async with session_scope(self._session_factory) as session:
                 repo = WorkspaceRepository(session)
                 ws = await repo.get(candidate.workspace_id)
                 if ws is None or ws.status != candidate.status.value:
@@ -807,7 +807,6 @@ class ControlWorker:
                     reason_code=DB_CONNECTION_CLOSED_REASON,
                     payload=payload,
                 )
-                await session.commit()
         except Exception:
             _log.exception(
                 "worker.db_connection_closed_event_failed",

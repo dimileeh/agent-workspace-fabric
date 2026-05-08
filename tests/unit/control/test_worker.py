@@ -6695,6 +6695,69 @@ async def test_expire_due_secret_leases_preserves_commit_error_when_close_fails(
 
 
 @pytest.mark.unit
+async def test_db_connection_closed_event_rolls_back_when_event_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingEventSession:
+        rolled_back = False
+        closed = False
+
+        async def __aenter__(self) -> FailingEventSession:
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            await self.close()
+
+        async def commit(self) -> None:
+            raise AssertionError("commit should not run after event write failure")
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FailingEventRepository:
+        def __init__(self, session: FailingEventSession) -> None:
+            assert session is failing_session
+
+        async def get(self, workspace_id: str) -> SimpleNamespace:
+            assert workspace_id == "ws_event_failure"
+            return SimpleNamespace(status=WorkspaceStatus.running.value)
+
+        async def add_event(self, *_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("event write failed")
+
+    failing_session = FailingEventSession()
+    worker = ControlWorker(
+        session_factory=lambda: failing_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    monkeypatch.setattr(
+        "awf.control.worker.WorkspaceRepository",
+        FailingEventRepository,
+    )
+
+    await worker._record_db_connection_closed_event(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id="ws_event_failure",
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_ws_event_failure",
+        ),
+        _closed_connection_error(),
+    )
+
+    assert failing_session.rolled_back is True
+    assert failing_session.closed is True
+
+
+@pytest.mark.unit
 async def test_stale_active_execution_check_preserves_unexpired_execution_claim(
     worker: ControlWorker,
     session_factory: async_sessionmaker[AsyncSession],
