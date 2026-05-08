@@ -154,6 +154,8 @@ _PR_FEEDBACK_RESOLUTION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "feedback_id",
     "feedback_body_hash",
 )
+_POSTGRES_INTEGER_MIN: Final = -(2**31)
+_POSTGRES_INTEGER_MAX: Final = 2**31 - 1
 
 
 @dataclass(frozen=True)
@@ -3785,13 +3787,19 @@ def _scheduler_json_int_expr(
 ) -> ColumnElement[Any]:
     if dialect_name == "postgresql":
         text_value = func.nullif(func.trim(_scheduler_json_path_expr(path).as_string()), "")
-        return case(
+        numeric_value = case(
             (
                 text_value.op("~")(POLICY_INT_TEXT_PATTERN),
-                sql_cast(sql_cast(text_value, Numeric), Integer),
+                sql_cast(text_value, Numeric),
             ),
             else_=None,
         )
+        clamped_value = _bounded_scheduler_int_expr(
+            numeric_value,
+            lower=_POSTGRES_INTEGER_MIN,
+            upper=_POSTGRES_INTEGER_MAX,
+        )
+        return sql_cast(clamped_value, Integer)
     if dialect_name == "sqlite":
         json_path = _sqlite_json_path(path)
         json_type = func.json_type(Workspace.task_policy, json_path)

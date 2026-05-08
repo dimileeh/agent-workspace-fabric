@@ -1360,6 +1360,64 @@ class TestOwnedPathOverlapLookup:
         assert listed == [decimal_string.id, lower_priority.id]
 
     @pytest.mark.unit
+    async def test_scheduler_clamps_oversized_policy_strings_before_postgres_integer_cast(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        oversized_high = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="oversized high priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={
+                "scheduler": {
+                    "base_priority": "999999999999999999999999999999999999999999999999"
+                }
+            },
+        )
+        normal = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="normal priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        oversized_low = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="oversized low priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={
+                "scheduler": {
+                    "base_priority": "-999999999999999999999999999999999999999999999999"
+                }
+            },
+        )
+        oversized_high.created_at = scoring_at
+        normal.created_at = scoring_at
+        oversized_low.created_at = scoring_at
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=3,
+            scoring_at=scoring_at,
+        )
+
+        assert listed == [oversized_high.id, normal.id, oversized_low.id]
+
+    @pytest.mark.unit
     async def test_scheduler_keeps_owned_path_overlap_advisory_only(
         self,
         session: AsyncSession,
