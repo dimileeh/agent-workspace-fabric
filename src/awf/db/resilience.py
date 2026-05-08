@@ -69,9 +69,14 @@ async def run_db_operation_with_retry[T](
     *,
     attempts: int = 2,
     commit: bool = False,
+    retry_commit_failures: bool = True,
     on_retry: Callable[[BaseException, int], Awaitable[None]] | None = None,
 ) -> T:
-    """Run a bounded DB operation, retrying stale closed connections with fresh sessions."""
+    """Run a bounded DB operation, retrying stale closed connections with fresh sessions.
+
+    Set ``retry_commit_failures`` to False for operations that make non-idempotent
+    writes before commit, where a commit exception may be an ambiguous boundary.
+    """
 
     if attempts < 1:
         raise ValueError("attempts must be at least 1")
@@ -79,16 +84,33 @@ async def run_db_operation_with_retry[T](
     for attempt in range(1, attempts + 1):
         session = session_factory()
         try:
-            result = await operation(session)
-            if commit:
+            try:
+                result = await operation(session)
+            except Exception as exc:
+                await invalidate_or_rollback_session(session, exc)
+                if attempt >= attempts or not is_transient_closed_connection_error(exc):
+                    raise
+                if on_retry is not None:
+                    await on_retry(exc, attempt)
+                continue
+
+            if not commit:
+                return result
+
+            try:
                 await session.commit()
+            except Exception as exc:
+                await invalidate_or_rollback_session(session, exc)
+                if (
+                    not retry_commit_failures
+                    or attempt >= attempts
+                    or not is_transient_closed_connection_error(exc)
+                ):
+                    raise
+                if on_retry is not None:
+                    await on_retry(exc, attempt)
+                continue
             return result
-        except Exception as exc:
-            await invalidate_or_rollback_session(session, exc)
-            if attempt >= attempts or not is_transient_closed_connection_error(exc):
-                raise
-            if on_retry is not None:
-                await on_retry(exc, attempt)
         finally:
             with contextlib.suppress(Exception):
                 await session.close()

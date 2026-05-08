@@ -752,6 +752,65 @@ class TestRunOnce:
         assert retry_attempts == [1]
 
     @pytest.mark.unit
+    async def test_scheduler_deferred_decisions_are_not_replayed_after_commit_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "scheduler-commit-boundary",
+            agent="gemini",
+            task_class="refactor_task",
+            task_policy={
+                "agent_model": "gemini-2.5-pro",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                },
+            },
+            create_task_attempt=True,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+        original_commit = AsyncSession.commit
+        failures_remaining = 1
+        commit_attempts = 0
+
+        async def _commit_then_closed(session: AsyncSession) -> None:
+            nonlocal failures_remaining, commit_attempts
+            commit_attempts += 1
+            await original_commit(session)
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+
+        monkeypatch.setattr(AsyncSession, "commit", _commit_then_closed)
+
+        with pytest.raises(InterfaceError, match="connection is closed"):
+            await worker._list_ready(limit=1)  # noqa: SLF001
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(ready_id)
+
+        assert commit_attempts == 1
+        assert len(decisions) == 1
+        assert decisions[0].decision == "deferred"
+        assert decisions[0].reason_code == "PROVIDER_RECOVERY_NOT_BEFORE"
+
+    @pytest.mark.unit
     async def test_provider_recovery_filter_keeps_scheduler_locks_until_decision_commit(
         self,
         monkeypatch: pytest.MonkeyPatch,

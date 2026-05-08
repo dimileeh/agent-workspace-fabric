@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, InterfaceError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db import session as session_mod
 from awf.db.resilience import (
@@ -179,3 +180,36 @@ async def test_db_retry_reraises_non_transient_errors_without_retrying() -> None
             await run_db_operation_with_retry(factory, _operation, attempts=2)
 
     assert calls == 1
+
+
+@pytest.mark.unit
+async def test_db_retry_can_avoid_ambiguous_commit_replays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        calls = 0
+        commits = 0
+
+        async def _operation(_session: object) -> str:
+            nonlocal calls
+            calls += 1
+            return "created"
+
+        async def _failing_commit(_session: AsyncSession) -> None:
+            nonlocal commits
+            commits += 1
+            raise _closed_connection_error()
+
+        monkeypatch.setattr(AsyncSession, "commit", _failing_commit)
+
+        with pytest.raises(InterfaceError, match="connection is closed"):
+            await run_db_operation_with_retry(
+                factory,
+                _operation,
+                commit=True,
+                retry_commit_failures=False,
+            )
+
+    assert calls == 1
+    assert commits == 1
