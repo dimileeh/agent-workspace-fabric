@@ -2209,8 +2209,8 @@ class WorkspaceExecutor:
             if val_result.all_passed:
                 conformance_failure: _PlanningRunFailure | None = None
                 if planning_validation_handoff is not None:
+                    conformance_handoff = planning_validation_handoff
                     try:
-                        conformance_handoff = planning_validation_handoff
                         if post_validation_conformance_fix_attempts:
                             conformance_handoff = replace(
                                 planning_validation_handoff,
@@ -2356,9 +2356,18 @@ class WorkspaceExecutor:
                         )
                         return
                     if conformance_failure is not None:
+                        remaining_conformance_iterations = max(
+                            0,
+                            conformance_handoff.max_iterations
+                            - (conformance_handoff.iteration + 1),
+                        )
                         # Recovery skips feature execution; retrying this
                         # conformance miss would only rerun validation.
-                        if recovery is not None or pass_number >= max_fix_passes:
+                        if (
+                            recovery is not None
+                            or pass_number >= max_fix_passes
+                            or remaining_conformance_iterations <= 0
+                        ):
                             await self._finish_pending_validate_operations(
                                 workspace_id=workspace_id,
                                 status=OperationStatus.failed,
@@ -2384,6 +2393,7 @@ class WorkspaceExecutor:
                             validation_run_id=validation_run_id,
                             fix_pass=pass_number,
                             max_fix_passes=max_fix_passes,
+                            remaining_conformance_iterations=remaining_conformance_iterations,
                             reason_code=(
                                 conformance_failure.reason_code
                                 or PLAN_CONFORMANCE_UNSATISFIED
@@ -3881,7 +3891,7 @@ class WorkspaceExecutor:
             details={
                 "conformance": build_conformance_failure_evidence(
                     report=report,
-                    iterations_used=1,
+                    iterations_used=handoff.iteration + 2,
                     max_iterations=handoff.max_iterations,
                     plan_path=handoff.plan_path,
                     report_path=handoff.report_path,

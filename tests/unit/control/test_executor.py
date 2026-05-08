@@ -1021,7 +1021,7 @@ class TestHappyPath:
         assert result["validation_run_id"]
 
     @pytest.mark.unit
-    async def test_post_validation_conformance_gap_runs_fix_pass_before_terminal_failure(
+    async def test_post_validation_conformance_gap_stops_at_preserved_handoff_budget(
         self,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
@@ -1194,7 +1194,7 @@ class TestHappyPath:
             for prompt in post_validation_conformance_prompts
             for line in prompt.splitlines()
             if line.startswith("Iteration: ")
-        ] == ["Iteration: 1", "Iteration: 2", "Iteration: 3"]
+        ] == ["Iteration: 1", "Iteration: 2"]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             runs = (
@@ -1228,17 +1228,17 @@ class TestHappyPath:
             )
 
         assert ws is not None
-        assert ws.status == WorkspaceStatus.completed.value
-        assert [run["status"] for run in runs] == ["succeeded", "succeeded", "succeeded"]
-        assert [run["reason_code"] for run in runs] == [
-            "VALIDATION_OK",
-            "VALIDATION_OK",
-            "VALIDATION_OK",
-        ]
-        assert operation["status"] == "succeeded"
-        assert operation["error_code"] is None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "agent_failure"
+        assert "Document the API endpoint required by the saved plan." in (
+            ws.failure_message or ""
+        )
+        assert [run["status"] for run in runs] == ["succeeded", "succeeded"]
+        assert [run["reason_code"] for run in runs] == ["VALIDATION_OK", "VALIDATION_OK"]
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == PLAN_CONFORMANCE_UNSATISFIED
         assert operation["finished_at"] is not None
-        assert _json_value(operation["result"])["reason_code"] == "VALIDATION_OK"
+        assert _json_value(operation["result"])["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_cleanup_failure_finishes_validate_operation(
