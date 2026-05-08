@@ -3781,8 +3781,10 @@ class WorkspaceExecutor:
             if before_compare_head is not None
             else set()
         )
-        compare_paths = after_compare | committed_compare
-        extra = sorted(compare_paths - before_compare - {handoff.report_path})
+        allowed_paths = {handoff.report_path}
+        dirty_extra = after_compare - before_compare - allowed_paths
+        committed_extra = committed_compare - allowed_paths
+        extra = sorted(dirty_extra | committed_extra)
         if extra:
             return _build_planning_scope_failure(
                 scope_phase="conformance",
