@@ -6992,6 +6992,38 @@ async def test_secret_lease_expiration_scan_skips_transient_closed_connection(
 
 
 @pytest.mark.unit
+async def test_stale_active_execution_scan_skips_transient_closed_connection(
+    worker: ControlWorker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_time = 1_000.0
+    monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+    recovery_attempts = 0
+
+    async def _raise_recovery_failure() -> None:
+        nonlocal recovery_attempts
+        recovery_attempts += 1
+        raise _closed_connection_error()
+
+    worker._next_stale_active_execution_scan_at = 0.0  # noqa: SLF001
+    worker._recover_stale_active_executions = _raise_recovery_failure  # type: ignore[method-assign]
+    scan_interval = max(
+        0.0,
+        worker._config.stale_active_execution_scan_interval_seconds,  # noqa: SLF001
+    )
+
+    await worker._maybe_recover_stale_active_executions()  # noqa: SLF001
+
+    expected_next_scan_at = current_time + scan_interval
+    actual_next_scan_at = worker._next_stale_active_execution_scan_at  # noqa: SLF001
+    assert actual_next_scan_at == expected_next_scan_at
+
+    await worker._maybe_recover_stale_active_executions()  # noqa: SLF001
+
+    assert recovery_attempts == 1
+
+
+@pytest.mark.unit
 async def test_expire_due_secret_leases_preserves_commit_error_when_close_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

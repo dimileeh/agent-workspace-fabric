@@ -710,7 +710,21 @@ class ControlWorker:
         if now < self._next_stale_active_execution_scan_at:
             return
 
-        await self._recover_stale_active_executions()
+        try:
+            await self._recover_stale_active_executions()
+        except Exception as exc:
+            if is_transient_closed_connection_error(exc):
+                interval = max(0.0, self._config.stale_active_execution_scan_interval_seconds)
+                self._next_stale_active_execution_scan_at = monotonic() + interval
+                _log.warning(
+                    "worker.stale_active_execution_scan_db_connection_closed",
+                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                )
+                return
+            raise
+
         interval = max(0.0, self._config.stale_active_execution_scan_interval_seconds)
         self._next_stale_active_execution_scan_at = monotonic() + interval
 
