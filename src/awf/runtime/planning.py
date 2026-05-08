@@ -615,9 +615,15 @@ def build_conformance_stall_recovery_prompt(
         "git add, and git commit. Use existing validation evidence from logs, validation "
         "summaries, git diff, and artifacts. If validation evidence is missing, stale, "
         "or insufficient, report `needs_iteration` with a specific gap asking AWF to "
-        "run the missing validation under the validation phase.\n\n"
+        "run the missing validation under the validation phase. Set `reason_code` to "
+        "`CONFORMANCE_REQUIRES_AWF_VALIDATION` only when every remaining gap is missing, "
+        "stale, or insufficient AWF-owned validation evidence. Do not use it for "
+        "implementation, API, plan, or documentation gaps.\n\n"
         "The object must have this shape:\n\n"
-        '```json\n{"status":"satisfied|needs_iteration","summary":"...","gaps":["..."]}\n```\n\n'
+        "```json\n"
+        '{"status":"satisfied|needs_iteration","summary":"...",'
+        '"gaps":["..."],"reason_code":"optional reason code"}\n'
+        "```\n\n"
         f"### Prior gaps (advisory)\n{gap_lines}\n\n"
         f"### Original task\n{task_prompt}\n"
     )
