@@ -8,7 +8,7 @@ since each call is distinguishable by its argv.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -143,6 +143,9 @@ async def _insert_validate_handoff_recovery_operation(
     *,
     workspace_id: str,
     operation_id: str,
+    requested_tier: int | None = None,
+    conformance_overrides: Mapping[str, object] | None = None,
+    created_at: datetime | None = None,
 ) -> None:
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -155,6 +158,13 @@ async def _insert_validate_handoff_recovery_operation(
         workspace.pr_url = f"https://github.com/dimileeh/aira-agent/pull/{pr_number}"
         workspace.monitor_last_commit_sha = source_head_sha
         workspace.remote_push_branch = remote_branch
+        conformance_payload: dict[str, object] = {
+            "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+            "summary": "AWF validation evidence is required before conformance can pass.",
+            "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
+        }
+        if conformance_overrides:
+            conformance_payload.update(conformance_overrides)
         payload = build_monitor_operation_payload(
             workspace=workspace,
             action="validate_only",
@@ -168,14 +178,10 @@ async def _insert_validate_handoff_recovery_operation(
             remote_branch=remote_branch,
             recovery_mode="validate_only",
             stale_reason=reason,
-            extra={
-                "conformance": {
-                    "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                    "summary": "AWF validation evidence is required before conformance can pass.",
-                    "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
-                },
-            },
+            extra={"conformance": conformance_payload},
         )
+        if requested_tier is not None:
+            payload["requested_tier"] = requested_tier
         await session.execute(
             text(
                 """
@@ -211,7 +217,7 @@ async def _insert_validate_handoff_recovery_operation(
                     source_head_sha=source_head_sha,
                     source_base_sha=workspace.base_commit,
                 ),
-                "created_at": datetime.now(UTC),
+                "created_at": created_at or datetime.now(UTC),
             },
         )
         await session.commit()
@@ -1107,90 +1113,22 @@ class TestHappyPath:
             },
         )
         operation_id = "op_post_validation_conformance_gap"
-        async with factory() as session:
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO operations (
-                        id,
-                        workspace_id,
-                        type,
-                        status,
-                        payload,
-                        created_at
-                    )
-                    VALUES (
-                        :operation_id,
-                        :workspace_id,
-                        'validate',
-                        'pending',
-                        CAST(:payload AS JSON),
-                        :created_at
-                    )
-                    """
-                ),
-                {
-                    "operation_id": operation_id,
-                    "workspace_id": ws_id,
-                    "payload": json.dumps({"requested_tier": 1}),
-                    "created_at": datetime.now(UTC),
-                },
-            )
-            await session.commit()
-        handoff_report = json.dumps(
-            {
-                "status": "needs_iteration",
-                "summary": "Only AWF validation evidence is missing.",
-                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
-                "gaps": ["AWF-owned validation evidence is missing for pytest."],
-            }
+        await _insert_validate_handoff_recovery_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id=operation_id,
+            requested_tier=1,
+            conformance_overrides={"iteration": 1, "max_iterations": 2},
         )
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
         post_validation_gap_report = json.dumps(
-            {
-                "status": "needs_iteration",
-                "summary": "Validation passed, but the API is still incomplete.",
-                "gaps": ["Wire the API endpoint required by the saved plan."],
-            }
-        )
-        second_post_validation_gap_report = json.dumps(
             {
                 "status": "needs_iteration",
                 "summary": "Validation passed, but the API docs are still incomplete.",
                 "gaps": ["Document the API endpoint required by the saved plan."],
             }
         )
-        satisfied_report = json.dumps(
-            {
-                "status": "satisfied",
-                "summary": "implementation and validation evidence satisfy the plan",
-                "gaps": [],
-            }
-        )
 
-        fake.queue_result(returncode=0, stdout="")  # before planning
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
-        fake.queue_result(returncode=0, stdout="plan written")  # planning
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
-        fake.queue_result(returncode=0, stdout="")  # committed_paths_since
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
-        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
-        fake.queue_result(returncode=0, stdout=handoff_report)
-        fake.queue_result(
-            returncode=0,
-            stdout=(
-                f"?? docs/awf-plans/{ws_id}.md\n"
-                f"?? docs/awf-plans/{ws_id}.conformance.json\n"
-                " M src/x.py\n"
-            ),
-        )
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-iter
-        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
-        fake.queue_result(returncode=0)  # git add
-        fake.queue_result(returncode=0, stdout="src/x.py\n")  # cached diff
-        fake.queue_result(returncode=0)  # git commit
-        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
-        fake.queue_result(returncode=0)  # merge-base --is-ancestor
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
         fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
@@ -1198,43 +1136,9 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout=post_validation_gap_report)
         fake.queue_result(
             returncode=0,
-            stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
+            stdout=f"?? {report_path}\n",
         )
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        fake.queue_result(returncode=0, stdout="fixed post-validation gap")  # fix pass
-        fake.queue_result(returncode=0)  # fix git add
-        fake.queue_result(returncode=0, stdout="src/api.py\n")  # fix cached diff
-        fake.queue_result(returncode=0)  # fix commit
-        _queue_validation_head(fake, head="b" * 40)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=second_post_validation_gap_report)
-        fake.queue_result(
-            returncode=0,
-            stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
-        )
-        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        fake.queue_result(returncode=0, stdout="fixed second post-validation gap")
-        fake.queue_result(returncode=0)  # second fix git add
-        fake.queue_result(returncode=0, stdout="docs/api.md\n")  # second fix cached diff
-        fake.queue_result(returncode=0)  # second fix commit
-        _queue_validation_head(fake, head="c" * 40)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers again
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=satisfied_report)
-        fake.queue_result(
-            returncode=0,
-            stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
-        )
-        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        _queue_post_validation_conformance_report_commit(
-            fake, f"docs/awf-plans/{ws_id}.conformance.json"
-        )
-        _queue_pre_push_diagnostics(fake)
-        fake.queue_result(returncode=0)  # git push
-        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
 
         await executor.execute(ws_id)
 
@@ -1243,24 +1147,20 @@ class TestHappyPath:
             for call in fake.calls
             if call.args[:2] == ["docker", "compose"] and "codex" in call.args
         ]
-        fix_prompt = next(
-            prompt
-            for prompt in adapter_prompts
-            if "post-validation plan conformance" in prompt
-        )
         post_validation_conformance_prompts = [
             prompt
             for prompt in adapter_prompts
             if "Conformance phase" in prompt and "### Validation evidence" in prompt
         ]
 
-        assert "Wire the API endpoint required by the saved plan." in fix_prompt
+        assert len(adapter_prompts) == 1
+        assert post_validation_conformance_prompts == adapter_prompts
         assert [
             line
             for prompt in post_validation_conformance_prompts
             for line in prompt.splitlines()
             if line.startswith("Iteration: ")
-        ] == ["Iteration: 1", "Iteration: 2"]
+        ] == ["Iteration: 2"]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             runs = (
@@ -1281,7 +1181,8 @@ class TestHappyPath:
                     await s.execute(
                         text(
                             """
-                            SELECT status, error_code, result, finished_at
+                            SELECT status, error_code, result, finished_at, payload,
+                                   idempotency_key
                             FROM operations
                             WHERE id = :operation_id
                             """
@@ -1299,12 +1200,28 @@ class TestHappyPath:
         assert "Document the API endpoint required by the saved plan." in (
             ws.failure_message or ""
         )
-        assert [run["status"] for run in runs] == ["succeeded", "succeeded"]
-        assert [run["reason_code"] for run in runs] == ["VALIDATION_OK", "VALIDATION_OK"]
+        assert [run["status"] for run in runs] == ["succeeded"]
+        assert [run["reason_code"] for run in runs] == ["VALIDATION_OK"]
         assert operation["status"] == "failed"
         assert operation["error_code"] == PLAN_CONFORMANCE_UNSATISFIED
         assert operation["finished_at"] is not None
-        assert _json_value(operation["result"])["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
+        payload = _json_value(operation["payload"])
+        assert payload["owner"] == "pr_monitor"
+        assert payload["source"] == "pr_monitor"
+        assert payload["action"] == "validate_only"
+        assert payload["requested_action"] == "validate"
+        assert payload["requested_tier"] == 1
+        assert payload["source_head_sha"] == "deadbeef01"
+        assert payload["source_base_sha"] == "a" * 40
+        assert payload["target_branch"] == "development"
+        assert payload["remote_branch"] == f"awf/{ws_id}"
+        assert payload["recovery_mode"] == "validate_only"
+        assert payload["conformance"]["iteration"] == 1
+        assert payload["conformance"]["max_iterations"] == 2
+        assert operation["idempotency_key"].startswith("pr_monitor:validate_only:")
+        result = _json_value(operation["result"])
+        assert result["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
+        assert result["requested_tier"] == 1
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_cleanup_failure_finishes_validate_operation(
