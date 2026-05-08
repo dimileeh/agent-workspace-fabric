@@ -32,6 +32,10 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
+from awf.db.resilience import (
+    DB_CONNECTION_TRANSIENT_ATTEMPT_REASON,
+    DB_CONNECTION_TRANSIENT_RECOVERED_REASON,
+)
 from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from tests.postgres import postgres_test_engine
@@ -220,6 +224,32 @@ async def test_list_pending_delegates_to_requested_query_without_extra_filter() 
 
     assert await worker._list_pending() == ["ws_requested"]
     assert worker.requested_calls == 1
+
+
+@pytest.mark.unit
+async def test_transient_db_retry_log_uses_attempt_reason_code() -> None:
+    worker = ControlWorker(
+        session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+        provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+        config=WorkerConfig(node_id="node-1"),
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await worker._log_transient_db_retry(
+            RuntimeError("connection is closed"),
+            attempt=1,
+        )
+
+    assert len(captured) == 1
+    event = captured[0]
+    assert event["event"] == "worker.db_connection_retry"
+    assert event["log_level"] == "warning"
+    assert event["reason_code"] == DB_CONNECTION_TRANSIENT_ATTEMPT_REASON
+    assert event["reason_code"] != DB_CONNECTION_TRANSIENT_RECOVERED_REASON
+    assert event["worker_id"].startswith("control-worker-")
+    assert event["attempt"] == 1
+    assert event["error_type"] == "RuntimeError"
+    assert event["error"] == "connection is closed"
 
 
 @pytest.mark.unit

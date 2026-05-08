@@ -42,7 +42,7 @@ from awf.db.repositories import (
 )
 from awf.db.resilience import (
     DB_CONNECTION_CLOSED_REASON,
-    DB_CONNECTION_TRANSIENT_RECOVERED_REASON,
+    DB_CONNECTION_TRANSIENT_ATTEMPT_REASON,
     is_transient_closed_connection_error,
     run_db_operation_with_retry,
 )
@@ -357,7 +357,7 @@ class ControlWorker:
     async def _log_transient_db_retry(self, exc: BaseException, attempt: int) -> None:
         _log.warning(
             "worker.db_connection_retry",
-            reason_code=DB_CONNECTION_TRANSIENT_RECOVERED_REASON,
+            reason_code=DB_CONNECTION_TRANSIENT_ATTEMPT_REASON,
             worker_id=self._worker_id,
             attempt=attempt,
             error_type=type(exc).__name__,
