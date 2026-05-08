@@ -73,6 +73,7 @@ from awf.runtime.monitor_prompts import (
     ready_to_merge_comment,
     sync_base_conflict_prompt,
 )
+from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
 from awf.runtime.pr_monitor import (
     Abort,
     AbortReason,
@@ -263,6 +264,39 @@ _TERMINAL_WORKSPACE_STATUSES = {
     WorkspaceStatus.cancelled.value,
     WorkspaceStatus.destroyed.value,
 }
+_PLANNING_VALIDATION_HANDOFF_EVENT = "workspace.planning_conformance_requires_awf_validation"
+
+
+def _normalize_conformance_handoff_reason_code(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().upper().replace("-", "_")
+
+
+def _monitor_recovery_conformance_payload(workspace: Workspace) -> dict[str, Any] | None:
+    """Return conformance handoff context for monitor-dispatched validation recovery."""
+    events = getattr(workspace, "events", None) or []
+    for event in reversed(events):
+        if getattr(event, "event_type", None) != _PLANNING_VALIDATION_HANDOFF_EVENT:
+            continue
+        raw_payload = getattr(event, "payload", None)
+        payload = raw_payload if isinstance(raw_payload, Mapping) else {}
+        reason_code = (
+            _normalize_conformance_handoff_reason_code(payload.get("report_reason_code"))
+            or _normalize_conformance_handoff_reason_code(payload.get("reason_code"))
+            or _normalize_conformance_handoff_reason_code(getattr(event, "reason_code", None))
+        )
+        if reason_code != CONFORMANCE_REQUIRES_AWF_VALIDATION:
+            continue
+        conformance: dict[str, Any] = {
+            "reason_code": reason_code,
+            "report_reason_code": reason_code,
+        }
+        for key in ("summary", "gaps", "plan_path", "report_path", "iteration", "max_iterations"):
+            if key in payload:
+                conformance[key] = payload[key]
+        return {"conformance": conformance}
+    return None
 
 
 class BaseFetchError(Exception):
@@ -2945,6 +2979,7 @@ class PullRequestMonitorRunner:
                     log_stream_refs=(
                         {"monitor": monitor_log.stream_id} if monitor_log is not None else None
                     ),
+                    extra=_monitor_recovery_conformance_payload(_ws),
                 )
                 operation_repo = OperationRepository(s)
                 idempotency_key = await retryable_monitor_operation_idempotency_key(

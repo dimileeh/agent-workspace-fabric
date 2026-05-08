@@ -46,6 +46,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.runtime.planning import CONFORMANCE_REQUIRES_AWF_VALIDATION
 from awf.runtime.pr_monitor import (
     AddressComments,
     CheckFailure,
@@ -3632,6 +3633,66 @@ async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_conte
     assert len(state_events) == 1
     assert state_events[0].old_state == WorkspaceStatus.monitoring_pr.value
     assert state_events[0].new_state == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_dispatch_preserves_planning_validation_handoff_context(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 78
+    head_sha = "e" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    await _mark_refactor_task(factory, workspace_id)
+    plan_path = f"docs/awf-plans/{workspace_id}.md"
+    report_path = f"docs/awf-plans/{workspace_id}.conformance.json"
+    async with factory() as session:
+        workspace_repo = WorkspaceRepository(session)
+        workspace = await workspace_repo.get(workspace_id)
+        assert workspace is not None
+        await workspace_repo.add_event(
+            workspace,
+            event_type="workspace.planning_conformance_requires_awf_validation",
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+            payload={
+                "summary": "AWF validation evidence is required before conformance can pass.",
+                "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
+                "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "plan_path": plan_path,
+                "report_path": report_path,
+                "iteration": 1,
+                "max_iterations": 3,
+            },
+        )
+        await session.commit()
+
+    terminal = await _dispatch_merge_recovery(
+        factory=factory,
+        tmp_path=tmp_path,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert terminal is True
+    assert len(operations) == 1
+    assert operations[0].payload["conformance"] == {
+        "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        "summary": "AWF validation evidence is required before conformance can pass.",
+        "gaps": ["AWF-owned validation evidence is missing for the pytest gate."],
+        "plan_path": plan_path,
+        "report_path": report_path,
+        "iteration": 1,
+        "max_iterations": 3,
+    }
 
 
 @pytest.mark.unit
