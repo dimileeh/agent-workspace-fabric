@@ -367,6 +367,28 @@ def test_conformance_requires_awf_validation_rejects_plan_and_documentation_arti
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "Missing validation tests for the new parser.",
+        "Add validation tests for the new parser.",
+        "Write parser tests covering invalid input.",
+    ),
+)
+def test_conformance_requires_awf_validation_rejects_test_work_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Test work remains.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert not conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 def test_planning_prompt_is_plan_artifact_only_and_stops_before_implementation() -> None:
     plan = Path("docs/awf-plans/ws_scope_prompt.md")
 

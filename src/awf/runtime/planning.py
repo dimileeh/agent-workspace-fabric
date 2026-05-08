@@ -577,6 +577,12 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         if re.match(r"[\s-]+coverage\b", text[match.end() :]):
             continue
         return False
+    # Test work is deterministic agent work; only "test coverage" remains
+    # validation evidence.
+    for match in re.finditer(r"(?<![a-z0-9_])tests?(?![a-z0-9_])", text):
+        if re.match(r"[\s-]+coverage\b", text[match.end() :]):
+            continue
+        return False
     return True
 
 
