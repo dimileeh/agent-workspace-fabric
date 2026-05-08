@@ -834,8 +834,14 @@ class TestPullRequestMonitorAdoptionService:
             assert old_task is not None
             assert old_workspace.idempotency_key == logical_key
             assert old_task.idempotency_key == logical_key
+            superseded_external_id = adoption_module._superseded_adoption_external_id(
+                external_id=logical_task_external_id,
+                workspace_id=first.workspace_id,
+            )
             old_workspace.status = WorkspaceStatus.destroyed.value
             old_workspace.idempotency_key = None
+            old_workspace.task_external_id = superseded_external_id
+            old_task.external_id = superseded_external_id
             await session.commit()
 
         async with factory() as session:
@@ -867,6 +873,10 @@ class TestPullRequestMonitorAdoptionService:
             assert fresh_task is not None
             assert old_workspace.idempotency_key is None
             assert old_task.idempotency_key == logical_key
+            assert old_task.external_id == adoption_module._superseded_adoption_external_id(
+                external_id=logical_task_external_id,
+                workspace_id=first.workspace_id,
+            )
             assert fresh_workspace.idempotency_key == logical_key
             assert fresh_workspace.task_external_id == f"{logical_task_external_id}:g1"
             assert fresh_task.external_id == fresh_workspace.task_external_id

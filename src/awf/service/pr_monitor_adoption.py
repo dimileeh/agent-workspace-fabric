@@ -347,6 +347,27 @@ class PullRequestMonitorAdoptionService:
                 owned_paths=list(workspace.owned_paths),
             )
 
+        async def _create_generated_task() -> Task:
+            task_external_id = workspace.task_external_id or _adoption_external_id(
+                repo_slug=repo.slug(),
+                pr_number=metadata.number,
+            )
+            task_generation_idempotency_key = await _next_adoption_task_idempotency_key(
+                self._session,
+                logical_idempotency_key=logical_idempotency_key,
+                task_external_id=task_external_id,
+            )
+            workspace.task_external_id = _adoption_generation_external_id(
+                repo_slug=repo.slug(),
+                pr_number=metadata.number,
+                logical_idempotency_key=logical_idempotency_key,
+                workspace_idempotency_key=task_generation_idempotency_key,
+            )
+            return await _create_or_get_task(
+                external_id=workspace.task_external_id,
+                task_idempotency_key=task_generation_idempotency_key,
+            )
+
         try:
             task = await _create_or_get_task(
                 external_id=workspace.task_external_id,
@@ -355,24 +376,14 @@ class PullRequestMonitorAdoptionService:
         except TaskExternalIdConflictError:
             if not previous_terminal_adoptions:
                 raise
-            task_generation_idempotency_key = await _next_adoption_task_idempotency_key(
-                self._session,
-                logical_idempotency_key=logical_idempotency_key,
-                task_external_id=workspace.task_external_id or _adoption_external_id(
-                    repo_slug=repo.slug(),
-                    pr_number=metadata.number,
-                ),
-            )
-            workspace.task_external_id = _adoption_generation_external_id(
-                repo_slug=repo.slug(),
-                pr_number=metadata.number,
-                logical_idempotency_key=logical_idempotency_key,
-                workspace_idempotency_key=task_generation_idempotency_key,
-            )
-            task = await _create_or_get_task(
-                external_id=workspace.task_external_id,
-                task_idempotency_key=task_generation_idempotency_key,
-            )
+            task = await _create_generated_task()
+        else:
+            if (
+                previous_terminal_adoptions
+                and task.idempotency_key == logical_idempotency_key
+                and await _task_has_existing_attempt(self._session, task.id)
+            ):
+                task = await _create_generated_task()
         attempt = await TaskAttemptRepository(self._session).create_for_workspace(
             task=task,
             workspace=workspace,
@@ -651,6 +662,11 @@ async def _next_adoption_task_idempotency_key(
         if candidate not in existing_keys:
             return candidate
     raise RuntimeError("Could not allocate a fresh PR adoption task idempotency key.")
+
+
+async def _task_has_existing_attempt(session: AsyncSession, task_id: str) -> bool:
+    stmt = select(TaskAttempt.id).where(TaskAttempt.task_id == task_id).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 def _is_adoption_generation_suffix(value: str) -> bool:
