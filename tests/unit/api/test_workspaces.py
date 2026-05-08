@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 import awf.api.routes.workspaces as workspaces_route
 import awf.service.workspace_observability as workspace_observability
 from awf.api.app import configure_database, create_app
+from awf.api.deps import get_db_session
 from awf.api.schemas import (
     PullRequestMonitorAdoptionRequest,
     WorkspaceCreateRequest,
@@ -3139,6 +3140,34 @@ class TestListWorkspaces:
         response = await client.get("/v1/workspaces")
         assert response.status_code == 200
         assert response.json() == []
+
+    @pytest.mark.unit
+    async def test_read_routes_do_not_open_unused_request_session(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="single read dependency")
+        app = client._transport.app  # noqa: SLF001
+        session_resolutions = 0
+
+        async def _fail_if_resolved() -> AsyncIterator[object]:
+            nonlocal session_resolutions
+            session_resolutions += 1
+            raise AssertionError("read routes should not resolve get_db_session")
+            yield object()
+
+        app.dependency_overrides[get_db_session] = _fail_if_resolved
+        try:
+            listed = await client.get("/v1/workspaces")
+            detail = await client.get(f"/v1/workspaces/{workspace_id}")
+        finally:
+            app.dependency_overrides.pop(get_db_session, None)
+
+        assert listed.status_code == 200
+        assert detail.status_code == 200
+        assert [item["id"] for item in listed.json()] == [workspace_id]
+        assert detail.json()["id"] == workspace_id
+        assert session_resolutions == 0
 
     @pytest.mark.unit
     async def test_list_workspaces_retries_once_after_closed_connection(

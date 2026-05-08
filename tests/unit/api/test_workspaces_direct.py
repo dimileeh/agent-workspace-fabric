@@ -21,11 +21,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.routes.workspaces import (
+    _get_workspace_response,
+    _list_workspace_responses,
     _payloads_match,
     create_workspace,
-    get_workspace,
     get_workspace_secret_leases,
-    list_workspaces,
 )
 from awf.api.schemas import (
     WorkspaceAcceptedResponse,
@@ -137,14 +137,14 @@ class TestGetDirect:
             session=session,
         )
         assert isinstance(created, WorkspaceAcceptedResponse)
-        result = await get_workspace(created.workspace_id, session=session)
+        result = await _get_workspace_response(created.workspace_id, session)
         assert result.id == created.workspace_id
         assert result.task_title == "look-me-up"
 
     @pytest.mark.unit
     async def test_raises_404_for_missing(self, session: AsyncSession) -> None:
         with pytest.raises(HTTPException) as exc:
-            await get_workspace("ws_missing_id", session=session)
+            await _get_workspace_response("ws_missing_id", session)
         assert exc.value.status_code == 404
         assert exc.value.detail["error_code"] == "NOT_FOUND"
 
@@ -164,7 +164,7 @@ class TestListDirect:
         )
         # Flush so the query sees the inserts in the same session.
         await session.flush()
-        results = await list_workspaces(limit=10, session=session)
+        results = await _list_workspace_responses(session, limit=10)
         assert len(results) == 2
 
 
