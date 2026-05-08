@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -702,6 +702,63 @@ class TestRunOnce:
             ws = await WorkspaceRepository(session).get(requested_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    async def test_provider_recovery_filter_runs_outside_scheduler_read_retry(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "filter-outside-read-retry",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+        inside_retry = False
+        filter_retry_states: list[bool] = []
+
+        async def _tracking_retry(
+            session_factory: async_sessionmaker[AsyncSession],
+            operation: Callable[[AsyncSession], Awaitable[object]],
+            **_kwargs: object,
+        ) -> object:
+            nonlocal inside_retry
+            session = session_factory()
+            try:
+                inside_retry = True
+                return await operation(session)
+            finally:
+                inside_retry = False
+                await session.close()
+
+        async def _record_filter(
+            session: AsyncSession,
+            workspaces: list[Workspace] | list[str],
+        ) -> list[str]:
+            del session
+            filter_retry_states.append(inside_retry)
+            return [workspace.id for workspace in workspaces if isinstance(workspace, Workspace)]
+
+        monkeypatch.setattr(
+            "awf.control.worker.run_db_operation_with_retry",
+            _tracking_retry,
+        )
+        worker._filter_provider_recovery_suppressed = _record_filter  # type: ignore[method-assign]
+
+        assert await worker._list_ready(limit=1) == [ready_id]  # noqa: SLF001
+        assert filter_retry_states == [False]
 
 
 class TestRunOnceExecution:

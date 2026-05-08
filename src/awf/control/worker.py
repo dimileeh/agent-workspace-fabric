@@ -412,12 +412,13 @@ class ControlWorker:
         if limit <= 0:
             return []
 
-        async def _operation(session: AsyncSession) -> list[str]:
-            if status not in {
-                WorkspaceStatus.requested,
-                WorkspaceStatus.ready,
-                WorkspaceStatus.monitoring_pr,
-            }:
+        if status not in {
+            WorkspaceStatus.requested,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.monitoring_pr,
+        }:
+
+            async def _operation(session: AsyncSession) -> list[str]:
                 ids = await WorkspaceRepository(session).list_schedulable_ids(
                     status=status,
                     limit=limit,
@@ -425,7 +426,31 @@ class ControlWorker:
                 )
                 return ids[:limit]
 
-            eligible_workspaces_by_id: dict[str, Workspace] = {}
+            return await run_db_operation_with_retry(
+                self._session_factory,
+                _operation,
+                on_retry=self._log_transient_db_retry,
+            )
+
+        candidate_workspaces = await self._list_scheduler_candidate_workspaces(
+            status=status,
+            limit=limit,
+            exclude_ids=exclude_ids,
+        )
+        return await self._filter_scheduler_candidate_workspaces(
+            candidate_workspaces,
+            limit=limit,
+        )
+
+    async def _list_scheduler_candidate_workspaces(
+        self,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+    ) -> list[Workspace]:
+        async def _operation(session: AsyncSession) -> list[Workspace]:
+            candidate_workspaces_by_id: dict[str, Workspace] = {}
             base_exclude_ids = set(exclude_ids or set())
             candidate_limit = _scheduler_candidate_fetch_limit(limit)
             candidate_after: tuple[datetime, str] | None = None
@@ -440,31 +465,44 @@ class ControlWorker:
                 if not workspaces:
                     break
                 candidate_after = _scheduler_candidate_cursor(workspaces)
-                eligible = await self._filter_provider_recovery_suppressed(
-                    session,
-                    workspaces,
-                )
-                workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
-                for workspace_id in eligible:
-                    if workspace_id in eligible_workspaces_by_id:
-                        continue
-                    workspace = workspaces_by_id.get(workspace_id)
-                    if workspace is not None:
-                        eligible_workspaces_by_id[workspace_id] = workspace
+                for workspace in workspaces:
+                    candidate_workspaces_by_id.setdefault(workspace.id, workspace)
                 if len(workspaces) < candidate_limit:
                     break
-            ordered_workspaces = _order_scheduler_workspaces(
-                list(eligible_workspaces_by_id.values())
-            )
-            ordered_ids = [workspace.id for workspace in ordered_workspaces[:limit]]
-            await session.commit()
-            return ordered_ids
+            return _order_scheduler_workspaces(list(candidate_workspaces_by_id.values()))
 
         return await run_db_operation_with_retry(
             self._session_factory,
             _operation,
             on_retry=self._log_transient_db_retry,
         )
+
+    async def _filter_scheduler_candidate_workspaces(
+        self,
+        candidate_workspaces: list[Workspace],
+        *,
+        limit: int,
+    ) -> list[str]:
+        if not candidate_workspaces:
+            return []
+
+        async with self._session_factory() as session:
+            eligible = await self._filter_provider_recovery_suppressed(
+                session,
+                candidate_workspaces,
+            )
+            workspaces_by_id = {workspace.id: workspace for workspace in candidate_workspaces}
+            eligible_workspaces_by_id: dict[str, Workspace] = {}
+            for workspace_id in eligible:
+                workspace = workspaces_by_id.get(workspace_id)
+                if workspace is not None:
+                    eligible_workspaces_by_id.setdefault(workspace_id, workspace)
+            ordered_workspaces = _order_scheduler_workspaces(
+                list(eligible_workspaces_by_id.values())
+            )
+            ordered_ids = [workspace.id for workspace in ordered_workspaces[:limit]]
+            await session.commit()
+            return ordered_ids
 
     async def _filter_provider_recovery_suppressed(
         self,
