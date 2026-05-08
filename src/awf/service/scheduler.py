@@ -71,6 +71,7 @@ class SchedulerOrderCursor:
     effective_score: int
     queued_at: datetime
     workspace_id: str
+    scoring_at: datetime
 
 
 def task_class_priority(task_class: str | None) -> int:

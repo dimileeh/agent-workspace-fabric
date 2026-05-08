@@ -2092,6 +2092,7 @@ def _scheduler_candidate_cursor(
         effective_score=score.effective_score,
         queued_at=score.queued_at,
         workspace_id=last.id,
+        scoring_at=scoring_at,
     )
 
 

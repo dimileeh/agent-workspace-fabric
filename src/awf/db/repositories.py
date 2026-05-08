@@ -3016,7 +3016,7 @@ class WorkspaceRepository:
         if limit <= 0:
             return []
 
-        scoring_time = scoring_at or datetime.now(UTC)
+        scoring_time = _scheduler_scoring_time(after=after, scoring_at=scoring_at)
         candidates = await self._list_schedulable_candidates(
             status=status,
             limit=limit,
@@ -3046,7 +3046,7 @@ class WorkspaceRepository:
         if limit <= 0:
             return []
 
-        scoring_time = scoring_at or datetime.now(UTC)
+        scoring_time = _scheduler_scoring_time(after=after, scoring_at=scoring_at)
         candidates = await self._list_schedulable_candidates(
             status=status,
             limit=limit,
@@ -3704,6 +3704,18 @@ def _schedulable_workspace_ids_stmt(
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt
+
+
+def _scheduler_scoring_time(
+    *,
+    after: SchedulerOrderCursor | None,
+    scoring_at: datetime | None,
+) -> datetime:
+    if after is None:
+        return scoring_at or datetime.now(UTC)
+    if scoring_at is not None and scoring_at != after.scoring_at:
+        raise ValueError("scoring_at must match after.scoring_at for scheduler pagination")
+    return after.scoring_at
 
 
 def _scheduler_order_expressions(

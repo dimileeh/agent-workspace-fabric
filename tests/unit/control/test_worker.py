@@ -6708,6 +6708,7 @@ def test_scheduler_candidate_cursor_handles_empty_and_uses_last_page_row() -> No
             effective_score=0,
             queued_at=third.created_at,
             workspace_id="ws_c",
+            scoring_at=scoring_at,
         )
     )
 

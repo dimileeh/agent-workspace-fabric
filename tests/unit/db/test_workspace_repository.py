@@ -1555,6 +1555,7 @@ class TestOwnedPathOverlapLookup:
                 effective_score=42,
                 queued_at=cursor_created_at,
                 workspace_id="ws_cursor",
+                scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
             ),
         )
 
@@ -1574,6 +1575,96 @@ class TestOwnedPathOverlapLookup:
         assert "workspaces.created_at >" in sql
         assert "workspaces.created_at =" in sql
         assert "workspaces.id > 'ws_cursor'" in sql
+
+    @pytest.mark.unit
+    async def test_postgres_scheduler_cursor_reuses_cursor_scoring_timestamp(
+        self,
+    ) -> None:
+        cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        cursor_scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.ready,
+            limit=1,
+            after=SchedulerOrderCursor(
+                class_priority=2,
+                effective_score=42,
+                queued_at=cursor_created_at,
+                workspace_id="ws_cursor",
+                scoring_at=cursor_scoring_at,
+            ),
+        )
+
+        assert [workspace.id for workspace in listed] == ["ws_after"]
+        assert len(session.executed) == 1
+        compiled = session.executed[0].compile(  # type: ignore[attr-defined]
+            dialect=postgresql.dialect()
+        )
+        assert cursor_scoring_at in compiled.params.values()
+
+    @pytest.mark.unit
+    async def test_postgres_scheduler_id_cursor_reuses_cursor_scoring_timestamp(
+        self,
+    ) -> None:
+        cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        cursor_scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.ready,
+            limit=1,
+            after=SchedulerOrderCursor(
+                class_priority=2,
+                effective_score=42,
+                queued_at=cursor_created_at,
+                workspace_id="ws_cursor",
+                scoring_at=cursor_scoring_at,
+            ),
+        )
+
+        assert listed == ["ws_after"]
+        assert len(session.executed) == 1
+        compiled = session.executed[0].compile(  # type: ignore[attr-defined]
+            dialect=postgresql.dialect()
+        )
+        assert cursor_scoring_at in compiled.params.values()
+
+    @pytest.mark.unit
+    async def test_postgres_scheduler_cursor_rejects_mismatched_scoring_timestamp(
+        self,
+    ) -> None:
+        cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        cursor_scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError, match="scoring_at must match after.scoring_at"):
+            await repo.list_schedulable_workspaces(
+                status=WorkspaceStatus.ready,
+                limit=1,
+                scoring_at=cursor_scoring_at + timedelta(seconds=1),
+                after=SchedulerOrderCursor(
+                    class_priority=2,
+                    effective_score=42,
+                    queued_at=cursor_created_at,
+                    workspace_id="ws_cursor",
+                    scoring_at=cursor_scoring_at,
+                ),
+            )
+
+        assert session.executed == []
 
     @pytest.mark.unit
     async def test_postgres_get_for_update_locks_workspace_row(self) -> None:
