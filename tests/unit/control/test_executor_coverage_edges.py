@@ -256,7 +256,9 @@ async def test_satisfied_post_validation_conformance_report_is_committed(
         encoding="utf-8",
     )
     runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout="validated-head\n")
     runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
     runner.queue_result(returncode=0)  # git add report
     runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
     runner.queue_result(returncode=0)  # git commit report
@@ -311,6 +313,67 @@ async def test_satisfied_post_validation_conformance_report_is_committed(
     assert add_index < commit_index
     assert event_markers == [("record", len(runner.calls))]
     assert commit_index < event_markers[0][1]
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_rejects_committed_implementation_paths(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout="")  # clean status after conformance
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._git_rev_parse_head = AsyncMock(return_value="validated-head")  # type: ignore[method-assign]
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("src/unvalidated.py")}
+    )
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is not None
+    assert failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert failure.message.startswith(
+        "post-validation conformance phase changed files outside "
+        "`docs/awf-plans/ws_post.conformance.json`"
+    )
+    assert failure.details is not None
+    assert failure.details["planning_scope"]["offending_paths"] == ["src/unvalidated.py"]
+    executor._committed_paths_since.assert_awaited_once_with(  # type: ignore[attr-defined]
+        tmp_path / "worktree",
+        "validated-head",
+    )
+    executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 def _coordination_task_policy() -> dict[str, object]:

@@ -705,11 +705,13 @@ class TestHappyPath:
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
         fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
         fake.queue_result(
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
         _queue_post_validation_conformance_report_commit(
             fake, f"docs/awf-plans/{ws_id}.conformance.json"
         )
@@ -871,6 +873,7 @@ class TestHappyPath:
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
         fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
         fake.queue_result(returncode=1, stderr="conformance runner failed")
 
         await executor.execute(ws_id)
@@ -1023,11 +1026,13 @@ class TestHappyPath:
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
         fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=post_validation_gap_report)
         fake.queue_result(
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
         fake.queue_result(returncode=0, stdout="fixed post-validation gap")  # fix pass
         fake.queue_result(returncode=0)  # fix git add
         fake.queue_result(returncode=0, stdout="src/api.py\n")  # fix cached diff
@@ -1035,11 +1040,13 @@ class TestHappyPath:
         _queue_validation_head(fake, head="b" * 40)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers
         fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=satisfied_report)
         fake.queue_result(
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
         _queue_post_validation_conformance_report_commit(
             fake, f"docs/awf-plans/{ws_id}.conformance.json"
         )
@@ -1131,6 +1138,7 @@ class TestHappyPath:
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
         fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
         fake.queue_result(
             returncode=124,
             stderr="idle timeout exceeded",
@@ -1264,11 +1272,13 @@ class TestHappyPath:
         _queue_validation_head(fake, head="b" * 40)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation recovers
         fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # conformance scope HEAD
         fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
         fake.queue_result(
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
         )
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
         _queue_post_validation_conformance_report_commit(
             fake, f"docs/awf-plans/{ws_id}.conformance.json"
         )

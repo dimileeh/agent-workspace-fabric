@@ -1476,6 +1476,7 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
     _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")
     fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
     fake.queue_result(
         returncode=0,
         stdout='{"status":"satisfied","summary":"validated recovery","gaps":[]}',
@@ -1484,6 +1485,7 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
         returncode=0,
         stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
     )
+    fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
     _queue_post_validation_conformance_report_commit(
         fake, f"docs/awf-plans/{ws_id}.conformance.json"
     )

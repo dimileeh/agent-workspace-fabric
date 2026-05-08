@@ -3649,6 +3649,11 @@ class WorkspaceExecutor:
     ) -> _PlanningRunFailure | None:
         evidence = await self._validation_run_evidence_for_conformance(validation_run_id)
         before_compare = await self._changed_paths(worktree_path)
+        before_compare_head = (
+            await self._git_rev_parse_head(worktree_path)
+            if profile.planning.fail_on_unexplained_deviation
+            else None
+        )
         await self._update_subphase(workspace.id, "conformance")
         compare_result = await adapter.run(
             compose_project=compose_project,
@@ -3665,7 +3670,13 @@ class WorkspaceExecutor:
         )
         after_compare = await self._changed_paths(worktree_path)
         if profile.planning.fail_on_unexplained_deviation:
-            extra = sorted(after_compare - before_compare - {handoff.report_path})
+            committed_compare = (
+                await self._committed_paths_since(worktree_path, before_compare_head)
+                if before_compare_head is not None
+                else set()
+            )
+            compare_paths = after_compare | committed_compare
+            extra = sorted(compare_paths - before_compare - {handoff.report_path})
             if extra:
                 return _build_planning_scope_failure(
                     scope_phase="conformance",
