@@ -110,7 +110,7 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
     events: list[str] = []
     engine_urls: list[str] = []
     ddl_schema_identifiers: list[str] = []
-    schema_name = "awf_test_0123456789abcdef_0123456789abcdef0123456789abcdef"
+    schema_name = "awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     @asynccontextmanager
     async def fake_lock(engine: _FakeEngine) -> AsyncIterator[_FakeEngine]:
@@ -142,11 +142,6 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
 
     monkeypatch.setattr(postgres, "_new_postgres_test_schema", lambda: schema_name)
     monkeypatch.setattr(postgres, "postgres_test_database_url", lambda: "postgresql+asyncpg://u:p@h/db")
-    monkeypatch.setattr(
-        postgres,
-        "_new_postgres_test_schema",
-        lambda: "awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )
     monkeypatch.setattr(postgres, "make_engine", fake_make_engine)
     monkeypatch.setattr(postgres, "_postgres_schema_ddl_lock", fake_lock, raising=False)
     monkeypatch.setattr(postgres, "_create_schema", fake_create_schema)

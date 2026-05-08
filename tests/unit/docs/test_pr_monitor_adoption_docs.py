@@ -127,16 +127,37 @@ def test_runbook_covers_auth_policy_idempotency_and_terminal_behavior() -> None:
     ):
         assert idempotency_term in doc
 
-    for terminal_reuse_term in (
-        "Adoption-key reuse behavior",
-        "terminal row can still satisfy",
+    for terminal_retry_term in (
+        "Terminal adoption retries",
         "destroyed",
+        "destroying",
         "cancelled",
         "failed",
+        "completed",
         "superseded",
+        "fresh monitor",
+        "attached_existing=false",
+        "previous terminal adoption",
+        "lineage",
+    ):
+        assert terminal_retry_term in doc
+
+    for stale_terminal_phrase in (
+        "terminal row can still satisfy",
+        "may be returned as `attached_existing=true`",
+        "Inspect the returned workspace status before assuming",
         "not landed",
     ):
-        assert terminal_reuse_term in doc
+        assert stale_terminal_phrase not in doc
+
+    for terminal_status in (
+        "destroyed",
+        "destroying",
+        "cancelled",
+        "failed",
+        "completed",
+    ):
+        assert terminal_status in doc
 
     for non_evergreen_phrase in (
         "does not start adoption today",

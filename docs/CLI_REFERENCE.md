@@ -158,7 +158,7 @@ monitor actions use the service-visible `AWF_GITHUB_TOKEN`, with `GH_TOKEN` and
 `GITHUB_TOKEN` accepted as fallbacks. AWF derives deterministic repo/PR
 idempotency for adoption; do not pass an adoption idempotency key. See
 [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for GitHub readiness, permissions,
-terminal-row reuse behavior, console inspection, REST/MCP examples, and the
+terminal adoption retry behavior, console inspection, REST/MCP examples, and the
 mocked-local docs-tested demo path.
 
 Show a workspace:

@@ -123,9 +123,9 @@ terminal PR errors include `PR_ALREADY_CLOSED`, `PR_ALREADY_MERGED`,
 
 AWF normalizes the GitHub repository identity and PR number, then stores a
 deterministic repo/PR adoption key. A repeat adoption for the same repo/PR and
-the same monitor policy returns the existing workspace with
-`attached_existing=true`; it does not fetch metadata again or create another
-monitor workspace.
+the same monitor policy returns the existing live or otherwise resumable
+workspace with `attached_existing=true`; it does not fetch metadata again or
+create another monitor workspace.
 
 Policy changes on an existing live adoption return
 `PR_ADOPTION_POLICY_CONFLICT`. That includes changes to `repo_url`, `agent`,
@@ -137,12 +137,14 @@ policies. If the first request omitted the grace override, later REST or MCP
 retries must also omit it or send `null`; if the first request set `900`,
 retries must set `900`.
 
-Adoption-key reuse behavior: deterministic adoption-key reuse does not
-distinguish terminal adoption rows. A previous terminal row can still satisfy the
-deterministic adoption key, so a destroyed, cancelled, failed, or superseded
-adoption row may be returned as `attached_existing=true` even though the prior
-monitor is not landed. Inspect the returned workspace status before assuming a
-retry has attached to a live monitor.
+Terminal adoption retries: destroyed, destroying, cancelled, failed, completed,
+and superseded adoption rows are not reused as live monitor attachments. AWF
+fetches fresh PR metadata, creates a fresh monitor workspace with
+`attached_existing=false`, supersedes the previous canonical adoption row when
+it still owns the deterministic key, and records previous terminal adoption
+lineage on the new workspace. If stale task idempotency data remains from an
+older adoption, AWF allocates a generated task key so the fresh monitor is not
+linked back to stale task scope or title.
 
 Closed or merged GitHub PRs are rejected before workspace creation with
 structured errors such as `PR_ALREADY_CLOSED` and `PR_ALREADY_MERGED`.

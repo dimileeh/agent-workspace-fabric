@@ -618,6 +618,9 @@ The response is `PullRequestMonitorAdoptionResponse` and includes the adopted
 `events_url`, `logs_url`, and `attached_existing`. A repeat adoption for the
 same repo/PR and same monitor policy returns the same workspace with
 `attached_existing=true`; policy changes return `PR_ADOPTION_POLICY_CONFLICT`.
+If the previous adoption row is terminal or superseded, a retry creates a fresh
+monitor workspace with `attached_existing=false` and records the previous
+terminal adoption lineage.
 Closed or merged PRs return structured errors such as `PR_ALREADY_CLOSED` or
 `PR_ALREADY_MERGED`.
 
@@ -668,7 +671,8 @@ curl -X POST "http://localhost:8000/v1/workspaces/ws_123/rebase" \
 
 See [PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for the CLI/MCP equivalents,
 GitHub auth readiness, `auto_merge=true` versus manual monitor policy,
-terminal-row reuse behavior, console inspection, and mocked-local demo path.
+terminal adoption retry behavior, console inspection, and mocked-local demo
+path.
 
 ---
 
