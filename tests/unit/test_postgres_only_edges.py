@@ -184,6 +184,18 @@ def test_postgres_test_schema_name_is_scoped_to_current_run(
 
 
 @pytest.mark.unit
+def test_postgres_test_run_uid_ignores_awf_exec_invocation_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PYTEST_XDIST_TESTRUNUID", raising=False)
+    monkeypatch.delenv("AWF_POSTGRES_TEST_RUN_UID", raising=False)
+    monkeypatch.setenv("AWF_EXEC_INVOCATION_ID", "long-lived-agent-invocation")
+    monkeypatch.setattr(postgres_mod, "_POSTGRES_TEST_LOCAL_RUN_UID", "local-pytest-run")
+
+    assert postgres_mod._postgres_test_run_uid() == "local-pytest-run"
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_stale_postgres_schema_listing_scans_all_inactive_test_namespaces(
     monkeypatch: pytest.MonkeyPatch,
@@ -255,6 +267,35 @@ def test_stale_postgres_cleanup_ignores_persistent_done_marker_for_reused_namesp
 
     assert dropped_urls == [database_url]
     assert active_urls == [database_url, database_url]
+
+
+@pytest.mark.unit
+def test_stale_postgres_cleanup_marks_run_active_after_drop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "cleanup-order-run")
+    events: list[tuple[str, str]] = []
+
+    async def _drop_stale(url: str) -> None:
+        events.append(("drop", url))
+
+    monkeypatch.setattr(postgres_mod, "postgres_test_database_url", lambda: database_url)
+    monkeypatch.setattr(postgres_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(postgres_mod, "_drop_stale_postgres_test_schemas", _drop_stale)
+    monkeypatch.setattr(
+        postgres_mod,
+        "_ensure_postgres_test_run_active",
+        lambda url: events.append(("active", url)),
+    )
+    postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+    try:
+        postgres_mod.cleanup_stale_postgres_test_schemas()
+    finally:
+        postgres_mod._STALE_SCHEMA_CLEANUP_DONE_KEYS.clear()
+
+    assert events == [("drop", database_url), ("active", database_url)]
 
 
 @pytest.mark.unit

@@ -109,6 +109,8 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
 ) -> None:
     events: list[str] = []
     engine_urls: list[str] = []
+    ddl_schema_identifiers: list[str] = []
+    schema_name = "awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     @asynccontextmanager
     async def fake_lock(engine: _FakeEngine) -> AsyncIterator[_FakeEngine]:
@@ -124,7 +126,7 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
         return _FakeEngine(name, events)
 
     async def fake_create_schema(engine: _FakeEngine, quoted_schema: str) -> None:
-        del quoted_schema
+        ddl_schema_identifiers.append(quoted_schema)
         events.append(f"create:{engine.name}")
 
     async def fake_drop_schema(
@@ -138,12 +140,8 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
     def fake_create_all(_conn: _FakeConnection) -> None:
         events.append("create_all")
 
+    monkeypatch.setattr(postgres, "_new_postgres_test_schema", lambda: schema_name)
     monkeypatch.setattr(postgres, "postgres_test_database_url", lambda: "postgresql+asyncpg://u:p@h/db")
-    monkeypatch.setattr(
-        postgres,
-        "_new_postgres_test_schema",
-        lambda: "awf_test_0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )
     monkeypatch.setattr(postgres, "make_engine", fake_make_engine)
     monkeypatch.setattr(postgres, "_postgres_schema_ddl_lock", fake_lock, raising=False)
     monkeypatch.setattr(postgres, "_create_schema", fake_create_schema)
@@ -168,6 +166,9 @@ async def test_postgres_test_engine_serializes_schema_create_and_drop(
         "unlock:admin",
         "dispose:admin",
     ]
+    assert ddl_schema_identifiers == [f'"{schema_name}"']
     schema_urls = [url for url in engine_urls if "awf_search_path=public" not in url]
     assert schema_urls
+    assert all(f"awf_search_path={schema_name}" in url for url in schema_urls)
+    assert all("%22" not in url for url in schema_urls)
     assert all("awf_null_pool=1" in url for url in schema_urls)

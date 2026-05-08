@@ -132,6 +132,35 @@ Add `--no-auto-merge` to keep monitoring after AWF posts the ready-for-human
 comment, and `--initial-review-grace-period-seconds 0` only for explicit
 fast-path tests.
 
+Adopt an already-open GitHub PR into monitoring without rerunning the original
+coding agent:
+
+```bash
+uv run --python 3.12 --extra dev awf workspace adopt-pr \
+  --repo owner/repo \
+  --pr 123 \
+  --auto-merge \
+  --reason "attach AWF to existing PR"
+```
+
+Equivalent PR URL form:
+
+```bash
+uv run --python 3.12 --extra dev awf workspace adopt-pr \
+  --pr-url https://github.com/owner/repo/pull/123 \
+  --no-auto-merge \
+  --initial-review-grace-period-seconds 900
+```
+
+`awf workspace adopt-pr` posts to `POST /v1/workspaces/adopt-pr` and uses
+`AWF_API_TOKEN` or `--api-token` for AWF API auth. GitHub PR metadata and later
+monitor actions use the service-visible `AWF_GITHUB_TOKEN`, with `GH_TOKEN` and
+`GITHUB_TOKEN` accepted as fallbacks. AWF derives deterministic repo/PR
+idempotency for adoption; do not pass an adoption idempotency key. See
+[PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for GitHub readiness, permissions,
+terminal adoption retry behavior, console inspection, REST/MCP examples, and the
+mocked-local docs-tested demo path.
+
 Show a workspace:
 
 ```bash

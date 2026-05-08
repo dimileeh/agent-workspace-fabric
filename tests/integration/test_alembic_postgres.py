@@ -7,7 +7,7 @@ migration round-trip never downgrades the operator's real AWF schema.
 What this covers:
 - asyncpg driver + ``async_engine_from_config`` path in migrations/env.py
 - The autogen migration's Postgres dialect output for JSON and index DDL
-- Round-trip upgrade → downgrade → upgrade on the real DB
+- Round-trip upgrade → downgrade → upgrade on the real DB dialect
 """
 
 from __future__ import annotations

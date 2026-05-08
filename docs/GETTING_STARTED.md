@@ -84,6 +84,11 @@ explicit:
 Subsequent sections describe the contributor/development setup; a fresh
 machine only needs the steps above plus a coding-agent credential.
 
+If the PR already exists and you only need AWF to monitor it, use the supported
+adoption path instead of rerunning the original coding agent. See
+[PR Monitor Adoption](PR_MONITOR_ADOPTION.md) for CLI, REST, MCP, GitHub auth,
+monitor policy, idempotency, console inspection, and mocked-local validation.
+
 ### Configure Environment
 
 Local service development should use Postgres via the Compose stack. The

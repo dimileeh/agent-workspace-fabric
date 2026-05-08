@@ -128,6 +128,7 @@ See:
 - [MCP Client Parity Matrix](docs/MCP_CLIENT_PARITY.md)
 - [Reason Catalog](docs/REASON_CATALOG.md)
 - [Client Surfaces](docs/CLIENT_SURFACES.md)
+- [PR Monitor Adoption](docs/PR_MONITOR_ADOPTION.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Trust Model](docs/AWF_CORE_TRUST_MODEL.md)
 - [Test Quality Guardrails](docs/test-quality-guardrails.md)
@@ -143,6 +144,9 @@ Existing GitHub pull requests can be adopted into AWF monitoring through the
 REST, CLI, and MCP surfaces. Adoption creates a monitor-owned workspace for the
 open PR without re-running the coding agent, then lets AWF apply the normal PR
 monitor loop for comments, checks, freshness, and merge policy.
+See [PR Monitor Adoption](docs/PR_MONITOR_ADOPTION.md) for the operator
+runbook, auth preflight, idempotency behavior, monitor policy options, and
+mocked-local demo path.
 
 ## Supply-Chain Guardrails
 
