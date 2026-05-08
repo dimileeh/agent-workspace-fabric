@@ -27,7 +27,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
 from awf.db.repositories import EgressAuditRepository
-from awf.db.resilience import db_connection_failure_reason
+from awf.db.resilience import db_connection_failure_reason, invalidate_or_rollback_session
 from awf.service.config import resolve_service_settings
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.orphan_resources import (
@@ -368,6 +368,10 @@ async def _egress_audit_summary_counts(factory: Any) -> dict[str, int]:
     session = factory()
     try:
         return await EgressAuditRepository(session).summary_counts_by_posture()
+    except BaseException as exc:
+        with contextlib.suppress(Exception):
+            await invalidate_or_rollback_session(session, exc)
+        raise
     finally:
         close = getattr(session, "close", None)
         if close is not None:

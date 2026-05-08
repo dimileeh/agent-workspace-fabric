@@ -401,6 +401,37 @@ async def test_readyz_egress_audit_timeout_drains_completed_session_cleanup(
 
 
 @pytest.mark.unit
+async def test_egress_audit_summary_invalidates_transient_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _Session:
+        async def invalidate(self) -> None:
+            events.append("invalidate")
+
+        async def rollback(self) -> None:
+            events.append("rollback")
+
+        async def close(self) -> None:
+            events.append("close")
+
+    class _FailingEgressAuditRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            raise _closed_connection_error()
+
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _FailingEgressAuditRepository)
+
+    with pytest.raises(InterfaceError, match="connection is closed"):
+        await health_route._egress_audit_summary_counts(_Session)
+
+    assert events == ["invalidate", "close"]
+
+
+@pytest.mark.unit
 async def test_readyz_egress_audit_timeout_not_delayed_by_session_cleanup(
     ready_app_and_client: tuple[Any, AsyncClient],
     monkeypatch: pytest.MonkeyPatch,

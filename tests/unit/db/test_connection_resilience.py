@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DBAPIError, InterfaceError
+from sqlalchemy.exc import DBAPIError, InterfaceError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db import resilience as resilience_mod
@@ -193,6 +193,58 @@ async def test_db_retry_reraises_non_transient_errors_without_retrying() -> None
             await run_db_operation_with_retry(factory, _operation, attempts=2)
 
     assert calls == 1
+
+
+@pytest.mark.unit
+async def test_db_retry_skips_cleanup_for_non_db_operation_errors() -> None:
+    events: list[str] = []
+
+    class _Session:
+        async def invalidate(self) -> None:
+            events.append("invalidate")
+
+        async def rollback(self) -> None:
+            events.append("rollback")
+
+        async def close(self) -> None:
+            events.append("close")
+
+    def _factory() -> _Session:
+        return _Session()
+
+    async def _operation(_session: _Session) -> None:
+        raise RuntimeError("application-level failure")
+
+    with pytest.raises(RuntimeError, match="application-level failure"):
+        await run_db_operation_with_retry(_factory, _operation)
+
+    assert events == ["close"]
+
+
+@pytest.mark.unit
+async def test_db_retry_rolls_back_non_transient_db_operation_errors() -> None:
+    events: list[str] = []
+
+    class _Session:
+        async def invalidate(self) -> None:
+            events.append("invalidate")
+
+        async def rollback(self) -> None:
+            events.append("rollback")
+
+        async def close(self) -> None:
+            events.append("close")
+
+    def _factory() -> _Session:
+        return _Session()
+
+    async def _operation(_session: _Session) -> None:
+        raise ProgrammingError("SELECT broken", {}, RuntimeError("syntax error"))
+
+    with pytest.raises(ProgrammingError, match="syntax error"):
+        await run_db_operation_with_retry(_factory, _operation)
+
+    assert events == ["rollback", "close"]
 
 
 @pytest.mark.unit

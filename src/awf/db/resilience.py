@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Awaitable, Callable, Iterator
 
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DB_CONNECTION_CLOSED_REASON = "DB_CONNECTION_CLOSED"
@@ -67,6 +67,12 @@ async def invalidate_or_rollback_session(session: AsyncSession, exc: BaseExcepti
         await session.rollback()
 
 
+def _needs_failed_operation_session_cleanup(exc: BaseException) -> bool:
+    if is_transient_closed_connection_error(exc):
+        return True
+    return any(isinstance(current, SQLAlchemyError) for current in _exception_chain(exc))
+
+
 async def run_db_operation_with_retry[T](
     session_factory: async_sessionmaker[AsyncSession],
     operation: Callable[[AsyncSession], Awaitable[T]],
@@ -91,7 +97,8 @@ async def run_db_operation_with_retry[T](
             try:
                 result = await operation(session)
             except Exception as exc:
-                await invalidate_or_rollback_session(session, exc)
+                if _needs_failed_operation_session_cleanup(exc):
+                    await invalidate_or_rollback_session(session, exc)
                 if attempt >= attempts or not is_transient_closed_connection_error(exc):
                     raise
                 if on_retry is not None:
