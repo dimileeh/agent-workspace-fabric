@@ -1721,6 +1721,11 @@ class TestHappyPath:
 
         assert len(adapter_prompts) == 5
         assert iteration_prompt_index < validation_call_index
+        async with factory() as s:
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id, limit=100)
+        assert not any(
+            event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events
+        )
 
     @pytest.mark.unit
     async def test_planning_profile_failure_records_conformance_evidence_and_salvage(
