@@ -7,6 +7,7 @@ without monkeypatching module-level globals.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator
 
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -48,7 +49,8 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
         await invalidate_or_rollback_session(session, exc)
         raise
     finally:
-        await session.close()
+        with contextlib.suppress(Exception):
+            await session.close()
 
 
 def require_api_token(
