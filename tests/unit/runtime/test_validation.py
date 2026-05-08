@@ -2122,6 +2122,66 @@ class TestCoverageEnforcement:
         assert result.command_result.reason_code == "COVERAGE_BELOW_THRESHOLD"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "fail_under_lines",
+        (
+            (
+                "FAIL Required test coverage of 99.0% not reached.\n"
+                "Total coverage: 98.84%\n"
+            ),
+            (
+                "Total coverage: 98.84%\n"
+                "FAIL Required test coverage of 99.0% not reached.\n"
+            ),
+        ),
+    )
+    async def test_run_profile_coverage_uses_adjacent_provider_fail_under_exact_percent(
+        self,
+        runner: tuple[FakeCommandRunner, ValidationRunner],
+        fail_under_lines: str,
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "Name                                      Stmts   Miss  Cover   Missing\n"
+                "---------------------------------------------------------------------\n"
+                "src/awf/runtime/validation.py               674      7    99%\n"
+                "---------------------------------------------------------------------\n"
+                "TOTAL                                     28144    167    99%\n"
+                f"{fail_under_lines}"
+                "============ 5579 passed, 7 skipped, 1 warning in 1675.12s ============\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "final-coverage-fail-under-adjacent-exact-percent",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term-missing",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_coverage(
+            workspace_id="ws_final_coverage_fail_under_adjacent_exact_percent",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase="final_coverage",
+        )
+
+        assert result is not None
+        assert result.percent == 98.84
+        assert result.status == "failed"
+        assert result.reason_code == "COVERAGE_BELOW_THRESHOLD"
+        assert result.command_result is not None
+        assert result.command_result.reason_code == "COVERAGE_BELOW_THRESHOLD"
+
+    @pytest.mark.unit
     async def test_run_profile_coverage_preserves_below_threshold_reason_with_provider_fail_under(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:

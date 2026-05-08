@@ -2271,6 +2271,16 @@ class WorkspaceExecutor:
                                     + post_validation_conformance_fix_attempts
                                 ),
                             )
+                        if recovery is not None:
+                            _log.info(
+                                "executor.post_validation_conformance_recovery_single_attempt",
+                                workspace_id=workspace_id,
+                                validation_run_id=validation_run_id,
+                                recovery_mode=recovery.get("recovery_mode"),
+                                source=recovery.get("source"),
+                                max_fix_passes=post_validation_conformance_fix_pass_budget,
+                                will_retry=False,
+                            )
                         conformance_failure = await self._run_post_validation_conformance_check(
                             adapter=adapter,
                             workspace=ws,

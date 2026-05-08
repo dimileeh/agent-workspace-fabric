@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1688,12 +1689,20 @@ async def test_validate_only_recovery_conformance_failure_fails_without_fix_loop
     fake.queue_result(returncode=0, stdout="")
     fake.queue_result(returncode=0, stdout="")
 
-    await executor.execute(ws_id)
+    with structlog.testing.capture_logs() as captured:
+        await executor.execute(ws_id)
 
     adapter_args = _all_adapter_args(fake)
     assert len(adapter_args) == 1
     assert "## Conformance phase" in adapter_args[0][-1]
     assert "Validation failed after your previous pass" not in adapter_args[0][-1]
+    assert any(
+        event.get("event") == "executor.post_validation_conformance_recovery_single_attempt"
+        and event.get("workspace_id") == ws_id
+        and event.get("recovery_mode") == "validate_only"
+        and event.get("will_retry") is False
+        for event in captured
+    )
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
