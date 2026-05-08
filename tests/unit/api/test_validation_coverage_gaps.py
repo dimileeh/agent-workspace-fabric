@@ -71,6 +71,32 @@ def test_validation_coverage_fields_extracts_gaps() -> None:
 
 
 @pytest.mark.unit
+def test_validation_coverage_fields_prefers_coverage_column_over_log_refs() -> None:
+    run = _run(
+        coverage={
+            "percent": 99.4,
+            "minimum_percent": 99.0,
+            "status": "passed",
+            "reason_code": "COVERAGE_OK",
+        },
+        log_stream_refs={
+            "coverage": {
+                "percent": 72.0,
+                "minimum_percent": 99.0,
+                "status": "failed",
+                "reason_code": "COVERAGE_BELOW_THRESHOLD",
+            }
+        },
+    )
+
+    fields = validation_coverage_fields(run)
+
+    assert fields["coverage_percent"] == 99.4
+    assert fields["coverage_status"] == "passed"
+    assert fields["coverage_reason_code"] == "COVERAGE_OK"
+
+
+@pytest.mark.unit
 def test_validation_coverage_fields_handles_missing_gaps() -> None:
     run = _run(
         log_stream_refs={

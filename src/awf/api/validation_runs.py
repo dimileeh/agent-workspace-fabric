@@ -13,6 +13,7 @@ from awf.api.schemas import (
     ValidationTier,
 )
 from awf.db.models import ValidationRun
+from awf.db.validation_runs import validation_run_coverage_payload
 
 
 def validation_run_summary(
@@ -131,7 +132,7 @@ def validation_identity_fields(run: ValidationRun) -> dict[str, Any]:
 
 
 def validation_coverage_fields(run: ValidationRun) -> dict[str, Any]:
-    coverage = _json_dict(_json_dict(run.log_stream_refs).get("coverage"))
+    coverage = validation_run_coverage_payload(run)
     gaps = coverage.get("gaps")
     if not isinstance(gaps, list):
         gaps = []

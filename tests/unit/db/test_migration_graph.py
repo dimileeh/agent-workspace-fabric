@@ -23,7 +23,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["b3c4d5e6f7a8"]
+    assert script.get_heads() == ["c5d6e7f8a9b0"]
 
 
 @pytest.mark.unit
@@ -194,6 +194,7 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "resolved_profile_digest",
         "environment_identity_digest",
         "environment_identity_inputs",
+        "coverage",
     } <= validation_run_columns
     assert "workspace_secret_leases" in tables
     assert {

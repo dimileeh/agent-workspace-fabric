@@ -26,7 +26,11 @@ from awf.control.executor import (
     _apply_baseline_coverage_ratchet,
 )
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
+from awf.db.repositories import (
+    ValidationRunRepository,
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.planning import (
@@ -768,6 +772,64 @@ class TestHappyPath:
             if event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION
         ]
         assert handoff_events
+
+    @pytest.mark.unit
+    async def test_validation_handoff_evidence_prefers_coverage_column_and_redacts(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+
+        async with factory() as session:
+            repo = ValidationRunRepository(session)
+            run = await repo.start(
+                workspace_id=ws_id,
+                attempt_id=None,
+                tier=1,
+                commands=[
+                    {
+                        "phase": "validate",
+                        "command": "GITHUB_TOKEN=ghp_secretvalue123 pytest -q",
+                    }
+                ],
+                base_commit="base",
+                target_branch="main",
+                target_head_sha="target",
+                log_stream_refs={
+                    "coverage": {
+                        "status": "failed",
+                        "reason_code": "COVERAGE_BELOW_THRESHOLD",
+                        "percent": 72.0,
+                    }
+                },
+            )
+            await repo.finish(
+                run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                coverage={
+                    "status": "passed",
+                    "reason_code": "COVERAGE_OK",
+                    "percent": 99.4,
+                },
+            )
+            run.log_stream_refs = {
+                "coverage": {
+                    "status": "failed",
+                    "reason_code": "COVERAGE_BELOW_THRESHOLD",
+                    "percent": 72.0,
+                }
+            }
+            await session.commit()
+            validation_run_id = run.id
+
+        evidence = await executor._validation_run_evidence_for_conformance(validation_run_id)
+
+        assert "COVERAGE_OK" in evidence
+        assert "COVERAGE_BELOW_THRESHOLD" not in evidence
+        assert "ghp_secretvalue123" not in evidence
+        assert "[redacted]" in evidence
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_agent_failure_finishes_validate_operation(

@@ -84,6 +84,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
     sync_candidate_readiness,
 )
+from awf.db.validation_runs import validation_run_coverage_payload
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.node.git_manager import mirror_path_for_worktree, repair_agent_writable_worktree
 from awf.profiles.models import WorkspaceProfile
@@ -3541,8 +3542,8 @@ class WorkspaceExecutor:
                     now=datetime.now(UTC),
                 )
             if reusable is not None:
-                metadata = (reusable.log_stream_refs or {}).get("coverage")
-                if isinstance(metadata, Mapping):
+                metadata = validation_run_coverage_payload(reusable)
+                if metadata:
                     return _CoverageEvidenceResult(
                         coverage=_coverage_result_from_metadata(metadata),
                         evidence_status="reused",
@@ -3717,6 +3718,8 @@ class WorkspaceExecutor:
                 }
             else:
                 log_stream_refs = dict(run.log_stream_refs or {})
+                log_stream_refs.pop("coverage", None)
+                coverage = validation_run_coverage_payload(run)
                 payload = {
                     "validation_run_id": run.id,
                     "status": run.status,
@@ -3725,7 +3728,7 @@ class WorkspaceExecutor:
                     "retry_count": run.retry_count,
                     "commands": list(run.commands or [])[:20],
                     "log_stream_refs": log_stream_refs,
-                    "coverage": log_stream_refs.get("coverage"),
+                    "coverage": coverage,
                     "command_set_hash": run.command_set_hash,
                     "base_commit": run.base_commit,
                     "base_sha": run.base_sha,
@@ -3739,10 +3742,12 @@ class WorkspaceExecutor:
                     "environment_identity_digest": run.environment_identity_digest,
                 }
         safe_payload = redact_audit_value(payload)
+        serialized_payload = json.dumps(safe_payload, sort_keys=True, default=str)
+        safe_serialized_payload = redact_audit_text(serialized_payload, limit=20000)
         return (
             "AWF persisted validation run evidence:\n"
             "```json\n"
-            f"{json.dumps(safe_payload, sort_keys=True, default=str)}\n"
+            f"{safe_serialized_payload}\n"
             "```"
         )
 
