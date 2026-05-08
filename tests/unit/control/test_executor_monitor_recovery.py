@@ -1473,6 +1473,7 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
         },
     )
 
+    report_path = f"docs/awf-plans/{ws_id}.conformance.json"
     _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")
     fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
@@ -1483,12 +1484,10 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
     )
     fake.queue_result(
         returncode=0,
-        stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
+        stdout=f"?? {report_path}\n",
     )
     fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-    _queue_post_validation_conformance_report_commit(
-        fake, f"docs/awf-plans/{ws_id}.conformance.json"
-    )
+    _queue_post_validation_conformance_report_commit(fake, report_path)
 
     await executor.execute(ws_id)
 
@@ -1501,6 +1500,15 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
     assert "Validation evidence" in prompt
     assert "VALIDATION_OK" in prompt
     assert "validation.01_validate.stdout" in prompt
+
+    git_calls = [call.args for call in fake.calls if call.args and call.args[0] == "git"]
+    assert any(call[-3:] == ["add", "--", report_path] for call in git_calls)
+    assert any(
+        "commit" in call
+        and "awf: post-validation conformance report" in call
+        and call[-1] == report_path
+        for call in git_calls
+    )
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
