@@ -22,7 +22,11 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
+from awf.db.resilience import invalidate_or_rollback_session
 from awf.runtime.events import ensure_workspace_event_broadcasting
+
+DEFAULT_POOL_RECYCLE_SECONDS = 1800
+DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
 
 
 def make_engine(
@@ -47,6 +51,7 @@ def make_engine(
     raw_connect_attempts = query.pop("awf_connect_attempts", None)
     raw_connect_retries = query.pop("awf_connect_retries", None)
     engine_options: dict[str, object] = {}
+    use_null_pool = False
     if raw_search_path is not None:
         search_path = _single_query_value(raw_search_path)
         existing_server_settings = resolved_connect_args.get("server_settings")
@@ -58,7 +63,12 @@ def make_engine(
     if raw_null_pool is not None:
         null_pool = _single_query_value(raw_null_pool)
         if str(null_pool).lower() in {"1", "true", "yes"}:
+            use_null_pool = True
             engine_options["poolclass"] = NullPool
+    if not use_null_pool:
+        engine_options.setdefault("pool_pre_ping", True)
+        engine_options.setdefault("pool_recycle", DEFAULT_POOL_RECYCLE_SECONDS)
+        engine_options.setdefault("pool_timeout", DEFAULT_POOL_TIMEOUT_SECONDS)
     if raw_connect_timeout is not None:
         resolved_connect_args.setdefault(
             "timeout",
@@ -189,8 +199,8 @@ async def session_scope(
     try:
         yield session
         await session.commit()
-    except Exception:
-        await session.rollback()
+    except Exception as exc:
+        await invalidate_or_rollback_session(session, exc)
         raise
     finally:
         await session.close()

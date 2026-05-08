@@ -19,6 +19,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.workspaces as workspaces_route
@@ -32,11 +33,13 @@ from awf.api.schemas import (
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
+    EgressAuditRepository,
     MergeCandidateRepository,
     SecretLeaseIssue,
     SecretLeaseRepository,
     TaskAttemptRepository,
     TaskRepository,
+    ValidationRunRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
@@ -53,6 +56,10 @@ _MINIMAL_BODY = {
     "agent": "codex",
     "test_commands": ["pytest -q"],
 }
+
+
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
 
 
 _V2_MINIMAL_BODY = {
@@ -2588,6 +2595,66 @@ class TestGetWorkspace:
         assert body["test_commands"] == _MINIMAL_BODY["test_commands"]
 
     @pytest.mark.unit
+    async def test_get_workspace_retries_once_after_closed_connection(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        original = ValidationRunRepository.list_for_workspace
+        failures_remaining = 1
+
+        async def _flaky_validation_runs(
+            self: ValidationRunRepository,
+            workspace_id: str,
+        ) -> list[object]:
+            nonlocal failures_remaining
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(self, workspace_id)
+
+        monkeypatch.setattr(
+            ValidationRunRepository,
+            "list_for_workspace",
+            _flaky_validation_runs,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert response.json()["validation_provenance"]["reason_code"] == "validation_unavailable"
+
+    @pytest.mark.unit
+    async def test_get_workspace_ignores_egress_audit_lookup_failure(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            raise RuntimeError(f"egress audit unavailable for {workspace_id}")
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert response.json()["egress_audit"] is None
+
+    @pytest.mark.unit
     async def test_get_workspace_exposes_validation_provenance_summary(
         self,
         client: AsyncClient,
@@ -2993,9 +3060,9 @@ class TestWorkspaceDirectRoutes:
                 include_resolved=True,
                 session=session,
             )
-            listed = await workspaces_route.list_workspaces(session=session)
-            detail = await workspaces_route.get_workspace(workspace_id, session=session)
             retry_error = await workspaces_route.retry_workspace("ws_missing", session=session)
+        listed = await workspaces_route.list_workspaces(session_factory=factory)
+        detail = await workspaces_route.get_workspace(workspace_id, session_factory=factory)
 
         assert [event.event_type for event in events.items] == ["workspace.created"]
         assert stale.items == []
@@ -3038,6 +3105,33 @@ class TestListWorkspaces:
         response = await client.get("/v1/workspaces")
         assert response.status_code == 200
         assert response.json() == []
+
+    @pytest.mark.unit
+    async def test_list_workspaces_retries_once_after_closed_connection(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="closed connection list")
+        original = WorkspaceRepository.list
+        failures_remaining = 1
+
+        async def _flaky_list(
+            self: WorkspaceRepository,
+            **kwargs: object,
+        ) -> list[Any]:
+            nonlocal failures_remaining
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(self, **kwargs)
+
+        monkeypatch.setattr(WorkspaceRepository, "list", _flaky_list)
+
+        response = await client.get("/v1/workspaces")
+
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()] == [workspace_id]
 
     @pytest.mark.unit
     async def test_returns_created_workspaces_newest_first(self, client: AsyncClient) -> None:

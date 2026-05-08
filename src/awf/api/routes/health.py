@@ -26,6 +26,7 @@ from awf import __version__
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
+from awf.db.resilience import db_connection_failure_reason
 from awf.service.config import resolve_service_settings
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.orphan_resources import (
@@ -183,7 +184,7 @@ async def _check_db(factory: Any) -> CheckResult:
         return CheckResult(
             ok=False,
             status="fail",
-            reason="DB_CONNECTION_FAILED",
+            reason=db_connection_failure_reason(exc),
             detail=_truncate(f"{type(exc).__name__}: {exc}"),
         )
     try:
@@ -202,7 +203,7 @@ async def _check_db(factory: Any) -> CheckResult:
             return CheckResult(
                 ok=False,
                 status="fail",
-                reason="DB_CONNECTION_FAILED",
+                reason=db_connection_failure_reason(exc),
                 detail=_truncate(f"{type(exc).__name__}: {exc}"),
             )
     finally:

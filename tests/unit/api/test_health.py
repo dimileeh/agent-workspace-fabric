@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.health as health_route
@@ -59,6 +60,10 @@ _PROVIDER_ENV_KEYS = (
     "DOCKER_AUTH_CONFIG",
     "DOCKER_HOST",
 )
+
+
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
 
 # ---- /healthz ---------------------------------------------------------------
 
@@ -707,6 +712,33 @@ async def test_readyz_db_query_failure_returns_503(
     assert orphan_check["ok"] is True
     assert orphan_check["status"] == "unknown"
     assert orphan_check["reason"] == "DB_UNAVAILABLE"
+
+
+@pytest.mark.unit
+async def test_readyz_db_closed_connection_returns_specific_diagnostic(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    class _ClosedConnectionSession:
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            raise _closed_connection_error()
+
+        async def close(self) -> None:
+            return None
+
+    app.state.db_session_factory = lambda: _ClosedConnectionSession()
+
+    response = await client.get("/readyz")
+
+    assert response.status_code == 503
+    db_check = response.json()["checks"]["db"]
+    assert db_check["ok"] is False
+    assert db_check["reason"] == "DB_CONNECTION_CLOSED"
+    assert "connection is closed" in (db_check["detail"] or "")
 
 
 @pytest.mark.unit

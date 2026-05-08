@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import event, select, update
+from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import (
@@ -464,6 +465,10 @@ def _live_agent_snapshot(*, container_id: str = "agent") -> RuntimeSnapshot:
     )
 
 
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
+
+
 class _HealthyRuntimeInspector:
     def __init__(self) -> None:
         self.calls: list[str | None] = []
@@ -651,6 +656,53 @@ class TestRunOnce:
 
         assert provisioner.calls == []
 
+    @pytest.mark.unit
+    async def test_run_once_retries_scheduler_read_after_closed_connection(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "closed-connection-requested",
+            create_task_attempt=True,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+        original = WorkspaceRepository.list_schedulable_workspaces
+        failures_remaining = 1
+
+        async def _flaky_list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *args: object,
+            **kwargs: object,
+        ) -> list[Workspace]:
+            nonlocal failures_remaining
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _flaky_list_schedulable_workspaces,
+        )
+
+        assert await worker.run_once() == 1
+
+        assert provisioner.calls == [requested_id]
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(requested_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ready.value
+
 
 class TestRunOnceExecution:
     @pytest.mark.unit
@@ -691,6 +743,74 @@ class TestRunOnceExecution:
 
         assert executor.calls == [high_id]
         assert low_id not in executor.calls
+
+    @pytest.mark.unit
+    async def test_execution_claim_refresh_retries_closed_connection_without_losing_owner(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "claim-refresh-closed-connection",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                execution_claim_lease_seconds=120,
+            ),
+        )
+        old_expiry = datetime.now(UTC) + timedelta(seconds=5)
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = worker._worker_id
+            ws.execution_claim_expires_at = old_expiry
+            await session.commit()
+
+        original = WorkspaceRepository.refresh_execution_claim
+        failures_remaining = 1
+
+        async def _flaky_refresh_execution_claim(
+            self: WorkspaceRepository,
+            workspace_id: str,
+            *,
+            owner_id: str,
+            lease_expires_at: datetime,
+        ) -> bool:
+            nonlocal failures_remaining
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(
+                self,
+                workspace_id,
+                owner_id=owner_id,
+                lease_expires_at=lease_expires_at,
+            )
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "refresh_execution_claim",
+            _flaky_refresh_execution_claim,
+        )
+
+        assert await worker._refresh_execution_claim(workspace_id) is True
+
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.execution_claimed_by == worker._worker_id
+            assert ws.execution_claim_expires_at is not None
+            assert ws.execution_claim_expires_at > old_expiry
 
     @pytest.mark.unit
     async def test_ready_execution_scores_beyond_fetch_window(
@@ -3159,6 +3279,71 @@ class TestRunOnceMonitorRecovery:
 
 
 class TestRunOnceStaleActiveExecutionRecovery:
+    @pytest.mark.unit
+    async def test_stale_active_scan_closed_connection_does_not_terminal_fail_workspace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-scan-closed-connection",
+            WorkspaceStatus.running,
+            node_id="node-a",
+        )
+        previous_owner = "worker-before-restart"
+        previous_expiry = datetime.now(UTC) - timedelta(seconds=5)
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = previous_owner
+            ws.execution_claim_expires_at = previous_expiry
+            await session.commit()
+
+        original = WorkspaceRepository.get
+        failures_remaining = 1
+
+        async def _flaky_get(
+            self: WorkspaceRepository,
+            workspace_id: str,
+        ) -> Workspace | None:
+            nonlocal failures_remaining
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(self, workspace_id)
+
+        monkeypatch.setattr(WorkspaceRepository, "get", _flaky_get)
+        inspector = _RecordingRuntimeInspector({f"awf_{workspace_id}": _live_agent_snapshot()})
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                node_id="node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.execution_claimed_by == previous_owner
+            assert ws.execution_claim_expires_at == previous_expiry
+            assert ws.failure_reason is None
+            events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+
+        assert inspector.calls == []
+        assert any(event.reason_code == "DB_CONNECTION_CLOSED" for event in events)
+
     @pytest.mark.unit
     async def test_stale_running_with_missing_compose_project_fails(
         self,

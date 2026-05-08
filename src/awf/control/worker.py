@@ -40,6 +40,12 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
+from awf.db.resilience import (
+    DB_CONNECTION_CLOSED_REASON,
+    DB_CONNECTION_TRANSIENT_RECOVERED_REASON,
+    is_transient_closed_connection_error,
+    run_db_operation_with_retry,
+)
 from awf.node.cleanup import WorkspaceCleanupResult
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
@@ -121,6 +127,7 @@ ORDERED_READY_EXECUTION_REASON = "ORDERED_READY_EXECUTION"
 ORDERED_MONITOR_RESUME_REASON = "ORDERED_MONITOR_RESUME"
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"
+_DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
 
 
 @dataclass(frozen=True)
@@ -346,6 +353,16 @@ class ControlWorker:
                         timeout=self._config.poll_interval_seconds,
                     )
 
+    async def _log_transient_db_retry(self, exc: BaseException, attempt: int) -> None:
+        _log.warning(
+            "worker.db_connection_retry",
+            reason_code=DB_CONNECTION_TRANSIENT_RECOVERED_REASON,
+            worker_id=self._worker_id,
+            attempt=attempt,
+            error_type=type(exc).__name__,
+            error=str(exc)[:240],
+        )
+
     async def _list_pending(self) -> list[str]:
         """Backward-compatible alias for the original requested query."""
         return await self._list_requested()
@@ -395,7 +412,7 @@ class ControlWorker:
         if limit <= 0:
             return []
 
-        async with self._session_factory() as session:
+        async def _operation(session: AsyncSession) -> list[str]:
             if status not in {
                 WorkspaceStatus.requested,
                 WorkspaceStatus.ready,
@@ -442,6 +459,12 @@ class ControlWorker:
             ordered_ids = [workspace.id for workspace in ordered_workspaces[:limit]]
             await session.commit()
             return ordered_ids
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
 
     async def _filter_provider_recovery_suppressed(
         self,
@@ -583,10 +606,16 @@ class ControlWorker:
         if not workspace_ids:
             return []
 
-        async with self._session_factory() as session:
+        async def _operation(session: AsyncSession) -> dict[str, str]:
             stmt = select(Workspace.id, Workspace.status).where(Workspace.id.in_(workspace_ids))
             result = await session.execute(stmt)
-            statuses: dict[str, str] = {row[0]: row[1] for row in result.all()}
+            return {row[0]: row[1] for row in result.all()}
+
+        statuses = await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
 
         current_ids: list[str] = []
         for workspace_id in workspace_ids:
@@ -650,7 +679,52 @@ class ControlWorker:
             exclude_ids=set(self._execution_tasks)
         )
         for candidate in candidates:
-            await self._recover_stale_active_execution(candidate)
+            try:
+                await self._recover_stale_active_execution(candidate)
+            except Exception as exc:
+                if not is_transient_closed_connection_error(exc):
+                    raise
+                _log.warning(
+                    "worker.stale_active_execution_db_connection_closed",
+                    workspace_id=candidate.workspace_id,
+                    status=candidate.status.value,
+                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                )
+                await self._record_db_connection_closed_event(candidate, exc)
+
+    async def _record_db_connection_closed_event(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        exc: BaseException,
+    ) -> None:
+        payload = {
+            "workspace_status": candidate.status.value,
+            "compose_project_name": candidate.compose_project_name,
+            "message": "Transient closed database connection interrupted worker recovery scan.",
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:240],
+        }
+        try:
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.get(candidate.workspace_id)
+                if ws is None or ws.status != candidate.status.value:
+                    return
+                await repo.add_event(
+                    ws,
+                    event_type=_DB_CONNECTION_TRANSIENT_EVENT_TYPE,
+                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    payload=payload,
+                )
+                await session.commit()
+        except Exception:
+            _log.exception(
+                "worker.db_connection_closed_event_failed",
+                workspace_id=candidate.workspace_id,
+                reason_code=DB_CONNECTION_CLOSED_REASON,
+            )
 
     async def _list_stale_active_execution_candidates(
         self,
@@ -696,9 +770,15 @@ class ControlWorker:
         if exclude_ids:
             stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
 
-        async with self._session_factory() as session:
+        async def _operation(session: AsyncSession) -> list[Any]:
             result = await session.execute(stmt)
-            rows = result.all()
+            return list(result.all())
+
+        rows = await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
 
         return [
             _ActiveExecutionCandidate(
@@ -1702,27 +1782,38 @@ class ControlWorker:
         lease_expires_at = datetime.now(UTC) + timedelta(
             seconds=self._config.monitor_claim_lease_seconds
         )
-        async with self._session_factory() as session:
-            refreshed = await WorkspaceRepository(session).refresh_monitoring_pr_claim(
+
+        async def _operation(session: AsyncSession) -> bool:
+            return await WorkspaceRepository(session).refresh_monitoring_pr_claim(
                 workspace_id,
                 owner_id=self._worker_id,
                 lease_expires_at=lease_expires_at,
             )
-            await session.commit()
-            return refreshed
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            on_retry=self._log_transient_db_retry,
+        )
 
     def _execution_claim_expires_at(self) -> datetime:
         return datetime.now(UTC) + timedelta(seconds=self._config.execution_claim_lease_seconds)
 
     async def _refresh_execution_claim(self, workspace_id: str) -> bool:
-        async with self._session_factory() as session:
-            refreshed = await WorkspaceRepository(session).refresh_execution_claim(
+        async def _operation(session: AsyncSession) -> bool:
+            return await WorkspaceRepository(session).refresh_execution_claim(
                 workspace_id,
                 owner_id=self._worker_id,
                 lease_expires_at=self._execution_claim_expires_at(),
             )
-            await session.commit()
-            return refreshed
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            on_retry=self._log_transient_db_retry,
+        )
 
     async def _release_execution_claim(self, workspace_id: str) -> None:
         try:

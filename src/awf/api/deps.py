@@ -13,6 +13,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings, get_settings
+from awf.db.resilience import invalidate_or_rollback_session
 
 
 def _get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -43,8 +44,8 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
     try:
         yield session
         await session.commit()
-    except Exception:
-        await session.rollback()
+    except Exception as exc:
+        await invalidate_or_rollback_session(session, exc)
         raise
     finally:
         await session.close()
