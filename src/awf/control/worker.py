@@ -110,6 +110,7 @@ _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
 _MONITOR_RECOVERY_OWNER = "control_worker"
+_SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL = 1
 _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE = (
     "STALE_EXECUTION_CLAIM_CLEARED_DURING_MONITOR_RECOVERY"
 )
@@ -446,16 +447,11 @@ class ControlWorker:
         exclude_ids: set[str] | None = None,
     ) -> list[str]:
         async def _operation(session: AsyncSession) -> list[str]:
-            candidate_workspaces = await self._list_scheduler_candidate_workspaces(
+            return await self._list_scheduler_dispatchable_ids_from_pages(
                 session,
                 status=status,
                 limit=limit,
                 exclude_ids=exclude_ids,
-            )
-            return await self._filter_scheduler_candidate_workspaces(
-                session,
-                candidate_workspaces,
-                limit=limit,
             )
 
         return await run_db_operation_with_retry(
@@ -466,34 +462,56 @@ class ControlWorker:
             on_retry=self._log_transient_db_retry,
         )
 
-    async def _list_scheduler_candidate_workspaces(
+    async def _list_scheduler_dispatchable_ids_from_pages(
         self,
         session: AsyncSession,
         *,
         status: WorkspaceStatus,
         limit: int,
         exclude_ids: set[str] | None = None,
-    ) -> list[Workspace]:
-        candidate_workspaces_by_id: dict[str, Workspace] = {}
-        base_exclude_ids = set(exclude_ids or set())
+    ) -> list[str]:
+        dispatchable_workspaces_by_id: dict[str, Workspace] = {}
         candidate_limit = _scheduler_candidate_fetch_limit(limit)
         candidate_after: tuple[datetime, str] | None = None
+        priority_refill_pages_remaining: int | None = None
+        ordered_workspaces: list[Workspace] = []
         repo = WorkspaceRepository(session)
         while True:
             workspaces = await repo.list_schedulable_workspaces(
                 status=status,
                 limit=candidate_limit,
-                exclude_ids=base_exclude_ids,
+                exclude_ids=exclude_ids,
                 after=candidate_after,
             )
             if not workspaces:
                 break
-            candidate_after = _scheduler_candidate_cursor(workspaces)
-            for workspace in workspaces:
-                candidate_workspaces_by_id.setdefault(workspace.id, workspace)
+            page_dispatchable_ids = await self._filter_scheduler_candidate_workspaces(
+                session,
+                workspaces,
+                limit=len(workspaces),
+            )
+            workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
+            for workspace_id in page_dispatchable_ids:
+                workspace = workspaces_by_id.get(workspace_id)
+                if workspace is not None:
+                    dispatchable_workspaces_by_id.setdefault(workspace_id, workspace)
+            ordered_workspaces = _order_scheduler_workspaces(
+                list(dispatchable_workspaces_by_id.values())
+            )
             if len(workspaces) < candidate_limit:
                 break
-        return _order_scheduler_workspaces(list(candidate_workspaces_by_id.values()))
+            if len(ordered_workspaces) >= limit:
+                # Preserve cross-page priority refill without scanning the tail
+                # of a large status queue after dispatch slots are filled.
+                if priority_refill_pages_remaining is None:
+                    priority_refill_pages_remaining = (
+                        _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
+                    )
+                if priority_refill_pages_remaining <= 0:
+                    break
+                priority_refill_pages_remaining -= 1
+            candidate_after = _scheduler_candidate_cursor(workspaces)
+        return [workspace.id for workspace in ordered_workspaces[:limit]]
 
     async def _filter_scheduler_candidate_workspaces(
         self,

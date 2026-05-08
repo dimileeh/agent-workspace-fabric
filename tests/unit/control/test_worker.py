@@ -1028,6 +1028,107 @@ class TestRunOnceExecution:
         assert not set(low_ids).intersection(executor.calls)
 
     @pytest.mark.unit
+    async def test_ready_scan_stops_after_dispatch_slots_are_filled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        candidate_limit = _scheduler_candidate_fetch_limit(1)
+        low_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"bounded-scan-low-{index}",
+                task_class="docs_task",
+                task_policy={"scheduler": {"base_priority": 0}},
+            )
+            for index in range(candidate_limit)
+        ]
+        urgent_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "bounded-scan-urgent",
+            task_class="migration_task",
+            task_policy={"scheduler": {"base_priority": 100, "human_boost": 5}},
+        )
+        tail_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"bounded-scan-tail-{index}",
+                task_class="docs_task",
+                task_policy={"scheduler": {"base_priority": 0}},
+            )
+            for index in range(candidate_limit)
+        ]
+        ordered_ids = [*low_ids, urgent_id, *tail_ids]
+        base_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        created_at_by_id: dict[str, datetime] = {}
+        async with session_factory() as session:
+            for index, workspace_id in enumerate(ordered_ids):
+                created_at = base_created_at + timedelta(seconds=index)
+                created_at_by_id[workspace_id] = created_at
+                await session.execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace_id)
+                    .values(created_at=created_at, updated_at=created_at)
+                )
+            await session.commit()
+        query_cursors: list[tuple[datetime, str] | None] = []
+
+        async def _list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+            after: tuple[datetime, str] | None = None,
+        ) -> list[Workspace]:
+            assert status == WorkspaceStatus.ready
+            assert limit == candidate_limit
+            excluded = set(exclude_ids or set())
+            query_cursors.append(after)
+            visible = [workspace_id for workspace_id in ordered_ids if workspace_id not in excluded]
+            if after is not None:
+                visible = [
+                    workspace_id
+                    for workspace_id in visible
+                    if (created_at_by_id[workspace_id], workspace_id) > after
+                ]
+            visible = visible[:limit]
+            if not visible:
+                return []
+            result = await self._session.execute(select(Workspace).where(Workspace.id.in_(visible)))
+            rows = {workspace.id: workspace for workspace in result.scalars()}
+            return [rows[workspace_id] for workspace_id in visible]
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
+            raising=False,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker._list_ready(limit=1) == [urgent_id]  # noqa: SLF001
+        assert query_cursors == [
+            None,
+            (created_at_by_id[low_ids[-1]], low_ids[-1]),
+        ]
+        assert all(cursor is None or cursor[1] not in tail_ids for cursor in query_cursors)
+
+    @pytest.mark.unit
     async def test_human_boosted_ready_workspace_wins_equal_priority_dispatch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
