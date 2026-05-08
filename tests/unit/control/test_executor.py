@@ -1649,8 +1649,12 @@ class TestHappyPath:
         post_validation_conformance_index = max(
             index for index, prompt in enumerate(adapter_prompts) if "Conformance phase" in prompt
         )
+        post_validation_prompt = adapter_prompts[post_validation_conformance_index]
 
         assert fix_prompt_index < post_validation_conformance_index
+        assert "### Validation evidence" in post_validation_prompt
+        assert "VALIDATION_OK" in post_validation_prompt
+        assert "COMMAND_FAILED" not in post_validation_prompt
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             runs = (
