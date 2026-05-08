@@ -116,6 +116,14 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_post_validation_conformance_report_commit(
+    fake: FakeCommandRunner, report_path: str
+) -> None:
+    fake.queue_result(returncode=0)  # git add report
+    fake.queue_result(returncode=0, stdout=f"{report_path}\n")  # cached report diff
+    fake.queue_result(returncode=0)  # commit refreshed report
+
+
 def _created_pr_body(fake: FakeCommandRunner) -> str:
     create_call = next(call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "create"])
     return create_call[create_call.index("--body") + 1]
@@ -702,6 +710,9 @@ class TestHappyPath:
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
         )
+        _queue_post_validation_conformance_report_commit(
+            fake, f"docs/awf-plans/{ws_id}.conformance.json"
+        )
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -1029,6 +1040,9 @@ class TestHappyPath:
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
         )
+        _queue_post_validation_conformance_report_commit(
+            fake, f"docs/awf-plans/{ws_id}.conformance.json"
+        )
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -1254,6 +1268,9 @@ class TestHappyPath:
         fake.queue_result(
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
+        )
+        _queue_post_validation_conformance_report_commit(
+            fake, f"docs/awf-plans/{ws_id}.conformance.json"
         )
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)

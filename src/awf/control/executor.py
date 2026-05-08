@@ -3680,6 +3680,18 @@ class WorkspaceExecutor:
         report_text = _read_text_if_present(worktree_path / handoff.report_path)
         report = parse_conformance_report(report_text or compare_result.stdout)
         if report.satisfied:
+            if report_text is None:
+                self._write_satisfied_post_validation_conformance_report(
+                    worktree_path=worktree_path,
+                    report_path=handoff.report_path,
+                    report=report,
+                )
+            await self._commit_post_validation_conformance_report(
+                workspace_id=workspace.id,
+                worktree_path=worktree_path,
+                report_path=handoff.report_path,
+                validation_run_id=validation_run_id,
+            )
             await self._record_post_validation_conformance_event(
                 workspace_id=workspace.id,
                 handoff=handoff,
@@ -3703,6 +3715,102 @@ class WorkspaceExecutor:
                 "validation_run_id": validation_run_id,
             },
         )
+
+    @staticmethod
+    def _write_satisfied_post_validation_conformance_report(
+        *,
+        worktree_path: Path,
+        report_path: Path,
+        report: PlanConformanceReport,
+    ) -> None:
+        path = worktree_path / report_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "status": report.status.value,
+                    "summary": report.summary,
+                    "reason_code": report.reason_code,
+                    "gaps": list(report.gaps),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    async def _commit_post_validation_conformance_report(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        report_path: Path,
+        validation_run_id: str,
+    ) -> bool:
+        report_path_text = report_path.as_posix()
+        git_base = [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+        ]
+        add_result = await self._runner.run([*git_base, "add", "--", report_path_text])
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_validation_conformance_report_git_add",
+        )
+        if not add_result.ok:
+            raise RuntimeError(
+                "post-validation conformance report git add failed "
+                f"(exit={add_result.returncode}): {add_result.stderr}"
+            )
+
+        cached = await self._runner.run(
+            [*git_base, "diff", "--cached", "--name-only", "--", report_path_text]
+        )
+        if not cached.ok:
+            raise RuntimeError(
+                "post-validation conformance report staged diff failed "
+                f"(exit={cached.returncode}): {cached.stderr}"
+            )
+        staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
+        if report_path_text not in staged_paths:
+            _log.info(
+                "executor.post_validation_conformance_report_no_commit_needed",
+                workspace_id=workspace_id,
+                report_path=report_path_text,
+                validation_run_id=validation_run_id,
+            )
+            return False
+
+        commit_result = await self._runner.run(
+            [
+                *git_base,
+                *git_identity_config_args(),
+                "commit",
+                "-m",
+                "awf: post-validation conformance report",
+                "-m",
+                (
+                    "Persist satisfied post-validation conformance report "
+                    f"for validation run {validation_run_id}."
+                ),
+                "--",
+                report_path_text,
+            ],
+        )
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_validation_conformance_report_git_commit",
+        )
+        if not commit_result.ok:
+            raise RuntimeError(
+                "post-validation conformance report commit failed "
+                f"(exit={commit_result.returncode}): {commit_result.stderr}"
+            )
+        return True
 
     async def _record_post_validation_conformance_event(
         self,

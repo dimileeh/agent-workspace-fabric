@@ -51,6 +51,14 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+def _queue_post_validation_conformance_report_commit(
+    fake: FakeCommandRunner, report_path: str
+) -> None:
+    fake.queue_result(returncode=0)  # git add report
+    fake.queue_result(returncode=0, stdout=f"{report_path}\n")  # cached report diff
+    fake.queue_result(returncode=0)  # commit refreshed report
+
+
 async def _force_workspace_status(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -1475,6 +1483,9 @@ async def test_validate_only_recovery_with_conformance_handoff_runs_evidence_che
     fake.queue_result(
         returncode=0,
         stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
+    )
+    _queue_post_validation_conformance_report_commit(
+        fake, f"docs/awf-plans/{ws_id}.conformance.json"
     )
 
     await executor.execute(ws_id)

@@ -36,6 +36,7 @@ from awf.control.executor import (
     _GitObjectRecoveryResult,
     _MonitorRebaseRecoveryError,
     _planning_validation_handoff_from_recovery_payload,
+    _PlanningValidationHandoff,
     _profile_with_planning_iteration_default,
     _raw_profile_has_explicit_planning_max_iterations,
     _read_ref_sha,
@@ -66,6 +67,8 @@ from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PLAN_CONFORMANCE_UNSATISFIED,
+    PlanConformanceReport,
+    PlanConformanceStatus,
 )
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -237,6 +240,77 @@ class _CoverageValidation:
         self.calls.append(phase)
         self.kwargs.append(dict(_kwargs))
         return self.coverage
+
+
+@pytest.mark.unit
+async def test_satisfied_post_validation_conformance_report_is_committed(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    report_file.write_text(
+        '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}',
+        encoding="utf-8",
+    )
+    runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
+    runner.queue_result(returncode=0)  # git commit report
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    event_markers: list[tuple[str, int]] = []
+
+    async def record_event(**_kwargs: object) -> None:
+        event_markers.append(("record", len(runner.calls)))
+
+    executor._record_post_validation_conformance_event = record_event  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is None
+    add_index = next(
+        index
+        for index, call in enumerate(runner.calls)
+        if call.args[-3:] == ["add", "--", report_path.as_posix()]
+    )
+    commit_index = next(
+        index for index, call in enumerate(runner.calls) if "commit" in call.args
+    )
+    assert add_index < commit_index
+    assert event_markers == [("record", len(runner.calls))]
+    assert commit_index < event_markers[0][1]
 
 
 def _coordination_task_policy() -> dict[str, object]:
