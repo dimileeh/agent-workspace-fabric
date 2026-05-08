@@ -496,6 +496,31 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
     def has_marker(marker: str) -> bool:
         return re.search(rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])", text) is not None
 
+    named_validation_command_handoff = (
+        re.search(r"(?<![a-z0-9_])(?:re-?run|run)(?![a-z0-9_])", text) is not None
+        and any(
+            has_marker(marker)
+            for marker in (
+                "awf",
+                "validation",
+                "validation phase",
+                "profile gate",
+                "profile gates",
+            )
+        )
+        and any(
+            has_marker(marker)
+            for marker in (
+                "pytest",
+                "ruff",
+                "mypy",
+                "coverage",
+                "npm",
+                "lint",
+                "build",
+            )
+        )
+    )
     evidence_markers = (
         "evidence",
         "provenance",
@@ -515,7 +540,9 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "profile gate",
         "profile gates",
     )
-    if not any(has_marker(marker) for marker in evidence_markers):
+    if not named_validation_command_handoff and not any(
+        has_marker(marker) for marker in evidence_markers
+    ):
         return False
     validation_subject_markers = (
         "validation",
@@ -528,7 +555,9 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "log",
         "logs",
     )
-    if not any(has_marker(marker) for marker in validation_subject_markers):
+    if not named_validation_command_handoff and not any(
+        has_marker(marker) for marker in validation_subject_markers
+    ):
         return False
     # Migration implementation gaps stay agent-owned; migration-gate evidence
     # gaps are AWF-owned because the profile gate must produce that evidence.

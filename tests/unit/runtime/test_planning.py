@@ -353,6 +353,27 @@ def test_conformance_requires_awf_validation_accepts_documentation_context_gaps(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "gap",
+    (
+        "Run pytest under AWF validation.",
+        "rerun pytest under AWF.",
+    ),
+)
+def test_conformance_requires_awf_validation_accepts_named_validation_command_handoff_gaps(
+    gap: str,
+) -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration",'
+        '"summary":"Implementation appears complete; AWF validation command is needed.",'
+        '"reason_code":"CONFORMANCE_REQUIRES_AWF_VALIDATION",'
+        f'"gaps":["{gap}"]}}'
+    )
+
+    assert conformance_requires_awf_validation(report)
+
+
+@pytest.mark.unit
 def test_conformance_requires_awf_validation_rejects_mixed_or_ordinary_gaps() -> None:
     mixed = parse_conformance_report(
         '{"status":"needs_iteration",'
