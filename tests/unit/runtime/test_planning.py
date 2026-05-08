@@ -244,6 +244,8 @@ def test_conformance_requires_awf_validation_accepts_validation_evidence_only_ga
     (
         "AWF-owned coverage evidence is stale.",
         "Required profile gate logs are missing from the workspace artifacts.",
+        "AWF functional test coverage logs are missing.",
+        "AWF coverage classification log is missing.",
     ),
 )
 def test_conformance_requires_awf_validation_accepts_validation_subject_gaps_without_literal_validation(

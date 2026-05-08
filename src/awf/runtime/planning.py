@@ -539,7 +539,7 @@ def _is_awf_validation_evidence_gap(gap: str) -> bool:
         "schema",
         "migration",
     )
-    if any(marker in text for marker in deterministic_markers):
+    if any(has_marker(marker) for marker in deterministic_markers):
         return False
     deterministic_gap_patterns = (
         r"(?:^|[.;:]\s*|(?<![a-z0-9_])please\s+)document(?![a-z0-9_])"
