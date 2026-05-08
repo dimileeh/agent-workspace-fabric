@@ -4048,7 +4048,7 @@ class WorkspaceExecutor:
                     "tier": run.tier,
                     "retry_count": run.retry_count,
                     "command_set_hash": run.command_set_hash,
-                    "commands": list(run.commands or [])[:20],
+                    "commands": list(run.commands or []),
                     "log_stream_refs": log_stream_refs,
                     "profile_name": run.profile_name,
                     "profile_version": run.profile_version,

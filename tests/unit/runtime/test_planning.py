@@ -270,6 +270,8 @@ def test_conformance_requires_awf_validation_rejects_empty_gaps_even_with_reason
         "AWF-owned coverage evidence is stale.",
         "Required profile gate logs are missing from the workspace artifacts.",
         "AWF functional test coverage logs are missing.",
+        "AWF unit test suite coverage evidence is missing.",
+        "AWF test runner coverage not found.",
         "AWF coverage classification log is missing.",
     ),
 )

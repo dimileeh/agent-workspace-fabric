@@ -885,6 +885,68 @@ class TestHappyPath:
         assert "[redacted]" in evidence
 
     @pytest.mark.unit
+    async def test_validation_handoff_evidence_keeps_late_coverage_command_provenance(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        commands = [
+            {"phase": "validate", "command": f"pytest tests/unit/test_{idx}.py -q"}
+            for idx in range(24)
+        ]
+        commands.append(
+            {
+                "phase": "coverage",
+                "command": "pytest --cov=awf --cov-report=term",
+            }
+        )
+
+        async with factory() as session:
+            repo = ValidationRunRepository(session)
+            run = await repo.start(
+                workspace_id=ws_id,
+                attempt_id=None,
+                tier=1,
+                commands=commands,
+                base_commit="base",
+                target_branch="main",
+                target_head_sha="target",
+                log_stream_refs={},
+            )
+            await repo.finish(
+                run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                coverage={
+                    "status": "passed",
+                    "reason_code": "COVERAGE_OK",
+                    "percent": 99.4,
+                },
+                coverage_evidence_status="reused",
+                coverage_evidence_reason_code="COVERAGE_EVIDENCE_REUSED",
+            )
+            validation_run_id = run.id
+            await session.commit()
+
+        evidence = await executor._validation_run_evidence_for_conformance(validation_run_id)
+        json_text = evidence.split("```json\n", 1)[1].split("\n```", 1)[0]
+        payload = json.loads(json_text)
+        coverage_commands = [
+            command for command in payload["commands"] if command.get("phase") == "coverage"
+        ]
+
+        assert len(payload["commands"]) == 25
+        assert coverage_commands == [
+            {
+                "phase": "coverage",
+                "command": "pytest --cov=awf --cov-report=term",
+                "evidence_status": "reused",
+                "evidence_reason_code": "COVERAGE_EVIDENCE_REUSED",
+            }
+        ]
+
+    @pytest.mark.unit
     async def test_validation_handoff_evidence_keeps_large_payload_json_valid(
         self,
         executor: WorkspaceExecutor,
