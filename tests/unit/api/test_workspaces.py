@@ -2687,6 +2687,52 @@ class TestGetWorkspace:
         assert calls == 2
 
     @pytest.mark.unit
+    async def test_get_workspace_isolates_transient_egress_audit_lookup_from_response_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        calls = 0
+        response_session_cleanup_calls = 0
+
+        async def _flaky_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise _closed_connection_error()
+            return None
+
+        async def _record_response_session_cleanup(
+            session: object,
+            exc: BaseException,
+        ) -> None:
+            nonlocal response_session_cleanup_calls
+            response_session_cleanup_calls += 1
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _flaky_audit_lookup,
+        )
+        monkeypatch.setattr(
+            workspaces_route,
+            "invalidate_or_rollback_session",
+            _record_response_session_cleanup,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert calls == 2
+        assert response_session_cleanup_calls == 0
+
+    @pytest.mark.unit
     async def test_get_workspace_retries_transient_egress_audit_lookup_failure(
         self,
         client: AsyncClient,

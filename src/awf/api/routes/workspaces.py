@@ -499,25 +499,30 @@ async def _get_workspace_response(
         validation_runs,
         candidate=latest_merge_candidate(ws),
     )
-    egress_audit = None
-    try:
-        audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
-        egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
-    except Exception as exc:
-        if is_transient_closed_connection_error(exc):
-            _logger.warning(
-                "egress audit lookup failed transiently for workspace %s",
-                workspace_id,
-                exc_info=True,
-            )
-            await invalidate_or_rollback_session(session, exc)
-            if egress_audit_session_factory is not None:
-                egress_audit = await _retry_optional_egress_audit_lookup(
+    if egress_audit_session_factory is not None:
+        egress_audit = await _retry_optional_egress_audit_lookup(
+            workspace_id,
+            egress_audit_session_factory,
+        )
+    else:
+        egress_audit = None
+        try:
+            audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
+            egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
+        except Exception as exc:
+            if is_transient_closed_connection_error(exc):
+                _logger.warning(
+                    "egress audit lookup failed transiently for workspace %s",
                     workspace_id,
-                    egress_audit_session_factory,
+                    exc_info=True,
                 )
-        else:
-            _logger.warning("egress audit lookup failed for workspace %s", workspace_id, exc_info=True)
+                await invalidate_or_rollback_session(session, exc)
+            else:
+                _logger.warning(
+                    "egress audit lookup failed for workspace %s",
+                    workspace_id,
+                    exc_info=True,
+                )
     return workspace_response(
         ws,
         validation_provenance=validation_provenance,
@@ -537,7 +542,7 @@ async def _retry_optional_egress_audit_lookup(
         return await run_db_operation_with_retry(
             session_factory,
             _lookup,
-            attempts=1,
+            attempts=2,
         )
     except Exception:
         _logger.warning(
