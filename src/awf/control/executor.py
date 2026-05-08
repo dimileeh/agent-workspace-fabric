@@ -190,6 +190,9 @@ _PR_CREATE_FAILED_REASON_CODE = "PR_CREATE_FAILED"
 GIT_AGENT_WRITABILITY_FAILED_REASON_CODE = "GIT_AGENT_WRITABILITY_FAILED"
 GIT_OBJECT_MISSING_REASON_CODE = "GIT_OBJECT_MISSING"
 GIT_OBJECT_MISSING_RECOVERED_REASON_CODE = "GIT_OBJECT_MISSING_RECOVERED"
+POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE = (
+    "POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED"
+)
 _PR_MONITOR_ADOPTED_EVENT = "workspace.pr_monitor_adopted"
 _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
@@ -217,6 +220,19 @@ _REBASE_RECOVERY_OPERATION_IDENTITY_KEYS = (
 class _RebaseRecoveryResult:
     base_sha: str
     head_sha: str
+
+
+class _PostValidationConformanceReportGitError(RuntimeError):
+    def __init__(self, *, operation: str, result: CommandResult) -> None:
+        output = (result.stderr or result.stdout or "").strip()
+        message = (
+            f"post-validation conformance report git {operation} failed "
+            f"(exit={result.returncode}): {output}"
+        )
+        super().__init__(message)
+        self.operation = operation
+        self.returncode = result.returncode
+        self.command_reason_code = result.reason_code
 
 
 @dataclass(frozen=True)
@@ -2223,6 +2239,44 @@ class WorkspaceExecutor:
                             ),
                         )
                         return
+                    except _PostValidationConformanceReportGitError as exc:
+                        reason_code = POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
+                        message = str(exc)
+                        _log.error(
+                            "executor.post_validation_conformance_report_git_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            operation=exc.operation,
+                            returncode=exc.returncode,
+                            command_reason_code=exc.command_reason_code,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        failure_details: dict[str, Any] = {
+                            "validation_run_id": validation_run_id,
+                            "report_path": planning_validation_handoff.report_path.as_posix(),
+                            "operation": exc.operation,
+                            "returncode": exc.returncode,
+                        }
+                        if exc.command_reason_code is not None:
+                            failure_details["command_reason_code"] = exc.command_reason_code
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=reason_code,
+                            details=failure_details,
+                        )
+                        return
                     if conformance_failure is not None:
                         if pass_number >= max_fix_passes:
                             await self._finish_pending_validate_operations(
@@ -3782,18 +3836,18 @@ class WorkspaceExecutor:
             reason="post_validation_conformance_report_git_add",
         )
         if not add_result.ok:
-            raise RuntimeError(
-                "post-validation conformance report git add failed "
-                f"(exit={add_result.returncode}): {add_result.stderr}"
+            raise _PostValidationConformanceReportGitError(
+                operation="add",
+                result=add_result,
             )
 
         cached = await self._runner.run(
             [*git_base, "diff", "--cached", "--name-only", "--", report_path_text]
         )
         if not cached.ok:
-            raise RuntimeError(
-                "post-validation conformance report staged diff failed "
-                f"(exit={cached.returncode}): {cached.stderr}"
+            raise _PostValidationConformanceReportGitError(
+                operation="diff",
+                result=cached,
             )
         staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
         if report_path_text not in staged_paths:
@@ -3827,9 +3881,9 @@ class WorkspaceExecutor:
             reason="post_validation_conformance_report_git_commit",
         )
         if not commit_result.ok:
-            raise RuntimeError(
-                "post-validation conformance report commit failed "
-                f"(exit={commit_result.returncode}): {commit_result.stderr}"
+            raise _PostValidationConformanceReportGitError(
+                operation="commit",
+                result=commit_result,
             )
         return True
 

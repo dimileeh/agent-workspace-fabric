@@ -21,6 +21,7 @@ from awf.adapters.base import AgentAdapter
 from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, FakeCommandRunner
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.executor import (
+    POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
     ExecutorConfig,
     WorkspaceExecutor,
     _apply_baseline_coverage_ratchet,
@@ -1228,6 +1229,122 @@ class TestHappyPath:
         assert EXEC_PROCESS_CLEANUP_FAILED in operation["error_message"]
         result = _json_value(operation["result"])
         assert result["reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert result["validation_run_id"]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "failing_git_operation",
+        ["add", "diff", "commit"],
+    )
+    async def test_planning_validation_handoff_report_commit_failure_finishes_validate_operation(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        failing_git_operation: str,
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned-recovery",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 2,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        operation_id = f"op_pv_{failing_git_operation}_failed"
+        await _insert_validate_handoff_recovery_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id=operation_id,
+        )
+
+        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
+        satisfied_report = json.dumps(
+            {
+                "status": "satisfied",
+                "summary": "implementation and validation evidence satisfy the plan",
+                "gaps": [],
+            }
+        )
+        failure_message = f"{failing_git_operation} failed"
+
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
+        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
+        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
+        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        if failing_git_operation == "add":
+            fake.queue_result(returncode=1, stderr=failure_message)
+        elif failing_git_operation == "diff":
+            fake.queue_result(returncode=0)  # git add report
+            fake.queue_result(returncode=1, stderr=failure_message)
+        else:
+            fake.queue_result(returncode=0)  # git add report
+            fake.queue_result(returncode=0, stdout=f"{report_path}\n")  # cached report diff
+            fake.queue_result(returncode=1, stderr=failure_message)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            run = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, reason_code
+                            FROM validation_runs
+                            WHERE workspace_id = :workspace_id
+                            """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            operation = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, error_code, error_message, result, finished_at
+                            FROM operations
+                            WHERE id = :operation_id
+                        """
+                        ),
+                        {"operation_id": operation_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "post-validation conformance report" in (ws.failure_message or "")
+        assert failure_message in (ws.failure_message or "")
+        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
+        assert operation["status"] == "failed"
+        assert (
+            operation["error_code"]
+            == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
+        )
+        assert operation["finished_at"] is not None
+        assert failure_message in operation["error_message"]
+        result = _json_value(operation["result"])
+        assert (
+            result["reason_code"]
+            == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
+        )
         assert result["validation_run_id"]
 
     @pytest.mark.unit
