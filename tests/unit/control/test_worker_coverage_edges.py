@@ -13,6 +13,10 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import (
+    _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
+    _STALE_ACTIVE_EXECUTION_REASON_CODE,
+    ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+    ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
     ControlWorker,
     WorkerConfig,
     _active_execution_preservation_claim_cleanup_payload,
@@ -580,6 +584,119 @@ def test_active_execution_preservation_claim_cleanup_preserves_unexpired_claim()
 
 
 @pytest.mark.unit
+async def test_active_execution_preservation_checks_skip_missing_workspaces(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    candidate = _ActiveExecutionCandidate(
+        workspace_id="ws_missing",
+        status=WorkspaceStatus.running,
+        compose_project_name="awf_missing",
+    )
+
+    assert not await worker._has_operator_refresh_after_latest_preservation(candidate)  # noqa: SLF001
+    assert not await worker._has_current_preserved_active_execution(candidate)  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_active_execution_event_queries_accept_event_floor(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    event_floor = datetime.now(UTC)
+
+    async with factory() as session:
+        assert not await worker._has_stale_active_execution_event(  # noqa: SLF001
+            session,
+            "ws_missing",
+            event_floor=event_floor,
+        )
+        assert not await worker._has_preserved_active_execution_event(  # noqa: SLF001
+            session,
+            "ws_missing",
+            WorkspaceStatus.running,
+            event_floor=event_floor,
+        )
+        assert (
+            await worker._latest_preserved_active_execution_at(  # noqa: SLF001
+                session,
+                "ws_missing",
+                WorkspaceStatus.running,
+                event_floor=event_floor,
+            )
+            is None
+        )
+        assert not await worker._has_stale_active_execution_event(  # noqa: SLF001
+            session,
+            "ws_missing",
+        )
+        assert not await worker._has_preserved_active_execution_event(  # noqa: SLF001
+            session,
+            "ws_missing",
+            WorkspaceStatus.running,
+        )
+        assert (
+            await worker._latest_preserved_active_execution_at(  # noqa: SLF001
+                session,
+                "ws_missing",
+                WorkspaceStatus.running,
+            )
+            is None
+        )
+
+
+@pytest.mark.unit
+async def test_record_preserved_active_execution_skips_missing_workspace(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+
+    await worker._record_preserved_active_execution_after_restart(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id="ws_missing",
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_missing",
+        ),
+        RuntimeSnapshot(stack_state="running", services=[]),
+    )
+
+
+@pytest.mark.unit
+async def test_stale_active_execution_can_fail_rejects_preserved_runtime(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _seed_status(factory, WorkspaceStatus.running, title="preserved")
+    worker = _worker(factory)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        ws.execution_claimed_by = "stale-worker"
+        ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=30)
+        await repo.add_event(
+            ws,
+            event_type=_STALE_ACTIVE_EXECUTION_EVENT_TYPE,
+            reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+            payload={"workspace_status": WorkspaceStatus.running.value},
+        )
+        await repo.add_event(
+            ws,
+            event_type=ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
+            reason_code=ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
+            payload={"workspace_status": WorkspaceStatus.running.value},
+        )
+        await session.commit()
+
+    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name=f"awf_{workspace_id}",
+        )
+    )
+
+
+@pytest.mark.unit
 def test_monitor_claim_staleness_and_json_datetime_handle_naive_datetimes() -> None:
     cutoff = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
 
@@ -734,6 +851,44 @@ async def test_execution_and_monitor_claim_helpers_skip_already_running_task(
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.unit
+async def test_dispatchable_execution_ids_stops_after_limit(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+
+    assert worker._dispatchable_execution_ids(["ws_one", "ws_two"], limit=1) == ["ws_one"]  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_finish_monitor_recovery_operation_skips_wrong_workspace(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _seed_status(factory, WorkspaceStatus.monitoring_pr, title="operation")
+    worker = _worker(factory)
+    async with factory() as session:
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+            payload={"requested_action": OperationType.remonitor.value},
+        )
+        operation_id = operation.id
+        await session.commit()
+
+    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        "ws_other",
+        operation_id=operation_id,
+        status=OperationStatus.succeeded,
+    )
+
+    async with factory() as session:
+        operation = await OperationRepository(session).get(operation_id)
+
+    assert operation is not None
+    assert operation.status == OperationStatus.running.value
 
 
 @pytest.mark.unit

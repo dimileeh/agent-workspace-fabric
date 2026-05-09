@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -54,6 +55,13 @@ def test_idempotency_identity_matching_accepts_missing_identity_and_rejects_non_
         identity={"reason": "operator requested"},
         identity_keys=None,
     )
+
+
+@pytest.mark.unit
+def test_pr_monitor_recovery_operation_rejects_non_mapping_payload() -> None:
+    operation = SimpleNamespace(type=OperationType.validate.value, payload=["not", "mapping"])
+
+    assert not controls._is_pr_monitor_recovery_operation(operation)  # noqa: SLF001
 
 
 @pytest.mark.unit

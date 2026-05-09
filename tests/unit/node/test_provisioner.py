@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import EgressDecision, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
     EgressAuditRepository,
@@ -32,7 +32,9 @@ from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import (
     Provisioner,
     ProvisionerConfig,
+    _egress_plan_decision,
     _egress_plan_destination_category,
+    _positive_int,
     _provision_checkout_base_branch,
     _provision_remote_push_branch,
 )
@@ -124,6 +126,38 @@ def test_egress_plan_destination_category_keeps_restricted_distinct_from_offline
     expected_category: str,
 ) -> None:
     assert _egress_plan_destination_category(mode) == expected_category
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("mode", "expected_decision"),
+    [
+        (EgressMode.open, EgressDecision.allow),
+        (EgressMode.offline, EgressDecision.deny),
+        (EgressMode.restricted, EgressDecision.deferred),
+    ],
+)
+def test_egress_plan_decision_maps_profile_modes(
+    mode: EgressMode,
+    expected_decision: EgressDecision,
+) -> None:
+    assert _egress_plan_decision(mode) == expected_decision
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, None),
+        (7, 7),
+        (0, None),
+        (" 5 ", 5),
+        ("0", None),
+        ("five", None),
+    ],
+)
+def test_positive_int_accepts_only_positive_int_values(value: object, expected: int | None) -> None:
+    assert _positive_int(value) == expected
 
 
 class TestSuccess:
