@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from time import monotonic
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -513,9 +513,7 @@ class ControlWorker:
                 # Preserve cross-page priority refill without scanning the tail
                 # of a large status queue after dispatch slots are filled.
                 if priority_refill_pages_remaining is None:
-                    priority_refill_pages_remaining = (
-                        _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
-                    )
+                    priority_refill_pages_remaining = _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
                 if priority_refill_pages_remaining <= 0:
                     break
                 priority_refill_pages_remaining -= 1
@@ -561,13 +559,13 @@ class ControlWorker:
         if not workspaces:
             return []
         if isinstance(workspaces[0], str):
-            workspace_ids = cast("list[str]", workspaces)
+            workspace_ids = workspaces
             stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
             rows = {
                 workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()
             }
         else:
-            workspace_rows = cast("list[Workspace]", workspaces)
+            workspace_rows = workspaces
             workspace_ids = [workspace.id for workspace in workspace_rows]
             rows = {workspace.id: workspace for workspace in workspace_rows}
         now = datetime.now(UTC)

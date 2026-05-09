@@ -552,7 +552,12 @@ async def readyz(
 
     async def _check_egress_audit() -> CheckResult:
         if factory is None:
-            return CheckResult(ok=True, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail="No session factory available")
+            return CheckResult(
+                ok=True,
+                status="unknown",
+                reason="EGRESS_AUDIT_UNAVAILABLE",
+                detail="No session factory available",
+            )
         try:
             counts = await _egress_audit_summary_counts_with_timeout(factory)
             posture_counts = {str(posture): int(count) for posture, count in counts.items()}

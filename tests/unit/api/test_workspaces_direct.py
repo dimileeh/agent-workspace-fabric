@@ -185,7 +185,9 @@ class TestGetDirect:
             calls += 1
             return await original(*args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(workspaces_route, "_get_workspace_response", _tracked_workspace_response)
+        monkeypatch.setattr(
+            workspaces_route, "_get_workspace_response", _tracked_workspace_response
+        )
 
         result = await get_workspace(created.workspace_id, session_factory=session_factory)
 

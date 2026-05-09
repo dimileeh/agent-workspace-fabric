@@ -1626,13 +1626,10 @@ class ValidationRunRepository:
         rows = (await self._session.execute(stmt)).scalars().all()
         for row in rows:
             coverage = validation_run_coverage_payload(row)
-            if (
-                coverage.get("status") in {
-                    "passed",
-                    "not_configured",
-                }
-                and not _coverage_metadata_has_pytest_failures(coverage)
-            ):
+            if coverage.get("status") in {
+                "passed",
+                "not_configured",
+            } and not _coverage_metadata_has_pytest_failures(coverage):
                 return row
         return None
 
@@ -2652,10 +2649,13 @@ class WorkspaceRepository:
         await self._session.flush()
         return workspace
 
-
     async def update_activity(self, workspace_id: str, *, subphase: str | None = None) -> None:
-        stmt = update(Workspace).where(Workspace.id == workspace_id).values(
-            last_activity_at=datetime.now(UTC),
+        stmt = (
+            update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(
+                last_activity_at=datetime.now(UTC),
+            )
         )
         if subphase is not None:
             stmt = stmt.values(subphase=subphase)
@@ -3876,9 +3876,7 @@ def _scheduler_json_string_expr(
 ) -> ColumnElement[Any]:
     del dialect_name
     return func.nullif(
-        func.trim(
-            _scheduler_json_path_expr(path, workspace_entity=workspace_entity).as_string()
-        ),
+        func.trim(_scheduler_json_path_expr(path, workspace_entity=workspace_entity).as_string()),
         "",
     )
 
@@ -3992,9 +3990,7 @@ def _scheduler_age_boost_expr(
                 (
                     workspace_entity.created_at
                     <= scoring_time
-                    - text(
-                        f"INTERVAL '{boost * AGE_BOOST_INTERVAL_SECONDS} seconds'"
-                    ),
+                    - text(f"INTERVAL '{boost * AGE_BOOST_INTERVAL_SECONDS} seconds'"),
                     boost,
                 )
                 for boost in range(AGE_BOOST_MAX, 0, -1)

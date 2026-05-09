@@ -31,19 +31,12 @@ def test_alembic_revision_graph_has_single_head() -> None:
 def test_validation_run_coverage_migration_uses_metadata_only_column_ops() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     migration_path = (
-        repo_root
-        / "migrations"
-        / "versions"
-        / "c5d6e7f8a9b0_validation_run_coverage.py"
+        repo_root / "migrations" / "versions" / "c5d6e7f8a9b0_validation_run_coverage.py"
     )
     tree = ast.parse(migration_path.read_text(encoding="utf-8"))
 
     call_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    call_attrs = [
-        node.func.attr
-        for node in call_nodes
-        if isinstance(node.func, ast.Attribute)
-    ]
+    call_attrs = [node.func.attr for node in call_nodes if isinstance(node.func, ast.Attribute)]
     op_call_attrs = {
         node.func.attr
         for node in call_nodes

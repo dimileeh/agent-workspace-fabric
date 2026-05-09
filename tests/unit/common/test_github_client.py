@@ -627,7 +627,7 @@ class TestFetchPrStatus:
                                         "viewerDidAuthor": True,
                                         "createdAt": "2026-05-06T12:02:00Z",
                                         "url": "https://github.example/review/203",
-                                    }
+                                    },
                                 ],
                                 "pageInfo": {"hasNextPage": False, "endCursor": None},
                             }
@@ -657,9 +657,7 @@ class TestFetchPrStatus:
         assert len(fake.calls) == 2
         assert "threadId=T_paginated" in fake.calls[1].args
         assert "cursor=cursor-1" in fake.calls[1].args
-        assert any(
-            a.startswith("query=") and "viewerDidAuthor" in a for a in fake.calls[1].args
-        )
+        assert any(a.startswith("query=") and "viewerDidAuthor" in a for a in fake.calls[1].args)
 
     @pytest.mark.unit
     async def test_skips_sparse_review_thread_nodes_without_id(self) -> None:
@@ -765,7 +763,7 @@ class TestFetchPrStatus:
                                             "state": "COMMENTED",
                                             "author": {"login": "token-owner"},
                                             "viewerDidAuthor": True,
-                                        }
+                                        },
                                     ],
                                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                                 }
@@ -797,7 +795,7 @@ class TestFetchPrStatus:
                                             "isMinimized": False,
                                             "author": {"login": "token-owner"},
                                             "viewerDidAuthor": True,
-                                        }
+                                        },
                                     ],
                                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                                 }
@@ -821,12 +819,8 @@ class TestFetchPrStatus:
         ]
         assert "cursor=reviews-1" in fake.calls[1].args
         assert "cursor=comments-1" in fake.calls[2].args
-        assert any(
-            a.startswith("query=") and "viewerDidAuthor" in a for a in fake.calls[1].args
-        )
-        assert any(
-            a.startswith("query=") and "viewerDidAuthor" in a for a in fake.calls[2].args
-        )
+        assert any(a.startswith("query=") and "viewerDidAuthor" in a for a in fake.calls[1].args)
+        assert any(a.startswith("query=") and "viewerDidAuthor" in a for a in fake.calls[2].args)
 
     @pytest.mark.unit
     async def test_preserves_review_and_issue_comment_metadata_without_bot_semantic_filtering(
@@ -1337,9 +1331,7 @@ class TestFetchPrStatus:
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
 
-        assert [t.thread_id for t in status.unresolved_inline_threads] == [
-            "PRRT_kwDOSJAM6s5_-ehR"
-        ]
+        assert [t.thread_id for t in status.unresolved_inline_threads] == ["PRRT_kwDOSJAM6s5_-ehR"]
         assert "Keep tier-1 deferred coverage stale" in (
             status.unresolved_inline_threads[0].body_excerpt
         )

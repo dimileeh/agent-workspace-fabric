@@ -1450,7 +1450,9 @@ class TestRunOnceExecution:
         assert query_cursors[1] is not None
         assert query_cursors[1] == page_end_cursors[0]
         assert query_cursors[1].queued_at == created_at_by_id[query_cursors[1].workspace_id]
-        assert all(cursor is None or cursor.workspace_id not in tail_ids for cursor in query_cursors)
+        assert all(
+            cursor is None or cursor.workspace_id not in tail_ids for cursor in query_cursors
+        )
 
     @pytest.mark.unit
     async def test_human_boosted_ready_workspace_wins_equal_priority_dispatch(
@@ -4502,9 +4504,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 event_type="workspace.state_changed",
             )
             running_started = next(
-                event
-                for event in state_events
-                if event.new_state == WorkspaceStatus.running.value
+                event for event in state_events if event.new_state == WorkspaceStatus.running.value
             )
             running_started.occurred_at = status_started_at
             preserved = await repo.add_event(
@@ -4788,9 +4788,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 event_type="workspace.state_changed",
             )
             pushing_started = next(
-                event
-                for event in state_events
-                if event.new_state == WorkspaceStatus.pushing.value
+                event for event in state_events if event.new_state == WorkspaceStatus.pushing.value
             )
             pushing_started.occurred_at = status_started_at
             preserved = await repo.add_event(
@@ -4915,14 +4913,17 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert preserved_events[0].payload["runtime"]["services"][0]["container_id"] == (
             "agent-pre-refresh-race"
         )
-        assert len(
-            [
-                operation
-                for operation in operations
-                if operation.result is not None
-                and operation.result.get("reason_code") == PRESERVED_EXECUTION_REASON_CODE
-            ]
-        ) == 1
+        assert (
+            len(
+                [
+                    operation
+                    for operation in operations
+                    if operation.result is not None
+                    and operation.result.get("reason_code") == PRESERVED_EXECUTION_REASON_CODE
+                ]
+            )
+            == 1
+        )
 
     @pytest.mark.unit
     @pytest.mark.parametrize("status", [WorkspaceStatus.validating, WorkspaceStatus.pushing])
@@ -5733,9 +5734,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 event_type="workspace.state_changed",
             )
             pushing_started = next(
-                event
-                for event in state_events
-                if event.new_state == WorkspaceStatus.pushing.value
+                event for event in state_events if event.new_state == WorkspaceStatus.pushing.value
             )
             pushing_started.occurred_at = status_started_at
             await WorkspaceControlService(
@@ -5904,9 +5903,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 event_type="workspace.state_changed",
             )
             pushing_started = next(
-                event
-                for event in state_events
-                if event.new_state == WorkspaceStatus.pushing.value
+                event for event in state_events if event.new_state == WorkspaceStatus.pushing.value
             )
             pushing_started.occurred_at = status_started_at
             preserved = await repo.add_event(
@@ -6280,9 +6277,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert preserved_events[0].payload is not None
         assert preserved_events[0].payload["claim_cleanup"] == {
             "action": "cleared_stale",
-            "reason_code": (
-                "STALE_EXECUTION_CLAIM_CLEARED_DURING_ACTIVE_EXECUTION_PRESERVATION"
-            ),
+            "reason_code": ("STALE_EXECUTION_CLAIM_CLEARED_DURING_ACTIVE_EXECUTION_PRESERVATION"),
             "previous_claimed_by": "previous-worker",
             "previous_expires_at": expired_claim_expires_at.isoformat(),
         }
@@ -6798,33 +6793,27 @@ def test_scheduler_candidate_cursor_uses_sql_age_boost_domain() -> None:
     score = scheduler_score_from_workspace(workspace, now=scoring_at)
 
     assert score.age_boost > 0
-    assert (
-        _scheduler_candidate_cursor(
-            [workspace],
-            scoring_at=scoring_at,
-            dialect_name="postgresql",
-        )
-        == SchedulerOrderCursor(
-            class_priority=score.class_priority,
-            effective_score=score.effective_score,
-            queued_at=workspace.created_at,
-            workspace_id=workspace.id,
-            scoring_at=scoring_at,
-        )
+    assert _scheduler_candidate_cursor(
+        [workspace],
+        scoring_at=scoring_at,
+        dialect_name="postgresql",
+    ) == SchedulerOrderCursor(
+        class_priority=score.class_priority,
+        effective_score=score.effective_score,
+        queued_at=workspace.created_at,
+        workspace_id=workspace.id,
+        scoring_at=scoring_at,
     )
-    assert (
-        _scheduler_candidate_cursor(
-            [workspace],
-            scoring_at=scoring_at,
-            dialect_name="unsupported",
-        )
-        == SchedulerOrderCursor(
-            class_priority=score.class_priority,
-            effective_score=score.effective_score - score.age_boost,
-            queued_at=workspace.created_at,
-            workspace_id=workspace.id,
-            scoring_at=scoring_at,
-        )
+    assert _scheduler_candidate_cursor(
+        [workspace],
+        scoring_at=scoring_at,
+        dialect_name="unsupported",
+    ) == SchedulerOrderCursor(
+        class_priority=score.class_priority,
+        effective_score=score.effective_score - score.age_boost,
+        queued_at=workspace.created_at,
+        workspace_id=workspace.id,
+        scoring_at=scoring_at,
     )
 
 
@@ -6940,10 +6929,13 @@ def test_worker_helper_branches_normalize_naive_datetimes() -> None:
     assert _has_running_agent_runtime(RuntimeSnapshot(stack_state="exited")) is False
     assert _json_datetime(datetime(2026, 5, 2, 12, 0)) == "2026-05-02T12:00:00+00:00"
     assert _utc_datetime(datetime(2026, 5, 2, 12, 0)) == cutoff
-    assert _active_execution_preservation_claim_cleanup_payload(
-        fresh_execution,
-        claim_cutoff=cutoff,
-    )["action"] == "preserved_unexpired"
+    assert (
+        _active_execution_preservation_claim_cleanup_payload(
+            fresh_execution,
+            claim_cutoff=cutoff,
+        )["action"]
+        == "preserved_unexpired"
+    )
 
 
 @pytest.mark.unit
@@ -7569,9 +7561,7 @@ async def test_stale_active_execution_check_ignores_stale_event_before_refresh(
             event_type="workspace.state_changed",
         )
         running_started = next(
-            event
-            for event in state_events
-            if event.new_state == WorkspaceStatus.running.value
+            event for event in state_events if event.new_state == WorkspaceStatus.running.value
         )
         running_started.occurred_at = status_started_at
         stale = await repo.add_event(

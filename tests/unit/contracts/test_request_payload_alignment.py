@@ -38,7 +38,9 @@ from tests.unit.contracts._stack import ContractStack
 REQUEST_PAYLOAD_CONTROL_CAPABILITY_NAMES = (*CONTROL_CAPABILITY_NAMES, "retry_workspace")
 
 
-def _stub_control_response(workspace_id: str, operation_id: str = "op_stub") -> WorkspaceControlResponse:
+def _stub_control_response(
+    workspace_id: str, operation_id: str = "op_stub"
+) -> WorkspaceControlResponse:
     return WorkspaceControlResponse(
         workspace_id=workspace_id,
         operation_id=operation_id,
@@ -348,9 +350,7 @@ async def test_rest_and_mcp_cancel_call_control_service_with_equivalent_kwargs(
     # The harness deliberately ignores workspace_id and idempotency_key so REST
     # and MCP can be compared on the user-authored payload itself.
     canonical_keys = {"reason", "stop_stack", "expected_version"}
-    assert {k: rest_call[k] for k in canonical_keys} == {
-        k: mcp_call[k] for k in canonical_keys
-    }
+    assert {k: rest_call[k] for k in canonical_keys} == {k: mcp_call[k] for k in canonical_keys}
 
 
 async def _seed_workspace_for_cancel(contract_stack: ContractStack) -> tuple[str, int]:
@@ -856,13 +856,17 @@ async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract
         return _stub_retry_response(workspace_id)
 
     monkeypatch.setattr(controls_module.WorkspaceControlService, "cancel_workspace", record_cancel)
-    monkeypatch.setattr(controls_module.WorkspaceControlService, "stop_workspace", record_stop_or_remonitor)
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService, "stop_workspace", record_stop_or_remonitor
+    )
     monkeypatch.setattr(
         controls_module.WorkspaceControlService,
         "remonitor_workspace",
         record_stop_or_remonitor,
     )
-    monkeypatch.setattr(controls_module.WorkspaceControlService, "destroy_workspace", record_destroy)
+    monkeypatch.setattr(
+        controls_module.WorkspaceControlService, "destroy_workspace", record_destroy
+    )
     monkeypatch.setattr(
         controls_module.WorkspaceControlService,
         "request_refresh_workspace",

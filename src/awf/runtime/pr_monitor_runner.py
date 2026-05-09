@@ -226,9 +226,7 @@ _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
 _GIT_FETCH_BASE_FAILED_REASON = "GIT_FETCH_BASE_FAILED"
 _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON = "GIT_BASE_FETCH_TRANSIENT_RETRY"
-_GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON = (
-    "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
-)
+_GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON = "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
 _GIT_BASE_BEHIND_FAILED_REASON = "GIT_BASE_BEHIND_FAILED"
 _GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
@@ -265,9 +263,7 @@ _TERMINAL_WORKSPACE_STATUSES = {
     WorkspaceStatus.destroyed.value,
 }
 _PLANNING_VALIDATION_HANDOFF_EVENT = "workspace.planning_conformance_requires_awf_validation"
-_POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT = (
-    "workspace.post_validation_conformance_satisfied"
-)
+_POST_VALIDATION_CONFORMANCE_SATISFIED_EVENT = "workspace.post_validation_conformance_satisfied"
 
 
 def _normalize_conformance_handoff_reason_code(value: object) -> str | None:
@@ -1864,9 +1860,7 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
-                    skip_initial_review_grace=(
-                        self._config.non_check_reviewer_settle_seconds > 0
-                    ),
+                    skip_initial_review_grace=(self._config.non_check_reviewer_settle_seconds > 0),
                 )
                 if handled is not None:
                     return handled
@@ -3392,8 +3386,7 @@ class PullRequestMonitorRunner:
             new_reviews = [
                 c
                 for c in status.unresolved_review_comments
-                if _agent_can_triage_review_comment(c)
-                and _review_comment_needs_attention(state, c)
+                if _agent_can_triage_review_comment(c) and _review_comment_needs_attention(state, c)
             ]
             if not new_threads and not new_reviews:
                 break  # burst settled
@@ -5241,10 +5234,9 @@ def _drop_stale_review_thread_addressed_state(
         verdict = state.threads_addressed_ids.get(thread.thread_id)
         if _needs_comment_attention(verdict):
             continue
-        if (
-            state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
-            == _review_thread_body_hash(thread)
-        ):
+        if state.threads_addressed_ids.get(
+            _review_thread_body_state_key(thread.thread_id)
+        ) == _review_thread_body_hash(thread):
             continue
         _clear_addressed_state_by_id(state, thread.thread_id)
         changed = True
@@ -5255,10 +5247,9 @@ def _review_comment_needs_attention(state: MonitorState, comment: ReviewComment)
     verdict = state.threads_addressed_ids.get(comment.comment_id)
     if _needs_comment_attention(verdict):
         return True
-    return (
-        state.threads_addressed_ids.get(_review_comment_body_state_key(comment.comment_id))
-        != _review_comment_body_hash(comment)
-    )
+    return state.threads_addressed_ids.get(
+        _review_comment_body_state_key(comment.comment_id)
+    ) != _review_comment_body_hash(comment)
 
 
 def _drop_stale_review_comment_addressed_state(
@@ -5270,10 +5261,9 @@ def _drop_stale_review_comment_addressed_state(
         verdict = state.threads_addressed_ids.get(comment.comment_id)
         if _needs_comment_attention(verdict):
             continue
-        if (
-            state.threads_addressed_ids.get(_review_comment_body_state_key(comment.comment_id))
-            == _review_comment_body_hash(comment)
-        ):
+        if state.threads_addressed_ids.get(
+            _review_comment_body_state_key(comment.comment_id)
+        ) == _review_comment_body_hash(comment):
             continue
         _clear_addressed_state_by_id(state, comment.comment_id)
         changed = True

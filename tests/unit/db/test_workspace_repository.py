@@ -440,9 +440,7 @@ class TestValidationRunRepository:
                     "status": "passed",
                     "reason_code": "COVERAGE_OK",
                     "percent": 99.0,
-                    "failing_test_node_ids": [
-                        "tests/unit/test_widget.py::test_handles_edges"
-                    ],
+                    "failing_test_node_ids": ["tests/unit/test_widget.py::test_handles_edges"],
                     "failing_test_evidence": [
                         "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
                     ],
@@ -1383,9 +1381,7 @@ class TestOwnedPathOverlapLookup:
             test_commands=[],
             task_class=TaskClass.docs_task.value,
             task_policy={
-                "scheduler": {
-                    "base_priority": "999999999999999999999999999999999999999999999999"
-                }
+                "scheduler": {"base_priority": "999999999999999999999999999999999999999999999999"}
             },
         )
         normal = await repo.create(
@@ -1407,9 +1403,7 @@ class TestOwnedPathOverlapLookup:
             test_commands=[],
             task_class=TaskClass.docs_task.value,
             task_policy={
-                "scheduler": {
-                    "base_priority": "-999999999999999999999999999999999999999999999999"
-                }
+                "scheduler": {"base_priority": "-999999999999999999999999999999999999999999999999"}
             },
         )
         oversized_high.created_at = scoring_at

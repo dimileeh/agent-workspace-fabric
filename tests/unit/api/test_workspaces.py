@@ -2186,7 +2186,9 @@ class TestCreateWorkspaceV2PolicyMetadata:
 
         assert workspaces_service._resolved_profile_requested_tier(workspace) == 2  # type: ignore[arg-type]  # noqa: SLF001
         assert workspaces_service._resolved_profile_requested_tier(malformed_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
-        assert workspaces_service._resolved_profile_requested_tier(missing_profile_workspace) is None  # type: ignore[arg-type]  # noqa: SLF001
+        assert (
+            workspaces_service._resolved_profile_requested_tier(missing_profile_workspace) is None
+        )  # type: ignore[arg-type]  # noqa: SLF001
         assert (
             workspaces_service._resolved_profile_requested_tier(  # noqa: SLF001
                 malformed_validation_workspace
@@ -2546,7 +2548,6 @@ class TestIdempotency:
 
 
 class TestGetWorkspace:
-
     @pytest.mark.unit
     async def test_stale_running_flag(
         self,
@@ -2560,15 +2561,19 @@ class TestGetWorkspace:
         from sqlalchemy.ext.asyncio import AsyncSession
 
         from awf.db.models import Workspace
+
         async with AsyncSession(engine) as session:
             from datetime import UTC, datetime, timedelta
 
             from sqlalchemy import update
+
             await session.execute(
-                update(Workspace).where(Workspace.id == ws_id).values(
+                update(Workspace)
+                .where(Workspace.id == ws_id)
+                .values(
                     status="running",
                     subphase="agent",
-                    last_activity_at=datetime.now(UTC) - timedelta(minutes=15)
+                    last_activity_at=datetime.now(UTC) - timedelta(minutes=15),
                 )
             )
             await session.commit()

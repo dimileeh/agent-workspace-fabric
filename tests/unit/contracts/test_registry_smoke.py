@@ -186,9 +186,7 @@ def test_assert_test_reference_exists_accepts_indented_test_classes(
     )
     monkeypatch.setattr("tests.unit.contracts.test_registry_smoke.REPO_ROOT", tmp_path)
 
-    _assert_test_reference_exists(
-        "test_nested.py::TestOuter::TestInner::test_nested_reference"
-    )
+    _assert_test_reference_exists("test_nested.py::TestOuter::TestInner::test_nested_reference")
 
 
 @pytest.mark.unit
@@ -215,9 +213,7 @@ def test_assert_test_reference_exists_rejects_test_moved_to_another_class(
     monkeypatch.setattr("tests.unit.contracts.test_registry_smoke.REPO_ROOT", tmp_path)
 
     with pytest.raises(AssertionError, match="is not a collected pytest node ID"):
-        _assert_test_reference_exists(
-            "test_moved.py::TestExpected::test_target_reference"
-        )
+        _assert_test_reference_exists("test_moved.py::TestExpected::test_target_reference")
 
 
 @pytest.mark.unit
@@ -238,9 +234,7 @@ def test_every_safe_read_or_control_capability_with_mcp_surface_is_registered() 
     REST surface includes a safe read/control endpoint. Out-of-scope rows:
     explicit Out of scope or already-tracked-as-missing/backlog rows.
     """
-    in_scope = set(
-        parity_capabilities_with_status({"MCP implemented", "MCP partial"})
-    )
+    in_scope = set(parity_capabilities_with_status({"MCP implemented", "MCP partial"}))
     registered_capabilities = {c.parity_capability for c in all_capabilities()}
 
     expected_must_be_registered = set(

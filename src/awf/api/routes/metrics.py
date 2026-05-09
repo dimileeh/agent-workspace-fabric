@@ -689,4 +689,5 @@ def _run_subprocess(
 
 async def _egress_posture_counts(session: AsyncSession) -> dict[str, int]:
     from awf.db.repositories import EgressAuditRepository
+
     return await EgressAuditRepository(session).summary_counts_by_posture()

@@ -45,7 +45,9 @@ async def test_workspace_summary_returns_zero_counts_for_empty_db(
 
 
 @pytest.mark.unit
-async def test_resource_saturation_local_capacity_accepts_async_provider_with_simple_request() -> None:
+async def test_resource_saturation_local_capacity_accepts_async_provider_with_simple_request() -> (
+    None
+):
     async def _provider(_settings: object) -> LocalCapacityLimits:
         return LocalCapacityLimits(cpu_cores=12, memory_gb=48, source="test")
 

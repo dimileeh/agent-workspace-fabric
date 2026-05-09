@@ -113,8 +113,7 @@ def _try_template(doc_path: str, spec_paths: set[str]) -> str | None:
 @pytest.mark.unit
 def test_openapi_json_consistent_with_current_app(openapi_spec: dict) -> None:
     assert OPENAPI_JSON_PATH.exists(), (
-        "Checked-in openapi.json is missing. "
-        "Run: python scripts/generate_openapi.py"
+        "Checked-in openapi.json is missing. Run: python scripts/generate_openapi.py"
     )
     checked_in = json.loads(OPENAPI_JSON_PATH.read_text())
     current_serialized = json.dumps(openapi_spec, sort_keys=True)

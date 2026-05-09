@@ -88,9 +88,7 @@ def _is_partial_or_missing_row(row: dict[str, str]) -> bool:
     return _parity_status(row) in {PARTIAL_STATUS, MISSING_STATUS}
 
 
-_REST_ENDPOINT_RE = re.compile(
-    r"\b(GET|POST|PUT|DELETE|PATCH|WS|WebSocket)\s+(/[^\s,;`]+)"
-)
+_REST_ENDPOINT_RE = re.compile(r"\b(GET|POST|PUT|DELETE|PATCH|WS|WebSocket)\s+(/[^\s,;`]+)")
 
 
 def _extract_rest_endpoints_from_cell(cell: str) -> list[tuple[str, str]]:
@@ -133,7 +131,9 @@ def _extract_cli_invocations_from_cell(cell: str) -> list[CliInvocation]:
                 base_end = index
                 break
         command = " ".join(tokens[:base_end])
-        flags = tuple(token.split("=", 1)[0] for token in tokens[base_end:] if token.startswith("--"))
+        flags = tuple(
+            token.split("=", 1)[0] for token in tokens[base_end:] if token.startswith("--")
+        )
         invocations.append(CliInvocation(source=part, command=command, flags=flags))
     return invocations
 

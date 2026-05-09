@@ -322,7 +322,12 @@ def control_rest_body(capability_name: str, *, variant: str = "base") -> dict[st
     reason = "operator recovery" if variant == "base" else "changed operator recovery"
     if capability_name == "cancel_workspace":
         return {"reason": reason, "stop_stack": variant == "base"}
-    if capability_name in {"stop_workspace", "remonitor_workspace", "refresh_workspace", "rebase_workspace"}:
+    if capability_name in {
+        "stop_workspace",
+        "remonitor_workspace",
+        "refresh_workspace",
+        "rebase_workspace",
+    }:
         return {"reason": reason}
     if capability_name == "request_validation":
         return {
@@ -385,9 +390,7 @@ def idempotent_rest_body(
             "repo_url": "git@github.com:example/idempotent-create-v1.git",
             "branch_base": "main",
             "task_title": (
-                "Idempotent create v1"
-                if variant == "base"
-                else "Changed idempotent create v1"
+                "Idempotent create v1" if variant == "base" else "Changed idempotent create v1"
             ),
             "task_prompt": "Exercise create v1 idempotency.",
             "test_commands": ["pytest -q"],
@@ -400,9 +403,7 @@ def idempotent_rest_body(
             },
             "task": {
                 "title": (
-                    "Idempotent create v2"
-                    if variant == "base"
-                    else "Changed idempotent create v2"
+                    "Idempotent create v2" if variant == "base" else "Changed idempotent create v2"
                 ),
                 "prompt": "Exercise create v2 idempotency.",
                 "agent": "codex",
@@ -463,11 +464,19 @@ def idempotent_mcp_args(
 
 
 def control_success_status(capability_name: str) -> int:
-    return 202 if capability_name in {"request_validation", "refresh_workspace", "rebase_workspace"} else 200
+    return (
+        202
+        if capability_name in {"request_validation", "refresh_workspace", "rebase_workspace"}
+        else 200
+    )
 
 
 def response_operation_id_field(capability_name: str) -> str:
-    return "id" if capability_name in {"request_validation", "refresh_workspace", "rebase_workspace"} else "operation_id"
+    return (
+        "id"
+        if capability_name in {"request_validation", "refresh_workspace", "rebase_workspace"}
+        else "operation_id"
+    )
 
 
 def idempotent_success_status(capability_name: str) -> int:

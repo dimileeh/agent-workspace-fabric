@@ -65,6 +65,7 @@ _PROVIDER_ENV_KEYS = (
 def _closed_connection_error() -> InterfaceError:
     return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
 
+
 # ---- /healthz ---------------------------------------------------------------
 
 

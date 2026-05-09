@@ -208,8 +208,7 @@ def test_make_engine_rejects_non_postgres_urls() -> None:
 @pytest.mark.unit
 async def test_make_engine_strips_test_connect_retry_query_params() -> None:
     engine = make_engine(
-        "postgresql+asyncpg://u:p@example/awf"
-        "?awf_connect_timeout=10&awf_connect_retries=2"
+        "postgresql+asyncpg://u:p@example/awf?awf_connect_timeout=10&awf_connect_retries=2"
     )
     try:
         assert "awf_connect_timeout" not in str(engine.url)

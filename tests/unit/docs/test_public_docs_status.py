@@ -72,11 +72,7 @@ def test_every_public_guide_is_linked_from_docs_index_or_readme() -> None:
 def test_awf_commands_mentioned_in_public_docs_exist_in_cli_help_tree() -> None:
     command_tree = _typer_command_tree(app)
     mentions = _awf_command_mentions([Path("README.md"), *map(Path, sorted(_public_docs()))])
-    missing = [
-        mention
-        for mention in mentions
-        if mention.command_path not in command_tree
-    ]
+    missing = [mention for mention in mentions if mention.command_path not in command_tree]
 
     assert not missing, (
         "Public docs mention AWF commands that are not present in the Typer command tree: "
@@ -147,12 +143,7 @@ echo ok
 
 
 def test_markdown_fences_accepts_indented_copy_paste_fences() -> None:
-    text = (
-        "1. Step\n"
-        "   ```python\n"
-        '   print("ok")\n'
-        "   ```\n"
-    )
+    text = '1. Step\n   ```python\n   print("ok")\n   ```\n'
 
     assert _fence_delimiter_count_is_even(text)
     assert not _fence_delimiter_count_is_even("1. Step\n   ```python\n   print('ok')\n")
@@ -250,11 +241,7 @@ def _docs_index_links() -> set[str]:
 
 
 def _readme_public_doc_links() -> set[str]:
-    return {
-        link
-        for link in _markdown_doc_links(README_PATH)
-        if _is_public_doc_path(link)
-    }
+    return {link for link in _markdown_doc_links(README_PATH) if _is_public_doc_path(link)}
 
 
 def _markdown_doc_links(path: Path) -> set[str]:

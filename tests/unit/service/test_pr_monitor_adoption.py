@@ -110,7 +110,9 @@ async def _transition_adoption(
         await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
         return
     if status == WorkspaceStatus.completed:
-        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST_PROVISION")
+        await repo.transition(
+            workspace, to=WorkspaceStatus.provisioning, reason_code="TEST_PROVISION"
+        )
         await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="TEST_READY")
         await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="TEST_RUN")
         await repo.transition(workspace, to=WorkspaceStatus.validating, reason_code="TEST_VALIDATE")
@@ -656,7 +658,9 @@ class TestPullRequestMonitorAdoptionService:
             workspaces = await _adoption_workspaces(session)
             assert len(workspaces) == 2
             old = next(workspace for workspace in workspaces if workspace.id == first.workspace_id)
-            fresh = next(workspace for workspace in workspaces if workspace.id == result.workspace_id)
+            fresh = next(
+                workspace for workspace in workspaces if workspace.id == result.workspace_id
+            )
             live_workspaces = [
                 workspace for workspace in workspaces if workspace.status in _LIVE_ADOPTION_STATUSES
             ]
@@ -1072,9 +1076,7 @@ class TestPullRequestMonitorAdoptionService:
                 workspace for workspace in workspaces if workspace.status in _LIVE_ADOPTION_STATUSES
             ]
             assert len(workspaces) == 2
-            assert [workspace.id for workspace in live_workspaces] == [
-                first_result.workspace_id
-            ]
+            assert [workspace.id for workspace in live_workspaces] == [first_result.workspace_id]
 
     @pytest.mark.unit
     async def test_replay_with_changed_monitor_policy_conflicts(
@@ -1464,9 +1466,7 @@ class TestPullRequestMonitorAdoptionService:
             first = await PullRequestMonitorAdoptionService(
                 session,
                 metadata_fetcher=_MetadataFetcher(_metadata(head_ref="feature/stale")),
-            ).adopt(
-                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
-            )
+            ).adopt(PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277))
             await _transition_adoption(session, first.workspace_id, WorkspaceStatus.cancelled)
             await session.commit()
 
@@ -1474,9 +1474,7 @@ class TestPullRequestMonitorAdoptionService:
             fresh = await PullRequestMonitorAdoptionService(
                 session,
                 metadata_fetcher=_MetadataFetcher(_metadata(head_ref="feature/current")),
-            ).adopt(
-                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
-            )
+            ).adopt(PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277))
             await session.commit()
 
         async with factory() as session:
@@ -1530,7 +1528,11 @@ class TestPullRequestMonitorAdoptionService:
                 "replacement_workspace_id": fresh.workspace_id,
             }
 
-            new_operation = next(operation for operation in operations if operation.workspace_id == fresh.workspace_id)
+            new_operation = next(
+                operation
+                for operation in operations
+                if operation.workspace_id == fresh.workspace_id
+            )
             assert new_operation.payload is not None
             assert new_operation.payload["superseded_adoption"] == superseded_event.payload
 
@@ -1551,9 +1553,7 @@ class TestPullRequestMonitorAdoptionService:
             first = await PullRequestMonitorAdoptionService(
                 session,
                 metadata_fetcher=_MetadataFetcher(_metadata(head_ref="feature/stale")),
-            ).adopt(
-                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
-            )
+            ).adopt(PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277))
             await _transition_adoption(session, first.workspace_id, WorkspaceStatus.cancelled)
             await session.commit()
 
@@ -1586,9 +1586,7 @@ class TestPullRequestMonitorAdoptionService:
             first = await PullRequestMonitorAdoptionService(
                 session,
                 metadata_fetcher=_MetadataFetcher(_metadata(head_ref="feature/stale")),
-            ).adopt(
-                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
-            )
+            ).adopt(PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277))
             await _transition_adoption(session, first.workspace_id, WorkspaceStatus.cancelled)
             await session.commit()
 

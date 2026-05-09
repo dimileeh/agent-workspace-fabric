@@ -35,9 +35,11 @@ def _encoded_operation_cursor(*, operation_id: object) -> str:
         "c": datetime(2026, 5, 8, tzinfo=UTC).isoformat(),
         "i": operation_id,
     }
-    return base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    ).decode("ascii").rstrip("=")
+    return (
+        base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+        .decode("ascii")
+        .rstrip("=")
+    )
 
 
 def _v2_request(*, profile_ref: str | None = "auto") -> WorkspaceCreateV2Request:
@@ -128,16 +130,22 @@ def test_workspace_helpers_cover_unloaded_and_snapshot_edges() -> None:
         SimpleNamespace(profile_ref=None, requested_profile=None, task_attempt=object()),
         _v2_request(profile_ref="named-profile"),
     )
-    assert workspaces_module._stored_resource_dind_slots(  # noqa: SLF001
-        SimpleNamespace(resolved_profile={"docker": {"mode": "dind"}}),
-        _v2_request(),
-    ) == 1
-    assert workspaces_module._stored_validation_requested_tier(  # noqa: SLF001
-        SimpleNamespace(
-            task_policy={workspaces_module.VALIDATION_POLICY_KEY: {"requested_tier": True}},
-            resolved_profile={"validation": {"requested_tier": 4}},
+    assert (
+        workspaces_module._stored_resource_dind_slots(  # noqa: SLF001
+            SimpleNamespace(resolved_profile={"docker": {"mode": "dind"}}),
+            _v2_request(),
         )
-    ) == 4
+        == 1
+    )
+    assert (
+        workspaces_module._stored_validation_requested_tier(  # noqa: SLF001
+            SimpleNamespace(
+                task_policy={workspaces_module.VALIDATION_POLICY_KEY: {"requested_tier": True}},
+                resolved_profile={"validation": {"requested_tier": 4}},
+            )
+        )
+        == 4
+    )
 
     planning_payload = workspaces_module._planning_scope_recovery_payload(  # noqa: SLF001
         workspaces_module._PlanningScopeRetryContext(  # noqa: SLF001

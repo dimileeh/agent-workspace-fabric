@@ -350,25 +350,78 @@ class _MockService:
 
 
 class _FailingMockService(_MockService):
-    async def cancel_workspace(self, workspace_id: str, *, reason: str | None = None, stop_stack: bool = True, idempotency_key: str | None = None, expected_version: int | None = None) -> WorkspaceControlResponse:
+    async def cancel_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        stop_stack: bool = True,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
         raise WorkspaceControlError(error_code="NOPE", message="cancel refused")
 
-    async def stop_workspace(self, workspace_id: str, *, reason: str | None = None, idempotency_key: str | None = None, expected_version: int | None = None) -> WorkspaceControlResponse:
+    async def stop_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
         raise WorkspaceControlError(error_code="NOPE", message="stop refused")
 
-    async def destroy_workspace(self, workspace_id: str, *, force: bool = False, remove_volumes: bool = True, remove_worktree: bool = True, idempotency_key: str | None = None, expected_version: int | None = None) -> WorkspaceControlResponse:
+    async def destroy_workspace(
+        self,
+        workspace_id: str,
+        *,
+        force: bool = False,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
         raise WorkspaceControlError(error_code="NOPE", message="destroy refused")
 
-    async def remonitor_workspace(self, workspace_id: str, *, reason: str | None = None, idempotency_key: str | None = None, expected_version: int | None = None) -> WorkspaceControlResponse:
+    async def remonitor_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
         raise WorkspaceControlError(error_code="NOPE", message="remonitor refused")
 
-    async def request_validate_workspace(self, workspace_id: str, *, reason: str | None = None, requested_tier: int | None = None, idempotency_key: str | None = None, expected_version: int | None = None) -> OperationResponse:
+    async def request_validate_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        requested_tier: int | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> OperationResponse:
         raise WorkspaceControlError(error_code="NOPE", message="validate refused")
 
-    async def request_refresh_workspace(self, workspace_id: str, *, reason: str | None = None, idempotency_key: str | None = None, expected_version: int | None = None) -> OperationResponse:
+    async def request_refresh_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> OperationResponse:
         raise WorkspaceControlError(error_code="NOPE", message="refresh refused")
 
-    async def request_rebase_workspace(self, workspace_id: str, *, reason: str | None = None, idempotency_key: str | None = None, expected_version: int | None = None) -> OperationResponse:
+    async def request_rebase_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> OperationResponse:
         raise WorkspaceControlError(error_code="NOPE", message="rebase refused")
 
 
@@ -394,7 +447,9 @@ class TestToolRegistrationAndSchema:
             props = tools[name].inputSchema.get("properties", {})
             assert "expected_version" in props, f"{name} missing expected_version"
             schema = props["expected_version"]
-            assert schema.get("type") == "integer" or any(s.get("type") == "integer" for s in schema.get("anyOf", []) if isinstance(s, dict))
+            assert schema.get("type") == "integer" or any(
+                s.get("type") == "integer" for s in schema.get("anyOf", []) if isinstance(s, dict)
+            )
             assert schema.get("default") is None
             required = tools[name].inputSchema.get("required", [])
             assert "expected_version" not in required, f"{name} should not require expected_version"
@@ -624,15 +679,11 @@ class TestErrorMapping:
         assert service.calls == []
 
     @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
-    async def test_blank_idempotency_key_returns_structured_mcp_error(
-        self, tool_name: str
-    ) -> None:
+    async def test_blank_idempotency_key_returns_structured_mcp_error(self, tool_name: str) -> None:
         service = _MockService()
         mcp = build_mcp_server(service=service)
 
-        result = await _call_result(
-            mcp, tool_name, {"workspace_id": "ws_x", "idempotency_key": ""}
-        )
+        result = await _call_result(mcp, tool_name, {"workspace_id": "ws_x", "idempotency_key": ""})
 
         assert result.isError is True
         assert result.structuredContent is not None
@@ -644,9 +695,7 @@ class TestErrorMapping:
         assert service.calls == []
 
     @pytest.mark.parametrize("tool_name", _IDEMPOTENCY_CONTROL_TOOLS)
-    async def test_null_idempotency_key_returns_structured_mcp_error(
-        self, tool_name: str
-    ) -> None:
+    async def test_null_idempotency_key_returns_structured_mcp_error(self, tool_name: str) -> None:
         service = _MockService()
         mcp = build_mcp_server(service=service)
 
@@ -723,7 +772,9 @@ class TestErrorMapping:
             "awf_rebase_workspace",
         ],
     )
-    async def test_workspace_control_error_returns_structured_mcp_error(self, tool_name: str) -> None:
+    async def test_workspace_control_error_returns_structured_mcp_error(
+        self, tool_name: str
+    ) -> None:
         service = _FailingMockService()
         mcp = build_mcp_server(service=service)
 
@@ -739,13 +790,24 @@ class TestErrorMapping:
 
     async def test_version_conflict_returns_structured_error_with_versions(self) -> None:
         class _VersionConflictService(_MockService):
-            async def request_refresh_workspace(self, workspace_id: str, *, reason: str | None = None, idempotency_key: str | None = None, expected_version: int | None = None) -> OperationResponse:
+            async def request_refresh_workspace(
+                self,
+                workspace_id: str,
+                *,
+                reason: str | None = None,
+                idempotency_key: str | None = None,
+                expected_version: int | None = None,
+            ) -> OperationResponse:
                 raise VersionConflictError(expected_version=5, actual_version=7)
 
         service = _VersionConflictService()
         mcp = build_mcp_server(service=service)
 
-        result = await _call_result(mcp, "awf_refresh_workspace", {"workspace_id": "ws_x", "idempotency_key": "ik-x", "expected_version": 5})
+        result = await _call_result(
+            mcp,
+            "awf_refresh_workspace",
+            {"workspace_id": "ws_x", "idempotency_key": "ik-x", "expected_version": 5},
+        )
 
         assert result.isError is True
         assert result.structuredContent["error_code"] == "VERSION_CONFLICT"
@@ -755,10 +817,24 @@ class TestErrorMapping:
         from types import SimpleNamespace
 
         class _StateErrorService(_MockService):
-            async def request_refresh_workspace(self, workspace_id: str, *, reason: str | None = None, idempotency_key: str | None = None, expected_version: int | None = None) -> OperationResponse:
+            async def request_refresh_workspace(
+                self,
+                workspace_id: str,
+                *,
+                reason: str | None = None,
+                idempotency_key: str | None = None,
+                expected_version: int | None = None,
+            ) -> OperationResponse:
                 raise WorkspaceRefreshStateError(SimpleNamespace(status="destroyed"))
 
-            async def request_rebase_workspace(self, workspace_id: str, *, reason: str | None = None, idempotency_key: str | None = None, expected_version: int | None = None) -> OperationResponse:
+            async def request_rebase_workspace(
+                self,
+                workspace_id: str,
+                *,
+                reason: str | None = None,
+                idempotency_key: str | None = None,
+                expected_version: int | None = None,
+            ) -> OperationResponse:
                 raise WorkspaceRebaseStateError(SimpleNamespace(status="destroyed"))
 
         service = _StateErrorService()
@@ -768,14 +844,18 @@ class TestErrorMapping:
             ("awf_refresh_workspace", "WORKSPACE_STATE_NOT_REFRESHABLE"),
             ("awf_rebase_workspace", "WORKSPACE_STATE_NOT_REBASEABLE"),
         ]:
-            result = await _call_result(mcp, tool_name, {"workspace_id": "ws_x", "idempotency_key": "ik-x"})
+            result = await _call_result(
+                mcp, tool_name, {"workspace_id": "ws_x", "idempotency_key": "ik-x"}
+            )
             assert result.isError is True, tool_name
             assert result.structuredContent["error_code"] == expected_code, tool_name
 
 
 @pytest.mark.unit
 class TestIdempotencyAndReplay:
-    async def test_same_idempotency_key_and_payload_returns_same_operation(self, factory: async_sessionmaker[AsyncSession]) -> None:
+    async def test_same_idempotency_key_and_payload_returns_same_operation(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
         async with factory() as session:
             workspace = await WorkspaceRepository(session).create(
                 repo_url="git@github.com:example/app.git",
@@ -793,24 +873,34 @@ class TestIdempotencyAndReplay:
         service = WorkspaceService(factory)
         mcp = build_mcp_server(service=service)
 
-        first = await _call(mcp, "awf_refresh_workspace", {
-            "workspace_id": workspace.id,
-            "reason": "refresh",
-            "idempotency_key": "ik-refresh-1",
-            "expected_version": None,
-        })
-        second = await _call(mcp, "awf_refresh_workspace", {
-            "workspace_id": workspace.id,
-            "reason": "refresh",
-            "idempotency_key": "ik-refresh-1",
-            "expected_version": None,
-        })
+        first = await _call(
+            mcp,
+            "awf_refresh_workspace",
+            {
+                "workspace_id": workspace.id,
+                "reason": "refresh",
+                "idempotency_key": "ik-refresh-1",
+                "expected_version": None,
+            },
+        )
+        second = await _call(
+            mcp,
+            "awf_refresh_workspace",
+            {
+                "workspace_id": workspace.id,
+                "reason": "refresh",
+                "idempotency_key": "ik-refresh-1",
+                "expected_version": None,
+            },
+        )
 
         assert isinstance(first, dict)
         assert isinstance(second, dict)
         assert first["id"] == second["id"]
 
-    async def test_same_key_different_payload_returns_idempotency_conflict(self, factory: async_sessionmaker[AsyncSession]) -> None:
+    async def test_same_key_different_payload_returns_idempotency_conflict(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
         async with factory() as session:
             workspace = await WorkspaceRepository(session).create(
                 repo_url="git@github.com:example/app.git",
@@ -828,23 +918,33 @@ class TestIdempotencyAndReplay:
         service = WorkspaceService(factory)
         mcp = build_mcp_server(service=service)
 
-        first = await _call(mcp, "awf_refresh_workspace", {
-            "workspace_id": workspace.id,
-            "reason": "refresh",
-            "idempotency_key": "ik-refresh-2",
-        })
+        first = await _call(
+            mcp,
+            "awf_refresh_workspace",
+            {
+                "workspace_id": workspace.id,
+                "reason": "refresh",
+                "idempotency_key": "ik-refresh-2",
+            },
+        )
         assert isinstance(first, dict)
 
-        result = await _call_result(mcp, "awf_refresh_workspace", {
-            "workspace_id": workspace.id,
-            "reason": "different",
-            "idempotency_key": "ik-refresh-2",
-        })
+        result = await _call_result(
+            mcp,
+            "awf_refresh_workspace",
+            {
+                "workspace_id": workspace.id,
+                "reason": "different",
+                "idempotency_key": "ik-refresh-2",
+            },
+        )
 
         assert result.isError is True
         assert result.structuredContent["error_code"] == "IDEMPOTENCY_CONFLICT"
 
-    async def test_version_conflict_rejects_without_mutating(self, factory: async_sessionmaker[AsyncSession]) -> None:
+    async def test_version_conflict_rejects_without_mutating(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
         async with factory() as session:
             workspace = await WorkspaceRepository(session).create(
                 repo_url="git@github.com:example/app.git",
@@ -862,12 +962,16 @@ class TestIdempotencyAndReplay:
         service = WorkspaceService(factory)
         mcp = build_mcp_server(service=service)
 
-        result = await _call_result(mcp, "awf_refresh_workspace", {
-            "workspace_id": workspace.id,
-            "reason": "refresh",
-            "idempotency_key": "ik-vc",
-            "expected_version": workspace.version + 1,
-        })
+        result = await _call_result(
+            mcp,
+            "awf_refresh_workspace",
+            {
+                "workspace_id": workspace.id,
+                "reason": "refresh",
+                "idempotency_key": "ik-vc",
+                "expected_version": workspace.version + 1,
+            },
+        )
 
         assert result.isError is True
         assert result.structuredContent["error_code"] == "VERSION_CONFLICT"
@@ -877,7 +981,9 @@ class TestIdempotencyAndReplay:
 
 @pytest.mark.unit
 class TestRealDbPaths:
-    async def test_refresh_creates_operation_row(self, factory: async_sessionmaker[AsyncSession]) -> None:
+    async def test_refresh_creates_operation_row(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
         async with factory() as session:
             workspace = await WorkspaceRepository(session).create(
                 repo_url="git@github.com:example/app.git",
@@ -895,11 +1001,15 @@ class TestRealDbPaths:
         service = WorkspaceService(factory)
         mcp = build_mcp_server(service=service)
 
-        payload = await _call(mcp, "awf_refresh_workspace", {
-            "workspace_id": workspace.id,
-            "reason": "operator refresh",
-            "idempotency_key": "ik-op-refresh",
-        })
+        payload = await _call(
+            mcp,
+            "awf_refresh_workspace",
+            {
+                "workspace_id": workspace.id,
+                "reason": "operator refresh",
+                "idempotency_key": "ik-op-refresh",
+            },
+        )
 
         assert isinstance(payload, dict)
         assert payload["type"] == "refresh"
@@ -910,7 +1020,9 @@ class TestRealDbPaths:
             assert len(refresh_ops) == 1
             assert refresh_ops[0].status == OperationStatus.pending.value
 
-    async def test_rebase_creates_operation_row(self, factory: async_sessionmaker[AsyncSession]) -> None:
+    async def test_rebase_creates_operation_row(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
         async with factory() as session:
             workspace = await WorkspaceRepository(session).create(
                 repo_url="git@github.com:example/app.git",
@@ -951,11 +1063,15 @@ class TestRealDbPaths:
         service = WorkspaceService(factory)
         mcp = build_mcp_server(service=service)
 
-        payload = await _call(mcp, "awf_rebase_workspace", {
-            "workspace_id": workspace.id,
-            "reason": "operator rebase",
-            "idempotency_key": "ik-op-rebase",
-        })
+        payload = await _call(
+            mcp,
+            "awf_rebase_workspace",
+            {
+                "workspace_id": workspace.id,
+                "reason": "operator rebase",
+                "idempotency_key": "ik-op-rebase",
+            },
+        )
 
         assert isinstance(payload, dict)
         assert payload["type"] == "rebase"
@@ -966,7 +1082,9 @@ class TestRealDbPaths:
             assert len(rebase_ops) == 1
             assert rebase_ops[0].status == OperationStatus.pending.value
 
-    async def test_validate_with_expected_version_matches(self, factory: async_sessionmaker[AsyncSession]) -> None:
+    async def test_validate_with_expected_version_matches(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
         async with factory() as session:
             workspace = await WorkspaceRepository(session).create(
                 repo_url="git@github.com:example/app.git",
@@ -985,17 +1103,23 @@ class TestRealDbPaths:
         service = WorkspaceService(factory)
         mcp = build_mcp_server(service=service)
 
-        payload = await _call(mcp, "awf_request_workspace_validation", {
-            "workspace_id": workspace.id,
-            "reason": "validate",
-            "idempotency_key": "ik-validate-version",
-            "expected_version": version,
-        })
+        payload = await _call(
+            mcp,
+            "awf_request_workspace_validation",
+            {
+                "workspace_id": workspace.id,
+                "reason": "validate",
+                "idempotency_key": "ik-validate-version",
+                "expected_version": version,
+            },
+        )
 
         assert isinstance(payload, dict)
         assert payload["type"] == "validate"
 
-    async def test_rebase_version_conflict_on_destroyed_workspace(self, factory: async_sessionmaker[AsyncSession]) -> None:
+    async def test_rebase_version_conflict_on_destroyed_workspace(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
         async with factory() as session:
             workspace = await WorkspaceRepository(session).create(
                 repo_url="git@github.com:example/app.git",
@@ -1013,11 +1137,18 @@ class TestRealDbPaths:
         service = WorkspaceService(factory)
         mcp = build_mcp_server(service=service)
 
-        result = await _call_result(mcp, "awf_rebase_workspace", {
-            "workspace_id": workspace.id,
-            "reason": "rebase",
-            "idempotency_key": "ik-rebase-destroyed",
-        })
+        result = await _call_result(
+            mcp,
+            "awf_rebase_workspace",
+            {
+                "workspace_id": workspace.id,
+                "reason": "rebase",
+                "idempotency_key": "ik-rebase-destroyed",
+            },
+        )
 
         assert result.isError is True
-        assert result.structuredContent["error_code"] in {"WORKSPACE_STATE_NOT_REBASEABLE", "NOT_FOUND"}
+        assert result.structuredContent["error_code"] in {
+            "WORKSPACE_STATE_NOT_REBASEABLE",
+            "NOT_FOUND",
+        }

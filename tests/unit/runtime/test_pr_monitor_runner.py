@@ -1086,9 +1086,7 @@ async def test_pre_merge_recheck_transient_base_fetch_exhaustion_is_terminal_rea
             if event.event_type == "workspace.state_changed"
             and event.new_state == WorkspaceStatus.failed.value
         ]
-        assert failed_transitions[-1].reason_code == (
-            "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
-        )
+        assert failed_transitions[-1].reason_code == ("GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED")
 
 
 @pytest.mark.unit
@@ -2289,8 +2287,7 @@ async def test_run_retries_transient_base_fetch_500_and_completes(
         assert workspace is not None
         assert workspace.status == WorkspaceStatus.completed.value
         assert any(
-            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY"
-            for event in workspace.events
+            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY" for event in workspace.events
         )
 
 
@@ -2354,9 +2351,7 @@ async def test_run_fails_after_transient_base_fetch_retry_budget_is_exhausted(
             if event.event_type == "workspace.state_changed"
             and event.new_state == WorkspaceStatus.failed.value
         ]
-        assert failed_transitions[-1].reason_code == (
-            "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
-        )
+        assert failed_transitions[-1].reason_code == ("GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED")
 
 
 @pytest.mark.unit
@@ -2423,9 +2418,7 @@ async def test_sync_base_transient_base_fetch_retry_budget_survives_status_refre
             if event.event_type == "workspace.state_changed"
             and event.new_state == WorkspaceStatus.failed.value
         ]
-        assert failed_transitions[-1].reason_code == (
-            "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
-        )
+        assert failed_transitions[-1].reason_code == ("GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED")
 
 
 @pytest.mark.unit
@@ -2736,9 +2729,7 @@ async def test_execute_sync_base_transient_exhaustion_records_terminal_reason(
     assert workspace.status == WorkspaceStatus.failed.value
     assert operations[0].status == OperationStatus.failed.value
     assert operations[0].error_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
-    assert operations[0].result["reason_code"] == (
-        "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
-    )
+    assert operations[0].result["reason_code"] == ("GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED")
 
 
 @pytest.mark.unit
@@ -3423,6 +3414,7 @@ class TestNotificationAndGraceHelpers:
         )
         assert invalid_started.threads_addressed_ids[started_key] == "20.000000"
         assert invalid_started.threads_addressed_ids[done_key] == "elapsed"
+
 
 class TestMiscMonitorHelpers:
     @pytest.mark.unit

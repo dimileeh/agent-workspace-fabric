@@ -433,7 +433,10 @@ def test_workspace_control_generated_idempotency_key_survives_request_failure() 
 @pytest.mark.parametrize(
     ("command", "args"),
     [
-        ("cancel", ["ws_cancel", "--reason", "operator requested", "--idempotency-key", "cancel-key"]),
+        (
+            "cancel",
+            ["ws_cancel", "--reason", "operator requested", "--idempotency-key", "cancel-key"],
+        ),
         (
             "stop",
             ["ws_stop", "--reason", "stack unstable", "--idempotency-key", "stop-key"],
@@ -485,12 +488,67 @@ def test_workspace_control_commands_emit_structured_api_error(
 @pytest.mark.parametrize(
     ("command", "args"),
     [
-        ("cancel", ["ws_cancel", "--reason", "operator requested", "--idempotency-key", "cancel-key", "--if-match", "bad"]),
-        ("stop", ["ws_stop", "--reason", "stack unstable", "--idempotency-key", "stop-key", "--if-match", "bad"]),
+        (
+            "cancel",
+            [
+                "ws_cancel",
+                "--reason",
+                "operator requested",
+                "--idempotency-key",
+                "cancel-key",
+                "--if-match",
+                "bad",
+            ],
+        ),
+        (
+            "stop",
+            [
+                "ws_stop",
+                "--reason",
+                "stack unstable",
+                "--idempotency-key",
+                "stop-key",
+                "--if-match",
+                "bad",
+            ],
+        ),
         ("destroy", ["ws_destroy", "--idempotency-key", "destroy-key", "--if-match", "bad"]),
-        ("refresh", ["ws_refresh", "--reason", "stale branch", "--idempotency-key", "refresh-key", "--if-match", "bad"]),
-        ("validate", ["ws_validate", "--requested-tier", "2", "--idempotency-key", "validate-key", "--if-match", "bad"]),
-        ("rebase", ["ws_rebase", "--reason", "recover merge conflicts", "--idempotency-key", "rebase-key", "--if-match", "bad"]),
+        (
+            "refresh",
+            [
+                "ws_refresh",
+                "--reason",
+                "stale branch",
+                "--idempotency-key",
+                "refresh-key",
+                "--if-match",
+                "bad",
+            ],
+        ),
+        (
+            "validate",
+            [
+                "ws_validate",
+                "--requested-tier",
+                "2",
+                "--idempotency-key",
+                "validate-key",
+                "--if-match",
+                "bad",
+            ],
+        ),
+        (
+            "rebase",
+            [
+                "ws_rebase",
+                "--reason",
+                "recover merge conflicts",
+                "--idempotency-key",
+                "rebase-key",
+                "--if-match",
+                "bad",
+            ],
+        ),
     ],
 )
 def test_workspace_control_commands_surface_invalid_if_match_api_error(

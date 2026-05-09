@@ -506,12 +506,14 @@ def test_control_command_authorization_failures_are_structured(case: _ControlCas
 @pytest.mark.parametrize(
     "case,error_code,status_code",
     [
-        *[(
-            case,
-            "NOT_FOUND",
-            404,
-        )
-          for case in _CONTROL_CASES],
+        *[
+            (
+                case,
+                "NOT_FOUND",
+                404,
+            )
+            for case in _CONTROL_CASES
+        ],
         *[(case, case.forbidden_error_code, 409) for case in _CONTROL_CASES],
     ],
 )

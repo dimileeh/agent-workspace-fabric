@@ -2125,14 +2125,8 @@ class TestCoverageEnforcement:
     @pytest.mark.parametrize(
         "fail_under_lines",
         (
-            (
-                "FAIL Required test coverage of 99.0% not reached.\n"
-                "Total coverage: 98.84%\n"
-            ),
-            (
-                "Total coverage: 98.84%\n"
-                "FAIL Required test coverage of 99.0% not reached.\n"
-            ),
+            ("FAIL Required test coverage of 99.0% not reached.\nTotal coverage: 98.84%\n"),
+            ("Total coverage: 98.84%\nFAIL Required test coverage of 99.0% not reached.\n"),
         ),
     )
     async def test_run_profile_coverage_uses_adjacent_provider_fail_under_exact_percent(
@@ -2495,9 +2489,7 @@ class TestCoverageEnforcement:
 
     @pytest.mark.unit
     def test_pytest_under_coverage_scan_continues_past_non_run_coverage_token(self) -> None:
-        assert _runs_pytest_under_coverage(
-            ["coverage", "report", "coverage", "run", "pytest"]
-        )
+        assert _runs_pytest_under_coverage(["coverage", "report", "coverage", "run", "pytest"])
 
     @pytest.mark.unit
     def test_provider_failure_evidence_parser_skips_missing_and_blank_lines(
