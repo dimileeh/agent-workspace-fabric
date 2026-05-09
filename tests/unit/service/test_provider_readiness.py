@@ -2319,6 +2319,41 @@ def test_ollama_model_probe_records_recovered_failure_debug_when_available(
     assert "sk-proj-ollama-secret" not in serialized
     assert "sk-proj-ollama-secret" not in caplog.text
 
+    caplog.clear()
+
+    def _http_error_then_success(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://primary.local/api/tags":
+            return SimpleNamespace(status_code=500, text="error for sk-proj-ollama-secret")
+        return SimpleNamespace(status_code=200, text='{"models":[{"name":"llama3:latest"}]}')
+
+    http_error_result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_error_then_success,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    assert http_error_result == {
+        "status": "ok",
+        "reason_code": "OLLAMA_MODEL_AVAILABLE",
+        "debug": {
+            "recovered_failures": [
+                {
+                    "url": "http://primary.local/api/tags",
+                    "status": "http_error",
+                    "status_code": 500,
+                    "detail": "HTTP 500: error for <redacted>",
+                }
+            ]
+        },
+    }
+    serialized = json.dumps(http_error_result, sort_keys=True)
+    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "sk-proj-ollama-secret" not in serialized
+    assert "sk-proj-ollama-secret" not in caplog.text
+
 
 @pytest.mark.unit
 def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:

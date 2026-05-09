@@ -63,8 +63,6 @@ class TestUp:
         assert "up" in cmd and "-d" in cmd and "--wait" in cmd
         assert "--remove-orphans" in cmd
         assert "--wait-timeout" in cmd and "300" in cmd
-        assert "--remove-orphans" in cmd
-        assert "--wait-timeout" in cmd and "300" in cmd
 
     @pytest.mark.unit
     async def test_up_without_wait_omits_wait_flag(
