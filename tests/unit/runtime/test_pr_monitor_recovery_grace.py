@@ -860,6 +860,112 @@ async def test_recovery_dispatch_does_not_requeue_already_succeeded_snapshot(
 
 
 @pytest.mark.unit
+async def test_recovery_dispatch_retries_cancelled_idempotent_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+    idempotency_key = monitor_operation_idempotency_key(
+        workspace_id=workspace_id,
+        action="validate_only",
+        pr_number=42,
+        reason_code="VALIDATION_INSUFFICIENT_TIER",
+        source_head_sha="abc1234567890def",
+        source_base_sha="a" * 40,
+    )
+
+    async with factory() as s:
+        repo = OperationRepository(s)
+        operation = await repo.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.running,
+            payload={
+                "owner": "pr_monitor",
+                "source": "pr_monitor",
+                "action": "validate_only",
+                "requested_action": "validate",
+                "reason": "Required validation tier has not passed for this merge candidate.",
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                "stale_reason": "validation_insufficient_tier",
+                "recovery_mode": "validate_only",
+                "pr_number": 42,
+                "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+                "source_head_sha": "abc1234567890def",
+                "source_base_sha": "a" * 40,
+                "target_branch": "development",
+                "remote_branch": f"awf/{workspace_id}",
+            },
+            idempotency_key=idempotency_key,
+        )
+        await repo.finish(
+            operation,
+            status=OperationStatus.cancelled,
+            result={"reason_code": "OPERATOR_REMONITOR"},
+            error_code="OPERATOR_REMONITOR",
+        )
+        await s.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=900,
+    )
+    state = MonitorState(started_at=0.0)
+    state.mark_addressed(
+        _initial_review_grace_started_key(42),
+        f"{0.0:.6f}",
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_pr_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert sleep_fn.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.ready.value
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
+        wait_operations = [
+            op
+            for op in operations
+            if op.type == OperationType.monitor_state.value
+            and op.payload.get("reason_code") == "RECOVERY_SNAPSHOT_ALREADY_HANDLED"
+        ]
+        assert len(recovery_operations) == 2
+        assert len(wait_operations) == 0
+        retry = next(op for op in recovery_operations if op.status == OperationStatus.pending.value)
+        cancelled = next(
+            op for op in recovery_operations if op.status == OperationStatus.cancelled.value
+        )
+        assert cancelled.idempotency_key == idempotency_key
+        assert retry.idempotency_key != idempotency_key
+        events = [e for e in ws.events if e.event_type == "monitor.recovery_dispatched"]
+        assert len(events) == 1
+
+
+@pytest.mark.unit
 async def test_recovery_dispatch_waits_when_idempotent_create_loses_race_to_active_op(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
