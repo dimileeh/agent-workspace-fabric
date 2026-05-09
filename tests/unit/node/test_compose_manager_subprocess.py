@@ -57,8 +57,9 @@ class TestUp:
         assert mock_exec.call_count == 1
         cmd = mock_exec.call_args[0]
         assert cmd[:2] == ("docker", "compose")
-        assert "-p" in cmd and spec.project_name() in cmd
-        assert "-f" in cmd
+        env = mock_exec.call_args.kwargs["env"]
+        assert env["COMPOSE_PROJECT_NAME"] == spec.project_name()
+        assert env["COMPOSE_FILE"].endswith("/compose.yml")
         assert "up" in cmd and "-d" in cmd and "--wait" in cmd
         assert "--remove-orphans" in cmd
         assert "--wait-timeout" in cmd and "300" in cmd
@@ -135,10 +136,6 @@ class TestEnsureProjectUp:
         assert cmd == (
             "docker",
             "compose",
-            "-p",
-            "awf_persisted_ws",
-            "-f",
-            str(compose_file),
             "up",
             "-d",
             "--remove-orphans",
@@ -146,6 +143,9 @@ class TestEnsureProjectUp:
             "--wait-timeout",
             "300",
         )
+        env = mock_exec.call_args.kwargs["env"]
+        assert env["COMPOSE_PROJECT_NAME"] == "awf_persisted_ws"
+        assert env["COMPOSE_FILE"] == str(compose_file)
         assert not (tmp_path / "work" / "compose" / "ws_persisted").exists()
 
 
@@ -197,8 +197,9 @@ class TestDown:
             )
 
         cmd = mock_exec.call_args[0]
-        assert "-p" in cmd and "awf_ws_custom" in cmd
-        assert "-f" in cmd and str(compose_file) in cmd
+        env = mock_exec.call_args.kwargs["env"]
+        assert env["COMPOSE_PROJECT_NAME"] == "awf_ws_custom"
+        assert env["COMPOSE_FILE"] == str(compose_file)
         assert "down" in cmd and "-v" in cmd
         assert "--remove-orphans" in cmd
 

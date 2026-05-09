@@ -154,6 +154,7 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     assert "uv run --python 3.12 pytest" in full_coverage_run
     assert "-n 8" in full_coverage_run
     assert "--dist=loadscope" in full_coverage_run
+    assert "--timeout=120" in full_coverage_run
     assert "--cov=awf" in full_coverage_run
     assert "--cov-report=term-missing" in full_coverage_run
     assert "--cov-report=xml" in full_coverage_run

@@ -11,6 +11,24 @@ from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 
 
 @pytest.mark.unit
+async def test_asyncio_runner_captures_subprocess_output_and_input() -> None:
+    runner = AsyncioSubprocessRunner()
+
+    result = await runner.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; data=sys.stdin.read(); print(data.upper(), end='')",
+        ],
+        input_bytes=b"payload",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "PAYLOAD"
+    assert result.stderr == ""
+
+
+@pytest.mark.unit
 async def test_asyncio_runner_streams_stdout_and_stderr_before_completion() -> None:
     runner = AsyncioSubprocessRunner()
     frames: list[tuple[str, str, float]] = []
@@ -70,6 +88,17 @@ async def test_asyncio_runner_preserves_utf8_split_across_stream_chunks() -> Non
     assert result.returncode == 0
     assert result.stdout == "before \U0001f600 after\n"
     assert "".join(stdout) == result.stdout
+
+
+@pytest.mark.unit
+async def test_asyncio_runner_rejects_non_positive_streaming_timeouts() -> None:
+    runner = AsyncioSubprocessRunner()
+
+    with pytest.raises(ValueError, match="wall_timeout_seconds must be positive"):
+        await runner.run_streaming([sys.executable, "-c", "pass"], wall_timeout_seconds=0)
+
+    with pytest.raises(ValueError, match="idle_timeout_seconds must be positive"):
+        await runner.run_streaming([sys.executable, "-c", "pass"], idle_timeout_seconds=-1)
 
 
 @pytest.mark.unit

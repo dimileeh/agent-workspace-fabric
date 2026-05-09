@@ -1882,13 +1882,13 @@ def _scheduler_candidate_cursor(workspaces: list[Workspace]) -> tuple[datetime, 
 def _scheduler_items_are_workspace_ids(
     workspaces: list[Workspace] | list[str],
 ) -> TypeGuard[list[str]]:
-    return isinstance(workspaces[0], str)
+    return bool(workspaces) and all(isinstance(item, str) for item in workspaces)
 
 
 def _scheduler_items_are_workspaces(
     workspaces: list[Workspace] | list[str],
 ) -> TypeGuard[list[Workspace]]:
-    return isinstance(workspaces[0], Workspace)
+    return bool(workspaces) and all(isinstance(item, Workspace) for item in workspaces)
 
 
 def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:

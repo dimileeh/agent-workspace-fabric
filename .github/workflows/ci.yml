@@ -80,7 +80,7 @@ jobs:
           CI: "true"
           AWF_DATABASE_URL: postgresql+asyncpg://awf:awf_ci@localhost:5432/awf
           AWF_TEST_DATABASE_URL: postgresql+asyncpg://awf:awf_ci@localhost:5432/awf
-        run: uv run --python 3.12 pytest -n 8 --dist=loadscope --cov=awf --cov-report=term-missing --cov-report=xml --cov-fail-under=99
+        run: uv run --python 3.12 pytest -n 8 --dist=loadscope --timeout=120 --cov=awf --cov-report=term-missing --cov-report=xml --cov-fail-under=99
 
       - name: Upload full coverage artifact
         if: always()

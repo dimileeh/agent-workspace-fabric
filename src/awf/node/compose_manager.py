@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -401,18 +402,20 @@ class ComposeManager:
         cmd = [
             "docker",
             "compose",
-            "-p",
-            project_name,
-            "-f",
-            str(compose_file),
             *args,
         ]
+        env = {
+            **os.environ,
+            "COMPOSE_PROJECT_NAME": project_name,
+            "COMPOSE_FILE": str(compose_file),
+        }
         _log.debug("compose.exec", operation=operation, cmd=cmd)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(),

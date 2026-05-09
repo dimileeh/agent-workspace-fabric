@@ -1982,6 +1982,24 @@ def test_ollama_http_probe_records_recovered_http_failure_as_redacted_debug(
 
 
 @pytest.mark.unit
+def test_ollama_probe_failure_debug_redacts_before_truncating_long_detail() -> None:
+    secret = "sk-proj-ollama-boundary-secret"
+    detail = ("x" * 225) + secret + "-tail"
+
+    result = provider_readiness._ollama_probe_failure_debug(
+        url="http://ollama.local/api/version",
+        status="http_error",
+        detail=detail,
+        secrets=frozenset({secret}),
+    )
+
+    serialized = json.dumps(result, sort_keys=True)
+    assert secret not in serialized
+    assert "sk-proj-ollama-boundary" not in serialized
+    assert "<redacted>" in result["detail"]
+
+
+@pytest.mark.unit
 def test_ollama_http_probe_terminal_mixed_failure_logs_only_http_terminal_detail(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -2289,7 +2307,7 @@ def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:
 
 
 @pytest.mark.unit
-def test_ollama_model_probe_logs_exception_before_missing_model(
+def test_ollama_model_probe_suppresses_exception_log_after_missing_model_response(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
@@ -2312,8 +2330,9 @@ def test_ollama_model_probe_logs_exception_before_missing_model(
 
     assert result["status"] == "fail"
     assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
-    assert "provider_readiness.ollama_model_probe_exception" in caplog.text
-    assert "RuntimeError: connect failed for <redacted>" in caplog.text
+    assert "probe_failures=http://primary.local/api/tags: RuntimeError: connect failed for <redacted>" in result["detail"]
+    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
+    assert "RuntimeError: connect failed" not in caplog.text
     assert "sk-proj-ollama-secret" not in caplog.text
     assert "sk-proj-ollama-secret" not in json.dumps(result, sort_keys=True)
 

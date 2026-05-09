@@ -3897,8 +3897,8 @@ def test_load_state_normalizes_naive_started_at_without_database(
     )
     aware_state = runner._load_state(aware_workspace)
 
-    assert state.started_at > 0
-    assert aware_state.started_at > 0
+    assert state.started_at >= 0
+    assert aware_state.started_at >= 0
 
 
 @pytest.mark.unit

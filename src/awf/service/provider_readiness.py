@@ -1828,7 +1828,7 @@ def _ollama_probe_failure_debug(
     payload: dict[str, Any] = {
         "url": _redact(url, secrets),
         "status": status,
-        "detail": _redact(_truncate(detail), secrets),
+        "detail": _truncate(_redact(detail, secrets)),
     }
     if status_code is not None:
         payload["status_code"] = status_code
@@ -1943,13 +1943,6 @@ def _probe_ollama_model(
         saw_model_response = True
         available_models.update(available)
 
-    for logged_exc in exceptions:
-        _log_redacted_exception(
-            "provider_readiness.ollama_model_probe_exception",
-            logged_exc,
-            secrets,
-        )
-
     if saw_model_response:
         detail = f"selected={model}; available_count={len(available_models)}"
         if failures:
@@ -1963,6 +1956,13 @@ def _probe_ollama_model(
                 secrets,
             ),
         }
+
+    for logged_exc in exceptions:
+        _log_redacted_exception(
+            "provider_readiness.ollama_model_probe_exception",
+            logged_exc,
+            secrets,
+        )
 
     return {
         "status": "fail",

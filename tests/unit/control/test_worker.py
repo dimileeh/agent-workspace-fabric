@@ -28,6 +28,8 @@ from awf.control.worker import (
     _monitor_recovery_claim_cleanup_payload,
     _scheduler_candidate_cursor,
     _scheduler_candidate_fetch_limit,
+    _scheduler_items_are_workspace_ids,
+    _scheduler_items_are_workspaces,
     _stale_active_execution_failure_message,
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
@@ -5983,6 +5985,18 @@ def test_scheduler_candidate_cursor_handles_empty_and_orders_by_created_at_then_
         third.created_at,
         "ws_c",
     )
+
+
+@pytest.mark.unit
+def test_scheduler_item_type_guards_reject_empty_and_mixed_lists() -> None:
+    workspace = object.__new__(Workspace)
+
+    assert _scheduler_items_are_workspace_ids([]) is False
+    assert _scheduler_items_are_workspaces([]) is False
+    assert _scheduler_items_are_workspace_ids(["ws_1", "ws_2"]) is True
+    assert _scheduler_items_are_workspace_ids(["ws_1", workspace]) is False
+    assert _scheduler_items_are_workspaces([workspace]) is True
+    assert _scheduler_items_are_workspaces([workspace, "ws_1"]) is False
 
 
 @pytest.mark.unit
