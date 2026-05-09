@@ -2702,8 +2702,20 @@ class TestGetWorkspace:
         create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
         ws_id = create.json()["workspace_id"]
         original_retry = workspaces_route.run_db_operation_with_retry
+        original_audit_lookup = EgressAuditRepository.get_latest_for_workspace
+        audit_calls = 0
         active_retry_operations = 0
         max_active_retry_operations = 0
+
+        async def _flaky_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal audit_calls
+            audit_calls += 1
+            if audit_calls == 1:
+                raise _closed_connection_error()
+            return await original_audit_lookup(self, workspace_id)
 
         async def _tracked_retry_operation(*args: Any, **kwargs: Any) -> Any:
             nonlocal active_retry_operations, max_active_retry_operations
@@ -2722,11 +2734,17 @@ class TestGetWorkspace:
             "run_db_operation_with_retry",
             _tracked_retry_operation,
         )
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _flaky_audit_lookup,
+        )
 
         response = await client.get(f"/v1/workspaces/{ws_id}")
 
         assert response.status_code == 200
         assert response.json()["id"] == ws_id
+        assert audit_calls == 2
         assert max_active_retry_operations == 1
 
     @pytest.mark.unit
