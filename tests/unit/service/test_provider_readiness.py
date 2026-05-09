@@ -354,6 +354,56 @@ def test_selected_opencode_preflight_requires_selected_ollama_model(
 
 
 @pytest.mark.unit
+def test_selected_opencode_preflight_suppresses_recovered_tags_fallback_logs(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+    urls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        urls.append(url)
+        if url == "http://host.docker.internal:11434/api/version":
+            raise RuntimeError("version fallback recovered")
+        if url == "http://localhost:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://host.docker.internal:11434/api/tags":
+            raise RuntimeError("tags fallback recovered")
+        if url == "http://localhost:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"kimi-k2.6:cloud"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={},
+        environ={},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    assert result["readiness_status"] == "ready"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["probe_status"] == "ok"
+    assert urls == [
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+        "http://host.docker.internal:11434/api/tags",
+        "http://localhost:11434/api/tags",
+    ]
+    assert "provider_readiness.ollama_probe_exception" not in caplog.text
+    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "fallback recovered" not in caplog.text
+
+
+@pytest.mark.unit
 def test_selected_claude_preflight_requires_usable_non_secret_probe(
     tmp_path: Path,
 ) -> None:
