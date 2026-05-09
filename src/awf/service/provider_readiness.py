@@ -1764,6 +1764,18 @@ def _log_redacted_exception(
     _log.error("%s: %s\n%s", event, detail, trace)
 
 
+def _log_redacted_terminal_failure(
+    event: str,
+    detail: str,
+    secrets: frozenset[str],
+) -> None:
+    _log.error(
+        "%s: %s",
+        event,
+        _truncate(_redact(detail, secrets), limit=_TRACEBACK_LOG_LIMIT),
+    )
+
+
 def _truncate(value: str, *, limit: int = 240) -> str:
     stripped = value.strip()
     if len(stripped) <= limit:
@@ -1869,6 +1881,12 @@ def _probe_ollama(
         _log_redacted_exception(
             "provider_readiness.ollama_probe_exception",
             logged_exc,
+            secrets,
+        )
+    if not exceptions and failures:
+        _log_redacted_terminal_failure(
+            "provider_readiness.ollama_probe_exception",
+            "; ".join(failures),
             secrets,
         )
     return {"ok": False, "detail": _redact("; ".join(failures), secrets)}
