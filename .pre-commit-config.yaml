@@ -27,14 +27,8 @@ repos:
         entry: uv run --python 3.12 --extra dev ruff format --check .
         language: system
         pass_filenames: false
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.14.1
-    hooks:
-      - id: mypy
+      - id: awf-mypy
+        name: mypy
+        entry: uv run --python 3.12 --extra dev mypy
+        language: system
         files: ^(src|tests)/
-        additional_dependencies:
-          - pydantic>=2.9.0
-          - fastapi>=0.115.0
-          - httpx>=0.27.0
-          - types-jinja2

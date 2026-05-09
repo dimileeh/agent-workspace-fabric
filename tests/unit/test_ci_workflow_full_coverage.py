@@ -126,6 +126,16 @@ def test_pull_request_ci_runs_for_every_target_branch() -> None:
 
 
 @pytest.mark.unit
+def test_ci_cancels_superseded_branch_and_pr_runs() -> None:
+    workflow = _workflow()
+
+    assert workflow.get("concurrency") == {
+        "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": True,
+    }
+
+
+@pytest.mark.unit
 def test_ci_has_authoritative_python_full_coverage_job() -> None:
     workflow = _workflow()
     job = _job(workflow, "python-full-coverage")

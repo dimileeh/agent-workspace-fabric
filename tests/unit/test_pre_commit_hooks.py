@@ -35,6 +35,18 @@ def test_pre_commit_runs_project_ruff_commands_that_match_ci() -> None:
     )
     assert hooks["awf-ruff-format-check"]["language"] == "system"
     assert hooks["awf-ruff-format-check"]["pass_filenames"] is False
+    assert hooks["awf-mypy"]["entry"] == "uv run --python 3.12 --extra dev mypy"
+    assert hooks["awf-mypy"]["language"] == "system"
+    assert hooks["awf-mypy"]["files"] == "^(src|tests)/"
+
+
+@pytest.mark.unit
+def test_pre_commit_does_not_use_isolated_mypy_mirror() -> None:
+    config = _yaml(".pre-commit-config.yaml")
+
+    assert all(
+        repo.get("repo") != "https://github.com/pre-commit/mirrors-mypy" for repo in config["repos"]
+    )
 
 
 @pytest.mark.unit
