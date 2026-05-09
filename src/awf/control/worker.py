@@ -23,9 +23,10 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeGuard
 
 from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
@@ -558,16 +559,18 @@ class ControlWorker:
     ) -> list[str]:
         if not workspaces:
             return []
-        if isinstance(workspaces[0], str):
+        if _scheduler_items_are_workspace_ids(workspaces):
             workspace_ids = workspaces
             stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
             rows = {
                 workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()
             }
-        else:
+        elif _scheduler_items_are_workspaces(workspaces):
             workspace_rows = workspaces
             workspace_ids = [workspace.id for workspace in workspace_rows]
             rows = {workspace.id: workspace for workspace in workspace_rows}
+        else:
+            return []
         now = datetime.now(UTC)
         breaker_repo = ProviderModelCircuitBreakerRepository(session)
         allowed: set[str] = set()
@@ -726,7 +729,7 @@ class ControlWorker:
         try:
             await self._recover_stale_active_executions()
         except Exception as exc:
-            if is_transient_closed_connection_error(exc):
+            if _worker_exception_is_transient_db_connection(exc):
                 interval = max(0.0, self._config.stale_active_execution_scan_interval_seconds)
                 self._next_stale_active_execution_scan_at = monotonic() + interval
                 _log.warning(
@@ -749,7 +752,7 @@ class ControlWorker:
         try:
             await self._expire_due_secret_leases()
         except Exception as exc:
-            if is_transient_closed_connection_error(exc):
+            if _worker_exception_is_transient_db_connection(exc):
                 interval = max(0.0, self._config.secret_lease_expiration_scan_interval_seconds)
                 self._next_secret_lease_expiration_scan_at = monotonic() + interval
                 _log.warning(
@@ -791,7 +794,7 @@ class ControlWorker:
             try:
                 await self._recover_stale_active_execution(candidate)
             except Exception as exc:
-                if is_transient_closed_connection_error(exc):
+                if _worker_exception_is_transient_db_connection(exc):
                     _log.warning(
                         "worker.stale_active_execution_db_connection_closed",
                         workspace_id=candidate.workspace_id,
@@ -2111,6 +2114,43 @@ def _scheduler_candidate_cursor(
         workspace_id=last.id,
         scoring_at=scoring_at,
     )
+
+
+def _scheduler_items_are_workspace_ids(
+    workspaces: list[Workspace] | list[str],
+) -> TypeGuard[list[str]]:
+    return bool(workspaces) and all(isinstance(item, str) for item in workspaces)
+
+
+def _scheduler_items_are_workspaces(
+    workspaces: list[Workspace] | list[str],
+) -> TypeGuard[list[Workspace]]:
+    return bool(workspaces) and all(isinstance(item, Workspace) for item in workspaces)
+
+
+def _worker_exception_is_transient_db_connection(exc: BaseException) -> bool:
+    if not is_transient_closed_connection_error(exc):
+        return False
+    return _exception_chain_has_sqlalchemy_error(exc)
+
+
+def _exception_chain_has_sqlalchemy_error(exc: BaseException) -> bool:
+    stack: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, SQLAlchemyError):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            stack.extend(current.exceptions)
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if not current.__suppress_context__ and current.__context__ is not None:
+            stack.append(current.__context__)
+    return False
 
 
 def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:

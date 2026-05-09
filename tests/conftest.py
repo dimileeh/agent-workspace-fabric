@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - Windows does not run AWF Docker CI.
     fcntl = None  # type: ignore[assignment]
 
 _POSTGRES_TEST_TIMEOUT_SECONDS = 120
+_SESSION_PATH = os.environ.get("PATH")
 _POSTGRES_FIXTURE_NAMES = frozenset(
     {
         "client",
@@ -318,8 +319,19 @@ def _serialize_docker_daemon_tests(request: pytest.FixtureRequest) -> Iterator[N
     if request.node.get_closest_marker("docker") is None:
         yield
         return
-    with _docker_test_lock():
-        yield
+    previous_path = os.environ.get("PATH")
+    if _SESSION_PATH is None:
+        os.environ.pop("PATH", None)
+    else:
+        os.environ["PATH"] = _SESSION_PATH
+    try:
+        with _docker_test_lock():
+            yield
+    finally:
+        if previous_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = previous_path
 
 
 @pytest.fixture

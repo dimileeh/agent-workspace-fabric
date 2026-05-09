@@ -119,4 +119,3 @@ uv run --python 3.12 --extra dev pytest --cov=awf --cov-report=term-missing
   dirty, inspect before editing and preserve unrelated changes.
 - Cleanup must remove workspace containers, networks, volumes, pressure
   directories, and worktrees only when policy says they are no longer needed.
-

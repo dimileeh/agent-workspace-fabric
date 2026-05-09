@@ -354,6 +354,56 @@ def test_selected_opencode_preflight_requires_selected_ollama_model(
 
 
 @pytest.mark.unit
+def test_selected_opencode_preflight_suppresses_recovered_tags_fallback_logs(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+    urls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        urls.append(url)
+        if url == "http://host.docker.internal:11434/api/version":
+            raise RuntimeError("version fallback recovered")
+        if url == "http://localhost:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://host.docker.internal:11434/api/tags":
+            raise RuntimeError("tags fallback recovered")
+        if url == "http://localhost:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"kimi-k2.6:cloud"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={},
+        environ={},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    assert result["readiness_status"] == "ready"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["probe_status"] == "ok"
+    assert urls == [
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+        "http://host.docker.internal:11434/api/tags",
+        "http://localhost:11434/api/tags",
+    ]
+    assert "provider_readiness.ollama_probe_exception" not in caplog.text
+    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "fallback recovered" not in caplog.text
+
+
+@pytest.mark.unit
 def test_selected_claude_preflight_requires_usable_non_secret_probe(
     tmp_path: Path,
 ) -> None:
@@ -1796,7 +1846,9 @@ def test_provider_readiness_opencode_ollama_file_reason_without_opencode_config(
 @pytest.mark.unit
 def test_provider_readiness_opencode_default_host_gateway_falls_back_to_localhost(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
     home = tmp_path / "home"
     (home / ".config" / "opencode").mkdir(parents=True)
     urls: list[str] = []
@@ -1821,6 +1873,222 @@ def test_provider_readiness_opencode_default_host_gateway_falls_back_to_localhos
         "http://host.docker.internal:11434/api/version",
         "http://localhost:11434/api/version",
     ]
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "debug" not in opencode
+    assert "provider_readiness.ollama_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "nodename nor servname provided" not in caplog.text
+    assert "nodename nor servname provided" not in serialized
+
+
+@pytest.mark.unit
+def test_ollama_http_probe_records_recovered_failures_as_redacted_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+    urls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        urls.append(url)
+        if url == "http://host.docker.internal:11434/api/version":
+            raise RuntimeError("transport failed for sk-proj-ollama-fallback-secret")
+        if url == "http://localhost:11434/api/version":
+            return SimpleNamespace(status_code=200, text="ok")
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = provider_readiness._probe_ollama(
+        (
+            "http://host.docker.internal:11434/api/version",
+            "http://localhost:11434/api/version",
+        ),
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-fallback-secret"}),
+    )
+
+    assert result == {
+        "ok": True,
+        "debug": {
+            "recovered_failures": [
+                {
+                    "url": "http://host.docker.internal:11434/api/version",
+                    "status": "exception",
+                    "detail": "RuntimeError: transport failed for <redacted>",
+                }
+            ]
+        },
+    }
+    assert urls == [
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+    ]
+    serialized = json.dumps(result, sort_keys=True)
+    assert "provider_readiness.ollama_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "sk-proj-ollama-fallback-secret" not in serialized
+    assert "sk-proj-ollama-fallback-secret" not in caplog.text
+
+
+@pytest.mark.unit
+def test_ollama_http_probe_records_recovered_http_failure_as_redacted_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+    urls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        urls.append(url)
+        if url == "http://host.docker.internal:11434/api/version":
+            return SimpleNamespace(
+                status_code=401,
+                text="unauthorized for sk-proj-ollama-fallback-secret",
+            )
+        if url == "http://localhost:11434/api/version":
+            return SimpleNamespace(status_code=200, text="ok")
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = provider_readiness._probe_ollama(
+        (
+            "http://host.docker.internal:11434/api/version",
+            "http://localhost:11434/api/version",
+        ),
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-fallback-secret"}),
+    )
+
+    assert result == {
+        "ok": True,
+        "debug": {
+            "recovered_failures": [
+                {
+                    "url": "http://host.docker.internal:11434/api/version",
+                    "status": "http_error",
+                    "detail": "HTTP 401: unauthorized for <redacted>",
+                    "status_code": 401,
+                }
+            ]
+        },
+    }
+    assert urls == [
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+    ]
+    serialized = json.dumps(result, sort_keys=True)
+    assert "provider_readiness.ollama_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "sk-proj-ollama-fallback-secret" not in serialized
+    assert "sk-proj-ollama-fallback-secret" not in caplog.text
+
+
+@pytest.mark.unit
+def test_ollama_probe_failure_debug_redacts_before_truncating_long_detail() -> None:
+    secret = "sk-proj-ollama-boundary-secret"
+    detail = ("x" * 225) + secret + "-tail"
+
+    result = provider_readiness._ollama_probe_failure_debug(
+        url="http://ollama.local/api/version",
+        status="http_error",
+        detail=detail,
+        secrets=frozenset({secret}),
+    )
+
+    serialized = json.dumps(result, sort_keys=True)
+    assert secret not in serialized
+    assert "sk-proj-ollama-boundary" not in serialized
+    assert "<redacted>" in result["detail"]
+
+
+@pytest.mark.unit
+def test_ollama_http_probe_terminal_mixed_failure_logs_only_http_terminal_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://host.docker.internal:11434/api/version":
+            raise RuntimeError("transport failed for sk-proj-ollama-terminal-secret")
+        if url == "http://localhost:11434/api/version":
+            return SimpleNamespace(status_code=503, text="busy ghp_ollama_terminal_secret")
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = provider_readiness._probe_ollama(
+        (
+            "http://host.docker.internal:11434/api/version",
+            "http://localhost:11434/api/version",
+        ),
+        http_get=_http_get,
+        secrets=frozenset(
+            {
+                "sk-proj-ollama-terminal-secret",
+                "ghp_ollama_terminal_secret",
+            }
+        ),
+    )
+
+    assert result["ok"] is False
+    assert "RuntimeError: transport failed for <redacted>" in result["detail"]
+    assert "HTTP 503: busy <redacted>" in result["detail"]
+    messages = [record.getMessage() for record in caplog.records]
+    traceback_messages = [message for message in messages if "Traceback" in message]
+    terminal_http_messages = [message for message in messages if "HTTP 503: busy" in message]
+    assert len(traceback_messages) == 1
+    assert len(terminal_http_messages) == 1
+    assert "RuntimeError: transport failed for <redacted>" in traceback_messages[0]
+    assert "RuntimeError: transport failed" not in terminal_http_messages[0]
+    assert "HTTP 503: busy <redacted>" in terminal_http_messages[0]
+    assert "sk-proj-ollama-terminal-secret" not in caplog.text
+    assert "ghp_ollama_terminal_secret" not in caplog.text
+
+
+@pytest.mark.unit
+def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted_detail(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+    urls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        urls.append(url)
+        if url == "http://host.docker.internal:11434/api/version":
+            raise RuntimeError("transport failed for sk-proj-ollama-terminal-secret")
+        if url == "http://localhost:11434/api/version":
+            return SimpleNamespace(status_code=503, text="busy ghp_ollama_terminal_secret")
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        strict_providers={"opencode"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_http_get,
+    )
+
+    opencode = payload["providers"]["opencode"]
+    assert payload["status"] == "fail"
+    assert opencode["status"] == "fail"
+    assert opencode["reason"] == "OLLAMA_HOST_UNREACHABLE"
+    assert urls == [
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+    ]
+    assert "http://host.docker.internal:11434/api/version" in opencode["detail"]
+    assert "http://localhost:11434/api/version" in opencode["detail"]
+    assert "<redacted>" in opencode["detail"]
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "sk-proj-ollama-terminal-secret" not in serialized
+    assert "ghp_ollama_terminal_secret" not in serialized
+    assert "provider_readiness.ollama_probe_exception" in caplog.text
+    assert "Traceback" in caplog.text
+    assert "RuntimeError: transport failed for <redacted>" in caplog.text
+    assert "HTTP 503: busy <redacted>" in caplog.text
+    assert "sk-proj-ollama-terminal-secret" not in caplog.text
+    assert "ghp_ollama_terminal_secret" not in caplog.text
 
 
 @pytest.mark.unit
@@ -1886,6 +2154,32 @@ def test_provider_readiness_opencode_http_error_detail_is_redacted(tmp_path: Pat
     serialized = json.dumps(payload, sort_keys=True)
     assert "ghp_ollama_secret" not in serialized
     assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
+def test_ollama_http_probe_all_http_failures_log_redacted_terminal_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+
+    def _http_get(_url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        return SimpleNamespace(status_code=503, text="busy sk-proj-ollama-secret")
+
+    result = provider_readiness._probe_ollama(
+        ("http://ollama.local:11434/api/version",),
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    serialized = json.dumps(result, sort_keys=True)
+    assert result["ok"] is False
+    assert "HTTP 503: busy <redacted>" in serialized
+    assert "provider_readiness.ollama_probe_exception" in caplog.text
+    assert "HTTP 503: busy <redacted>" in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "sk-proj-ollama-secret" not in serialized
+    assert "sk-proj-ollama-secret" not in caplog.text
 
 
 @pytest.mark.unit
@@ -1988,6 +2282,80 @@ def test_ollama_model_probe_checks_fallback_tags_urls_before_missing() -> None:
 
 
 @pytest.mark.unit
+def test_ollama_model_probe_records_recovered_failure_debug_when_available(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://primary.local/api/tags":
+            raise RuntimeError("connect failed for sk-proj-ollama-secret")
+        return SimpleNamespace(status_code=200, text='{"models":[{"name":"llama3:latest"}]}')
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    assert result == {
+        "status": "ok",
+        "reason_code": "OLLAMA_MODEL_AVAILABLE",
+        "debug": {
+            "recovered_failures": [
+                {
+                    "url": "http://primary.local/api/tags",
+                    "status": "exception",
+                    "detail": "RuntimeError: connect failed for <redacted>",
+                }
+            ]
+        },
+    }
+    serialized = json.dumps(result, sort_keys=True)
+    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "sk-proj-ollama-secret" not in serialized
+    assert "sk-proj-ollama-secret" not in caplog.text
+
+    caplog.clear()
+
+    def _http_error_then_success(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://primary.local/api/tags":
+            return SimpleNamespace(status_code=500, text="error for sk-proj-ollama-secret")
+        return SimpleNamespace(status_code=200, text='{"models":[{"name":"llama3:latest"}]}')
+
+    http_error_result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_error_then_success,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    assert http_error_result == {
+        "status": "ok",
+        "reason_code": "OLLAMA_MODEL_AVAILABLE",
+        "debug": {
+            "recovered_failures": [
+                {
+                    "url": "http://primary.local/api/tags",
+                    "status": "http_error",
+                    "status_code": 500,
+                    "detail": "HTTP 500: error for <redacted>",
+                }
+            ]
+        },
+    }
+    serialized = json.dumps(http_error_result, sort_keys=True)
+    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "sk-proj-ollama-secret" not in serialized
+    assert "sk-proj-ollama-secret" not in caplog.text
+
+
+@pytest.mark.unit
 def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
@@ -2010,6 +2378,88 @@ def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:
         "selected=llama3; available_count=1; "
         "probe_failures=http://secondary.local/api/tags: HTTP 503: busy"
     )
+
+
+@pytest.mark.unit
+def test_ollama_model_probe_missing_model_redacts_before_truncating_detail() -> None:
+    secret = "LEAKME-sensitive-ollama-secret-value"
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://primary.local/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"other-model:latest"}]}',
+            )
+        return SimpleNamespace(status_code=503, text=("x" * 120) + secret + "-tail")
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({secret}),
+    )
+
+    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
+    assert secret not in result["detail"]
+    assert "LEAKME" not in result["detail"]
+    assert "<redacted>" in result["detail"]
+
+
+@pytest.mark.unit
+def test_ollama_model_probe_failure_redacts_before_truncating_detail() -> None:
+    secret = "LEAKME-sensitive-ollama-secret-value"
+
+    def _http_get(_url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        return SimpleNamespace(status_code=503, text=("x" * 160) + secret + "-tail")
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags",),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({secret}),
+    )
+
+    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
+    assert secret not in result["detail"]
+    assert "LEAKME" not in result["detail"]
+    assert "<redacted>" in result["detail"]
+
+
+@pytest.mark.unit
+def test_ollama_model_probe_logs_exception_after_missing_model_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://primary.local/api/tags":
+            raise RuntimeError("connect failed for sk-proj-ollama-secret")
+        return SimpleNamespace(
+            status_code=200,
+            text='{"models":[{"name":"other-model:latest"}]}',
+        )
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
+    assert (
+        "probe_failures=http://primary.local/api/tags: RuntimeError: connect failed for <redacted>"
+        in result["detail"]
+    )
+    assert "provider_readiness.ollama_model_probe_exception" in caplog.text
+    assert "Traceback" in caplog.text
+    assert "RuntimeError: connect failed for <redacted>" in caplog.text
+    assert "sk-proj-ollama-secret" not in caplog.text
+    assert "sk-proj-ollama-secret" not in json.dumps(result, sort_keys=True)
 
 
 @pytest.mark.unit

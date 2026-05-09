@@ -1044,9 +1044,9 @@ const setSelectedId = useCallback((action: React.SetStateAction<string | null>) 
         <section className="min-w-0">
           {error ? <ErrorBanner message={error} /> : null}
           <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            <ResourceCapacityPanel 
-              saturation={resourceSaturation} 
-              error={resourceError} 
+            <ResourceCapacityPanel
+              saturation={resourceSaturation}
+              error={resourceError}
               workspaceSummary={workspaceSummary}
               workspaceSummaryError={workspaceSummaryError}
             />
@@ -2209,7 +2209,7 @@ function UsageSummaryBlock({
   const safeUsage = fallbackLlmUsage(usage);
   const pricingReason = pricingAvailabilityReason(pricing);
   const showCost = safeUsage.cost_estimate !== null && (!pricing || pricing.is_current);
-  
+
   if (safeUsage.status === "unavailable" || (safeUsage.input_tokens == null && safeUsage.output_tokens == null && safeUsage.total_tokens == null && safeUsage.cost_estimate == null)) {
     return (
       <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
@@ -2401,13 +2401,13 @@ function ResourceCapacityPanel({
           ) : null}
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <Fact label="Active" value={`${saturation.workspace_counts.active_total} workspaces`} />
-            <Fact 
-              label="Stuck" 
-              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"} 
+            <Fact
+              label="Stuck"
+              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
             />
-            <Fact 
-              label="Reason Coverage" 
-              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"} 
+            <Fact
+              label="Reason Coverage"
+              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
             />
             <Fact
               label="Reserved CPU"

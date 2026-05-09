@@ -723,6 +723,37 @@ class TestRender:
         assert "docker" in exc.value.stderr
 
     @pytest.mark.unit
+    async def test_compose_command_uses_environment_project_and_file_contract(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        async def _spawn(*args: object, **kwargs: object) -> _FakeProcess:
+            calls.append((args, kwargs))
+            return _FakeProcess(returncode=0)
+
+        compose_file = tmp_path / "compose.yml"
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        await manager._compose(  # noqa: SLF001
+            "awf_ws_long_flags",
+            compose_file,
+            ["up", "-d"],
+            operation="up",
+        )
+
+        assert calls
+        args, kwargs = calls[0]
+        assert args == ("docker", "compose", "up", "-d")
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert env["COMPOSE_PROJECT_NAME"] == "awf_ws_long_flags"
+        assert env["COMPOSE_FILE"] == str(compose_file)
+
+    @pytest.mark.unit
     async def test_compose_command_times_out_and_kills_hung_process(
         self,
         manager: ComposeManager,

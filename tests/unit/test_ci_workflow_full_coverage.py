@@ -14,6 +14,7 @@ CONTRIBUTING_PATH = REPO_ROOT / "CONTRIBUTING.md"
 DB_URL = "postgresql+asyncpg://awf:awf_ci@localhost:5432/awf"
 DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+GITHUB_HOSTED_RUNNER = "ubuntu-latest"
 
 
 def _workflow() -> dict[str, Any]:
@@ -125,11 +126,21 @@ def test_pull_request_ci_runs_for_every_target_branch() -> None:
 
 
 @pytest.mark.unit
+def test_ci_cancels_superseded_branch_and_pr_runs() -> None:
+    workflow = _workflow()
+
+    assert workflow.get("concurrency") == {
+        "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": True,
+    }
+
+
+@pytest.mark.unit
 def test_ci_has_authoritative_python_full_coverage_job() -> None:
     workflow = _workflow()
     job = _job(workflow, "python-full-coverage")
 
-    assert job.get("runs-on") == "ubuntu-latest-8-cores"
+    assert job.get("runs-on") == GITHUB_HOSTED_RUNNER
 
     services = job.get("services", {})
     assert isinstance(services, dict)
@@ -153,6 +164,8 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     assert "uv run --python 3.12 pytest" in full_coverage_run
     assert "-n 8" in full_coverage_run
     assert "--dist=loadscope" in full_coverage_run
+    assert "--timeout=300" in full_coverage_run
+    assert "--timeout=120" not in full_coverage_run
     assert "--cov=awf" in full_coverage_run
     assert "--cov-report=term-missing" in full_coverage_run
     assert "--cov-report=xml" in full_coverage_run
@@ -199,12 +212,35 @@ def test_full_coverage_job_rejects_truthy_docker_skip_env_at_any_scope(
 
 
 @pytest.mark.unit
-def test_unit_smoke_job_is_not_the_authoritative_coverage_gate() -> None:
-    commands = _run_steps(_job(_workflow(), "lint-and-test"))
+def test_lint_and_type_job_does_not_duplicate_python_test_execution() -> None:
+    workflow = _workflow()
+    job = _job(workflow, "lint-and-type")
 
-    assert "pytest tests/unit/" in commands
+    assert job.get("runs-on") == GITHUB_HOSTED_RUNNER
+    assert job.get("timeout-minutes") == 15
+    assert "services" not in job
+
+    commands = _run_steps(job)
+    assert "ruff check ." in commands
+    assert "ruff format --check ." in commands
+    assert ".venv/bin/mypy" in commands
+    assert "pytest" not in commands
     assert "--cov=awf" not in commands
     assert "--cov-fail-under" not in commands
+
+
+@pytest.mark.unit
+def test_full_coverage_is_the_only_python_test_job() -> None:
+    workflow = _workflow()
+    jobs = workflow.get("jobs", {})
+    assert isinstance(jobs, dict)
+
+    assert "integration" not in jobs
+
+    python_test_jobs = [
+        name for name, job in jobs.items() if isinstance(job, dict) and "pytest" in _run_steps(job)
+    ]
+    assert python_test_jobs == ["python-full-coverage"]
 
 
 @pytest.mark.unit
@@ -222,11 +258,10 @@ def test_required_ci_gate_rolls_up_full_coverage_and_required_jobs() -> None:
 
     assert job.get("if") == "${{ always() }}"
     assert _job_needs(job) == {
-        "lint-and-test",
+        "lint-and-type",
         "python-full-coverage",
         "console",
         "release-artifacts",
-        "integration",
     }
 
     commands = _run_steps(job)
