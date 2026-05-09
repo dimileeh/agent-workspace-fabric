@@ -86,10 +86,13 @@ def test_remote_push_url_uses_adopted_fork_url_with_workspace_remote_style() -> 
         repo_url="git@github.com:base-org/project.git",
     )
 
-    assert remote_push_url_for_workspace(
-        ws,  # type: ignore[arg-type]
-        base_repo=RepoRef(owner="base-org", name="project"),
-    ) == "git@github.com:fork-owner/project.git"
+    assert (
+        remote_push_url_for_workspace(
+            ws,  # type: ignore[arg-type]
+            base_repo=RepoRef(owner="base-org", name="project"),
+        )
+        == "git@github.com:fork-owner/project.git"
+    )
 
 
 @pytest.mark.unit
@@ -99,7 +102,10 @@ def test_remote_push_url_preserves_https_userinfo_for_fork_pushes() -> None:
         repo_url="https://token@github.com/base-org/project.git",
     )
 
-    assert remote_push_url_for_workspace(
-        ws,  # type: ignore[arg-type]
-        base_repo=RepoRef(owner="base-org", name="project"),
-    ) == "https://token@github.com/fork/project.git"
+    assert (
+        remote_push_url_for_workspace(
+            ws,  # type: ignore[arg-type]
+            base_repo=RepoRef(owner="base-org", name="project"),
+        )
+        == "https://token@github.com/fork/project.git"
+    )

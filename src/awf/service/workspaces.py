@@ -559,7 +559,9 @@ class WorkspaceService:
                 )
                 egress_audit = None
             else:
-                egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
+                egress_audit = (
+                    _egress_audit_response(audit_record) if audit_record is not None else None
+                )
             return workspace_response(
                 ws,
                 validation_provenance=validation_provenance,
@@ -1120,9 +1122,8 @@ def _profile_ref_matches(existing: Workspace, payload: WorkspaceCreateV2Request)
         return existing.profile_ref == payload.workspace.profile_ref
     if payload.workspace.profile_ref not in (None, "auto"):
         return False
-    if (
-        payload.workspace.profile_ref == "auto"
-        and (existing.requested_profile is not None or payload.workspace.profile is not None)
+    if payload.workspace.profile_ref == "auto" and (
+        existing.requested_profile is not None or payload.workspace.profile is not None
     ):
         return False
     return _has_v2_create_artifact(existing)
@@ -1143,10 +1144,7 @@ def _owned_path_hints_match(stored: Sequence[str], requested: Sequence[str]) -> 
 
 
 def _auto_profile_request(payload: WorkspaceCreateV2Request) -> bool:
-    return (
-        payload.workspace.profile is None
-        and payload.workspace.profile_ref in (None, "auto")
-    )
+    return payload.workspace.profile is None and payload.workspace.profile_ref in (None, "auto")
 
 
 def _stored_validation_requested_tier_matches(

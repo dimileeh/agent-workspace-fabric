@@ -217,9 +217,7 @@ def test_runbook_covers_observability_and_recovery_surfaces() -> None:
         ("docs/REST_API_REFERENCE.md", "Inspect the adopted monitor:"),
     ),
 )
-def test_adoption_rest_inspection_examples_include_auth_header(
-    doc_path: str, heading: str
-) -> None:
+def test_adoption_rest_inspection_examples_include_auth_header(doc_path: str, heading: str) -> None:
     doc = _read(doc_path)
     pattern = rf"{re.escape(heading)}\n\n.*?```bash\n(?P<block>.*?)\n```"
     match = re.search(pattern, doc, re.DOTALL)

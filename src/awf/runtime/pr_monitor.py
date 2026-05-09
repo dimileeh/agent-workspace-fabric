@@ -457,14 +457,15 @@ def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) ->
     verdict = state.threads_addressed_ids.get(thread.thread_id)
     if _needs_comment_attention(verdict):
         return True
-    return (
-        state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
-        != _review_thread_body_hash(thread)
-    )
+    return state.threads_addressed_ids.get(
+        _review_thread_body_state_key(thread.thread_id)
+    ) != _review_thread_body_hash(thread)
 
 
 def _is_bot_review_thread(thread: ReviewThread) -> bool:
-    authors = [comment.author for comment in thread.comments] if thread.comments else [thread.author]
+    authors = (
+        [comment.author for comment in thread.comments] if thread.comments else [thread.author]
+    )
     return all(_is_bot_author(author) for author in authors)
 
 

@@ -568,9 +568,7 @@ async def _next_adoption_workspace_idempotency_key(
     reserved_idempotency_keys: Iterable[str] = (),
     require_generation: bool = False,
 ) -> str:
-    workspace_keys = set(
-        await workspace_repo.list_idempotency_key_family(logical_idempotency_key)
-    )
+    workspace_keys = set(await workspace_repo.list_idempotency_key_family(logical_idempotency_key))
     if known_workspace_keys is not None:
         workspace_keys.update(known_workspace_keys)
     if not require_generation and not workspace_keys:
@@ -690,9 +688,7 @@ async def _terminal_adoption_lineage(
     if unloaded_workspace_ids:
         stmt = select(TaskAttempt).where(TaskAttempt.workspace_id.in_(unloaded_workspace_ids))
         attempts = (await session.execute(stmt)).scalars()
-        attempts_by_workspace_id.update(
-            {attempt.workspace_id: attempt for attempt in attempts}
-        )
+        attempts_by_workspace_id.update({attempt.workspace_id: attempt for attempt in attempts})
 
     lineage: list[dict[str, str | None]] = []
     for workspace in terminal_workspaces:

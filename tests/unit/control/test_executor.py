@@ -718,7 +718,11 @@ class TestHappyPath:
             }
         )
         satisfied_report = json.dumps(
-            {"status": "satisfied", "summary": "implementation and validation satisfy plan", "gaps": []}
+            {
+                "status": "satisfied",
+                "summary": "implementation and validation satisfy plan",
+                "gaps": [],
+            }
         )
 
         fake.queue_result(returncode=0, stdout="")  # changed paths before planning
@@ -827,9 +831,7 @@ class TestHappyPath:
             ]
         }
         handoff_events = [
-            event
-            for event in events
-            if event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION
+            event for event in events if event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION
         ]
         assert handoff_events
 
@@ -1214,9 +1216,7 @@ class TestHappyPath:
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert ws.failure_reason == "agent_failure"
-        assert "Document the API endpoint required by the saved plan." in (
-            ws.failure_message or ""
-        )
+        assert "Document the API endpoint required by the saved plan." in (ws.failure_message or "")
         assert [run["status"] for run in runs] == ["succeeded"]
         assert [run["reason_code"] for run in runs] == ["VALIDATION_OK"]
         assert operation["status"] == "failed"
@@ -1445,17 +1445,11 @@ class TestHappyPath:
         assert failure_message in (ws.failure_message or "")
         assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
         assert operation["status"] == "failed"
-        assert (
-            operation["error_code"]
-            == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
-        )
+        assert operation["error_code"] == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
         assert operation["finished_at"] is not None
         assert failure_message in operation["error_message"]
         result = _json_value(operation["result"])
-        assert (
-            result["reason_code"]
-            == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
-        )
+        assert result["reason_code"] == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
         assert result["validation_run_id"]
         failure_payload = _json_value(failure_event.payload)
         expected_operation = (
@@ -1465,10 +1459,7 @@ class TestHappyPath:
         if failing_git_operation == "diff_reset":
             assert failure_payload["details"]["cleanup_operation"] == "reset"
             assert failure_payload["details"]["cleanup_returncode"] == 129
-            assert (
-                failure_payload["details"]["cleanup_command_reason_code"]
-                == "GIT_RESET_FAILED"
-            )
+            assert failure_payload["details"]["cleanup_command_reason_code"] == "GIT_RESET_FAILED"
             assert failure_payload["details"]["report_left_staged"] is True
         else:
             assert "cleanup_operation" not in failure_payload["details"]
@@ -1582,23 +1573,17 @@ class TestHappyPath:
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert ws.failure_reason == "infrastructure_failure"
-        assert "post-validation conformance report write failed" in (
-            ws.failure_message or ""
-        )
+        assert "post-validation conformance report write failed" in (ws.failure_message or "")
         assert "disk full" in (ws.failure_message or "")
         assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
         assert operation["status"] == "failed"
         assert (
-            operation["error_code"]
-            == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
+            operation["error_code"] == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
         )
         assert operation["finished_at"] is not None
         assert "disk full" in operation["error_message"]
         result = _json_value(operation["result"])
-        assert (
-            result["reason_code"]
-            == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
-        )
+        assert result["reason_code"] == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
         assert result["validation_run_id"]
         assert event["reason_code"] == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
         event_payload = _json_value(event["payload"])
@@ -1903,11 +1888,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
         fake.queue_result(
             returncode=0,
-            stdout=(
-                f"?? docs/awf-plans/{ws_id}.md\n"
-                f"?? {report_path}\n"
-                " M src/x.py\n"
-            ),
+            stdout=(f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n"),
         )
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
@@ -2055,11 +2036,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout=handoff_report)  # conformance handoff
         fake.queue_result(
             returncode=0,
-            stdout=(
-                f"?? docs/awf-plans/{ws_id}.md\n"
-                f"?? {report_path}\n"
-                " M src/x.py\n"
-            ),
+            stdout=(f"?? docs/awf-plans/{ws_id}.md\n?? {report_path}\n M src/x.py\n"),
         )
         fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
@@ -2284,9 +2261,7 @@ class TestHappyPath:
         assert iteration_prompt_index < validation_call_index
         async with factory() as s:
             events = await WorkspaceEventRepository(s).list(workspace_id=ws_id, limit=100)
-        assert not any(
-            event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events
-        )
+        assert not any(event.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION for event in events)
 
     @pytest.mark.unit
     async def test_planning_profile_failure_records_conformance_evidence_and_salvage(

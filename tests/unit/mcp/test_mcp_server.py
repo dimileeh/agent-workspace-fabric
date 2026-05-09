@@ -2190,7 +2190,9 @@ class TestWorkspaceOperations:
         self,
         mcp,
     ) -> None:  # type: ignore[no-untyped-def]
-        result = await mcp.call_tool("awf_list_workspace_operations", {"workspace_id": "ws_missing"})
+        result = await mcp.call_tool(
+            "awf_list_workspace_operations", {"workspace_id": "ws_missing"}
+        )
 
         assert isinstance(result, CallToolResult)
         assert result.isError is True

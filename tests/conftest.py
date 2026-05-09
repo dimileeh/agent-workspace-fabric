@@ -106,7 +106,9 @@ def _item_source_line(item: pytest.Item) -> int | None:
 
 
 def _item_fixture_names(item: pytest.Item) -> tuple[str, ...]:
-    return tuple(sorted(name for name in getattr(item, "fixturenames", ()) if isinstance(name, str)))
+    return tuple(
+        sorted(name for name in getattr(item, "fixturenames", ()) if isinstance(name, str))
+    )
 
 
 def _test_function_contains_line(node: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> bool:
@@ -118,9 +120,7 @@ def _selected_test_function_nodes(
     item: pytest.Item,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...]:
     function_nodes = tuple(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
     )
     source_line = _item_source_line(item)
     if source_line is not None:

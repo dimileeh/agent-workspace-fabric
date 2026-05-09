@@ -31,7 +31,9 @@ def test_spec_generation_succeeds(openapi_spec: dict) -> None:
     assert "openapi" in openapi_spec, "Spec missing 'openapi' key"
     assert "info" in openapi_spec, "Spec missing 'info' key"
     assert "paths" in openapi_spec, "Spec missing 'paths' key"
-    assert openapi_spec["openapi"].startswith("3."), f"Expected OpenAPI 3.x, got {openapi_spec['openapi']}"
+    assert openapi_spec["openapi"].startswith("3."), (
+        f"Expected OpenAPI 3.x, got {openapi_spec['openapi']}"
+    )
 
 
 @pytest.mark.unit
@@ -63,7 +65,9 @@ def test_all_route_prefixes_present(openapi_spec: dict) -> None:
     paths = set(openapi_spec.get("paths", {}).keys())
     for prefix in expected_prefixes:
         matching = [p for p in paths if p.startswith(prefix)]
-        assert matching, f"Expected path prefix {prefix!r} not found in spec paths. Available: {sorted(paths)}"
+        assert matching, (
+            f"Expected path prefix {prefix!r} not found in spec paths. Available: {sorted(paths)}"
+        )
 
 
 @pytest.mark.unit
@@ -83,7 +87,9 @@ def test_key_endpoint_methods_exist(openapi_spec: dict) -> None:
         ("DELETE", "/v1/workspaces/{workspace_id}"),
     ]
     for method, path in expected_methods:
-        assert path in paths, f"Expected path {path!r} not in spec. Available: {sorted(paths.keys())}"
+        assert path in paths, (
+            f"Expected path {path!r} not in spec. Available: {sorted(paths.keys())}"
+        )
         path_item = paths[path]
         assert method.lower() in path_item, (
             f"Expected {method} {path} in spec, but only found methods: {list(path_item.keys())}"

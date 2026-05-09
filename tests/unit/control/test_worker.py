@@ -3714,9 +3714,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 event_type="workspace.state_changed",
             )
             running_started = next(
-                event
-                for event in state_events
-                if event.new_state == WorkspaceStatus.running.value
+                event for event in state_events if event.new_state == WorkspaceStatus.running.value
             )
             running_started.occurred_at = status_started_at
             preserved = await repo.add_event(
@@ -4000,9 +3998,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 event_type="workspace.state_changed",
             )
             pushing_started = next(
-                event
-                for event in state_events
-                if event.new_state == WorkspaceStatus.pushing.value
+                event for event in state_events if event.new_state == WorkspaceStatus.pushing.value
             )
             pushing_started.occurred_at = status_started_at
             preserved = await repo.add_event(
@@ -4127,14 +4123,17 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert preserved_events[0].payload["runtime"]["services"][0]["container_id"] == (
             "agent-pre-refresh-race"
         )
-        assert len(
-            [
-                operation
-                for operation in operations
-                if operation.result is not None
-                and operation.result.get("reason_code") == PRESERVED_EXECUTION_REASON_CODE
-            ]
-        ) == 1
+        assert (
+            len(
+                [
+                    operation
+                    for operation in operations
+                    if operation.result is not None
+                    and operation.result.get("reason_code") == PRESERVED_EXECUTION_REASON_CODE
+                ]
+            )
+            == 1
+        )
 
     @pytest.mark.unit
     @pytest.mark.parametrize("status", [WorkspaceStatus.validating, WorkspaceStatus.pushing])
@@ -4945,9 +4944,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 event_type="workspace.state_changed",
             )
             pushing_started = next(
-                event
-                for event in state_events
-                if event.new_state == WorkspaceStatus.pushing.value
+                event for event in state_events if event.new_state == WorkspaceStatus.pushing.value
             )
             pushing_started.occurred_at = status_started_at
             await WorkspaceControlService(
@@ -5116,9 +5113,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 event_type="workspace.state_changed",
             )
             pushing_started = next(
-                event
-                for event in state_events
-                if event.new_state == WorkspaceStatus.pushing.value
+                event for event in state_events if event.new_state == WorkspaceStatus.pushing.value
             )
             pushing_started.occurred_at = status_started_at
             preserved = await repo.add_event(
@@ -5492,9 +5487,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert preserved_events[0].payload is not None
         assert preserved_events[0].payload["claim_cleanup"] == {
             "action": "cleared_stale",
-            "reason_code": (
-                "STALE_EXECUTION_CLAIM_CLEARED_DURING_ACTIVE_EXECUTION_PRESERVATION"
-            ),
+            "reason_code": ("STALE_EXECUTION_CLAIM_CLEARED_DURING_ACTIVE_EXECUTION_PRESERVATION"),
             "previous_claimed_by": "previous-worker",
             "previous_expires_at": expired_claim_expires_at.isoformat(),
         }
@@ -6106,9 +6099,7 @@ async def test_stale_active_execution_check_ignores_stale_event_before_refresh(
             event_type="workspace.state_changed",
         )
         running_started = next(
-            event
-            for event in state_events
-            if event.new_state == WorkspaceStatus.running.value
+            event for event in state_events if event.new_state == WorkspaceStatus.running.value
         )
         running_started.occurred_at = status_started_at
         stale = await repo.add_event(

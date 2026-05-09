@@ -439,9 +439,7 @@ class TestValidationRunRepository:
                     "status": "passed",
                     "reason_code": "COVERAGE_OK",
                     "percent": 99.0,
-                    "failing_test_node_ids": [
-                        "tests/unit/test_widget.py::test_handles_edges"
-                    ],
+                    "failing_test_node_ids": ["tests/unit/test_widget.py::test_handles_edges"],
                     "failing_test_evidence": [
                         "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
                     ],

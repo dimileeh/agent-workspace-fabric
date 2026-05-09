@@ -626,9 +626,7 @@ async def test_satisfied_post_validation_conformance_report_is_committed(
         for index, call in enumerate(runner.calls)
         if call.args[-3:] == ["add", "--", report_path.as_posix()]
     )
-    commit_index = next(
-        index for index, call in enumerate(runner.calls) if "commit" in call.args
-    )
+    commit_index = next(index for index, call in enumerate(runner.calls) if "commit" in call.args)
     assert add_index < commit_index
     assert event_markers == [("record", len(runner.calls))]
     assert commit_index < event_markers[0][1]
@@ -3468,7 +3466,9 @@ def test_post_validation_conformance_result_uses_attempt_from_failure_details(
 
 
 @pytest.mark.unit
-def test_post_validation_conformance_agent_failure_details_include_output_and_agent_details() -> None:
+def test_post_validation_conformance_agent_failure_details_include_output_and_agent_details() -> (
+    None
+):
     exc = AgentRunError(
         agent=AgentRuntime.codex,
         result=CommandResult(returncode=2, stdout="stdout detail", stderr="stderr detail"),
