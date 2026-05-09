@@ -1796,7 +1796,9 @@ def test_provider_readiness_opencode_ollama_file_reason_without_opencode_config(
 @pytest.mark.unit
 def test_provider_readiness_opencode_default_host_gateway_falls_back_to_localhost(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
     home = tmp_path / "home"
     (home / ".config" / "opencode").mkdir(parents=True)
     urls: list[str] = []
@@ -1821,6 +1823,59 @@ def test_provider_readiness_opencode_default_host_gateway_falls_back_to_localhos
         "http://host.docker.internal:11434/api/version",
         "http://localhost:11434/api/version",
     ]
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "provider_readiness.ollama_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "nodename nor servname provided" not in caplog.text
+    assert "nodename nor servname provided" not in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted_detail(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+    urls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        urls.append(url)
+        if url == "http://host.docker.internal:11434/api/version":
+            raise RuntimeError("transport failed for sk-proj-ollama-terminal-secret")
+        if url == "http://localhost:11434/api/version":
+            return SimpleNamespace(status_code=503, text="busy ghp_ollama_terminal_secret")
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        strict_providers={"opencode"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_http_get,
+    )
+
+    opencode = payload["providers"]["opencode"]
+    assert payload["status"] == "fail"
+    assert opencode["status"] == "fail"
+    assert opencode["reason"] == "OLLAMA_HOST_UNREACHABLE"
+    assert urls == [
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+    ]
+    assert "http://host.docker.internal:11434/api/version" in opencode["detail"]
+    assert "http://localhost:11434/api/version" in opencode["detail"]
+    assert "<redacted>" in opencode["detail"]
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "sk-proj-ollama-terminal-secret" not in serialized
+    assert "ghp_ollama_terminal_secret" not in serialized
+    assert "provider_readiness.ollama_probe_exception" in caplog.text
+    assert "Traceback" in caplog.text
+    assert "RuntimeError: transport failed for <redacted>" in caplog.text
+    assert "sk-proj-ollama-terminal-secret" not in caplog.text
+    assert "ghp_ollama_terminal_secret" not in caplog.text
 
 
 @pytest.mark.unit

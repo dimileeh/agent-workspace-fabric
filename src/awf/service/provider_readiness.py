@@ -1809,15 +1809,12 @@ def _probe_ollama(
     secrets: frozenset[str],
 ) -> dict[str, Any]:
     failures: list[str] = []
+    exceptions: list[Exception] = []
     for url in urls:
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
         except Exception as exc:
-            _log_redacted_exception(
-                "provider_readiness.ollama_probe_exception",
-                exc,
-                secrets,
-            )
+            exceptions.append(exc)
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
             continue
@@ -1826,6 +1823,12 @@ def _probe_ollama(
         detail = response.text or f"HTTP {response.status_code}"
         failure = f"HTTP {response.status_code}: {detail}"
         failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
+    for exc in exceptions:
+        _log_redacted_exception(
+            "provider_readiness.ollama_probe_exception",
+            exc,
+            secrets,
+        )
     return {"ok": False, "detail": _redact("; ".join(failures), secrets)}
 
 
