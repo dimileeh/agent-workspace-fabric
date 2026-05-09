@@ -2690,6 +2690,42 @@ class TestGetWorkspace:
         assert calls == 2
 
     @pytest.mark.unit
+    async def test_get_workspace_releases_response_session_before_egress_audit_retry(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        original_retry = workspaces_route.run_db_operation_with_retry
+        active_retry_operations = 0
+        max_active_retry_operations = 0
+
+        async def _tracked_retry_operation(*args: Any, **kwargs: Any) -> Any:
+            nonlocal active_retry_operations, max_active_retry_operations
+            active_retry_operations += 1
+            max_active_retry_operations = max(
+                max_active_retry_operations,
+                active_retry_operations,
+            )
+            try:
+                return await original_retry(*args, **kwargs)
+            finally:
+                active_retry_operations -= 1
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "run_db_operation_with_retry",
+            _tracked_retry_operation,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert max_active_retry_operations == 1
+
+    @pytest.mark.unit
     async def test_get_workspace_isolates_transient_egress_audit_lookup_from_response_session(
         self,
         client: AsyncClient,

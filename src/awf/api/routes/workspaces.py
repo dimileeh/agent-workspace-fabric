@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.deps import get_db_session, get_db_session_factory, require_api_token
 from awf.api.schemas import (
+    EgressAuditRecordResponse,
     ErrorResponse,
     PullRequestMonitorAdoptionRequest,
     PullRequestMonitorAdoptionResponse,
@@ -470,13 +471,17 @@ async def get_workspace(
     workspace_id: str,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> WorkspaceResponse:
-    return await run_db_operation_with_retry(
+    response_without_egress_audit = await run_db_operation_with_retry(
         session_factory,
-        lambda retry_session: _get_workspace_response(
+        lambda retry_session: _get_workspace_response_without_egress_audit(
             workspace_id,
             retry_session,
-            egress_audit_session_factory=session_factory,
         ),
+    )
+    egress_audit = await _retry_optional_egress_audit_lookup(workspace_id, session_factory)
+    return _workspace_response_with_egress_audit(
+        response_without_egress_audit,
+        egress_audit,
     )
 
 
@@ -485,6 +490,48 @@ async def _get_workspace_response(
     session: AsyncSession,
     *,
     egress_audit_session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> WorkspaceResponse:
+    response_without_egress_audit = await _get_workspace_response_without_egress_audit(
+        workspace_id,
+        session,
+    )
+    if egress_audit_session_factory is not None:
+        egress_audit = await _retry_optional_egress_audit_lookup(
+            workspace_id,
+            egress_audit_session_factory,
+        )
+        return _workspace_response_with_egress_audit(
+            response_without_egress_audit,
+            egress_audit,
+        )
+
+    egress_audit = None
+    try:
+        audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
+        egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
+    except Exception as exc:
+        if is_transient_closed_connection_error(exc):
+            _logger.warning(
+                "egress audit lookup failed transiently for workspace %s",
+                workspace_id,
+                exc_info=True,
+            )
+            await invalidate_or_rollback_session(session, exc)
+        else:
+            _logger.warning(
+                "egress audit lookup failed for workspace %s",
+                workspace_id,
+                exc_info=True,
+            )
+    return _workspace_response_with_egress_audit(
+        response_without_egress_audit,
+        egress_audit,
+    )
+
+
+async def _get_workspace_response_without_egress_audit(
+    workspace_id: str,
+    session: AsyncSession,
 ) -> WorkspaceResponse:
     repo = WorkspaceRepository(session)
     ws = await repo.get_with_secret_leases(workspace_id)
@@ -499,42 +546,20 @@ async def _get_workspace_response(
         validation_runs,
         candidate=latest_merge_candidate(ws),
     )
-    response_without_egress_audit: WorkspaceResponse | None = None
-    if egress_audit_session_factory is not None:
-        egress_audit = await _retry_optional_egress_audit_lookup(
-            workspace_id,
-            egress_audit_session_factory,
-        )
-    else:
-        # Direct-call fallback: serialize before cleanup can expire/invalidate ``ws``.
-        response_without_egress_audit = workspace_response(
-            ws,
-            validation_provenance=validation_provenance,
-        )
-        egress_audit = None
-        try:
-            audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
-            egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
-        except Exception as exc:
-            if is_transient_closed_connection_error(exc):
-                _logger.warning(
-                    "egress audit lookup failed transiently for workspace %s",
-                    workspace_id,
-                    exc_info=True,
-                )
-                await invalidate_or_rollback_session(session, exc)
-            else:
-                _logger.warning(
-                    "egress audit lookup failed for workspace %s",
-                    workspace_id,
-                    exc_info=True,
-                )
-    if response_without_egress_audit is not None and egress_audit is None:
-        return response_without_egress_audit
     return workspace_response(
         ws,
         validation_provenance=validation_provenance,
-        egress_audit=egress_audit,
+    )
+
+
+def _workspace_response_with_egress_audit(
+    response: WorkspaceResponse,
+    egress_audit: dict[str, Any] | None,
+) -> WorkspaceResponse:
+    if egress_audit is None:
+        return response
+    return response.model_copy(
+        update={"egress_audit": EgressAuditRecordResponse.model_validate(egress_audit)}
     )
 
 
