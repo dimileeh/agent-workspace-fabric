@@ -226,9 +226,7 @@ def test_full_coverage_is_the_only_python_test_job() -> None:
     assert "integration" not in jobs
 
     python_test_jobs = [
-        name
-        for name, job in jobs.items()
-        if isinstance(job, dict) and "pytest" in _run_steps(job)
+        name for name, job in jobs.items() if isinstance(job, dict) and "pytest" in _run_steps(job)
     ]
     assert python_test_jobs == ["python-full-coverage"]
 
