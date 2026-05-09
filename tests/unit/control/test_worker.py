@@ -3950,6 +3950,119 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert any(event.reason_code == "DB_CONNECTION_CLOSED" for event in events)
 
     @pytest.mark.unit
+    async def test_stale_active_cleanup_closed_connection_text_surfaces_runtime_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        class _RaisingRuntimeCleaner:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def cleanup(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                compose_project_name: str | None = None,
+                compose_file_path: Path | None = None,
+                worktree_host_path: Path | None = None,
+                remove_volumes: bool = True,
+                remove_worktree: bool = True,
+            ) -> WorkspaceCleanupResult:
+                self.calls.append(workspace_id)
+                raise RuntimeError("runtime cleanup connection is closed")
+
+        compose_project = "awf_cleanup_closed_text"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "cleanup-closed-text",
+            WorkspaceStatus.pushing,
+            compose_project_name=compose_project,
+            node_id="node-a",
+        )
+        now = datetime.now(UTC)
+        status_started_at = now - timedelta(minutes=10)
+        preserved_at = now - timedelta(minutes=5)
+        refresh_requested_at = now - timedelta(minutes=1)
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            state_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            pushing_started = next(
+                event for event in state_events if event.new_state == WorkspaceStatus.pushing.value
+            )
+            pushing_started.occurred_at = status_started_at
+            preserved = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            preserved.occurred_at = preserved_at
+            await WorkspaceControlService(
+                session,
+                project_stopper=_noop_project_stop,
+                cleaner_factory=_unexpected_cleaner_factory,
+            ).request_refresh_workspace(
+                workspace_id,
+                reason="operator recovery",
+                idempotency_key="refresh-before-cleanup-closed-text",
+            )
+            refresh_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.refresh_requested",
+            )
+            assert refresh_events
+            refresh_events[0].occurred_at = refresh_requested_at
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "compose_project_name": compose_project,
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "runtime": {"stack_state": "running"},
+                },
+            )
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
+        cleaner = _RaisingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="runtime cleanup connection is closed"):
+            await worker._recover_stale_active_executions()  # noqa: SLF001
+
+        assert cleaner.calls == [workspace_id]
+        async with session_factory() as session:
+            db_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.db_connection_transient",
+            )
+
+        assert db_events == []
+
+    @pytest.mark.unit
     async def test_stale_running_with_missing_compose_project_fails(
         self,
         session_factory: async_sessionmaker[AsyncSession],
