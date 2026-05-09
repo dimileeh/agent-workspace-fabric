@@ -1982,6 +1982,49 @@ def test_ollama_http_probe_records_recovered_http_failure_as_redacted_debug(
 
 
 @pytest.mark.unit
+def test_ollama_http_probe_terminal_mixed_failure_logs_only_http_terminal_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://host.docker.internal:11434/api/version":
+            raise RuntimeError("transport failed for sk-proj-ollama-terminal-secret")
+        if url == "http://localhost:11434/api/version":
+            return SimpleNamespace(status_code=503, text="busy ghp_ollama_terminal_secret")
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = provider_readiness._probe_ollama(
+        (
+            "http://host.docker.internal:11434/api/version",
+            "http://localhost:11434/api/version",
+        ),
+        http_get=_http_get,
+        secrets=frozenset(
+            {
+                "sk-proj-ollama-terminal-secret",
+                "ghp_ollama_terminal_secret",
+            }
+        ),
+    )
+
+    assert result["ok"] is False
+    assert "RuntimeError: transport failed for <redacted>" in result["detail"]
+    assert "HTTP 503: busy <redacted>" in result["detail"]
+    messages = [record.getMessage() for record in caplog.records]
+    traceback_messages = [message for message in messages if "Traceback" in message]
+    terminal_http_messages = [message for message in messages if "HTTP 503: busy" in message]
+    assert len(traceback_messages) == 1
+    assert len(terminal_http_messages) == 1
+    assert "RuntimeError: transport failed for <redacted>" in traceback_messages[0]
+    assert "RuntimeError: transport failed" not in terminal_http_messages[0]
+    assert "HTTP 503: busy <redacted>" in terminal_http_messages[0]
+    assert "sk-proj-ollama-terminal-secret" not in caplog.text
+    assert "ghp_ollama_terminal_secret" not in caplog.text
+
+
+@pytest.mark.unit
 def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted_detail(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,

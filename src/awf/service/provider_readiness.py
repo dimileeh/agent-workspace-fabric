@@ -1842,9 +1842,9 @@ def _probe_ollama(
     secrets: frozenset[str],
 ) -> dict[str, Any]:
     failures: list[str] = []
+    http_failures: list[str] = []
     recovered_failures: list[dict[str, Any]] = []
     exceptions: list[Exception] = []
-    saw_http_failure = False
     for url in urls:
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
@@ -1868,8 +1868,9 @@ def _probe_ollama(
             return payload
         detail = response.text or f"HTTP {response.status_code}"
         failure = f"HTTP {response.status_code}: {detail}"
-        failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
-        saw_http_failure = True
+        failure_detail = f"{url}: {failure}" if len(urls) > 1 else failure
+        failures.append(failure_detail)
+        http_failures.append(failure_detail)
         recovered_failures.append(
             _ollama_probe_failure_debug(
                 url=url,
@@ -1885,10 +1886,10 @@ def _probe_ollama(
             logged_exc,
             secrets,
         )
-    if saw_http_failure and failures:
+    if http_failures:
         _log_redacted_terminal_failure(
             "provider_readiness.ollama_probe_exception",
-            "; ".join(failures),
+            "; ".join(http_failures),
             secrets,
         )
     return {"ok": False, "detail": _redact("; ".join(failures), secrets)}
