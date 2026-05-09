@@ -18,6 +18,16 @@ from tests.unit.helpers import create_workspace
 
 
 @pytest.mark.unit
+def test_recovery_runner_reuses_monitor_retryable_statuses() -> None:
+    from awf.runtime import pr_monitor_runner as runner
+
+    assert (
+        runner._RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES
+        is operations.RETRYABLE_MONITOR_OPERATION_STATUSES
+    )
+
+
+@pytest.mark.unit
 def test_redact_monitor_operation_value_preserves_llm_token_usage_metadata() -> None:
     value = {
         "usage": {

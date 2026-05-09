@@ -105,6 +105,9 @@ from awf.runtime.pr_monitor import (
     sync_base_no_progress_signature,
 )
 from awf.runtime.pr_monitor_operations import (
+    RETRYABLE_MONITOR_OPERATION_STATUSES as _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES,
+)
+from awf.runtime.pr_monitor_operations import (
     MonitorOperationHandle,
     begin_monitor_state_operation,
     build_monitor_operation_payload,
@@ -261,12 +264,6 @@ _ACTIVE_RECOVERY_OPERATION_STATUSES = frozenset(
     {
         OperationStatus.pending.value,
         OperationStatus.running.value,
-    }
-)
-_RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES = frozenset(
-    {
-        OperationStatus.failed.value,
-        OperationStatus.cancelled.value,
     }
 )
 _TERMINAL_WORKSPACE_STATUSES = {

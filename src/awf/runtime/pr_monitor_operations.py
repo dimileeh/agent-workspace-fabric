@@ -16,7 +16,7 @@ from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import OperationRepository
 
-_RETRYABLE_MONITOR_OPERATION_STATUSES = frozenset(
+RETRYABLE_MONITOR_OPERATION_STATUSES = frozenset(
     {
         OperationStatus.failed.value,
         OperationStatus.cancelled.value,
@@ -137,7 +137,7 @@ async def retryable_monitor_operation_idempotency_key(
             extra=retry_extra,
         )
         existing = await repo.get_by_idempotency_key(idempotency_key)
-        if existing is None or existing.status not in _RETRYABLE_MONITOR_OPERATION_STATUSES:
+        if existing is None or existing.status not in RETRYABLE_MONITOR_OPERATION_STATUSES:
             return idempotency_key
         retry_marker = f"retry_after_{existing.status}_operation"
         retry_extra = (
