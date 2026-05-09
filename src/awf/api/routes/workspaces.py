@@ -48,11 +48,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.resilience import (
-    invalidate_or_rollback_session,
-    is_transient_closed_connection_error,
-    run_db_operation_with_retry,
-)
+from awf.db.resilience import run_db_operation_with_retry
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck, check_disk_space
@@ -471,65 +467,21 @@ async def get_workspace(
     workspace_id: str,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> WorkspaceResponse:
-    response_without_egress_audit = await run_db_operation_with_retry(
+    response = await run_db_operation_with_retry(
         session_factory,
-        lambda retry_session: _get_workspace_response_without_egress_audit(
+        lambda retry_session: _get_workspace_response(
             workspace_id,
             retry_session,
         ),
     )
     egress_audit = await _retry_optional_egress_audit_lookup(workspace_id, session_factory)
     return _workspace_response_with_egress_audit(
-        response_without_egress_audit,
+        response,
         egress_audit,
     )
 
 
 async def _get_workspace_response(
-    workspace_id: str,
-    session: AsyncSession,
-    *,
-    egress_audit_session_factory: async_sessionmaker[AsyncSession] | None = None,
-) -> WorkspaceResponse:
-    response_without_egress_audit = await _get_workspace_response_without_egress_audit(
-        workspace_id,
-        session,
-    )
-    if egress_audit_session_factory is not None:
-        egress_audit = await _retry_optional_egress_audit_lookup(
-            workspace_id,
-            egress_audit_session_factory,
-        )
-        return _workspace_response_with_egress_audit(
-            response_without_egress_audit,
-            egress_audit,
-        )
-
-    egress_audit = None
-    try:
-        audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
-        egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
-    except Exception as exc:
-        if is_transient_closed_connection_error(exc):
-            _logger.warning(
-                "egress audit lookup failed transiently for workspace %s",
-                workspace_id,
-                exc_info=True,
-            )
-            await invalidate_or_rollback_session(session, exc)
-        else:
-            _logger.warning(
-                "egress audit lookup failed for workspace %s",
-                workspace_id,
-                exc_info=True,
-            )
-    return _workspace_response_with_egress_audit(
-        response_without_egress_audit,
-        egress_audit,
-    )
-
-
-async def _get_workspace_response_without_egress_audit(
     workspace_id: str,
     session: AsyncSession,
 ) -> WorkspaceResponse:

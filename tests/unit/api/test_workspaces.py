@@ -23,6 +23,7 @@ from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.workspaces as workspaces_route
+import awf.db.resilience as db_resilience
 import awf.service.workspace_observability as workspace_observability
 from awf.api.app import configure_database, create_app
 from awf.api.deps import get_db_session
@@ -2756,7 +2757,9 @@ class TestGetWorkspace:
         create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
         ws_id = create.json()["workspace_id"]
         calls = 0
-        response_session_cleanup_calls = 0
+        audit_sessions: list[object] = []
+        cleanup_sessions: list[object] = []
+        original_cleanup = db_resilience.invalidate_or_rollback_session
 
         async def _flaky_audit_lookup(
             self: EgressAuditRepository,
@@ -2764,16 +2767,17 @@ class TestGetWorkspace:
         ) -> object:
             nonlocal calls
             calls += 1
+            audit_sessions.append(self._session)
             if calls == 1:
                 raise _closed_connection_error()
             return None
 
-        async def _record_response_session_cleanup(
+        async def _record_retry_session_cleanup(
             session: object,
             exc: BaseException,
         ) -> None:
-            nonlocal response_session_cleanup_calls
-            response_session_cleanup_calls += 1
+            cleanup_sessions.append(session)
+            await original_cleanup(session, exc)  # type: ignore[arg-type]
 
         monkeypatch.setattr(
             EgressAuditRepository,
@@ -2781,9 +2785,9 @@ class TestGetWorkspace:
             _flaky_audit_lookup,
         )
         monkeypatch.setattr(
-            workspaces_route,
+            db_resilience,
             "invalidate_or_rollback_session",
-            _record_response_session_cleanup,
+            _record_retry_session_cleanup,
         )
 
         response = await client.get(f"/v1/workspaces/{ws_id}")
@@ -2791,7 +2795,8 @@ class TestGetWorkspace:
         assert response.status_code == 200
         assert response.json()["id"] == ws_id
         assert calls == 2
-        assert response_session_cleanup_calls == 0
+        assert len(cleanup_sessions) == 1
+        assert cleanup_sessions[0] is audit_sessions[0]
 
     @pytest.mark.unit
     async def test_get_workspace_retries_transient_egress_audit_lookup_failure(
