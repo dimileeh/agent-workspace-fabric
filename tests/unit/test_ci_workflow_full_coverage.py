@@ -200,11 +200,37 @@ def test_full_coverage_job_rejects_truthy_docker_skip_env_at_any_scope(
 
 @pytest.mark.unit
 def test_unit_smoke_job_is_not_the_authoritative_coverage_gate() -> None:
-    commands = _run_steps(_job(_workflow(), "lint-and-test"))
+    workflow = _workflow()
+    job = _job(workflow, "lint-and-test")
+    commands = _run_steps(job)
 
     assert "pytest tests/unit/" in commands
     assert "--cov=awf" not in commands
     assert "--cov-fail-under" not in commands
+
+
+@pytest.mark.unit
+def test_unit_smoke_job_has_postgres_for_database_required_unit_tests() -> None:
+    workflow = _workflow()
+    job = _job(workflow, "lint-and-test")
+
+    services = job.get("services", {})
+    assert isinstance(services, dict)
+    postgres = services.get("postgres")
+    assert isinstance(postgres, dict)
+    assert postgres.get("image") == "postgres:16"
+    assert postgres.get("env") == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_PASSWORD": "awf_ci",
+        "POSTGRES_DB": "awf",
+    }
+
+    unit_step = _named_step(job, "Unit tests")
+    env = _effective_env(workflow, job, unit_step)
+    assert env.get("CI") == "true"
+    assert env.get("AWF_DATABASE_URL") == DB_URL
+    assert env.get("AWF_TEST_DATABASE_URL") == DB_URL
+    _assert_docker_skip_env_disabled(workflow, job, unit_step)
 
 
 @pytest.mark.unit
