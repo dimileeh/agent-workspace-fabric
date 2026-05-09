@@ -2330,7 +2330,10 @@ def test_ollama_model_probe_suppresses_exception_log_after_missing_model_respons
 
     assert result["status"] == "fail"
     assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
-    assert "probe_failures=http://primary.local/api/tags: RuntimeError: connect failed for <redacted>" in result["detail"]
+    assert (
+        "probe_failures=http://primary.local/api/tags: RuntimeError: connect failed for <redacted>"
+        in result["detail"]
+    )
     assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
     assert "RuntimeError: connect failed" not in caplog.text
     assert "sk-proj-ollama-secret" not in caplog.text
