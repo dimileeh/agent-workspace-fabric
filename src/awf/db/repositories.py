@@ -13,6 +13,7 @@ from __future__ import annotations
 import builtins
 import hashlib
 import json
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -3894,9 +3895,14 @@ def _scheduler_json_int_expr(
             ),
             "",
         )
+        postgres_whole_text = func.replace(func.split_part(text_value, ".", 1), "-", "")
+        integer_text: ColumnElement[Any] = text_value.op("~")(POLICY_INT_TEXT_PATTERN)
+        max_str_digits = sys.get_int_max_str_digits()
+        if max_str_digits > 0:
+            integer_text = and_(integer_text, func.length(postgres_whole_text) <= max_str_digits)
         numeric_value = case(
             (
-                text_value.op("~")(POLICY_INT_TEXT_PATTERN),
+                integer_text,
                 sql_cast(text_value, Numeric),
             ),
             else_=None,

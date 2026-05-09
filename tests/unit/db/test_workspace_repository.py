@@ -1420,6 +1420,50 @@ class TestOwnedPathOverlapLookup:
         assert listed == [oversized_high.id, normal.id, oversized_low.id]
 
     @pytest.mark.unit
+    async def test_scheduler_ignores_policy_strings_above_python_int_limit(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        previous_limit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(640)
+        try:
+            oversized_high = await repo.create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="development",
+                task_title="oversized high priority",
+                task_prompt="p",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+                task_class=TaskClass.docs_task.value,
+                task_policy={"scheduler": {"base_priority": "9" * 641}},
+            )
+            normal = await repo.create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="development",
+                task_title="normal priority",
+                task_prompt="p",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+                task_class=TaskClass.docs_task.value,
+                task_policy={"scheduler": {"base_priority": 50}},
+            )
+            oversized_high.created_at = scoring_at
+            normal.created_at = scoring_at
+            await session.commit()
+
+            listed = await repo.list_schedulable_ids(
+                status=WorkspaceStatus.requested,
+                limit=1,
+                scoring_at=scoring_at,
+            )
+
+            assert listed == [normal.id]
+        finally:
+            sys.set_int_max_str_digits(previous_limit)
+
+    @pytest.mark.unit
     async def test_scheduler_cursor_recomputes_database_score_for_page_boundary(
         self,
         session: AsyncSession,
