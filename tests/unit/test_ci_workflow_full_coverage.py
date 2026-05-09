@@ -30,6 +30,12 @@ def _job(workflow: dict[str, Any], name: str) -> dict[str, Any]:
     return job
 
 
+def _workflow_triggers(workflow: dict[str, Any]) -> dict[str, Any]:
+    triggers = workflow.get("on", workflow.get(True, {}))
+    assert isinstance(triggers, dict)
+    return triggers
+
+
 def _steps(job: dict[str, Any]) -> list[dict[str, Any]]:
     steps = job.get("steps", [])
     assert isinstance(steps, list)
@@ -105,6 +111,19 @@ def _assert_docker_skip_env_disabled(
         if _env_truthy(scoped_env.get(DOCKER_SKIP_ENV, ""))
     ]
     assert not offenders, f"{DOCKER_SKIP_ENV} must not be truthy in: {', '.join(offenders)}"
+
+
+@pytest.mark.unit
+def test_pull_request_ci_runs_for_every_target_branch() -> None:
+    workflow = _workflow()
+    triggers = _workflow_triggers(workflow)
+
+    assert "pull_request" in triggers
+    pull_request_trigger = triggers.get("pull_request")
+
+    assert not (
+        isinstance(pull_request_trigger, dict) and pull_request_trigger.get("branches")
+    )
 
 
 @pytest.mark.unit
