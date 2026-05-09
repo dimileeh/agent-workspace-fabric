@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor_runner import (
     _non_check_reviewer_settle_done_key,
     _non_check_reviewer_settle_skip_visible_key,
     _non_check_reviewer_settle_started_key,
+    _non_check_reviewer_settle_wait_operation_context,
     _normalize_non_check_reviewer_logins,
 )
 from tests.postgres import postgres_test_engine
@@ -303,6 +304,40 @@ def test_pr_166_regression_visible_greptile_check_still_waits_for_codex_review()
             _non_check_reviewer_settle_started_key(pr_number=166, head_sha="head-a")
         ]
         == "1000.000000"
+    )
+
+
+@pytest.mark.unit
+def test_non_check_reviewer_wait_operation_context_centralizes_payload_and_identity() -> None:
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps", "chatgpt-codex-connector"),
+    )
+    decision = _non_check_reviewer_settle_decision(
+        _ready_status(checks=(CheckTiming(name="Greptile Review", conclusion="SUCCESS"),)),
+        state,
+        cfg,
+        pr_number=166,
+        now=1000.0,
+    )
+
+    context = _non_check_reviewer_settle_wait_operation_context(cfg, decision)
+
+    assert context.extra_payload == {
+        "settle_seconds": 900,
+        "configured_reviewers": ["greptile-apps", "chatgpt-codex-connector"],
+        "missing_reviewers": ["chatgpt-codex-connector"],
+        "visible_reviewers": ["greptile-apps"],
+        "elapsed_seconds": 0.0,
+    }
+    assert context.extra_identity == (
+        "greptile-apps",
+        "chatgpt-codex-connector",
+        "chatgpt-codex-connector",
+        1000.0,
     )
 
 

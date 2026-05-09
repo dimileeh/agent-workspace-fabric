@@ -385,6 +385,12 @@ class _NonCheckReviewerSettleDecision:
     state_changed: bool = False
 
 
+@dataclass(frozen=True)
+class _NonCheckReviewerSettleWaitOperationContext:
+    extra_payload: dict[str, object]
+    extra_identity: tuple[object, ...]
+
+
 class ProviderRecoveryFallbackError(Exception):
     """Raised when a retryable provider failure triggers a fallback workspace."""
 
@@ -1831,6 +1837,10 @@ class PullRequestMonitorRunner:
             )
             if settle_decision.wait_seconds > 0:
                 requested_action = "validate" if pending_validation_gate is not None else "merge"
+                settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
+                    self._config,
+                    settle_decision,
+                )
                 await self._sleep_with_monitor_state_operation(
                     workspace_id=workspace_id,
                     action="reviewer_settle_wait",
@@ -1848,18 +1858,8 @@ class PullRequestMonitorRunner:
                     remote_branch=remote_branch,
                     wait_seconds=settle_decision.wait_seconds,
                     monitor_log=monitor_log,
-                    extra_payload={
-                        "settle_seconds": self._config.non_check_reviewer_settle_seconds,
-                        "configured_reviewers": list(settle_decision.configured_reviewers),
-                        "missing_reviewers": list(settle_decision.missing_reviewers),
-                        "visible_reviewers": list(settle_decision.visible_reviewers),
-                        "elapsed_seconds": settle_decision.elapsed_seconds,
-                    },
-                    extra_identity=(
-                        *settle_decision.configured_reviewers,
-                        *settle_decision.missing_reviewers,
-                        settle_decision.started_at,
-                    ),
+                    extra_payload=settle_operation_context.extra_payload,
+                    extra_identity=settle_operation_context.extra_identity,
                 )
                 return False
 
@@ -2342,6 +2342,12 @@ class PullRequestMonitorRunner:
                             monitor_log=monitor_log,
                         )
                         if settle_decision.wait_seconds > 0:
+                            settle_operation_context = (
+                                _non_check_reviewer_settle_wait_operation_context(
+                                    settle_config,
+                                    settle_decision,
+                                )
+                            )
                             await self._sleep_with_monitor_state_operation(
                                 workspace_id=workspace_id,
                                 action="reviewer_settle_wait",
@@ -2357,22 +2363,8 @@ class PullRequestMonitorRunner:
                                 remote_branch=remote_branch,
                                 wait_seconds=settle_decision.wait_seconds,
                                 monitor_log=monitor_log,
-                                extra_payload={
-                                    "settle_seconds": (
-                                        self._config.non_check_reviewer_settle_seconds
-                                    ),
-                                    "configured_reviewers": list(
-                                        settle_decision.configured_reviewers
-                                    ),
-                                    "missing_reviewers": list(settle_decision.missing_reviewers),
-                                    "visible_reviewers": list(settle_decision.visible_reviewers),
-                                    "elapsed_seconds": settle_decision.elapsed_seconds,
-                                },
-                                extra_identity=(
-                                    *settle_decision.configured_reviewers,
-                                    *settle_decision.missing_reviewers,
-                                    settle_decision.started_at,
-                                ),
+                                extra_payload=settle_operation_context.extra_payload,
+                                extra_identity=settle_operation_context.extra_identity,
                             )
                             return False
 
@@ -5744,6 +5736,26 @@ def _non_check_reviewer_settle_decision(
         started_at=started_at,
         elapsed_seconds=elapsed_seconds,
         state_changed=started_now,
+    )
+
+
+def _non_check_reviewer_settle_wait_operation_context(
+    config: MonitorConfig,
+    decision: _NonCheckReviewerSettleDecision,
+) -> _NonCheckReviewerSettleWaitOperationContext:
+    return _NonCheckReviewerSettleWaitOperationContext(
+        extra_payload={
+            "settle_seconds": config.non_check_reviewer_settle_seconds,
+            "configured_reviewers": list(decision.configured_reviewers),
+            "missing_reviewers": list(decision.missing_reviewers),
+            "visible_reviewers": list(decision.visible_reviewers),
+            "elapsed_seconds": decision.elapsed_seconds,
+        },
+        extra_identity=(
+            *decision.configured_reviewers,
+            *decision.missing_reviewers,
+            decision.started_at,
+        ),
     )
 
 
