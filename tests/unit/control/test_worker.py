@@ -6787,6 +6787,115 @@ def test_scheduler_candidate_cursor_handles_empty_and_uses_last_page_row() -> No
 
 
 @pytest.mark.unit
+def test_scheduler_candidate_cursor_uses_sql_age_boost_domain() -> None:
+    scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_aged",
+        task_class="docs_task",
+        task_policy={"scheduler": {"base_priority": 20}},
+        created_at=scoring_at - timedelta(hours=2),
+    )
+    score = scheduler_score_from_workspace(workspace, now=scoring_at)
+
+    assert score.age_boost > 0
+    assert (
+        _scheduler_candidate_cursor(
+            [workspace],
+            scoring_at=scoring_at,
+            dialect_name="postgresql",
+        )
+        == SchedulerOrderCursor(
+            class_priority=score.class_priority,
+            effective_score=score.effective_score,
+            queued_at=workspace.created_at,
+            workspace_id=workspace.id,
+            scoring_at=scoring_at,
+        )
+    )
+    assert (
+        _scheduler_candidate_cursor(
+            [workspace],
+            scoring_at=scoring_at,
+            dialect_name="unsupported",
+        )
+        == SchedulerOrderCursor(
+            class_priority=score.class_priority,
+            effective_score=score.effective_score - score.age_boost,
+            queued_at=workspace.created_at,
+            workspace_id=workspace.id,
+            scoring_at=scoring_at,
+        )
+    )
+
+
+@pytest.mark.unit
+async def test_scheduler_page_filter_limit_uses_remaining_dispatch_slots(
+    worker: ControlWorker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_limit = _scheduler_candidate_fetch_limit(2)
+    scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    pages = [
+        [
+            SimpleNamespace(
+                id=f"ws_page_{page_index}_{workspace_index}",
+                task_class="docs_task",
+                task_policy={},
+                created_at=scoring_at
+                + timedelta(seconds=(page_index * candidate_limit) + workspace_index),
+            )
+            for workspace_index in range(candidate_limit)
+        ]
+        for page_index in range(2)
+    ]
+    filter_limits: list[int] = []
+
+    async def _list_schedulable_workspaces(
+        self: WorkspaceRepository,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+        after: SchedulerOrderCursor | None = None,
+        scoring_at: datetime | None = None,
+    ) -> list[Workspace]:
+        del self, exclude_ids, after, scoring_at
+        assert status == WorkspaceStatus.ready
+        assert limit == candidate_limit
+        return pages.pop(0) if pages else []
+
+    async def _return_one_candidate(
+        session: AsyncSession,
+        workspaces: list[Workspace],
+        *,
+        limit: int,
+        scoring_at: datetime | None = None,
+    ) -> list[str]:
+        del session, scoring_at
+        filter_limits.append(limit)
+        return [workspaces[0].id]
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "list_schedulable_workspaces",
+        _list_schedulable_workspaces,
+        raising=False,
+    )
+    worker._filter_scheduler_candidate_workspaces = (  # type: ignore[method-assign]
+        _return_one_candidate
+    )
+
+    listed = await worker._list_scheduler_dispatchable_ids_from_pages(  # noqa: SLF001
+        SimpleNamespace(info={}),  # type: ignore[arg-type]
+        status=WorkspaceStatus.ready,
+        limit=2,
+    )
+
+    assert filter_limits == [2, 1]
+    assert listed == ["ws_page_0_0", "ws_page_1_0"]
+
+
+@pytest.mark.unit
 def test_monitor_recovery_claim_payload_derives_execution_cleanup_when_omitted() -> None:
     now = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
     workspace = SimpleNamespace(

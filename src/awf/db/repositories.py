@@ -2577,6 +2577,10 @@ class WorkspaceRepository:
         self._session = session
         self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
+    @property
+    def dialect_name(self) -> str | None:
+        return self._dialect_name
+
     async def create(
         self,
         *,

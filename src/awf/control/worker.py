@@ -114,6 +114,7 @@ _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
 _MONITOR_RECOVERY_OWNER = "control_worker"
 _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL = 1
+_SCHEDULER_SQL_AGE_BOOST_DIALECTS = {"postgresql", "sqlite"}
 _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE = (
     "STALE_EXECUTION_CLAIM_CLEARED_DURING_MONITOR_RECOVERY"
 )
@@ -490,10 +491,11 @@ class ControlWorker:
             )
             if not workspaces:
                 break
+            remaining_dispatch_slots = limit - len(dispatchable_workspaces_by_id)
             page_dispatchable_ids = await self._filter_scheduler_candidate_workspaces(
                 session,
                 workspaces,
-                limit=len(workspaces),
+                limit=remaining_dispatch_slots if remaining_dispatch_slots > 0 else limit,
                 scoring_at=scoring_at,
             )
             workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
@@ -517,7 +519,11 @@ class ControlWorker:
                 if priority_refill_pages_remaining <= 0:
                     break
                 priority_refill_pages_remaining -= 1
-            candidate_after = _scheduler_candidate_cursor(workspaces, scoring_at=scoring_at)
+            candidate_after = _scheduler_candidate_cursor(
+                workspaces,
+                scoring_at=scoring_at,
+                dialect_name=repo.dialect_name,
+            )
         return [workspace.id for workspace in ordered_workspaces[:limit]]
 
     async def _filter_scheduler_candidate_workspaces(
@@ -2091,14 +2097,18 @@ def _scheduler_candidate_cursor(
     workspaces: list[Workspace],
     *,
     scoring_at: datetime,
+    dialect_name: str | None = None,
 ) -> SchedulerOrderCursor | None:
     if not workspaces:
         return None
     last = workspaces[-1]
     score = scheduler_score_from_workspace(last, now=scoring_at)
+    effective_score = score.effective_score
+    if dialect_name not in _SCHEDULER_SQL_AGE_BOOST_DIALECTS:
+        effective_score -= score.age_boost
     return SchedulerOrderCursor(
         class_priority=score.class_priority,
-        effective_score=score.effective_score,
+        effective_score=effective_score,
         queued_at=score.queued_at,
         workspace_id=last.id,
         scoring_at=scoring_at,
