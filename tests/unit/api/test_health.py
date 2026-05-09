@@ -950,9 +950,11 @@ async def test_readyz_db_closed_connection_returns_specific_diagnostic(
     app.state.db_session_factory = lambda: _ClosedConnectionSession()
 
     response = await client.get("/readyz")
+    body = response.json()
 
     assert response.status_code == 503
-    db_check = response.json()["checks"]["db"]
+    assert body["status"] == "fail"
+    db_check = body["checks"]["db"]
     assert db_check["ok"] is False
     assert db_check["reason"] == "DB_CONNECTION_CLOSED"
     assert "connection is closed" in (db_check["detail"] or "")
