@@ -3008,6 +3008,18 @@ class PullRequestMonitorRunner:
                 if not created:
                     existing_operation_id = operation.id
                     existing_operation_status = operation.status
+                    wait_payload = {
+                        "recovery_mode": recovery_mode,
+                        "stale_reason": stale_reason,
+                        "operation_id": existing_operation_id,
+                        "operation_status": existing_operation_status,
+                    }
+                    wait_identity = (
+                        recovery_mode,
+                        stale_reason,
+                        existing_operation_id,
+                        existing_operation_status,
+                    )
                     await s.commit()
                     if existing_operation_status in _ACTIVE_RECOVERY_OPERATION_STATUSES:
                         await self._sleep_with_monitor_state_operation(
@@ -3023,18 +3035,8 @@ class PullRequestMonitorRunner:
                             wait_seconds=self._config.poll_interval_seconds,
                             monitor_log=monitor_log,
                             stale_reason=stale_reason,
-                            extra_payload={
-                                "recovery_mode": recovery_mode,
-                                "stale_reason": stale_reason,
-                                "operation_id": existing_operation_id,
-                                "operation_status": existing_operation_status,
-                            },
-                            extra_identity=(
-                                recovery_mode,
-                                stale_reason,
-                                existing_operation_id,
-                                existing_operation_status,
-                            ),
+                            extra_payload=wait_payload,
+                            extra_identity=wait_identity,
                         )
                     else:
                         await self._sleep_with_monitor_state_operation(
@@ -3053,18 +3055,8 @@ class PullRequestMonitorRunner:
                             wait_seconds=self._config.poll_interval_seconds,
                             monitor_log=monitor_log,
                             stale_reason=stale_reason,
-                            extra_payload={
-                                "recovery_mode": recovery_mode,
-                                "stale_reason": stale_reason,
-                                "operation_id": existing_operation_id,
-                                "operation_status": existing_operation_status,
-                            },
-                            extra_identity=(
-                                recovery_mode,
-                                stale_reason,
-                                existing_operation_id,
-                                existing_operation_status,
-                            ),
+                            extra_payload=wait_payload,
+                            extra_identity=wait_identity,
                         )
                     return False
                 await workspace_repo.transition(
