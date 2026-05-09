@@ -73,9 +73,11 @@ Status values:
 
 ### Active Slices
 
-No active AWF slices are currently tracked in this ledger. The previously
-active PR-monitor slices for PRs #206, #212, #214, #216, #218, and #219 have
-landed on `codex/awf-post-merge-fixes` and are recorded under Completed Slices.
+| TODO area | Slice | Workspace | Agent / model | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| P0 Reliability, Cleanup, And SLOs | Harden Postgres/asyncpg connection resilience for long-running local control planes | `ws_b9cdd9b1c3474951876ee21d` | Codex `gpt-5.5` / `xhigh` | running | First-wave independent P0 slice. Scope: SQLAlchemy/asyncpg liveness, bounded retry/invalidation in API and worker read paths, worker polling continuity, and service-health diagnostics without terminalizing unrelated workspaces. |
+| P0 Reliability, Cleanup, And SLOs | Stop and release terminal failed runtime resources without destroying salvage evidence | `ws_de86ae75f42943d1830f1b0c` | Codex `gpt-5.5` / `xhigh` | running | First-wave independent P0 slice. Scope: terminal failed/cancelled/completed runtime teardown, reservation release, readiness/orphan-resource distinction between retained evidence and leaked live resources, and salvage-preserving cleanup tests. |
+| P0 Operation And Recovery Truth | Add an AWF-owned conformance-to-validation handoff | `ws_c76512d8b0514eff9a3c8a38` | Codex `gpt-5.5` / `xhigh` | running | First-wave independent P0 slice. Scope: conformance gaps limited to missing/stale AWF validation evidence transition to validation, rerun conformance after persisted validation evidence, and keep real plan/API gaps routed to agent iteration. |
 
 ### Reschedule Required Slices
 

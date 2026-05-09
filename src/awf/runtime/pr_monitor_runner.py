@@ -232,6 +232,7 @@ _GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
+_RECOVERY_SNAPSHOT_ALREADY_HANDLED_REASON = "RECOVERY_SNAPSHOT_ALREADY_HANDLED"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
 _AUDIT_MERGE_RESULT_EVENT = "workspace.audit.merge_result"
@@ -256,6 +257,12 @@ _BROKEN_AWF_REF_RE = re.compile(r"refs/heads/awf/(ws_[A-Za-z0-9_-]+)")
 _BASE_FETCH_RETRY_COUNT_KEY_PREFIX = "__awf_base_fetch_retry_count:"
 _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY = "__awf_sync_base_no_progress_signature"
 _SYNC_BASE_NO_PROGRESS_COUNT_KEY = "__awf_sync_base_no_progress_count"
+_ACTIVE_RECOVERY_OPERATION_STATUSES = frozenset(
+    {
+        OperationStatus.pending.value,
+        OperationStatus.running.value,
+    }
+)
 _TERMINAL_WORKSPACE_STATUSES = {
     WorkspaceStatus.completed.value,
     WorkspaceStatus.failed.value,
@@ -299,6 +306,15 @@ def _monitor_recovery_conformance_payload(workspace: Workspace) -> dict[str, Any
                 conformance[key] = payload[key]
         return {"conformance": conformance}
     return None
+
+
+def _is_active_pr_monitor_recovery_operation(operation: Operation) -> bool:
+    return (
+        operation.status in _ACTIVE_RECOVERY_OPERATION_STATUSES
+        and operation.type != OperationType.monitor_state.value
+        and isinstance(operation.payload, dict)
+        and operation.payload.get("source") == "pr_monitor"
+    )
 
 
 class BaseFetchError(Exception):
@@ -2920,15 +2936,7 @@ class PullRequestMonitorRunner:
                     await s.commit()
                     return True
                 active_recovery = any(
-                    op.status
-                    in (
-                        OperationStatus.pending.value,
-                        OperationStatus.running.value,
-                    )
-                    and op.type != OperationType.monitor_state.value
-                    and isinstance(op.payload, dict)
-                    and op.payload.get("source") == "pr_monitor"
-                    for op in _ws.operations
+                    _is_active_pr_monitor_recovery_operation(op) for op in _ws.operations
                 )
                 if active_recovery:
                     await s.commit()
@@ -2991,12 +2999,74 @@ class PullRequestMonitorRunner:
                     source_head_sha=status.head_sha,
                     source_base_sha=_ws.base_commit,
                 )
-                await operation_repo.create_idempotent(
+                operation, created = await operation_repo.create_idempotent(
                     workspace_id=workspace_id,
                     operation_type="validate",
                     payload=operation_payload,
                     idempotency_key=idempotency_key,
                 )
+                if not created:
+                    existing_operation_id = operation.id
+                    existing_operation_status = operation.status
+                    await s.commit()
+                    if existing_operation_status in _ACTIVE_RECOVERY_OPERATION_STATUSES:
+                        await self._sleep_with_monitor_state_operation(
+                            workspace_id=workspace_id,
+                            action="recovery_wait",
+                            requested_action=requested_action,
+                            reason="Waiting for an active PR monitor recovery operation to finish.",
+                            reason_code="RECOVERY_IN_PROGRESS",
+                            pr_number=pr_number,
+                            status=status,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            wait_seconds=self._config.poll_interval_seconds,
+                            monitor_log=monitor_log,
+                            stale_reason=stale_reason,
+                            extra_payload={
+                                "recovery_mode": recovery_mode,
+                                "stale_reason": stale_reason,
+                                "operation_id": existing_operation_id,
+                                "operation_status": existing_operation_status,
+                            },
+                            extra_identity=(
+                                recovery_mode,
+                                stale_reason,
+                                existing_operation_id,
+                                existing_operation_status,
+                            ),
+                        )
+                    else:
+                        await self._sleep_with_monitor_state_operation(
+                            workspace_id=workspace_id,
+                            action="recovery_already_handled",
+                            requested_action=requested_action,
+                            reason=(
+                                "A prior PR monitor recovery operation already handled this "
+                                "observed PR snapshot."
+                            ),
+                            reason_code=_RECOVERY_SNAPSHOT_ALREADY_HANDLED_REASON,
+                            pr_number=pr_number,
+                            status=status,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            wait_seconds=self._config.poll_interval_seconds,
+                            monitor_log=monitor_log,
+                            stale_reason=stale_reason,
+                            extra_payload={
+                                "recovery_mode": recovery_mode,
+                                "stale_reason": stale_reason,
+                                "operation_id": existing_operation_id,
+                                "operation_status": existing_operation_status,
+                            },
+                            extra_identity=(
+                                recovery_mode,
+                                stale_reason,
+                                existing_operation_id,
+                                existing_operation_status,
+                            ),
+                        )
+                    return False
                 await workspace_repo.transition(
                     _ws,
                     to=WorkspaceStatus.ready,
