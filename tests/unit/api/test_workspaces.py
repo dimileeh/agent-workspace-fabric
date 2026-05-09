@@ -2639,11 +2639,14 @@ class TestGetWorkspace:
     ) -> None:
         create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
         ws_id = create.json()["workspace_id"]
+        calls = 0
 
         async def _fail_audit_lookup(
             self: EgressAuditRepository,
             workspace_id: str,
         ) -> object:
+            nonlocal calls
+            calls += 1
             raise RuntimeError(f"egress audit unavailable for {workspace_id}")
 
         monkeypatch.setattr(
@@ -2657,6 +2660,7 @@ class TestGetWorkspace:
         assert response.status_code == 200
         assert response.json()["id"] == ws_id
         assert response.json()["egress_audit"] is None
+        assert calls == 1
 
     @pytest.mark.unit
     async def test_get_workspace_ignores_transient_egress_audit_lookup_failure(
@@ -3294,12 +3298,14 @@ class TestListWorkspaces:
         workspace_id = await _create_workspace(client, task_title="closed connection list")
         original = WorkspaceRepository.list
         failures_remaining = 1
+        calls = 0
 
         async def _flaky_list(
             self: WorkspaceRepository,
             **kwargs: object,
         ) -> list[Any]:
-            nonlocal failures_remaining
+            nonlocal failures_remaining, calls
+            calls += 1
             if failures_remaining:
                 failures_remaining -= 1
                 raise _closed_connection_error()
@@ -3311,6 +3317,7 @@ class TestListWorkspaces:
 
         assert response.status_code == 200
         assert [item["id"] for item in response.json()] == [workspace_id]
+        assert calls == 2
 
     @pytest.mark.unit
     async def test_returns_created_workspaces_newest_first(self, client: AsyncClient) -> None:
