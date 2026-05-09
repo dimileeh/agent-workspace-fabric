@@ -219,6 +219,7 @@ def test_unit_smoke_job_has_postgres_for_database_required_unit_tests() -> None:
     job = _job(workflow, "lint-and-test")
 
     assert job.get("runs-on") == GITHUB_HOSTED_RUNNER
+    assert job.get("timeout-minutes") == 30
 
     services = job.get("services", {})
     assert isinstance(services, dict)
