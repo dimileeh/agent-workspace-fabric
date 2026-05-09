@@ -754,6 +754,70 @@ async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "operation_type",
+    [
+        OperationType.sync_base,
+        OperationType.ci_repair,
+        OperationType.comment_repair,
+        OperationType.human_wait,
+    ],
+)
+async def test_stale_recovery_callback_ignores_active_pr_monitor_non_recovery_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    operation_type: OperationType,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.ready,
+            reason_code="TEST_READY_AFTER_RECOVERY_DISPATCH",
+        )
+        await OperationRepository(s).create(
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            status=OperationStatus.running,
+            payload={
+                "owner": "pr_monitor",
+                "source": "pr_monitor",
+                "action": operation_type.value,
+                "requested_action": operation_type.value,
+                "reason_code": operation_type.value.upper(),
+            },
+        )
+        await s.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    stale = await runner._recovery_dispatch_status_is_stale(workspace_id)
+
+    assert stale is True
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        stale_events = [
+            event
+            for event in ws.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+    assert len(stale_events) == 1
+    assert stale_events[0].reason_code == "STALE_CALLBACK_IGNORED"
+    assert stale_events[0].payload["callback_action"] == "recovery_dispatch"
+    assert stale_events[0].payload["actual_status"] == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
 async def test_recovery_dispatch_does_not_requeue_already_succeeded_snapshot(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

@@ -2535,15 +2535,7 @@ class PullRequestMonitorRunner:
             if ws.status == WorkspaceStatus.monitoring_pr.value:
                 return False
             active_recovery = any(
-                op.status
-                in (
-                    OperationStatus.pending.value,
-                    OperationStatus.running.value,
-                )
-                and op.type != OperationType.monitor_state.value
-                and isinstance(op.payload, dict)
-                and op.payload.get("source") == "pr_monitor"
-                for op in ws.operations
+                _is_active_pr_monitor_recovery_operation(op) for op in ws.operations
             )
             if active_recovery:
                 return False
