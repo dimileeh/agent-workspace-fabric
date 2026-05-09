@@ -59,7 +59,7 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
         step for step in job["steps"] if isinstance(step, dict) and step.get("name") == "Full coverage"
     ]
     assert len(coverage_steps) == 1
-    env = coverage_steps[0]["env"]
+    env = {**job.get("env", {}), **coverage_steps[0].get("env", {})}
     assert env["CI"] == "true"
     assert env["AWF_DATABASE_URL"] == DB_URL
     assert env["AWF_TEST_DATABASE_URL"] == DB_URL
