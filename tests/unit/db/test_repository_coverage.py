@@ -662,6 +662,7 @@ async def test_validation_run_finish_updates_metadata_and_handles_missing(
     assert finished is not None
     assert finished.status == "succeeded"
     assert finished.retry_count == 2
+    assert finished.coverage == {"total": 99.1}
     assert finished.log_stream_refs == {
         "stdout": "validation.stdout",
         "coverage": {"total": 99.1},
@@ -674,6 +675,7 @@ async def test_validation_run_finish_updates_metadata_and_handles_missing(
     assert updated.target_head_sha == "d" * 40
     assert updated.workspace_head_sha == "e" * 40
     assert plain_finished is not None
+    assert plain_finished.coverage is None
     assert plain_finished.log_stream_refs == {}
     assert plain_finished.commands == [{"command": "mypy"}]
     assert [row.id for row in listed] == [plain_run.id, run.id]

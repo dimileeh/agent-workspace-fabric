@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -11,8 +12,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 import awf.control.executor as executor_mod
-from awf.adapters.base import AgentDefaults
-from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
+from awf.adapters.base import AgentDefaults, AgentRunError
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.control.executor import (
     GIT_OBJECT_MISSING_REASON_CODE,
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
@@ -36,13 +37,15 @@ from awf.control.executor import (
     _git_error_indicates_missing_head_object,
     _GitObjectRecoveryResult,
     _MonitorRebaseRecoveryError,
+    _planning_validation_handoff_from_recovery_payload,
+    _PlanningValidationHandoff,
     _profile_with_planning_iteration_default,
     _raw_profile_has_explicit_planning_max_iterations,
     _read_ref_sha,
     _read_text_if_present,
     _RebaseRecoveryResult,
     _recover_missing_head_from_filesystem,
-    _validate_only_recovery_needs_existing_pr_push,
+    _recovery_needs_existing_pr_push,
     _validation_command_count,
     _validation_failure_message,
     _validation_run_command_records,
@@ -51,7 +54,14 @@ from awf.control.executor import (
     _validation_run_reason_code,
     _validation_tier_for_workspace,
 )
-from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    WorkspaceStatus,
+)
 from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
@@ -64,7 +74,10 @@ from awf.db.session import make_session_factory
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PLAN_CONFORMANCE_UNSATISFIED,
+    PlanConformanceReport,
+    PlanConformanceStatus,
 )
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -126,6 +139,18 @@ def _coverage(
             False,
         ),
         (
+            {"recovery_mode": "rebase_only", "source_head_sha": "old"},
+            "rebased",
+            _RebaseRecoveryResult(base_sha="base", head_sha="rebased"),
+            False,
+        ),
+        (
+            {"recovery_mode": "rebase_only", "source_head_sha": "old"},
+            "post-validation-report",
+            _RebaseRecoveryResult(base_sha="base", head_sha="rebased"),
+            True,
+        ),
+        (
             {"recovery_mode": "validate_only", "source_head_sha": "old"},
             "new",
             _RebaseRecoveryResult(base_sha="base", head_sha="rebased"),
@@ -151,20 +176,130 @@ def _coverage(
         ),
     ],
 )
-def test_validate_only_recovery_needs_existing_pr_push_edges(
+def test_recovery_needs_existing_pr_push_edges(
     recovery_payload: dict[str, object],
     head_sha: str | None,
     rebase_result: _RebaseRecoveryResult | None,
     expected: bool,
 ) -> None:
     assert (
-        _validate_only_recovery_needs_existing_pr_push(
+        _recovery_needs_existing_pr_push(
             recovery_payload,
             validated_workspace_head_sha=head_sha,
             rebase_recovery_result=rebase_result,
         )
         is expected
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conformance_fields", "payload_fields", "expected_iteration", "expected_max_iterations"),
+    [
+        ({"iteration": 2, "max_iterations": 5}, {}, 2, 5),
+        ({}, {"iteration": 1, "max_iterations": 0}, 1, 0),
+        ({}, {}, 0, 3),
+    ],
+)
+def test_recovery_conformance_handoff_preserves_iteration_budget(
+    conformance_fields: dict[str, object],
+    payload_fields: dict[str, object],
+    expected_iteration: int,
+    expected_max_iterations: int,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planned",
+            "planning": {
+                "required": True,
+                "max_iterations": 3,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+            },
+        }
+    )
+    handoff = _planning_validation_handoff_from_recovery_payload(
+        workspace_id="ws123",
+        profile=profile,
+        recovery_payload={
+            **payload_fields,
+            "conformance": {
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "summary": "AWF validation evidence is required.",
+                "gaps": ["rerun pytest under AWF"],
+                **conformance_fields,
+            },
+        },
+    )
+
+    assert handoff is not None
+    assert handoff.iteration == expected_iteration
+    assert handoff.max_iterations == expected_max_iterations
+
+
+@pytest.mark.unit
+def test_recovery_conformance_handoff_reads_persisted_report_reason_code() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planned",
+            "planning": {
+                "required": True,
+                "max_iterations": 3,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+            },
+        }
+    )
+    handoff = _planning_validation_handoff_from_recovery_payload(
+        workspace_id="ws123",
+        profile=profile,
+        recovery_payload={
+            "conformance": {
+                "report_reason_code": " conformance-requires-awf-validation ",
+                "summary": "AWF validation evidence is required.",
+                "gaps": ["rerun pytest under AWF"],
+            },
+        },
+    )
+
+    assert handoff is not None
+    assert handoff.report.reason_code == CONFORMANCE_REQUIRES_AWF_VALIDATION
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("invalid_path_field", ["plan_path", "report_path"])
+def test_recovery_conformance_handoff_falls_back_when_payload_path_escapes_workspace(
+    invalid_path_field: str,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planned",
+            "planning": {
+                "required": True,
+                "max_iterations": 3,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+            },
+        }
+    )
+    conformance = {
+        "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        "summary": "AWF validation evidence is required.",
+        "gaps": ["rerun pytest under AWF"],
+        "plan_path": "docs/custom-plan.md",
+        "report_path": "docs/custom-report.json",
+        invalid_path_field: "../outside.json",
+    }
+
+    handoff = _planning_validation_handoff_from_recovery_payload(
+        workspace_id="ws123",
+        profile=profile,
+        recovery_payload={"conformance": conformance},
+    )
+
+    assert handoff is not None
+    assert handoff.plan_path == Path("docs/awf-plans/ws123.md")
+    assert handoff.report_path == Path("docs/awf-plans/ws123.conformance.json")
 
 
 class _PlanningAdapter:
@@ -192,6 +327,740 @@ class _CoverageValidation:
         self.calls.append(phase)
         self.kwargs.append(dict(_kwargs))
         return self.coverage
+
+
+@pytest.mark.unit
+async def test_post_validation_report_repairs_git_ownership_before_add(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
+    runner.queue_result(returncode=0)  # git commit report
+    executor = _executor_with_runner(runner, tmp_path)
+    repair_events: list[tuple[str, int]] = []
+
+    async def record_repair(**kwargs: object) -> bool:
+        reason = kwargs["reason"]
+        assert isinstance(reason, str)
+        repair_events.append((reason, len(runner.calls)))
+        return True
+
+    executor._repair_agent_git_ownership = record_repair  # type: ignore[method-assign]
+
+    committed = await executor._commit_post_validation_conformance_report(
+        workspace_id="ws_post",
+        worktree_path=tmp_path / "worktree",
+        report_path=report_path,
+        validation_run_id="validation-run-1",
+    )
+
+    add_call_index = next(
+        index
+        for index, call in enumerate(runner.calls)
+        if call.args[-3:] == ["add", "--", report_path.as_posix()]
+    )
+    assert committed is True
+    assert repair_events[0] == (
+        "post_validation_conformance_report_git_add",
+        add_call_index,
+    )
+
+
+@pytest.mark.unit
+async def test_post_validation_report_unstages_report_when_cached_diff_fails(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(returncode=128, stderr="fatal: index.lock exists")
+    runner.queue_result(returncode=0)  # git reset report
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    with pytest.raises(executor_mod._PostValidationConformanceReportGitError) as exc_info:
+        await executor._commit_post_validation_conformance_report(
+            workspace_id="ws_post",
+            worktree_path=tmp_path / "worktree",
+            report_path=report_path,
+            validation_run_id="validation-run-1",
+        )
+
+    assert exc_info.value.operation == "diff"
+    assert runner.calls[-1].args[-4:] == [
+        "reset",
+        "-q",
+        "--",
+        report_path.as_posix(),
+    ]
+
+
+@pytest.mark.unit
+async def test_post_validation_report_git_error_preserves_unstage_failure_metadata(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(
+        returncode=128,
+        stderr="fatal: index.lock exists",
+        reason_code="GIT_DIFF_FAILED",
+    )
+    runner.queue_result(
+        returncode=129,
+        stderr="fatal: could not reset",
+        reason_code="GIT_RESET_FAILED",
+    )
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    with pytest.raises(executor_mod._PostValidationConformanceReportGitError) as exc_info:
+        await executor._commit_post_validation_conformance_report(
+            workspace_id="ws_post",
+            worktree_path=tmp_path / "worktree",
+            report_path=report_path,
+            validation_run_id="validation-run-1",
+        )
+
+    assert exc_info.value.operation == "diff"
+    assert exc_info.value.command_reason_code == "GIT_DIFF_FAILED"
+    assert exc_info.value.cleanup_operation == "reset"
+    assert exc_info.value.cleanup_returncode == 129
+    assert exc_info.value.cleanup_command_reason_code == "GIT_RESET_FAILED"
+    assert "git reset failed" in str(exc_info.value)
+    assert runner.calls[-1].args[-4:] == [
+        "reset",
+        "-q",
+        "--",
+        report_path.as_posix(),
+    ]
+
+
+@pytest.mark.unit
+def test_validation_evidence_json_enforces_limit_on_minimal_fallback() -> None:
+    oversized_percent = {f"pkg_{index}": "x" * 1000 for index in range(100)}
+    payload = {
+        "validation_run_id": "validation-run-1",
+        "status": "failed",
+        "reason_code": "COVERAGE_BELOW_THRESHOLD",
+        "coverage": {
+            "status": "failed",
+            "reason_code": "COVERAGE_BELOW_THRESHOLD",
+            "percent": oversized_percent,
+            "minimum_percent": 99,
+            "enforce": True,
+            "provider": "python",
+        },
+        "workspace_head_sha": "validated-head",
+        "target_branch": "main",
+        "commands": [{"command": "pytest", "stdout": "x" * 100000}],
+        "log_stream_refs": {"stdout": "x" * 100000},
+        "raw_output": "x" * 100000,
+    }
+
+    evidence = executor_mod._validation_evidence_json(payload)
+
+    assert len(evidence) <= executor_mod._VALIDATION_EVIDENCE_JSON_LIMIT
+    decoded = json.loads(evidence)
+    assert decoded["evidence_truncated"] is True
+    assert decoded["coverage"]["truncated"] is True
+    assert "percent" not in decoded["coverage"]
+    assert decoded["oversized_serialized_length"] == len(
+        json.dumps(executor_mod.redact_audit_value(payload), default=str)
+    )
+    assert decoded["oversized_serialized_length"] > len(evidence)
+
+
+@pytest.mark.unit
+def test_validation_evidence_floor_payload_special_cases_coverage_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coverage = {
+        "status": "failed",
+        "reason_code": "COVERAGE_BELOW_THRESHOLD",
+        "percent": {f"pkg_{index}": "x" * 1000 for index in range(10)},
+    }
+    payload = {
+        "validation_run_id": "validation-run-1",
+        "status": "failed",
+        "coverage": coverage,
+    }
+    floor_values: list[object] = []
+    original_floor_value = executor_mod._validation_evidence_floor_value
+
+    def record_floor_value(value: object) -> object:
+        floor_values.append(value)
+        return original_floor_value(value)
+
+    monkeypatch.setattr(
+        executor_mod,
+        "_validation_evidence_floor_value",
+        record_floor_value,
+    )
+
+    floor_payload = executor_mod._validation_evidence_floor_payload(
+        payload,
+        oversized_serialized_length=123456,
+    )
+
+    assert coverage not in floor_values
+    assert floor_payload["coverage"] == executor_mod._validation_evidence_size_summary(coverage)
+
+
+@pytest.mark.unit
+def test_validation_evidence_serializer_uses_evidence_limit_for_redaction_expansion() -> None:
+    payload = {"output": " ".join(["SECRET=a"] * 2166)}
+    raw_length = len(json.dumps(payload, default=str))
+    assert raw_length < executor_mod._VALIDATION_EVIDENCE_JSON_LIMIT
+
+    evidence = executor_mod._serialize_validation_evidence_payload(payload)
+
+    assert len(evidence) == executor_mod._VALIDATION_EVIDENCE_JSON_LIMIT + len("...[truncated]")
+    assert len(evidence) < raw_length + 4096
+    assert "[redacted]" in evidence
+    assert "SECRET=a" not in evidence
+    assert evidence.endswith("...[truncated]")
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_fix_result_preserves_attempt_artifacts(
+    tmp_path: Path,
+) -> None:
+    first = executor_mod._post_validation_conformance_fix_result(
+        failure=executor_mod._PlanningRunFailure(
+            message="first conformance gap",
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        ),
+        workspace_id="ws_post",
+        artifacts_root=tmp_path,
+        attempt=1,
+    )
+    second = executor_mod._post_validation_conformance_fix_result(
+        failure=executor_mod._PlanningRunFailure(
+            message="second conformance gap",
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        ),
+        workspace_id="ws_post",
+        artifacts_root=tmp_path,
+        attempt=2,
+    )
+
+    first_command = first.commands[0]
+    second_command = second.commands[0]
+    assert first_command.stdout_path.name == "post_validation_conformance.1.stdout"
+    assert first_command.stderr_path.name == "post_validation_conformance.1.stderr"
+    assert second_command.stdout_path.name == "post_validation_conformance.2.stdout"
+    assert second_command.stderr_path.name == "post_validation_conformance.2.stderr"
+    assert first_command.stdout_path.read_text(encoding="utf-8") == "first conformance gap"
+    assert second_command.stdout_path.read_text(encoding="utf-8") == "second conformance gap"
+    assert not (
+        tmp_path / "ws_post" / "post_validation_conformance" / "post_validation_conformance.stdout"
+    ).exists()
+
+
+@pytest.mark.unit
+async def test_satisfied_post_validation_conformance_report_is_committed(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    report_file.write_text(
+        '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}',
+        encoding="utf-8",
+    )
+    runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout="validated-head\n")
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
+    runner.queue_result(returncode=0)  # git commit report
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    event_markers: list[tuple[str, int]] = []
+
+    async def record_event(**_kwargs: object) -> None:
+        event_markers.append(("record", len(runner.calls)))
+
+    executor._record_post_validation_conformance_event = record_event  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is None
+    add_index = next(
+        index
+        for index, call in enumerate(runner.calls)
+        if call.args[-3:] == ["add", "--", report_path.as_posix()]
+    )
+    commit_index = next(
+        index for index, call in enumerate(runner.calls) if "commit" in call.args
+    )
+    assert add_index < commit_index
+    assert event_markers == [("record", len(runner.calls))]
+    assert commit_index < event_markers[0][1]
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    report_file.write_text(
+        (
+            '{"status":"needs_iteration","summary":"AWF validation evidence is missing.",'
+            f'"reason_code":"{CONFORMANCE_REQUIRES_AWF_VALIDATION}",'
+            '"gaps":["Run AWF validation."]}'
+        ),
+        encoding="utf-8",
+    )
+    satisfied_stdout = (
+        '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+    )
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="validated-head\n")
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
+    runner.queue_result(returncode=0)
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(satisfied_stdout),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is None
+    assert "validated evidence satisfies plan" in report_file.read_text(encoding="utf-8")
+    executor._record_post_validation_conformance_event.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_ignores_stale_report_without_stdout(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    report_file.write_text(
+        '{"status":"satisfied","summary":"stale success","gaps":[]}',
+        encoding="utf-8",
+    )
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="validated-head\n")
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="")
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._commit_post_validation_conformance_report = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(""),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is not None
+    assert failure.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert "Produce a valid plan-conformance JSON report." in failure.message
+    executor._commit_post_validation_conformance_report.assert_not_awaited()  # type: ignore[attr-defined]
+    executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_failure_counts_handoff_iterations(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout="validated-head\n")
+    runner.queue_result(returncode=0, stdout="")  # changed paths after conformance
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=1,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"needs_iteration","summary":"docs still missing",'
+            '"gaps":["Document the validated endpoint."]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is not None
+    assert failure.details is not None
+    assert failure.details["conformance"]["iterations_used"] == 3
+    assert failure.details["conformance"]["max_iterations"] == 2
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_rejects_committed_implementation_paths(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout="")  # clean status after conformance
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._git_rev_parse_head = AsyncMock(return_value="validated-head")  # type: ignore[method-assign]
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("src/unvalidated.py")}
+    )
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is not None
+    assert failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert failure.message.startswith(
+        "post-validation conformance phase changed files outside "
+        "`docs/awf-plans/ws_post.conformance.json`"
+    )
+    assert failure.details is not None
+    assert failure.details["planning_scope"]["offending_paths"] == ["src/unvalidated.py"]
+    executor._committed_paths_since.assert_awaited_once_with(  # type: ignore[attr-defined]
+        tmp_path / "worktree",
+        "validated-head",
+    )
+    executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_rejects_pre_dirty_committed_paths(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=0,
+        stdout=" M src/unvalidated.py\n",
+    )  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout="")  # clean status after conformance
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._git_rev_parse_head = AsyncMock(return_value="validated-head")  # type: ignore[method-assign]
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("src/unvalidated.py")}
+    )
+    executor._commit_post_validation_conformance_report = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is not None
+    assert failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert failure.details is not None
+    assert failure.details["planning_scope"]["offending_paths"] == ["src/unvalidated.py"]
+    executor._commit_post_validation_conformance_report.assert_not_awaited()  # type: ignore[attr-defined]
+    executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_rejects_edits_to_pre_dirty_paths(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktree"
+    dirty_path = worktree_path / "src" / "unvalidated.py"
+    dirty_path.parent.mkdir(parents=True)
+    dirty_path.write_text("validation dirty content", encoding="utf-8")
+    runner = FakeCommandRunner()
+    runner.queue_result(
+        returncode=0,
+        stdout=" M src/unvalidated.py\n",
+    )  # changed paths before conformance
+    runner.queue_result(
+        returncode=0,
+        stdout=" M src/unvalidated.py\n",
+    )  # same path remains dirty after conformance
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._git_rev_parse_head = AsyncMock(return_value="validated-head")  # type: ignore[method-assign]
+    executor._committed_paths_since = AsyncMock(return_value=set())  # type: ignore[method-assign]
+    executor._commit_post_validation_conformance_report = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    class _SamePathEditingAdapter(_PlanningAdapter):
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            dirty_path.write_text("conformance-only edit", encoding="utf-8")
+            return await super().run(**kwargs)
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_SamePathEditingAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is not None
+    assert failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert failure.details is not None
+    assert failure.details["planning_scope"]["offending_paths"] == ["src/unvalidated.py"]
+    executor._commit_post_validation_conformance_report.assert_not_awaited()  # type: ignore[attr-defined]
+    executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_rejects_committed_paths_when_deviation_guard_disabled(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout="")  # clean status after conformance
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    executor._git_rev_parse_head = AsyncMock(return_value="validated-head")  # type: ignore[method-assign]
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
+        return_value={Path("src/unvalidated.py")}
+    )
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planned",
+            "planning": {
+                "required": True,
+                "fail_on_unexplained_deviation": False,
+            },
+        }
+    )
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is not None
+    assert failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert failure.details is not None
+    assert failure.details["planning_scope"]["offending_paths"] == ["src/unvalidated.py"]
+    executor._git_rev_parse_head.assert_awaited_once_with(  # type: ignore[attr-defined]
+        tmp_path / "worktree"
+    )
+    executor._committed_paths_since.assert_awaited_once_with(  # type: ignore[attr-defined]
+        tmp_path / "worktree",
+        "validated-head",
+    )
+    executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 def _coordination_task_policy() -> dict[str, object]:
@@ -894,82 +1763,85 @@ async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
     tmp_path: Path,
 ) -> None:
     engine = await create_postgres_test_engine()
-    factory = make_session_factory(engine)
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "final-gate-parallel",
-            "validation": {
-                "strategy": {"final_gate": "coverage"},
-                "coverage": {
-                    "minimum_percent": 99,
-                    "command": "pytest --cov=awf",
-                    "parallel_workers": 20,
+    try:
+        factory = make_session_factory(engine)
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "final-gate-parallel",
+                "validation": {
+                    "strategy": {"final_gate": "coverage"},
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "command": "pytest --cov=awf",
+                        "parallel_workers": 20,
+                    },
                 },
-            },
-        }
-    )
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).create(
-            repo_url="git@github.com:example/awf.git",
-            branch_base="main",
-            task_title="parallel final coverage",
-            task_prompt="parallel final coverage",
-            agent="codex",
-            test_commands=[],
+            }
         )
-        task = await TaskRepository(session).create_or_get(
-            repo_url=workspace.repo_url,
-            base_branch=workspace.branch_base,
-            title=workspace.task_title,
-            prompt=workspace.task_prompt,
-            external_id=None,
-            idempotency_key=None,
-            task_class=None,
-            owned_paths=[],
-        )
-        attempt = await TaskAttemptRepository(session).create_for_workspace(
-            task=task,
-            workspace=workspace,
-        )
-        await ResourceReservationRepository(session).create(
-            workspace_id=workspace.id,
-            attempt_id=attempt.id,
-            node_id="local",
-            steady_cpu=3.0,
-            steady_memory_gb=10.0,
-            peak_cpu=6.0,
-            peak_memory_gb=16.0,
-            disk_mb=None,
-            phase="execution",
-        )
-        await session.commit()
-        workspace_id = workspace.id
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/awf.git",
+                branch_base="main",
+                task_title="parallel final coverage",
+                task_prompt="parallel final coverage",
+                agent="codex",
+                test_commands=[],
+            )
+            task = await TaskRepository(session).create_or_get(
+                repo_url=workspace.repo_url,
+                base_branch=workspace.branch_base,
+                title=workspace.task_title,
+                prompt=workspace.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=None,
+                owned_paths=[],
+            )
+            attempt = await TaskAttemptRepository(session).create_for_workspace(
+                task=task,
+                workspace=workspace,
+            )
+            await ResourceReservationRepository(session).create(
+                workspace_id=workspace.id,
+                attempt_id=attempt.id,
+                node_id="local",
+                steady_cpu=3.0,
+                steady_memory_gb=10.0,
+                peak_cpu=6.0,
+                peak_memory_gb=16.0,
+                disk_mb=None,
+                phase="execution",
+            )
+            await session.commit()
+            workspace_id = workspace.id
 
-    coverage = _coverage(tmp_path, percent=100, status="passed", reason_code="COVERAGE_OK")
-    validation = _CoverageValidation(coverage)
-    executor = WorkspaceExecutor(
-        session_factory=factory,
-        runner=FakeCommandRunner(),
-        compose=object(),  # type: ignore[arg-type]
-        validation=validation,  # type: ignore[arg-type]
-        pr_creator=object(),  # type: ignore[arg-type]
-        config=ExecutorConfig(
-            worktrees_root=tmp_path / "worktrees",
-            compose_projects_root=tmp_path / "compose",
-        ),
-    )
+        coverage = _coverage(tmp_path, percent=100, status="passed", reason_code="COVERAGE_OK")
+        validation = _CoverageValidation(coverage)
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=FakeCommandRunner(),
+            compose=object(),  # type: ignore[arg-type]
+            validation=validation,  # type: ignore[arg-type]
+            pr_creator=object(),  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "worktrees",
+                compose_projects_root=tmp_path / "compose",
+            ),
+        )
 
-    result = await executor._run_final_coverage_gate(
-        workspace_id=workspace_id,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        profile=profile,
-        validation_tier=1,
-        workspace_head_sha="head",
-    )
+        result = await executor._run_final_coverage_gate(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            profile=profile,
+            validation_tier=1,
+            workspace_head_sha="head",
+        )
 
-    assert result.coverage is coverage
-    assert validation.kwargs[0]["parallel_worker_cpu_limit"] == 3
+        assert result.coverage is coverage
+        assert validation.kwargs[0]["parallel_worker_cpu_limit"] == 3
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.unit
@@ -2561,6 +3433,78 @@ def test_validation_failure_message_carries_coverage_context(tmp_path: Path) -> 
         )
         == "validation failed"
     )
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_result_uses_attempt_from_failure_details(
+    tmp_path: Path,
+) -> None:
+    failure = executor_mod._PlanningRunFailure(  # noqa: SLF001
+        message="Plan conformance still requires validation evidence.",
+        details={
+            "attempt": 2,
+            "conformance": {
+                "summary": "AWF validation evidence is missing.",
+                "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": ["pytest coverage evidence is stale", "  ", 42],
+            },
+        },
+    )
+
+    result = executor_mod._post_validation_conformance_fix_result(  # noqa: SLF001
+        failure=failure,
+        workspace_id="ws_conformance",
+        artifacts_root=tmp_path,
+    )
+
+    command = result.commands[0]
+    assert command.stdout_path.name == "post_validation_conformance.2.stdout"
+    assert command.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    text = command.stdout_path.read_text(encoding="utf-8")
+    assert "Summary: AWF validation evidence is missing." in text
+    assert f"Report reason code: {CONFORMANCE_REQUIRES_AWF_VALIDATION}" in text
+    assert "- pytest coverage evidence is stale" in text
+    assert "- 42" in text
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_agent_failure_details_include_output_and_agent_details() -> None:
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=2, stdout="stdout detail", stderr="stderr detail"),
+        reason_code="",
+        details={"provider": "codex", "retry": True},
+    )
+
+    details = executor_mod._post_validation_conformance_agent_failure_details(  # noqa: SLF001
+        exc,
+        validation_run_id="vr_123",
+    )
+
+    assert details["validation_run_id"] == "vr_123"
+    assert details["conformance"] == {
+        "phase": "post_validation",
+        "reason_code": "AGENT_CLI_FAILED",
+        "returncode": 2,
+        "stdout": "stdout detail",
+        "stderr": "stderr detail",
+    }
+    assert details["agent"] == {"provider": "codex", "retry": True}
+
+    stdout_only = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=1, stdout="stdout only", stderr=""),
+    )
+    stdout_only_details = executor_mod._post_validation_conformance_agent_failure_details(  # noqa: SLF001
+        stdout_only,
+        validation_run_id="vr_456",
+    )
+    assert stdout_only_details["conformance"] == {
+        "phase": "post_validation",
+        "reason_code": "AGENT_CLI_FAILED",
+        "returncode": 1,
+        "stdout": "stdout only",
+    }
 
 
 @pytest.mark.unit

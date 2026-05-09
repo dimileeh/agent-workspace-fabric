@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
@@ -23,7 +24,36 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["b3c4d5e6f7a8"]
+    assert script.get_heads() == ["c5d6e7f8a9b0"]
+
+
+@pytest.mark.unit
+def test_validation_run_coverage_migration_uses_metadata_only_column_ops() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration_path = (
+        repo_root
+        / "migrations"
+        / "versions"
+        / "c5d6e7f8a9b0_validation_run_coverage.py"
+    )
+    tree = ast.parse(migration_path.read_text(encoding="utf-8"))
+
+    call_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    call_attrs = [
+        node.func.attr
+        for node in call_nodes
+        if isinstance(node.func, ast.Attribute)
+    ]
+    op_call_attrs = {
+        node.func.attr
+        for node in call_nodes
+        if isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "op"
+    }
+
+    assert "batch_alter_table" not in call_attrs
+    assert op_call_attrs == {"add_column", "drop_column"}
 
 
 @pytest.mark.unit
@@ -194,6 +224,7 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "resolved_profile_digest",
         "environment_identity_digest",
         "environment_identity_inputs",
+        "coverage",
     } <= validation_run_columns
     assert "workspace_secret_leases" in tables
     assert {

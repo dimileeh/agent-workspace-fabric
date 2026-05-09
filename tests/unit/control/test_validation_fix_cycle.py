@@ -215,6 +215,21 @@ class TestBuildFixPrompt:
         assert "fix the failing pytest tests first, then revisit coverage" in prompt
         assert "tests/unit/test_widget.py::test_handles_edges" in prompt
 
+    @pytest.mark.unit
+    def test_retry_prompt_treats_provider_fail_under_as_coverage_work(self) -> None:
+        prompt = build_fix_prompt(
+            self._ctx(
+                failed_command="pytest --cov=awf --cov-report=term-missing",
+                reason_code="COVERAGE_FAIL_UNDER_NOT_REACHED",
+                coverage_percent=99.0,
+                coverage_minimum_percent=99.0,
+            )
+        ).lower()
+
+        assert "add meaningful tests" in prompt
+        assert "coverage provider reported fail-under was not reached" in prompt
+        assert "coverage already meets the configured threshold" not in prompt
+
 
 class TestValidationFixContext:
     @pytest.mark.unit

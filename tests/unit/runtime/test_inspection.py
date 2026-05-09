@@ -226,6 +226,9 @@ def test_runtime_helper_fallbacks() -> None:
     assert (
         inspection._command_from({}, {"Config": {"Cmd": ["sleep", "infinity"]}}) == "sleep infinity"
     )
+    assert inspection._command_from({}, {"Config": {"Cmd": ["sleep", None, "10"]}}) == "sleep 10"
+    assert inspection._command_from({}, {"Config": {"Cmd": [None]}}) is None
+    assert inspection._command_from({}, {"Config": {"Cmd": "python -m app"}}) == "python -m app"
     assert (
         inspection._command_from({"Command": "echo hi"}, {"Config": {"Cmd": ["sleep"]}})
         == "echo hi"

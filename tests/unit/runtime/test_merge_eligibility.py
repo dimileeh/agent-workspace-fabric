@@ -8,6 +8,7 @@ from awf.db.repositories import sync_candidate_readiness
 from awf.runtime.merge_eligibility import (
     VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
     _successful_validation_run_tier,
+    _validation_run_deferred_required_coverage,
     compute_stale_reason,
     compute_stale_reason_for_attempt,
 )
@@ -202,6 +203,21 @@ def test_successful_validation_run_tier_excludes_deferred_coverage_runs() -> Non
     )
 
     assert _successful_validation_run_tier(run) is None
+
+
+@pytest.mark.unit
+def test_validation_run_deferred_coverage_ignores_completed_coverage_command() -> None:
+    run = _validation_run(
+        tier=2,
+        started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        commands=[
+            {"phase": "validate", "command": "pytest -q"},
+            {"phase": "coverage", "command": "pytest --cov=awf", "evidence_status": "complete"},
+        ],
+    )
+
+    assert not _validation_run_deferred_required_coverage(run)
+    assert _successful_validation_run_tier(run) == 2
 
 
 @pytest.mark.unit

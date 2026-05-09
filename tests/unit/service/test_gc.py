@@ -47,6 +47,13 @@ from awf.service.gc import (
 """Terminal workspace filesystem GC tests."""
 
 
+@pytest.mark.unit
+def test_gc_to_utc_accepts_naive_datetime() -> None:
+    naive = datetime(2026, 5, 8, 12, 30)
+
+    assert gc._to_utc(naive) == naive.replace(tzinfo=UTC)  # noqa: SLF001
+
+
 @pytest.fixture(autouse=True)
 def _mock_default_worktree_remover():
     with patch(

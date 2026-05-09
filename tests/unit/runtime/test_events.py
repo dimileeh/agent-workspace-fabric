@@ -31,3 +31,15 @@ async def test_committed_workspace_events_are_broadcast(engine: AsyncEngine) -> 
 
     assert frame.workspace_id == workspace.id
     assert frame.event_type == "workspace.created"
+
+
+@pytest.mark.unit
+async def test_unsubscribe_keeps_workspace_entry_until_last_subscriber_exits() -> None:
+    workspace_id = "ws_two_subscribers"
+
+    async with WORKSPACE_EVENT_BROADCASTER.subscribe(workspace_id) as first:
+        async with WORKSPACE_EVENT_BROADCASTER.subscribe(workspace_id) as second:
+            assert first is not second
+        assert workspace_id in WORKSPACE_EVENT_BROADCASTER._subscribers  # noqa: SLF001
+
+    assert workspace_id not in WORKSPACE_EVENT_BROADCASTER._subscribers  # noqa: SLF001

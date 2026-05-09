@@ -13,6 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.app import configure_database, create_app
+from awf.api.routes import metrics as metrics_route
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
@@ -220,6 +221,24 @@ async def test_resource_saturation_endpoint_uses_detected_docker_capacity_when_u
         "available_after_next_default": 0.0,
         "reason_code": None,
     }
+
+
+@pytest.mark.unit
+async def test_resource_saturation_endpoint_tolerates_egress_count_failure(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app, client = metrics_app_and_client
+
+    async def _raise_egress_counts(_session: object) -> dict[str, int]:
+        raise RuntimeError("egress query failed")
+
+    monkeypatch.setattr(metrics_route, "_egress_posture_counts", _raise_egress_counts)
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    assert response.json()["egress_posture_counts"] == {}
 
 
 @pytest.mark.unit
