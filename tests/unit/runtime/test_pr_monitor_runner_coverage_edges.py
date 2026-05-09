@@ -25,6 +25,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.runtime import pr_monitor_runner
 from awf.runtime.pr_monitor import (
     AddressComments,
     CheckFailure,
@@ -3861,7 +3862,17 @@ async def test_load_and_persist_state_handles_workspace_without_pr_number(
 @pytest.mark.unit
 def test_load_state_normalizes_naive_started_at_without_database(
     tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
 ) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz: object | None = None) -> datetime:
+            assert tz is UTC
+            return datetime(2026, 4, 27, 12, 1, tzinfo=UTC)
+
+    mocker.patch.object(pr_monitor_runner, "datetime", FrozenDateTime)
+    mocker.patch("time.monotonic", return_value=30.0)
+
     runner = make_runner(
         factory=None,  # type: ignore[arg-type]
         cmd=FakeCommandRunner(),
@@ -3897,8 +3908,8 @@ def test_load_state_normalizes_naive_started_at_without_database(
     )
     aware_state = runner._load_state(aware_workspace)
 
-    assert state.started_at >= 0
-    assert aware_state.started_at >= 0
+    assert state.started_at == pytest.approx(-30.0)
+    assert aware_state.started_at == pytest.approx(-30.0)
 
 
 @pytest.mark.unit

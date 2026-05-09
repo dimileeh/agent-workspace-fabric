@@ -4760,7 +4760,7 @@ class PullRequestMonitorRunner:
             if started_dt.tzinfo is None:
                 started_dt = started_dt.replace(tzinfo=UTC)
             elapsed = (now_wall - started_dt).total_seconds()
-            started_at = max(now_monotonic - max(elapsed, 0.0), 0.0)
+            started_at = now_monotonic - max(elapsed, 0.0)
         threads_addressed = dict(ws.monitor_threads_addressed or {})
         sync_base_no_progress_signature = threads_addressed.pop(
             _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY,
