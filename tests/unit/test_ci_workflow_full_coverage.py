@@ -203,8 +203,11 @@ def test_unit_smoke_job_is_not_the_authoritative_coverage_gate() -> None:
     workflow = _workflow()
     job = _job(workflow, "lint-and-test")
     commands = _run_steps(job)
+    unit_run = _step_run(job, "Unit tests")
 
     assert "pytest tests/unit/" in commands
+    assert "-n 8" in unit_run
+    assert "--dist=loadscope" in unit_run
     assert "--cov=awf" not in commands
     assert "--cov-fail-under" not in commands
 
@@ -213,6 +216,8 @@ def test_unit_smoke_job_is_not_the_authoritative_coverage_gate() -> None:
 def test_unit_smoke_job_has_postgres_for_database_required_unit_tests() -> None:
     workflow = _workflow()
     job = _job(workflow, "lint-and-test")
+
+    assert job.get("runs-on") == "ubuntu-latest-8-cores"
 
     services = job.get("services", {})
     assert isinstance(services, dict)
