@@ -82,6 +82,34 @@ async def _pending_execution_task() -> None:
     await asyncio.Event().wait()
 
 
+def _scheduler_test_scoring_time(
+    *,
+    after: SchedulerOrderCursor | None,
+    scoring_at: datetime | None,
+) -> datetime:
+    if after is None:
+        assert scoring_at is not None
+        return scoring_at
+    if scoring_at is not None:
+        assert scoring_at == after.scoring_at
+    return after.scoring_at
+
+
+def _scheduler_order_cursor_for_workspace(
+    workspace: Workspace,
+    *,
+    scoring_at: datetime,
+) -> SchedulerOrderCursor:
+    score = scheduler_score_from_workspace(workspace, now=scoring_at)
+    return SchedulerOrderCursor(
+        class_priority=score.class_priority,
+        effective_score=score.effective_score,
+        queued_at=score.queued_at,
+        workspace_id=score.workspace_id,
+        scoring_at=scoring_at,
+    )
+
+
 @pytest.fixture
 def origin_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "origin"
@@ -1365,6 +1393,8 @@ class TestRunOnceExecution:
                 )
             await session.commit()
         query_cursors: list[SchedulerOrderCursor | None] = []
+        page_end_cursors: list[SchedulerOrderCursor] = []
+        original_list_schedulable_workspaces = WorkspaceRepository.list_schedulable_workspaces
 
         async def _list_schedulable_workspaces(
             self: WorkspaceRepository,
@@ -1375,25 +1405,26 @@ class TestRunOnceExecution:
             after: SchedulerOrderCursor | None = None,
             scoring_at: datetime | None = None,
         ) -> list[Workspace]:
-            del scoring_at
             assert status == WorkspaceStatus.ready
             assert limit == candidate_limit
-            excluded = set(exclude_ids or set())
             query_cursors.append(after)
-            visible = [workspace_id for workspace_id in ordered_ids if workspace_id not in excluded]
             if after is not None:
-                visible = [
-                    workspace_id
-                    for workspace_id in visible
-                    if (created_at_by_id[workspace_id], workspace_id)
-                    > (after.queued_at, after.workspace_id)
-                ]
-            visible = visible[:limit]
-            if not visible:
-                return []
-            result = await self._session.execute(select(Workspace).where(Workspace.id.in_(visible)))
-            rows = {workspace.id: workspace for workspace in result.scalars()}
-            return [rows[workspace_id] for workspace_id in visible]
+                assert page_end_cursors
+                assert after == page_end_cursors[-1]
+            scoring_time = _scheduler_test_scoring_time(after=after, scoring_at=scoring_at)
+            page = await original_list_schedulable_workspaces(
+                self,
+                status=status,
+                limit=limit,
+                exclude_ids=exclude_ids,
+                after=after,
+                scoring_at=scoring_time,
+            )
+            if page:
+                page_end_cursors.append(
+                    _scheduler_order_cursor_for_workspace(page[-1], scoring_at=scoring_time)
+                )
+            return page
 
         monkeypatch.setattr(
             WorkspaceRepository,
@@ -1417,8 +1448,8 @@ class TestRunOnceExecution:
         assert len(query_cursors) == 2
         assert query_cursors[0] is None
         assert query_cursors[1] is not None
-        assert query_cursors[1].queued_at == created_at_by_id[low_ids[-1]]
-        assert query_cursors[1].workspace_id == low_ids[-1]
+        assert query_cursors[1] == page_end_cursors[0]
+        assert query_cursors[1].queued_at == created_at_by_id[query_cursors[1].workspace_id]
         assert all(cursor is None or cursor.workspace_id not in tail_ids for cursor in query_cursors)
 
     @pytest.mark.unit
@@ -1900,6 +1931,8 @@ class TestRunOnceExecution:
                 )
             await session.commit()
         queries: list[tuple[SchedulerOrderCursor | None, set[str]]] = []
+        page_end_cursors: list[SchedulerOrderCursor] = []
+        original_list_schedulable_workspaces = WorkspaceRepository.list_schedulable_workspaces
 
         async def _list_schedulable_workspaces(
             self: WorkspaceRepository,
@@ -1910,24 +1943,26 @@ class TestRunOnceExecution:
             after: SchedulerOrderCursor | None = None,
             scoring_at: datetime | None = None,
         ) -> list[Workspace]:
-            del scoring_at
             assert status == WorkspaceStatus.ready
             excluded = set(exclude_ids or set())
             queries.append((after, excluded))
-            visible = [workspace_id for workspace_id in ordered_ids if workspace_id not in excluded]
             if after is not None:
-                visible = [
-                    workspace_id
-                    for workspace_id in visible
-                    if (created_at_by_id[workspace_id], workspace_id)
-                    > (after.queued_at, after.workspace_id)
-                ]
-            visible = visible[:limit]
-            if not visible:
-                return []
-            result = await self._session.execute(select(Workspace).where(Workspace.id.in_(visible)))
-            rows = {workspace.id: workspace for workspace in result.scalars()}
-            return [rows[workspace_id] for workspace_id in visible]
+                assert page_end_cursors
+                assert after == page_end_cursors[-1]
+            scoring_time = _scheduler_test_scoring_time(after=after, scoring_at=scoring_at)
+            page = await original_list_schedulable_workspaces(
+                self,
+                status=status,
+                limit=limit,
+                exclude_ids=exclude_ids,
+                after=after,
+                scoring_at=scoring_time,
+            )
+            if page:
+                page_end_cursors.append(
+                    _scheduler_order_cursor_for_workspace(page[-1], scoring_at=scoring_time)
+                )
+            return page
 
         monkeypatch.setattr(
             WorkspaceRepository,
@@ -1951,6 +1986,7 @@ class TestRunOnceExecution:
         assert len(queries) == 2
         assert queries[0] == (None, base_exclude_ids)
         assert queries[1][0] is not None
+        assert queries[1][0] == page_end_cursors[0]
         assert queries[1][0].queued_at == created_at_by_id[suppressed_ids[-1]]
         assert queries[1][0].workspace_id == suppressed_ids[-1]
         assert queries[1][1] == base_exclude_ids
