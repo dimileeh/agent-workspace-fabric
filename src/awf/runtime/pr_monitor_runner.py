@@ -2993,6 +2993,29 @@ class PullRequestMonitorRunner:
                     source_base_sha=_ws.base_commit,
                 )
                 while True:
+                    await s.refresh(_ws, attribute_names=["status"])
+                    if _is_callback_terminal_workspace_status(_ws.status):
+                        await workspace_repo.record_ignored_stale_callback(
+                            _ws,
+                            callback_source="pr_monitor",
+                            callback_action="recovery_dispatch",
+                            expected_status=WorkspaceStatus.monitoring_pr,
+                            requested_status=WorkspaceStatus.ready,
+                            reason_code="STALE_CALLBACK_IGNORED",
+                        )
+                        await s.commit()
+                        return True
+                    if _ws.status != WorkspaceStatus.monitoring_pr.value:
+                        await workspace_repo.record_ignored_stale_callback(
+                            _ws,
+                            callback_source="pr_monitor",
+                            callback_action="recovery_dispatch",
+                            expected_status=WorkspaceStatus.monitoring_pr,
+                            requested_status=WorkspaceStatus.ready,
+                            reason_code="STALE_CALLBACK_IGNORED",
+                        )
+                        await s.commit()
+                        return True
                     operation, created = await operation_repo.create_idempotent(
                         workspace_id=workspace_id,
                         operation_type="validate",
