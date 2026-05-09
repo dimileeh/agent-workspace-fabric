@@ -186,9 +186,7 @@ def test_v2_resource_snapshot_helpers_reject_malformed_values() -> None:
     assert (
         workspaces._stored_resource_reservation_request_values(  # noqa: SLF001
             SimpleNamespace(
-                task_policy={
-                    workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY: {"disk_mb": 1.5}
-                }
+                task_policy={workspaces.RESOURCE_RESERVATION_REQUEST_POLICY_KEY: {"disk_mb": 1.5}}
             )
         )
         is None
@@ -249,12 +247,15 @@ async def test_v2_resource_snapshot_helpers_do_not_lazy_load_unloaded_reservatio
 
 @pytest.mark.unit
 def test_v2_validation_tier_helper_falls_back_to_resolved_profile() -> None:
-    assert workspaces._stored_validation_requested_tier(  # noqa: SLF001
-        SimpleNamespace(
-            task_policy={},
-            resolved_profile={"validation": {"requested_tier": 3}},
+    assert (
+        workspaces._stored_validation_requested_tier(  # noqa: SLF001
+            SimpleNamespace(
+                task_policy={},
+                resolved_profile={"validation": {"requested_tier": 3}},
+            )
         )
-    ) == 3
+        == 3
+    )
 
 
 @pytest.mark.unit

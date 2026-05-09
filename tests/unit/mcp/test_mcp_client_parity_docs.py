@@ -351,7 +351,9 @@ def test_parity_matrix_matches_real_surfaces() -> None:
                 if not cli_path:
                     continue
                 # The real CLI command must be an exact match or a prefix followed by a space
-                assert any(cli_path == c or cli_path.startswith(c + " ") for c in real_cli_commands), (
+                assert any(
+                    cli_path == c or cli_path.startswith(c + " ") for c in real_cli_commands
+                ), (
                     f"CLI usage {cli_path!r} for {capability!r} does not match any real Typer command prefix"
                 )
 

@@ -117,7 +117,11 @@ def _cli_command_info(tokens: tuple[str, ...], callback: Any) -> CliCommandInfo:
         default = parameter.default
         if isinstance(default, OptionInfo):
             declarations = getattr(default, "param_decls", ()) or ()
-            options.update(str(declaration) for declaration in declarations if str(declaration).startswith("--"))
+            options.update(
+                str(declaration)
+                for declaration in declarations
+                if str(declaration).startswith("--")
+            )
         elif isinstance(default, ArgumentInfo):
             arguments.add(name)
             argument_order.append(name)

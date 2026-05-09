@@ -438,7 +438,12 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         supports_idempotency_key=True,
         supports_if_match=False,
         error_codes=frozenset(
-            {"IDEMPOTENCY_CONFLICT", "INVALID_PROFILE", "TASK_EXTERNAL_ID_CONFLICT", "INSUFFICIENT_DISK"}
+            {
+                "IDEMPOTENCY_CONFLICT",
+                "INVALID_PROFILE",
+                "TASK_EXTERNAL_ID_CONFLICT",
+                "INSUFFICIENT_DISK",
+            }
         ),
         rest_response_model="WorkspaceAcceptedResponse",
         rest_header_fields=frozenset({"Idempotency-Key"}),
@@ -647,9 +652,7 @@ _CAPABILITIES += (
         supports_if_match=False,
         rest_response_model="MergeQueueListResponse",
         rest_query_fields=frozenset({"repo_url", "base_branch", "status", "limit", "cursor"}),
-        mcp_request_fields=frozenset(
-            {"repo_url", "base_branch", "status", "limit", "cursor"}
-        ),
+        mcp_request_fields=frozenset({"repo_url", "base_branch", "status", "limit", "cursor"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
     ),
     ContractCapability(
@@ -830,9 +833,7 @@ _CAPABILITIES += (
         supports_if_match=False,
         rest_response_model="WorkspaceLockListResponse",
         rest_query_fields=frozenset({"repo_url", "task_class", "status", "limit", "cursor"}),
-        mcp_request_fields=frozenset(
-            {"repo_url", "task_class", "status", "limit", "cursor"}
-        ),
+        mcp_request_fields=frozenset({"repo_url", "task_class", "status", "limit", "cursor"}),
         cli_options=frozenset({"--repo-url", "--task-class", "--status", "--limit", "--api-token"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
     ),
@@ -848,8 +849,12 @@ _CAPABILITIES += (
         supports_idempotency_key=False,
         supports_if_match=False,
         rest_response_model="WorkspaceOverlapGraphResponse",
-        rest_query_fields=frozenset({"repo_url", "base_branch", "task_class", "queue_state", "limit"}),
-        mcp_request_fields=frozenset({"repo_url", "base_branch", "task_class", "queue_state", "limit"}),
+        rest_query_fields=frozenset(
+            {"repo_url", "base_branch", "task_class", "queue_state", "limit"}
+        ),
+        mcp_request_fields=frozenset(
+            {"repo_url", "base_branch", "task_class", "queue_state", "limit"}
+        ),
         response_fields=frozenset({"nodes", "edges", "summary"}),
     ),
     ContractCapability(
@@ -1096,9 +1101,7 @@ def mutating_capabilities() -> tuple[ContractCapability, ...]:
 
 def implemented_surface_capabilities() -> tuple[ContractCapability, ...]:
     """Return registry rows whose MCP parity status is implemented or partial."""
-    return tuple(
-        c for c in _CAPABILITIES if c.parity_status in {"MCP implemented", "MCP partial"}
-    )
+    return tuple(c for c in _CAPABILITIES if c.parity_status in {"MCP implemented", "MCP partial"})
 
 
 def mcp_capabilities() -> tuple[ContractCapability, ...]:
@@ -1227,9 +1230,7 @@ def normalize_rest_error_body(body: Any) -> dict[str, Any]:
     inner = body.get("detail")
     if isinstance(inner, dict) and "error_code" in inner:
         return _ensure_envelope(inner)
-    raise AssertionError(
-        f"REST error body has no recognizable error envelope: {body!r}"
-    )
+    raise AssertionError(f"REST error body has no recognizable error envelope: {body!r}")
 
 
 def normalize_mcp_error_body(structured: Any) -> dict[str, Any]:
@@ -1237,9 +1238,7 @@ def normalize_mcp_error_body(structured: Any) -> dict[str, Any]:
     if not isinstance(structured, dict):
         raise AssertionError(f"MCP structured error is not a dict: {structured!r}")
     if "error_code" not in structured or "message" not in structured:
-        raise AssertionError(
-            f"MCP structured error missing error_code/message: {structured!r}"
-        )
+        raise AssertionError(f"MCP structured error missing error_code/message: {structured!r}")
     return _ensure_envelope(structured)
 
 

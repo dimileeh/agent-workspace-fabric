@@ -49,7 +49,9 @@ async def _workspace_with_audit(
         ws.compose_file_path = f"/tmp/{ws.id}/compose.yml"
         await session.flush()
 
-        record_details = details or {"internet_access": "unrestricted" if posture == "open" else "internal"}
+        record_details = details or {
+            "internet_access": "unrestricted" if posture == "open" else "internal"
+        }
         record = EgressAuditRecord(
             id=new_egress_audit_record_id(),
             workspace_id=ws.id,
@@ -200,9 +202,11 @@ async def test_workspace_detail_egress_audit_redacts_secrets(
         ws.compose_file_path = f"/tmp/{ws.id}/compose.yml"
         await session.flush()
 
-        details = redact_audit_value({
-            "safe_field": "normal",
-        })
+        details = redact_audit_value(
+            {
+                "safe_field": "normal",
+            }
+        )
 
         record = EgressAuditRecord(
             id=new_egress_audit_record_id(),

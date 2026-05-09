@@ -182,7 +182,10 @@ async def test_rest_and_mcp_agree_on_not_found_for_control(
     assert rest_response.status_code == 404
     rest_envelope = normalize_rest_error_body(rest_response.json())
 
-    mcp_args: dict[str, object] = {"workspace_id": bogus_id, "idempotency_key": headers["Idempotency-Key"]}
+    mcp_args: dict[str, object] = {
+        "workspace_id": bogus_id,
+        "idempotency_key": headers["Idempotency-Key"],
+    }
     if capability_name in {"cancel_workspace"}:
         mcp_args.update({"reason": "scenario", "stop_stack": True})
     elif capability_name in {"stop_workspace", "remonitor_workspace", "request_validation"}:

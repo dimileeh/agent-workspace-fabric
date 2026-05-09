@@ -105,9 +105,7 @@ def _normalize_control_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in payload.items() if k not in volatile}
 
 
-async def _call_mcp_structured(
-    mcp: Any, name: str, args: dict[str, object]
-) -> dict[str, Any]:
+async def _call_mcp_structured(mcp: Any, name: str, args: dict[str, object]) -> dict[str, Any]:
     result = await mcp.call_tool(name, args)
     assert isinstance(result, CallToolResult)
     assert result.isError is False, result.structuredContent

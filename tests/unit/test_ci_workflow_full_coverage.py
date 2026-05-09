@@ -126,6 +126,16 @@ def test_pull_request_ci_runs_for_every_target_branch() -> None:
 
 
 @pytest.mark.unit
+def test_ci_cancels_superseded_branch_and_pr_runs() -> None:
+    workflow = _workflow()
+
+    assert workflow.get("concurrency") == {
+        "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": True,
+    }
+
+
+@pytest.mark.unit
 def test_ci_has_authoritative_python_full_coverage_job() -> None:
     workflow = _workflow()
     job = _job(workflow, "python-full-coverage")
@@ -154,6 +164,8 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     assert "uv run --python 3.12 pytest" in full_coverage_run
     assert "-n 8" in full_coverage_run
     assert "--dist=loadscope" in full_coverage_run
+    assert "--timeout=300" in full_coverage_run
+    assert "--timeout=120" not in full_coverage_run
     assert "--cov=awf" in full_coverage_run
     assert "--cov-report=term-missing" in full_coverage_run
     assert "--cov-report=xml" in full_coverage_run

@@ -224,7 +224,10 @@ def test_conformance_prompt_documents_awf_validation_handoff_reason_code() -> No
 
     assert '"reason_code"' in prompt
     assert CONFORMANCE_REQUIRES_AWF_VALIDATION in prompt
-    assert "only when every remaining gap is missing, stale, or insufficient AWF-owned validation evidence" in prompt
+    assert (
+        "only when every remaining gap is missing, stale, or insufficient AWF-owned validation evidence"
+        in prompt
+    )
     assert "Do not use it for implementation, API, plan, or documentation gaps" in prompt
 
 
@@ -1665,7 +1668,10 @@ def test_build_conformance_stall_recovery_prompt_steers_agent_to_only_redo_compa
     assert "- Add regression test" in prompt
     assert "- Wire retry endpoint" in prompt
     assert "also print the same JSON object as your final response" in prompt
-    assert "only when every remaining gap is missing, stale, or insufficient AWF-owned validation evidence" in prompt
+    assert (
+        "only when every remaining gap is missing, stale, or insufficient AWF-owned validation evidence"
+        in prompt
+    )
     assert (
         '{"status":"satisfied|needs_iteration","summary":"...","gaps":["..."],'
         '"reason_code":"optional reason code"}'

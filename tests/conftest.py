@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - Windows does not run AWF Docker CI.
     fcntl = None  # type: ignore[assignment]
 
 _POSTGRES_TEST_TIMEOUT_SECONDS = 120
+_SESSION_PATH = os.environ.get("PATH")
 _POSTGRES_FIXTURE_NAMES = frozenset(
     {
         "client",
@@ -106,7 +107,9 @@ def _item_source_line(item: pytest.Item) -> int | None:
 
 
 def _item_fixture_names(item: pytest.Item) -> tuple[str, ...]:
-    return tuple(sorted(name for name in getattr(item, "fixturenames", ()) if isinstance(name, str)))
+    return tuple(
+        sorted(name for name in getattr(item, "fixturenames", ()) if isinstance(name, str))
+    )
 
 
 def _test_function_contains_line(node: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> bool:
@@ -118,9 +121,7 @@ def _selected_test_function_nodes(
     item: pytest.Item,
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...]:
     function_nodes = tuple(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
     )
     source_line = _item_source_line(item)
     if source_line is not None:
@@ -318,8 +319,19 @@ def _serialize_docker_daemon_tests(request: pytest.FixtureRequest) -> Iterator[N
     if request.node.get_closest_marker("docker") is None:
         yield
         return
-    with _docker_test_lock():
-        yield
+    previous_path = os.environ.get("PATH")
+    if _SESSION_PATH is None:
+        os.environ.pop("PATH", None)
+    else:
+        os.environ["PATH"] = _SESSION_PATH
+    try:
+        with _docker_test_lock():
+            yield
+    finally:
+        if previous_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = previous_path
 
 
 @pytest.fixture

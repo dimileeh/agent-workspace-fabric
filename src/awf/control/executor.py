@@ -275,9 +275,7 @@ class _PostValidationConformanceReportGitError(RuntimeError):
         self.returncode = result.returncode
         self.command_reason_code = result.reason_code
         self.cleanup_operation = cleanup_operation
-        self.cleanup_returncode = (
-            cleanup_result.returncode if cleanup_result is not None else None
-        )
+        self.cleanup_returncode = cleanup_result.returncode if cleanup_result is not None else None
         self.cleanup_command_reason_code = (
             cleanup_result.reason_code if cleanup_result is not None else None
         )
@@ -286,8 +284,7 @@ class _PostValidationConformanceReportGitError(RuntimeError):
 class _PostValidationConformanceReportWriteError(RuntimeError):
     def __init__(self, *, report_path: Path, error: OSError) -> None:
         message = (
-            "post-validation conformance report write failed for "
-            f"{report_path.as_posix()}: {error}"
+            f"post-validation conformance report write failed for {report_path.as_posix()}: {error}"
         )
         super().__init__(message)
         self.report_path = report_path
@@ -2081,15 +2078,12 @@ class WorkspaceExecutor:
         post_validation_conformance_fix_pass_budget = (
             max(
                 0,
-                planning_validation_handoff.max_iterations
-                - planning_validation_handoff.iteration,
+                planning_validation_handoff.max_iterations - planning_validation_handoff.iteration,
             )
             if planning_validation_handoff is not None and recovery is None
             else 0
         )
-        max_validation_attempts = (
-            max_fix_passes + post_validation_conformance_fix_pass_budget + 1
-        )
+        max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
         for pass_number in range(max_validation_attempts):
             # This loop covers the initial validation plus any validation or
             # post-validation conformance fix prompts. The per-category
@@ -2398,9 +2392,7 @@ class WorkspaceExecutor:
                         )
                         return
                     except _PostValidationConformanceReportWriteError as exc:
-                        reason_code = (
-                            POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
-                        )
+                        reason_code = POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
                         message = str(exc)
                         _log.error(
                             "executor.post_validation_conformance_report_write_failed",
@@ -2439,9 +2431,7 @@ class WorkspaceExecutor:
                         return
                     except Exception as exc:
                         reason_code = POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE
-                        message = (
-                            f"post-validation conformance check failed: {exc!r}"
-                        )[:2000]
+                        message = (f"post-validation conformance check failed: {exc!r}")[:2000]
                         _log.exception(
                             "executor.post_validation_conformance_unexpected_failed",
                             workspace_id=workspace_id,
@@ -2468,15 +2458,11 @@ class WorkspaceExecutor:
                     if conformance_failure is not None:
                         remaining_conformance_iterations = max(
                             0,
-                            conformance_handoff.max_iterations
-                            - conformance_handoff.iteration,
+                            conformance_handoff.max_iterations - conformance_handoff.iteration,
                         )
                         # Recovery skips feature execution; retrying this
                         # conformance miss would only rerun validation.
-                        if (
-                            recovery is not None
-                            or remaining_conformance_iterations <= 0
-                        ):
+                        if recovery is not None or remaining_conformance_iterations <= 0:
                             await self._finish_pending_validate_operations(
                                 workspace_id=workspace_id,
                                 status=OperationStatus.failed,
@@ -2505,8 +2491,7 @@ class WorkspaceExecutor:
                             validation_fix_passes_used=validation_fix_passes_used,
                             remaining_conformance_iterations=remaining_conformance_iterations,
                             reason_code=(
-                                conformance_failure.reason_code
-                                or PLAN_CONFORMANCE_UNSATISFIED
+                                conformance_failure.reason_code or PLAN_CONFORMANCE_UNSATISFIED
                             ),
                         )
                         post_validation_conformance_fix_attempts += 1
@@ -2562,21 +2547,16 @@ class WorkspaceExecutor:
                 fix_pass=pass_number,
                 max_fix_passes=max_fix_passes,
                 validation_fix_passes_used=validation_fix_passes_used,
-                post_validation_conformance_fix_attempts=(
-                    post_validation_conformance_fix_attempts
-                ),
+                post_validation_conformance_fix_attempts=(post_validation_conformance_fix_attempts),
             )
             last_failure_message = _validation_failure_message(
                 val_result,
                 baseline_coverage=baseline_coverage,
             )
 
-            if (
-                first_fail is None
-                or (
-                    not is_post_validation_conformance_fix_pass
-                    and validation_fix_passes_used >= max_fix_passes
-                )
+            if first_fail is None or (
+                not is_post_validation_conformance_fix_pass
+                and validation_fix_passes_used >= max_fix_passes
             ):
                 # Exhausted our budget (or no failure details to anchor a
                 # fix prompt on) — mark failed and let the operator triage.
@@ -4238,12 +4218,7 @@ class WorkspaceExecutor:
         # compact bulky fields as JSON values so the fenced evidence stays
         # parseable while retaining the validation result fields first.
         safe_serialized_payload = _validation_evidence_json(payload)
-        return (
-            "AWF persisted validation run evidence:\n"
-            "```json\n"
-            f"{safe_serialized_payload}\n"
-            "```"
-        )
+        return f"AWF persisted validation run evidence:\n```json\n{safe_serialized_payload}\n```"
 
     async def _run_agent_task_with_optional_planning(
         self,
@@ -4992,7 +4967,6 @@ class WorkspaceExecutor:
                 status=current.status,
             )
             return None
-
 
     async def _update_subphase(self, workspace_id: str, subphase: str) -> None:
         async with self._session_factory() as session:
@@ -5982,9 +5956,7 @@ def _validation_evidence_json(payload: dict[str, Any]) -> str:
 
     compact_payload = dict(safe_payload)
     compact_payload["evidence_truncated"] = True
-    compact_payload["commands"] = _validation_evidence_size_summary(
-        safe_payload.get("commands")
-    )
+    compact_payload["commands"] = _validation_evidence_size_summary(safe_payload.get("commands"))
     compact_payload["log_stream_refs"] = _validation_evidence_size_summary(
         safe_payload.get("log_stream_refs")
     )
@@ -6005,9 +5977,7 @@ def _validation_evidence_json(payload: dict[str, Any]) -> str:
         if key in compact_payload
     }
     minimal_payload["evidence_truncated"] = True
-    minimal_payload["commands"] = _validation_evidence_size_summary(
-        safe_payload.get("commands")
-    )
+    minimal_payload["commands"] = _validation_evidence_size_summary(safe_payload.get("commands"))
     minimal_payload["log_stream_refs"] = _validation_evidence_size_summary(
         safe_payload.get("log_stream_refs")
     )
@@ -6082,9 +6052,7 @@ def _validation_evidence_floor_value(value: object) -> object:
 
 def _validation_evidence_size_summary(value: object) -> dict[str, Any]:
     if isinstance(value, Mapping):
-        retained_keys = [
-            str(key) for key in list(value)[:_VALIDATION_EVIDENCE_RETAINED_KEY_COUNT]
-        ]
+        retained_keys = [str(key) for key in list(value)[:_VALIDATION_EVIDENCE_RETAINED_KEY_COUNT]]
         return {
             "truncated": True,
             "original_type": "mapping",
@@ -6925,7 +6893,7 @@ def _post_validation_conformance_failure_text(failure: _PlanningRunFailure) -> s
 
 def _post_validation_conformance_agent_failure_message(exc: AgentRunError) -> str:
     reason_code = exc.reason_code or "AGENT_CLI_FAILED"
-    output = (exc.result.stderr.strip() or exc.result.stdout.strip() or "<no output>")
+    output = exc.result.stderr.strip() or exc.result.stdout.strip() or "<no output>"
     safe_output = redact_audit_text(output, limit=1000)
     return (
         "post-validation conformance agent failed "

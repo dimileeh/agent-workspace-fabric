@@ -344,7 +344,12 @@ def _protected_rest_params(capability_name: str) -> dict[str, object] | None:
 def _protected_rest_body(capability_name: str) -> dict[str, object] | None:
     if capability_name == "cancel_workspace":
         return {"reason": "auth contract", "stop_stack": True}
-    if capability_name in {"stop_workspace", "remonitor_workspace", "refresh_workspace", "rebase_workspace"}:
+    if capability_name in {
+        "stop_workspace",
+        "remonitor_workspace",
+        "refresh_workspace",
+        "rebase_workspace",
+    }:
         return {"reason": "auth contract"}
     if capability_name == "request_validation":
         return {"reason": "auth contract", "requested_tier": 1}

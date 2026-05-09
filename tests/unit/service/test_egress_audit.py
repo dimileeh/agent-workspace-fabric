@@ -428,9 +428,7 @@ async def test_summary_counts_by_posture_uses_latest_audit_only(
 ) -> None:
     """A workspace with multiple audit records must contribute only once, using the latest."""
     async with session_factory() as session:
-        wid_retried = await _workspace(
-            session_factory, network_posture="restricted"
-        )
+        wid_retried = await _workspace(session_factory, network_posture="restricted")
         r_old = EgressAuditRecord(
             id=new_egress_audit_record_id(),
             workspace_id=wid_retried,
@@ -455,9 +453,7 @@ async def test_summary_counts_by_posture_uses_latest_audit_only(
         )
         session.add(r_new)
 
-        wid_single = await _workspace(
-            session_factory, network_posture="open"
-        )
+        wid_single = await _workspace(session_factory, network_posture="open")
         r_single = EgressAuditRecord(
             id=new_egress_audit_record_id(),
             workspace_id=wid_single,

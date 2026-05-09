@@ -1268,7 +1268,9 @@ async def test_sync_feature_pr_validate_only_recovery_pushes_adopted_pr_head(
     assert len(push_calls) == 1
     assert "HEAD:refs/heads/feature/existing-pr" in push_calls[0]
     assert f"feature-sync/{ws_id}" not in push_calls[0]
-    assert not any(call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake))
+    assert not any(
+        call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake)
+    )
     assert monitor_calls == [ws_id]
 
     async with factory() as s:
@@ -1420,7 +1422,9 @@ async def test_sync_feature_pr_validate_only_recovery_pushes_fork_head_repo(
     assert "HEAD:refs/heads/feature/existing-pr" in push_calls[0]
     assert "origin" not in push_calls[0][push_index + 1 :]
     assert f"feature-sync/{ws_id}" not in push_calls[0]
-    assert not any(call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake))
+    assert not any(
+        call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake)
+    )
     assert monitor_calls == [ws_id]
 
 

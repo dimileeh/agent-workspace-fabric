@@ -101,7 +101,7 @@ test.describe("Dashboard Workspace Inspector", () => {
   test("Open and close inspector, verify URL persistence, and test no jump", async ({ page }) => {
     // 1. Initial Load
     await page.goto("/");
-    
+
     // Wait for the workspace list to load and select the workspace
     const workspaceRow = page.locator("text=ws_mock123").first();
     await workspaceRow.waitFor({ state: "visible" });
@@ -140,7 +140,7 @@ test.describe("Dashboard Workspace Inspector", () => {
     // 4. Persistence on Reload
     // Navigate manually to the URL with the ID
     await page.goto("/?workspaceId=ws_mock123");
-    
+
     // Wait for inspector to be visible (translate-x-0)
     await expect(page.locator(".fixed.inset-y-0.right-0").first()).toHaveClass(/translate-x-0/);
     await expect(page.locator("h2", { hasText: "Mock Workspace" }).first()).toBeVisible();
@@ -172,7 +172,7 @@ test.describe("Dashboard Workspace Inspector", () => {
   test("Responsive layout verification", async ({ page }) => {
     await page.goto("/?workspaceId=ws_mock123");
     const inspectorDrawer = page.locator(".fixed.inset-y-0.right-0").first();
-    
+
     // Wait for inspector to open before asserting layout
     await expect(inspectorDrawer).toHaveClass(/translate-x-0/);
     await inspectorDrawer.evaluate(async (element) => {
@@ -220,7 +220,7 @@ test.describe("Dashboard Workspace Inspector", () => {
 
     // Mobile layout
     await page.setViewportSize({ width: 375, height: 667 });
-    
+
     // In mobile, it should be full width (w-full is on it) and overlay should be visible
     const overlay = page.locator(".fixed.inset-0.z-40").first();
     await expect(overlay).toBeVisible();

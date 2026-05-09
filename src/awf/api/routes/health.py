@@ -469,12 +469,20 @@ async def readyz(
 
     async def _check_egress_audit() -> CheckResult:
         if factory is None:
-            return CheckResult(ok=True, status="unknown", reason="EGRESS_AUDIT_UNAVAILABLE", detail="No session factory available")
+            return CheckResult(
+                ok=True,
+                status="unknown",
+                reason="EGRESS_AUDIT_UNAVAILABLE",
+                detail="No session factory available",
+            )
         try:
             async with factory() as session:
                 from awf.db.repositories import EgressAuditRepository
+
                 repo = EgressAuditRepository(session)
-                counts = await asyncio.wait_for(repo.summary_counts_by_posture(), timeout=_CHECK_TIMEOUT_SECONDS)
+                counts = await asyncio.wait_for(
+                    repo.summary_counts_by_posture(), timeout=_CHECK_TIMEOUT_SECONDS
+                )
             posture_counts = {str(posture): int(count) for posture, count in counts.items()}
             total = sum(posture_counts.values())
             return CheckResult(

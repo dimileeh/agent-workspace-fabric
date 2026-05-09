@@ -1598,13 +1598,10 @@ class ValidationRunRepository:
         rows = (await self._session.execute(stmt)).scalars().all()
         for row in rows:
             coverage = validation_run_coverage_payload(row)
-            if (
-                coverage.get("status") in {
-                    "passed",
-                    "not_configured",
-                }
-                and not _coverage_metadata_has_pytest_failures(coverage)
-            ):
+            if coverage.get("status") in {
+                "passed",
+                "not_configured",
+            } and not _coverage_metadata_has_pytest_failures(coverage):
                 return row
         return None
 
@@ -2620,10 +2617,13 @@ class WorkspaceRepository:
         await self._session.flush()
         return workspace
 
-
     async def update_activity(self, workspace_id: str, *, subphase: str | None = None) -> None:
-        stmt = update(Workspace).where(Workspace.id == workspace_id).values(
-            last_activity_at=datetime.now(UTC),
+        stmt = (
+            update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(
+                last_activity_at=datetime.now(UTC),
+            )
         )
         if subphase is not None:
             stmt = stmt.values(subphase=subphase)

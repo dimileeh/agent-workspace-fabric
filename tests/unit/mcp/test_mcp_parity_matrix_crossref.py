@@ -253,7 +253,9 @@ def test_parity_matrix_implemented_status_is_backed_by_real_surfaces() -> None:
             for method, path in rest_endpoints:
                 normalized = f"{method} {_normalize_path(path)}"
                 if normalized not in known_rest:
-                    failures.append(f"{capability}: REST endpoint {method} {path} is not registered")
+                    failures.append(
+                        f"{capability}: REST endpoint {method} {path} is not registered"
+                    )
         elif not _normalize_cell(rest_cell).startswith("If-Match"):
             failures.append(
                 f"{capability}: implemented row must name REST endpoints or a documented cross-cutting REST contract"
@@ -268,7 +270,9 @@ def test_parity_matrix_implemented_status_is_backed_by_real_surfaces() -> None:
 
         backlog = _parity_backlog_slice(row)
         if backlog.startswith("TODO§"):
-            failures.append(f"{capability}: implemented row still points at active backlog {backlog}")
+            failures.append(
+                f"{capability}: implemented row still points at active backlog {backlog}"
+            )
 
         cli_cell = row.get("CLI surface", "")
         if _normalize_cell(cli_cell) == "CLI absent":
@@ -334,8 +338,8 @@ def test_partial_and_missing_rows_have_unchecked_backlog_visibility() -> None:
         ):
             failures.append(f"{capability}: partial row must declare the implemented MCP subset")
 
-    assert not failures, "Non-implemented parity-matrix rows lost backlog visibility:\n" + "\n".join(
-        failures
+    assert not failures, (
+        "Non-implemented parity-matrix rows lost backlog visibility:\n" + "\n".join(failures)
     )
 
 

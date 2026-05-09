@@ -57,6 +57,8 @@ awf:
     setup:
       - command: uv sync --extra dev
         timeout_seconds: 900
+      - command: uv run --python 3.12 --extra dev pre-commit install --install-hooks
+        timeout_seconds: 300
     validate:
       - command: uv run ruff check src/awf/cli tests/unit/cli
         timeout_seconds: 300

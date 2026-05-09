@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import traceback
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -1219,6 +1219,9 @@ def _check_opencode(
             ),
         )
 
+    # Keep successful readiness payloads schema-stable. `_probe_ollama` retains
+    # recovered candidate failures under debug for internal diagnostics; only
+    # terminal probe failures become operator-facing provider detail.
     reason = "OPENCODE_FILE_AUTH_PRESENT"
     if not opencode_config and ollama_files:
         reason = "OLLAMA_FILE_AUTH_PRESENT"
@@ -1761,6 +1764,18 @@ def _log_redacted_exception(
     _log.error("%s: %s\n%s", event, detail, trace)
 
 
+def _log_redacted_terminal_failure(
+    event: str,
+    detail: str,
+    secrets: frozenset[str],
+) -> None:
+    _log.error(
+        "%s: %s",
+        event,
+        _truncate(_redact(detail, secrets), limit=_TRACEBACK_LOG_LIMIT),
+    )
+
+
 def _truncate(value: str, *, limit: int = 240) -> str:
     stripped = value.strip()
     if len(stripped) <= limit:
@@ -1802,6 +1817,24 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
     return (primary,)
 
 
+def _ollama_probe_failure_debug(
+    *,
+    url: str,
+    status: str,
+    detail: str,
+    secrets: frozenset[str],
+    status_code: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "url": _redact(url, secrets),
+        "status": status,
+        "detail": _truncate(_redact(detail, secrets)),
+    }
+    if status_code is not None:
+        payload["status_code"] = status_code
+    return payload
+
+
 def _probe_ollama(
     urls: tuple[str, ...],
     *,
@@ -1809,23 +1842,56 @@ def _probe_ollama(
     secrets: frozenset[str],
 ) -> dict[str, Any]:
     failures: list[str] = []
+    http_failures: list[str] = []
+    recovered_failures: list[dict[str, Any]] = []
+    exceptions: list[Exception] = []
     for url in urls:
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
         except Exception as exc:
-            _log_redacted_exception(
-                "provider_readiness.ollama_probe_exception",
-                exc,
-                secrets,
-            )
+            exceptions.append(exc)
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
+            recovered_failures.append(
+                _ollama_probe_failure_debug(
+                    url=url,
+                    status="exception",
+                    detail=detail,
+                    secrets=secrets,
+                )
+            )
             continue
         if 200 <= response.status_code < 300:
-            return {"ok": True}
+            payload: dict[str, Any] = {"ok": True}
+            if recovered_failures:
+                payload["debug"] = {"recovered_failures": recovered_failures}
+            return payload
         detail = response.text or f"HTTP {response.status_code}"
         failure = f"HTTP {response.status_code}: {detail}"
-        failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
+        failure_detail = f"{url}: {failure}" if len(urls) > 1 else failure
+        failures.append(failure_detail)
+        http_failures.append(failure_detail)
+        recovered_failures.append(
+            _ollama_probe_failure_debug(
+                url=url,
+                status="http_error",
+                status_code=response.status_code,
+                detail=failure,
+                secrets=secrets,
+            )
+        )
+    for logged_exc in exceptions:
+        _log_redacted_exception(
+            "provider_readiness.ollama_probe_exception",
+            logged_exc,
+            secrets,
+        )
+    if http_failures:
+        _log_redacted_terminal_failure(
+            "provider_readiness.ollama_probe_exception",
+            "; ".join(http_failures),
+            secrets,
+        )
     return {"ok": False, "detail": _redact("; ".join(failures), secrets)}
 
 
@@ -1845,24 +1911,39 @@ def _probe_ollama_model(
         }
 
     failures: list[str] = []
+    exceptions: list[Exception] = []
+    recovered_failures: list[dict[str, Any]] = []
     available_models: set[str] = set()
     saw_model_response = False
     for url in urls:
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
         except Exception as exc:
-            _log_redacted_exception(
-                "provider_readiness.ollama_model_probe_exception",
-                exc,
-                secrets,
-            )
+            exceptions.append(exc)
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
+            recovered_failures.append(
+                _ollama_probe_failure_debug(
+                    url=url,
+                    status="exception",
+                    detail=detail,
+                    secrets=secrets,
+                )
+            )
             continue
         if not 200 <= response.status_code < 300:
             detail = response.text or f"HTTP {response.status_code}"
             failure = f"HTTP {response.status_code}: {detail}"
             failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
+            recovered_failures.append(
+                _ollama_probe_failure_debug(
+                    url=url,
+                    status="http_error",
+                    status_code=response.status_code,
+                    detail=failure,
+                    secrets=secrets,
+                )
+            )
             continue
         try:
             payload = json.loads(response.text or "{}")
@@ -1876,11 +1957,18 @@ def _probe_ollama_model(
 
         available = _ollama_model_names(payload)
         if candidates & available:
-            return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+            result: dict[str, Any] = {
+                "status": "ok",
+                "reason_code": "OLLAMA_MODEL_AVAILABLE",
+            }
+            if recovered_failures:
+                result["debug"] = {"recovered_failures": recovered_failures}
+            return result
         saw_model_response = True
         available_models.update(available)
 
     if saw_model_response:
+        _log_ollama_model_probe_exceptions(exceptions, secrets)
         detail = f"selected={model}; available_count={len(available_models)}"
         if failures:
             detail = f"{detail}; probe_failures={'; '.join(failures)}"
@@ -1888,18 +1976,29 @@ def _probe_ollama_model(
             "status": "fail",
             "reason_code": "OLLAMA_MODEL_NOT_AVAILABLE",
             "message": "Selected OpenCode/Ollama model is not available from Ollama /api/tags.",
-            "detail": _redact(
-                _truncate(detail),
-                secrets,
-            ),
+            "detail": _truncate(_redact(detail, secrets)),
         }
+
+    _log_ollama_model_probe_exceptions(exceptions, secrets)
 
     return {
         "status": "fail",
         "reason_code": "OLLAMA_MODEL_PROBE_FAILED",
         "message": "Ollama model availability probe did not complete successfully.",
-        "detail": _redact(_truncate("; ".join(failures)), secrets),
+        "detail": _truncate(_redact("; ".join(failures), secrets)),
     }
+
+
+def _log_ollama_model_probe_exceptions(
+    exceptions: Sequence[Exception],
+    secrets: frozenset[str],
+) -> None:
+    for logged_exc in exceptions:
+        _log_redacted_exception(
+            "provider_readiness.ollama_model_probe_exception",
+            logged_exc,
+            secrets,
+        )
 
 
 def _ollama_model_candidates(model: str | None) -> set[str]:

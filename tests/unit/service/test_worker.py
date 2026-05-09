@@ -681,8 +681,7 @@ def test_is_postgres_database_url_rejects_non_postgres_backend_without_warning()
 
     assert result is False
     assert not any(
-        event.get("event") == "worker.postgres_merge_coordinator_not_selected"
-        for event in captured
+        event.get("event") == "worker.postgres_merge_coordinator_not_selected" for event in captured
     )
 
 

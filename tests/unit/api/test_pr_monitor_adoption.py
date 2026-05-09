@@ -250,7 +250,9 @@ async def test_adopt_pr_supersedes_cancelled_previous_adoption(
     async with session_factory() as session:
         workspaces = list((await session.execute(select(Workspace))).scalars())
     assert len(workspaces) == 2
-    previous = next(workspace for workspace in workspaces if workspace.id == first_body["workspace_id"])
+    previous = next(
+        workspace for workspace in workspaces if workspace.id == first_body["workspace_id"]
+    )
     fresh = next(workspace for workspace in workspaces if workspace.id == body["workspace_id"])
     assert previous.status == WorkspaceStatus.cancelled.value
     assert previous.idempotency_key != canonical_key

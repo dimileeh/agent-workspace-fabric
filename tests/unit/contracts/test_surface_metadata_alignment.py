@@ -68,8 +68,7 @@ def test_rest_route_metadata_matches_registry(capability_name: str) -> None:
     routes = rest_routes()
     route = routes.get((capability.rest_method, capability.rest_path))
     assert route is not None, (
-        f"{capability.name}: missing REST route "
-        f"{capability.rest_method} {capability.rest_path}"
+        f"{capability.name}: missing REST route {capability.rest_method} {capability.rest_path}"
     )
 
     if capability.rest_response_model is not None:
@@ -218,20 +217,18 @@ async def test_mcp_surface_stays_inside_operator_safety_boundary() -> None:
         )
         assert forbidden_prefix is None, f"{tool_name}: forbidden unsafe MCP tool prefix"
         forbidden_inputs = FORBIDDEN_MCP_INPUTS & set(tool.properties)
-        assert not forbidden_inputs, f"{tool_name}: forbidden unsafe inputs {sorted(forbidden_inputs)}"
+        assert not forbidden_inputs, (
+            f"{tool_name}: forbidden unsafe inputs {sorted(forbidden_inputs)}"
+        )
 
 
 @pytest.mark.unit
 def test_idempotency_key_requirement_is_distinct_from_optional_support() -> None:
     required_capabilities = {
-        capability.name
-        for capability in all_capabilities()
-        if capability.requires_idempotency_key
+        capability.name for capability in all_capabilities() if capability.requires_idempotency_key
     }
     supported_capabilities = {
-        capability.name
-        for capability in all_capabilities()
-        if capability.supports_idempotency_key
+        capability.name for capability in all_capabilities() if capability.supports_idempotency_key
     }
 
     assert required_capabilities == {capability.name for capability in control_capabilities()}

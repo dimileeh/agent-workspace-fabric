@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from time import monotonic
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeGuard
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -450,16 +450,18 @@ class ControlWorker:
     ) -> list[str]:
         if not workspaces:
             return []
-        if isinstance(workspaces[0], str):
-            workspace_ids = cast("list[str]", workspaces)
+        if _scheduler_items_are_workspace_ids(workspaces):
+            workspace_ids = workspaces
             stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
             rows = {
                 workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()
             }
-        else:
-            workspace_rows = cast("list[Workspace]", workspaces)
+        elif _scheduler_items_are_workspaces(workspaces):
+            workspace_rows = workspaces
             workspace_ids = [workspace.id for workspace in workspace_rows]
             rows = {workspace.id: workspace for workspace in workspace_rows}
+        else:
+            return []
         now = datetime.now(UTC)
         breaker_repo = ProviderModelCircuitBreakerRepository(session)
         allowed: set[str] = set()
@@ -1875,6 +1877,18 @@ def _scheduler_candidate_cursor(workspaces: list[Workspace]) -> tuple[datetime, 
         return None
     latest = max(workspaces, key=lambda workspace: (workspace.created_at, workspace.id))
     return latest.created_at, latest.id
+
+
+def _scheduler_items_are_workspace_ids(
+    workspaces: list[Workspace] | list[str],
+) -> TypeGuard[list[str]]:
+    return bool(workspaces) and all(isinstance(item, str) for item in workspaces)
+
+
+def _scheduler_items_are_workspaces(
+    workspaces: list[Workspace] | list[str],
+) -> TypeGuard[list[Workspace]]:
+    return bool(workspaces) and all(isinstance(item, Workspace) for item in workspaces)
 
 
 def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:

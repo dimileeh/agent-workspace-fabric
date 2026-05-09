@@ -15,20 +15,21 @@ repos:
       - id: check-merge-conflict
       - id: detect-private-key
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.1
+  - repo: local
     hooks:
-      - id: ruff
-        args: ["--fix"]
-      - id: ruff-format
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.14.1
-    hooks:
-      - id: mypy
+      - id: awf-ruff-check
+        name: ruff check
+        entry: uv run --python 3.12 --extra dev ruff check .
+        language: system
+        pass_filenames: false
+      - id: awf-ruff-format-check
+        name: ruff format --check
+        entry: uv run --python 3.12 --extra dev ruff format --check .
+        language: system
+        pass_filenames: false
+      - id: awf-mypy
+        name: mypy
+        entry: uv run --python 3.12 --extra dev mypy
+        language: system
+        pass_filenames: false
         files: ^(src|tests)/
-        additional_dependencies:
-          - pydantic>=2.9.0
-          - fastapi>=0.115.0
-          - httpx>=0.27.0
-          - types-jinja2

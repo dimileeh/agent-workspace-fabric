@@ -38,8 +38,7 @@ def main() -> None:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Verify that the generated spec matches the checked-in openapi.json. "
-        "Exit 1 on drift.",
+        help="Verify that the generated spec matches the checked-in openapi.json. Exit 1 on drift.",
     )
     args = parser.parse_args()
 

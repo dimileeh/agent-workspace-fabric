@@ -56,9 +56,11 @@ async def _workspace_with_audit(
         ws.compose_file_path = f"/tmp/{ws.id}/compose.yml"
         await session.flush()
 
-        details = redact_audit_value({
-            "safe_field": "normal_value",
-        })
+        details = redact_audit_value(
+            {
+                "safe_field": "normal_value",
+            }
+        )
 
         record = EgressAuditRecord(
             id=new_egress_audit_record_id(),
