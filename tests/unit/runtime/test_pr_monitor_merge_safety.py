@@ -753,6 +753,67 @@ async def test_auto_merge_does_not_duplicate_active_monitor_recovery(
 
 
 @pytest.mark.unit
+async def test_auto_merge_dispatches_recovery_despite_active_monitor_non_recovery_operation(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    seed = await _seed_merge_candidate(
+        factory,
+        pr_number=511,
+        same_attempt_validation_tier=1,
+    )
+    async with factory() as session:
+        await OperationRepository(session).create(
+            workspace_id=seed.workspace_id,
+            operation_type=OperationType.comment_repair,
+            status=OperationStatus.running,
+            payload={
+                "owner": "pr_monitor",
+                "source": "pr_monitor",
+                "action": "comment_repair",
+                "requested_action": "address_comments",
+                "reason": "Unresolved PR review comments required repair.",
+                "reason_code": "COMMENT_REPAIR",
+                "pr_number": seed.pr_number,
+            },
+        )
+        await session.commit()
+
+    terminal = await _execute_merge(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        tmp_path=tmp_path,
+        seed=seed,
+    )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(
+            workspace_id=seed.workspace_id,
+        )
+
+    assert terminal is True
+    assert sleep_fn.calls == []
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
+    wait_operations = [
+        op
+        for op in operations
+        if op.type == OperationType.monitor_state.value
+        and op.payload.get("reason_code") == "RECOVERY_IN_PROGRESS"
+    ]
+    assert len(recovery_operations) == 1
+    assert wait_operations == []
+    assert recovery_operations[0].status == OperationStatus.pending.value
+    assert recovery_operations[0].payload["recovery_mode"] == "validate_only"
+    assert recovery_operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
+
+
+@pytest.mark.unit
 async def test_auto_merge_retries_failed_monitor_recovery_with_new_operation(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,

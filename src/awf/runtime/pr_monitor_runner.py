@@ -311,9 +311,10 @@ def _monitor_recovery_conformance_payload(workspace: Workspace) -> dict[str, Any
 def _is_active_pr_monitor_recovery_operation(operation: Operation) -> bool:
     return (
         operation.status in _ACTIVE_RECOVERY_OPERATION_STATUSES
-        and operation.type != OperationType.monitor_state.value
+        and operation.type == OperationType.validate.value
         and isinstance(operation.payload, dict)
         and operation.payload.get("source") == "pr_monitor"
+        and operation.payload.get("recovery_mode") is not None
     )
 
 
