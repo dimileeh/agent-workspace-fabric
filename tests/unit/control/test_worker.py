@@ -698,6 +698,8 @@ class TestRunOnce:
         )
         original = WorkspaceRepository.list_schedulable_workspaces
         failures_remaining = 1
+        scheduler_read_sessions: list[AsyncSession] = []
+        scheduler_read_session_ids: list[int] = []
 
         async def _flaky_list_schedulable_workspaces(
             self: WorkspaceRepository,
@@ -705,6 +707,8 @@ class TestRunOnce:
             **kwargs: object,
         ) -> list[Workspace]:
             nonlocal failures_remaining
+            scheduler_read_sessions.append(self._session)
+            scheduler_read_session_ids.append(id(self._session))
             if failures_remaining:
                 failures_remaining -= 1
                 raise _closed_connection_error()
@@ -718,6 +722,10 @@ class TestRunOnce:
 
         assert await worker.run_once() == 1
 
+        assert len(scheduler_read_sessions) == 2
+        assert scheduler_read_sessions[1] is not scheduler_read_sessions[0]
+        assert len(scheduler_read_session_ids) == 2
+        assert scheduler_read_session_ids[1] != scheduler_read_session_ids[0]
         assert provisioner.calls == [requested_id]
         async with session_factory() as session:
             ws = await WorkspaceRepository(session).get(requested_id)
@@ -748,6 +756,8 @@ class TestRunOnce:
         )
         failures_remaining = 1
         filter_attempts = 0
+        filter_sessions: list[AsyncSession] = []
+        filter_session_ids: list[int] = []
         retry_attempts: list[int] = []
         original_filter = worker._filter_provider_recovery_suppressed
 
@@ -757,6 +767,8 @@ class TestRunOnce:
         ) -> list[str]:
             nonlocal failures_remaining, filter_attempts
             filter_attempts += 1
+            filter_sessions.append(session)
+            filter_session_ids.append(id(session))
             if failures_remaining:
                 failures_remaining -= 1
                 raise _closed_connection_error()
@@ -770,6 +782,10 @@ class TestRunOnce:
 
         assert await worker._list_ready(limit=1) == [ready_id]  # noqa: SLF001
         assert filter_attempts == 2
+        assert len(filter_sessions) == 2
+        assert filter_sessions[1] is not filter_sessions[0]
+        assert len(filter_session_ids) == 2
+        assert filter_session_ids[1] != filter_session_ids[0]
         assert retry_attempts == [1]
 
     @pytest.mark.unit
@@ -986,6 +1002,8 @@ class TestRunOnceExecution:
         original = WorkspaceRepository.refresh_monitoring_pr_claim
         failures_remaining = 1
         lease_expiries: list[datetime] = []
+        refresh_sessions: list[AsyncSession] = []
+        refresh_session_ids: list[int] = []
 
         async def _flaky_refresh_monitoring_pr_claim(
             self: WorkspaceRepository,
@@ -996,6 +1014,8 @@ class TestRunOnceExecution:
         ) -> bool:
             nonlocal failures_remaining
             lease_expiries.append(lease_expires_at)
+            refresh_sessions.append(self._session)
+            refresh_session_ids.append(id(self._session))
             if failures_remaining:
                 failures_remaining -= 1
                 raise _closed_connection_error()
@@ -1018,6 +1038,10 @@ class TestRunOnceExecution:
             base_time + timedelta(seconds=121),
             base_time + timedelta(seconds=122),
         ]
+        assert len(refresh_sessions) == 2
+        assert refresh_sessions[1] is not refresh_sessions[0]
+        assert len(refresh_session_ids) == 2
+        assert refresh_session_ids[1] != refresh_session_ids[0]
         async with session_factory() as session:
             ws = await WorkspaceRepository(session).get(workspace_id)
             assert ws is not None
@@ -1058,6 +1082,8 @@ class TestRunOnceExecution:
 
         original = WorkspaceRepository.refresh_execution_claim
         failures_remaining = 1
+        refresh_sessions: list[AsyncSession] = []
+        refresh_session_ids: list[int] = []
 
         async def _flaky_refresh_execution_claim(
             self: WorkspaceRepository,
@@ -1067,6 +1093,8 @@ class TestRunOnceExecution:
             lease_expires_at: datetime,
         ) -> bool:
             nonlocal failures_remaining
+            refresh_sessions.append(self._session)
+            refresh_session_ids.append(id(self._session))
             if failures_remaining:
                 failures_remaining -= 1
                 raise _closed_connection_error()
@@ -1085,6 +1113,10 @@ class TestRunOnceExecution:
 
         assert await worker._refresh_execution_claim(workspace_id) is True
 
+        assert len(refresh_sessions) == 2
+        assert refresh_sessions[1] is not refresh_sessions[0]
+        assert len(refresh_session_ids) == 2
+        assert refresh_session_ids[1] != refresh_session_ids[0]
         async with session_factory() as session:
             ws = await WorkspaceRepository(session).get(workspace_id)
             assert ws is not None
