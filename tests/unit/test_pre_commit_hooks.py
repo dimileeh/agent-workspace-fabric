@@ -37,6 +37,7 @@ def test_pre_commit_runs_project_ruff_commands_that_match_ci() -> None:
     assert hooks["awf-ruff-format-check"]["pass_filenames"] is False
     assert hooks["awf-mypy"]["entry"] == "uv run --python 3.12 --extra dev mypy"
     assert hooks["awf-mypy"]["language"] == "system"
+    assert hooks["awf-mypy"]["pass_filenames"] is False
     assert hooks["awf-mypy"]["files"] == "^(src|tests)/"
 
 

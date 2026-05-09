@@ -2346,6 +2346,53 @@ def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:
 
 
 @pytest.mark.unit
+def test_ollama_model_probe_missing_model_redacts_before_truncating_detail() -> None:
+    secret = "LEAKME-sensitive-ollama-secret-value"
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://primary.local/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"other-model:latest"}]}',
+            )
+        return SimpleNamespace(status_code=503, text=("x" * 120) + secret + "-tail")
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({secret}),
+    )
+
+    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
+    assert secret not in result["detail"]
+    assert "LEAKME" not in result["detail"]
+    assert "<redacted>" in result["detail"]
+
+
+@pytest.mark.unit
+def test_ollama_model_probe_failure_redacts_before_truncating_detail() -> None:
+    secret = "LEAKME-sensitive-ollama-secret-value"
+
+    def _http_get(_url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        return SimpleNamespace(status_code=503, text=("x" * 160) + secret + "-tail")
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags",),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({secret}),
+    )
+
+    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
+    assert secret not in result["detail"]
+    assert "LEAKME" not in result["detail"]
+    assert "<redacted>" in result["detail"]
+
+
+@pytest.mark.unit
 def test_ollama_model_probe_logs_exception_after_missing_model_response(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

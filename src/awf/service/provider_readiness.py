@@ -1976,10 +1976,7 @@ def _probe_ollama_model(
             "status": "fail",
             "reason_code": "OLLAMA_MODEL_NOT_AVAILABLE",
             "message": "Selected OpenCode/Ollama model is not available from Ollama /api/tags.",
-            "detail": _redact(
-                _truncate(detail),
-                secrets,
-            ),
+            "detail": _truncate(_redact(detail, secrets)),
         }
 
     _log_ollama_model_probe_exceptions(exceptions, secrets)
@@ -1988,7 +1985,7 @@ def _probe_ollama_model(
         "status": "fail",
         "reason_code": "OLLAMA_MODEL_PROBE_FAILED",
         "message": "Ollama model availability probe did not complete successfully.",
-        "detail": _redact(_truncate("; ".join(failures)), secrets),
+        "detail": _truncate(_redact("; ".join(failures), secrets)),
     }
 
 

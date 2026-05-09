@@ -31,4 +31,5 @@ repos:
         name: mypy
         entry: uv run --python 3.12 --extra dev mypy
         language: system
+        pass_filenames: false
         files: ^(src|tests)/
