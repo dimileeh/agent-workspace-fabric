@@ -42,6 +42,12 @@ def _named_step(job: dict[str, Any], name: str) -> dict[str, Any]:
     return matches[0]
 
 
+def _step_run(job: dict[str, Any], name: str) -> str:
+    run = _named_step(job, name).get("run")
+    assert isinstance(run, str)
+    return run
+
+
 def _run_steps(job: dict[str, Any]) -> str:
     return "\n".join(str(step.get("run", "")) for step in _steps(job))
 
@@ -123,16 +129,17 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     assert "docker version" in commands
     assert "docker compose version" in commands
     assert "docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile ." in commands
-    assert "uv run --python 3.12 --extra dev pytest" in commands
-    assert "-n 8" in commands
-    assert "--dist=loadscope" in commands
-    assert "--cov=awf" in commands
-    assert "--cov-report=term-missing" in commands
-    assert "--cov-report=xml" in commands
-    assert "--cov-fail-under=99" in commands
 
-    assert "--cov-fail-under=0" not in commands
-    assert "pytest tests/unit" not in commands
+    full_coverage_run = _step_run(job, "Full coverage")
+    assert "uv run --python 3.12 pytest" in full_coverage_run
+    assert "-n 8" in full_coverage_run
+    assert "--dist=loadscope" in full_coverage_run
+    assert "--cov=awf" in full_coverage_run
+    assert "--cov-report=term-missing" in full_coverage_run
+    assert "--cov-report=xml" in full_coverage_run
+    assert "--cov-fail-under=99" in full_coverage_run
+    assert "--cov-fail-under=0" not in full_coverage_run
+    assert "pytest tests/unit" not in full_coverage_run
 
     coverage_step = _named_step(job, "Full coverage")
     env = _effective_env(workflow, job, coverage_step)
