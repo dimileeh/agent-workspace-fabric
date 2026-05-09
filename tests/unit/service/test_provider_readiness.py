@@ -2282,6 +2282,45 @@ def test_ollama_model_probe_checks_fallback_tags_urls_before_missing() -> None:
 
 
 @pytest.mark.unit
+def test_ollama_model_probe_records_recovered_failure_debug_when_available(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://primary.local/api/tags":
+            raise RuntimeError("connect failed for sk-proj-ollama-secret")
+        return SimpleNamespace(status_code=200, text='{"models":[{"name":"llama3:latest"}]}')
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    assert result == {
+        "status": "ok",
+        "reason_code": "OLLAMA_MODEL_AVAILABLE",
+        "debug": {
+            "recovered_failures": [
+                {
+                    "url": "http://primary.local/api/tags",
+                    "status": "exception",
+                    "detail": "RuntimeError: connect failed for <redacted>",
+                }
+            ]
+        },
+    }
+    serialized = json.dumps(result, sort_keys=True)
+    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "sk-proj-ollama-secret" not in serialized
+    assert "sk-proj-ollama-secret" not in caplog.text
+
+
+@pytest.mark.unit
 def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
@@ -2307,7 +2346,7 @@ def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:
 
 
 @pytest.mark.unit
-def test_ollama_model_probe_suppresses_exception_log_after_missing_model_response(
+def test_ollama_model_probe_logs_exception_after_missing_model_response(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
@@ -2334,8 +2373,9 @@ def test_ollama_model_probe_suppresses_exception_log_after_missing_model_respons
         "probe_failures=http://primary.local/api/tags: RuntimeError: connect failed for <redacted>"
         in result["detail"]
     )
-    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
-    assert "RuntimeError: connect failed" not in caplog.text
+    assert "provider_readiness.ollama_model_probe_exception" in caplog.text
+    assert "Traceback" in caplog.text
+    assert "RuntimeError: connect failed for <redacted>" in caplog.text
     assert "sk-proj-ollama-secret" not in caplog.text
     assert "sk-proj-ollama-secret" not in json.dumps(result, sort_keys=True)
 

@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import traceback
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -1912,6 +1912,7 @@ def _probe_ollama_model(
 
     failures: list[str] = []
     exceptions: list[Exception] = []
+    recovered_failures: list[dict[str, Any]] = []
     available_models: set[str] = set()
     saw_model_response = False
     for url in urls:
@@ -1921,11 +1922,28 @@ def _probe_ollama_model(
             exceptions.append(exc)
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
+            recovered_failures.append(
+                _ollama_probe_failure_debug(
+                    url=url,
+                    status="exception",
+                    detail=detail,
+                    secrets=secrets,
+                )
+            )
             continue
         if not 200 <= response.status_code < 300:
             detail = response.text or f"HTTP {response.status_code}"
             failure = f"HTTP {response.status_code}: {detail}"
             failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
+            recovered_failures.append(
+                _ollama_probe_failure_debug(
+                    url=url,
+                    status="http_error",
+                    status_code=response.status_code,
+                    detail=failure,
+                    secrets=secrets,
+                )
+            )
             continue
         try:
             payload = json.loads(response.text or "{}")
@@ -1939,11 +1957,18 @@ def _probe_ollama_model(
 
         available = _ollama_model_names(payload)
         if candidates & available:
-            return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+            result: dict[str, Any] = {
+                "status": "ok",
+                "reason_code": "OLLAMA_MODEL_AVAILABLE",
+            }
+            if recovered_failures:
+                result["debug"] = {"recovered_failures": recovered_failures}
+            return result
         saw_model_response = True
         available_models.update(available)
 
     if saw_model_response:
+        _log_ollama_model_probe_exceptions(exceptions, secrets)
         detail = f"selected={model}; available_count={len(available_models)}"
         if failures:
             detail = f"{detail}; probe_failures={'; '.join(failures)}"
@@ -1957,12 +1982,7 @@ def _probe_ollama_model(
             ),
         }
 
-    for logged_exc in exceptions:
-        _log_redacted_exception(
-            "provider_readiness.ollama_model_probe_exception",
-            logged_exc,
-            secrets,
-        )
+    _log_ollama_model_probe_exceptions(exceptions, secrets)
 
     return {
         "status": "fail",
@@ -1970,6 +1990,18 @@ def _probe_ollama_model(
         "message": "Ollama model availability probe did not complete successfully.",
         "detail": _redact(_truncate("; ".join(failures)), secrets),
     }
+
+
+def _log_ollama_model_probe_exceptions(
+    exceptions: Sequence[Exception],
+    secrets: frozenset[str],
+) -> None:
+    for logged_exc in exceptions:
+        _log_redacted_exception(
+            "provider_readiness.ollama_model_probe_exception",
+            logged_exc,
+            secrets,
+        )
 
 
 def _ollama_model_candidates(model: str | None) -> set[str]:
