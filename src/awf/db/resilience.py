@@ -141,6 +141,8 @@ def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
         seen.add(marker)
         yield current
 
+        if isinstance(current, BaseExceptionGroup):
+            stack.extend(reversed(current.exceptions))
         orig = getattr(current, "orig", None)
         if isinstance(orig, BaseException):
             stack.append(orig)

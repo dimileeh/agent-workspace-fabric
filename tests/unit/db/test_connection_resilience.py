@@ -174,6 +174,19 @@ def test_closed_connection_classifier_walks_unsuppressed_context() -> None:
 
 
 @pytest.mark.unit
+def test_closed_connection_classifier_walks_exception_group_members() -> None:
+    grouped = ExceptionGroup(
+        "task group failed",
+        [
+            RuntimeError("application failure"),
+            _closed_connection_error(),
+        ],
+    )
+
+    assert is_transient_closed_connection_error(grouped) is True
+
+
+@pytest.mark.unit
 def test_closed_connection_classifier_bounds_long_message_fragment_scan() -> None:
     early_fragment = RuntimeError("prefix connection is closed")
     late_fragment = RuntimeError(
