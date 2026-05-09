@@ -211,3 +211,40 @@ jobs:
         env:
           AWF_DATABASE_URL: postgresql+asyncpg://awf:awf_ci@localhost:5432/awf
         run: .venv/bin/pytest tests/integration/ -v
+
+  ci-required:
+    runs-on: ubuntu-latest
+    needs:
+      - lint-and-test
+      - python-full-coverage
+      - console
+      - release-artifacts
+      - integration
+    if: ${{ always() }}
+    timeout-minutes: 5
+    steps:
+      - name: Verify required jobs passed
+        env:
+          LINT_AND_TEST_RESULT: ${{ needs['lint-and-test'].result }}
+          PYTHON_FULL_COVERAGE_RESULT: ${{ needs['python-full-coverage'].result }}
+          CONSOLE_RESULT: ${{ needs.console.result }}
+          RELEASE_ARTIFACTS_RESULT: ${{ needs['release-artifacts'].result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+        run: |
+          for result in \
+            "$LINT_AND_TEST_RESULT" \
+            "$PYTHON_FULL_COVERAGE_RESULT" \
+            "$CONSOLE_RESULT" \
+            "$RELEASE_ARTIFACTS_RESULT" \
+            "$INTEGRATION_RESULT"
+          do
+            if [ "$result" != "success" ]; then
+              echo "A required CI job did not pass."
+              echo "lint-and-test: $LINT_AND_TEST_RESULT"
+              echo "python-full-coverage: $PYTHON_FULL_COVERAGE_RESULT"
+              echo "console: $CONSOLE_RESULT"
+              echo "release-artifacts: $RELEASE_ARTIFACTS_RESULT"
+              echo "integration: $INTEGRATION_RESULT"
+              exit 1
+            fi
+          done

@@ -10,6 +10,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+CONTRIBUTING_PATH = REPO_ROOT / "CONTRIBUTING.md"
 DB_URL = "postgresql+asyncpg://awf:awf_ci@localhost:5432/awf"
 DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -43,6 +44,14 @@ def _named_step(job: dict[str, Any], name: str) -> dict[str, Any]:
 
 def _run_steps(job: dict[str, Any]) -> str:
     return "\n".join(str(step.get("run", "")) for step in _steps(job))
+
+
+def _job_needs(job: dict[str, Any]) -> set[str]:
+    needs = job.get("needs", [])
+    if isinstance(needs, str):
+        return {needs}
+    assert isinstance(needs, list)
+    return {str(need) for need in needs}
 
 
 def _env_mapping(scope: str, value: object) -> dict[str, Any]:
@@ -169,3 +178,30 @@ def test_unit_smoke_job_is_not_the_authoritative_coverage_gate() -> None:
     assert "pytest tests/unit/" in commands
     assert "--cov=awf" not in commands
     assert "--cov-fail-under" not in commands
+
+
+@pytest.mark.unit
+def test_required_ci_gate_rolls_up_full_coverage_and_required_jobs() -> None:
+    job = _job(_workflow(), "ci-required")
+
+    assert job.get("if") == "${{ always() }}"
+    assert _job_needs(job) == {
+        "lint-and-test",
+        "python-full-coverage",
+        "console",
+        "release-artifacts",
+        "integration",
+    }
+
+    commands = _run_steps(job)
+    assert "A required CI job did not pass." in commands
+    assert '!= "success"' in commands
+
+
+@pytest.mark.unit
+def test_contributor_docs_require_ci_rollup_status_check() -> None:
+    docs = CONTRIBUTING_PATH.read_text(encoding="utf-8")
+
+    assert "branch protection" in docs.lower()
+    assert "ci-required" in docs
+    assert "python-full-coverage" in docs
