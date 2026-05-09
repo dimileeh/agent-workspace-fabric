@@ -14,6 +14,7 @@ CONTRIBUTING_PATH = REPO_ROOT / "CONTRIBUTING.md"
 DB_URL = "postgresql+asyncpg://awf:awf_ci@localhost:5432/awf"
 DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+GITHUB_HOSTED_RUNNER = "ubuntu-latest"
 
 
 def _workflow() -> dict[str, Any]:
@@ -131,7 +132,7 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     workflow = _workflow()
     job = _job(workflow, "python-full-coverage")
 
-    assert job.get("runs-on") == "ubuntu-latest-8-cores"
+    assert job.get("runs-on") == GITHUB_HOSTED_RUNNER
 
     services = job.get("services", {})
     assert isinstance(services, dict)
@@ -217,7 +218,7 @@ def test_unit_smoke_job_has_postgres_for_database_required_unit_tests() -> None:
     workflow = _workflow()
     job = _job(workflow, "lint-and-test")
 
-    assert job.get("runs-on") == "ubuntu-latest-8-cores"
+    assert job.get("runs-on") == GITHUB_HOSTED_RUNNER
 
     services = job.get("services", {})
     assert isinstance(services, dict)
