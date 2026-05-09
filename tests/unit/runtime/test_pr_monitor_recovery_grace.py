@@ -1137,3 +1137,132 @@ async def test_recovery_dispatch_waits_when_idempotent_create_loses_race_to_acti
         assert len(wait_operations) == 1
         events = [e for e in ws.events if e.event_type == "monitor.recovery_dispatched"]
         assert events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("terminal_status", "error_code"),
+    [
+        (OperationStatus.failed, "COMMAND_FAILED"),
+        (OperationStatus.cancelled, "OPERATOR_REMONITOR"),
+    ],
+)
+async def test_recovery_dispatch_retries_when_idempotent_create_loses_race_to_terminal_op(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: OperationStatus,
+    error_code: str,
+) -> None:
+    """A competing monitor can finish the same recovery key before our insert.
+
+    The returned terminal operation must feed the retryable idempotency-key flow
+    immediately, not get classified as an already-handled snapshot.
+    """
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+    original_create_idempotent = OperationRepository.create_idempotent
+    inserted = False
+
+    async def _race_create_idempotent(
+        self: OperationRepository,
+        *,
+        workspace_id: str,
+        operation_type: OperationType | str,
+        status: OperationStatus | str = OperationStatus.pending,
+        payload: dict[str, object] | None = None,
+        idempotency_key: str,
+    ) -> tuple[object, bool]:
+        """Simulate a concurrent recovery create and terminal finish winning."""
+        nonlocal inserted
+        if not inserted:
+            inserted = True
+            async with factory() as s:
+                repo = OperationRepository(s)
+                operation = await repo.create(
+                    workspace_id=workspace_id,
+                    operation_type=operation_type,
+                    status=OperationStatus.running,
+                    payload={
+                        "owner": "pr_monitor",
+                        "source": "pr_monitor",
+                        "action": "validate_only",
+                        "requested_action": "validate",
+                        "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                        "stale_reason": "validation_insufficient_tier",
+                        "recovery_mode": "validate_only",
+                    },
+                    idempotency_key=idempotency_key,
+                )
+                await repo.finish(
+                    operation,
+                    status=terminal_status,
+                    result={"reason_code": error_code},
+                    error_code=error_code,
+                )
+                await s.commit()
+        return await original_create_idempotent(
+            self,
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            status=status,
+            payload=payload,
+            idempotency_key=idempotency_key,
+        )
+
+    monkeypatch.setattr(OperationRepository, "create_idempotent", _race_create_idempotent)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=900,
+    )
+    state = MonitorState(started_at=0.0)
+    state.mark_addressed(
+        _initial_review_grace_started_key(42),
+        f"{0.0:.6f}",
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_pr_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert sleep_fn.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.ready.value
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        recovery_operations = [op for op in operations if op.type == OperationType.validate.value]
+        wait_operations = [
+            op
+            for op in operations
+            if op.type == OperationType.monitor_state.value
+            and op.payload.get("reason_code") == "RECOVERY_SNAPSHOT_ALREADY_HANDLED"
+        ]
+        assert len(recovery_operations) == 2
+        assert len(wait_operations) == 0
+        retry = next(op for op in recovery_operations if op.status == OperationStatus.pending.value)
+        terminal_recovery = next(
+            op for op in recovery_operations if op.status == terminal_status.value
+        )
+        assert retry.idempotency_key != terminal_recovery.idempotency_key
+        events = [e for e in ws.events if e.event_type == "monitor.recovery_dispatched"]
+        assert len(events) == 1

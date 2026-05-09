@@ -263,6 +263,12 @@ _ACTIVE_RECOVERY_OPERATION_STATUSES = frozenset(
         OperationStatus.running.value,
     }
 )
+_RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES = frozenset(
+    {
+        OperationStatus.failed.value,
+        OperationStatus.cancelled.value,
+    }
+)
 _TERMINAL_WORKSPACE_STATUSES = {
     WorkspaceStatus.completed.value,
     WorkspaceStatus.failed.value,
@@ -2989,15 +2995,31 @@ class PullRequestMonitorRunner:
                     source_head_sha=status.head_sha,
                     source_base_sha=_ws.base_commit,
                 )
-                operation, created = await operation_repo.create_idempotent(
-                    workspace_id=workspace_id,
-                    operation_type="validate",
-                    payload=operation_payload,
-                    idempotency_key=idempotency_key,
-                )
-                if not created:
+                while True:
+                    operation, created = await operation_repo.create_idempotent(
+                        workspace_id=workspace_id,
+                        operation_type="validate",
+                        payload=operation_payload,
+                        idempotency_key=idempotency_key,
+                    )
+                    if created:
+                        break
                     existing_operation_id = operation.id
                     existing_operation_status = operation.status
+                    if (
+                        existing_operation_status
+                        in _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES
+                    ):
+                        idempotency_key = await retryable_monitor_operation_idempotency_key(
+                            operation_repo,
+                            workspace_id=workspace_id,
+                            action=recovery_mode,
+                            pr_number=pr_number,
+                            reason_code=recovery_reason_code,
+                            source_head_sha=status.head_sha,
+                            source_base_sha=_ws.base_commit,
+                        )
+                        continue
                     wait_payload = {
                         "recovery_mode": recovery_mode,
                         "stale_reason": stale_reason,
