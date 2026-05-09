@@ -401,6 +401,65 @@ async def test_readyz_egress_audit_timeout_drains_completed_session_cleanup(
 
 
 @pytest.mark.unit
+async def test_egress_audit_summary_timeout_gates_pending_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions_created = 0
+    summary_calls = 0
+    closed_sessions = 0
+    release = asyncio.Event()
+    all_sessions_closed = asyncio.Event()
+
+    class _Session:
+        def __init__(self) -> None:
+            nonlocal sessions_created
+            sessions_created += 1
+
+        async def close(self) -> None:
+            nonlocal closed_sessions
+            closed_sessions += 1
+            if closed_sessions == sessions_created:
+                all_sessions_closed.set()
+
+    class _CancellationResistantEgressAuditRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            nonlocal summary_calls
+            summary_calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+                raise
+
+    monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(health_route, "_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(
+        health_route,
+        "EgressAuditRepository",
+        _CancellationResistantEgressAuditRepository,
+    )
+
+    try:
+        with pytest.raises(TimeoutError):
+            await health_route._egress_audit_summary_counts_with_timeout(_Session)
+
+        assert sessions_created == 1
+
+        with pytest.raises(TimeoutError):
+            await health_route._egress_audit_summary_counts_with_timeout(_Session)
+
+        assert sessions_created == 1
+        assert summary_calls == 1
+    finally:
+        release.set()
+        if sessions_created:
+            await asyncio.wait_for(all_sessions_closed.wait(), timeout=1.0)
+
+
+@pytest.mark.unit
 async def test_drain_cancelled_task_result_defers_pending_task_consumption() -> None:
     release = asyncio.Event()
 

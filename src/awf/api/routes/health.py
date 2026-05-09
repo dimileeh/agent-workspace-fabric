@@ -143,6 +143,7 @@ async def release_readiness(
 # down once we have latency telemetry.
 _CHECK_TIMEOUT_SECONDS = 5.0
 _EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS = 0.1
+_egress_audit_summary_counts_task: asyncio.Task[dict[str, int]] | None = None
 
 
 def _get_command_runner_for_request(request: Request) -> AsyncCommandRunner:
@@ -379,8 +380,35 @@ async def _egress_audit_summary_counts(factory: Any) -> dict[str, int]:
                 await close()
 
 
+def _pending_egress_audit_summary_counts_task() -> asyncio.Task[dict[str, int]] | None:
+    global _egress_audit_summary_counts_task
+
+    task = _egress_audit_summary_counts_task
+    if task is not None and task.done():
+        _egress_audit_summary_counts_task = None
+        return None
+    return task
+
+
+def _track_egress_audit_summary_counts_task(task: asyncio.Task[dict[str, int]]) -> None:
+    global _egress_audit_summary_counts_task
+
+    _egress_audit_summary_counts_task = task
+
+    def _clear_tracked_task(completed: asyncio.Task[dict[str, int]]) -> None:
+        global _egress_audit_summary_counts_task
+        if _egress_audit_summary_counts_task is completed:
+            _egress_audit_summary_counts_task = None
+
+    task.add_done_callback(_clear_tracked_task)
+
+
 async def _egress_audit_summary_counts_with_timeout(factory: Any) -> dict[str, int]:
+    if _pending_egress_audit_summary_counts_task() is not None:
+        raise TimeoutError
+
     task = asyncio.create_task(_egress_audit_summary_counts(factory))
+    _track_egress_audit_summary_counts_task(task)
     try:
         done, _pending = await asyncio.wait({task}, timeout=_CHECK_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
