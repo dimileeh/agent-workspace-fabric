@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import re
 import shlex
 import time
@@ -39,7 +40,7 @@ from awf.adapters.base import (
     get_adapter,
 )
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.compose_exec import (
@@ -83,6 +84,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
     sync_candidate_readiness,
 )
+from awf.db.validation_runs import validation_run_coverage_payload
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.node.git_manager import mirror_path_for_worktree, repair_agent_writable_worktree
 from awf.profiles.models import WorkspaceProfile
@@ -95,12 +97,14 @@ from awf.runtime.logs import LogStore
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     AGENT_STALLED_IN_CONFORMANCE,
+    CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PLAN_CONFORMANCE_UNSATISFIED,
     ConformanceIterationRecord,
     ConformanceStallEvidence,
     ConformanceStallKind,
     ConformanceStallPolicy,
     PlanConformanceReport,
+    PlanConformanceStatus,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
@@ -109,6 +113,7 @@ from awf.runtime.planning import (
     build_planning_prompt,
     changed_paths_from_porcelain,
     classify_conformance_stall,
+    conformance_requires_awf_validation,
     parse_conformance_report,
     render_workspace_path,
 )
@@ -185,12 +190,43 @@ _PR_CREATE_FAILED_REASON_CODE = "PR_CREATE_FAILED"
 GIT_AGENT_WRITABILITY_FAILED_REASON_CODE = "GIT_AGENT_WRITABILITY_FAILED"
 GIT_OBJECT_MISSING_REASON_CODE = "GIT_OBJECT_MISSING"
 GIT_OBJECT_MISSING_RECOVERED_REASON_CODE = "GIT_OBJECT_MISSING_RECOVERED"
+POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE = (
+    "POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED"
+)
+POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE = (
+    "POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED"
+)
+POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE = "POST_VALIDATION_CONFORMANCE_FAILED"
 _PR_MONITOR_ADOPTED_EVENT = "workspace.pr_monitor_adopted"
 _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
 _PR_ADOPTION_METADATA_MISSING_REASON_CODE = "PR_ADOPTION_METADATA_MISSING"
 _PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE = "PR_ADOPTION_MONITOR_UNAVAILABLE"
 _EXCEPTION_TRACEBACK_LIMIT = 4000
+_VALIDATION_EVIDENCE_JSON_LIMIT = 20000
+_VALIDATION_EVIDENCE_COVERAGE_PRIORITY_KEYS = (
+    "status",
+    "reason_code",
+    "percent",
+    "minimum_percent",
+    "enforce",
+    "provider",
+)
+_VALIDATION_EVIDENCE_RETAINED_KEY_COUNT = 5
+_VALIDATION_EVIDENCE_CORE_KEYS = (
+    "validation_run_id",
+    "status",
+    "reason_code",
+    "coverage",
+    "workspace_head_sha",
+    "target_branch",
+    "target_head_sha",
+    "base_commit",
+    "base_sha",
+    "tier",
+    "retry_count",
+    "command_set_hash",
+)
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -214,6 +250,51 @@ class _RebaseRecoveryResult:
     head_sha: str
 
 
+class _PostValidationConformanceReportGitError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        operation: str,
+        result: CommandResult,
+        cleanup_operation: str | None = None,
+        cleanup_result: CommandResult | None = None,
+    ) -> None:
+        output = (result.stderr or result.stdout or "").strip()
+        message = (
+            f"post-validation conformance report git {operation} failed "
+            f"(exit={result.returncode}): {output}"
+        )
+        if cleanup_operation is not None and cleanup_result is not None:
+            cleanup_output = (cleanup_result.stderr or cleanup_result.stdout or "").strip()
+            message = (
+                f"{message}; cleanup git {cleanup_operation} failed "
+                f"(exit={cleanup_result.returncode}): {cleanup_output}"
+            )
+        super().__init__(message)
+        self.operation = operation
+        self.returncode = result.returncode
+        self.command_reason_code = result.reason_code
+        self.cleanup_operation = cleanup_operation
+        self.cleanup_returncode = (
+            cleanup_result.returncode if cleanup_result is not None else None
+        )
+        self.cleanup_command_reason_code = (
+            cleanup_result.reason_code if cleanup_result is not None else None
+        )
+
+
+class _PostValidationConformanceReportWriteError(RuntimeError):
+    def __init__(self, *, report_path: Path, error: OSError) -> None:
+        message = (
+            "post-validation conformance report write failed for "
+            f"{report_path.as_posix()}: {error}"
+        )
+        super().__init__(message)
+        self.report_path = report_path
+        self.error_type = type(error).__name__
+        self.errno = error.errno
+
+
 @dataclass(frozen=True)
 class _CoverageEvidenceResult:
     coverage: ValidationCoverageResult | None
@@ -233,6 +314,15 @@ class _PlanningRunFailure:
     message: str
     reason_code: str | None = None
     details: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _PlanningValidationHandoff:
+    report: PlanConformanceReport
+    plan_path: Path
+    report_path: Path
+    iteration: int
+    max_iterations: int
 
 
 @dataclass(frozen=True)
@@ -456,23 +546,133 @@ def _is_validate_only_recovery_payload(payload: object) -> bool:
     )
 
 
-def _validate_only_recovery_needs_existing_pr_push(
+def _planning_validation_handoff_from_recovery_payload(
+    *,
+    workspace_id: str,
+    profile: WorkspaceProfile,
+    recovery_payload: Mapping[str, Any],
+) -> _PlanningValidationHandoff | None:
+    conformance_payload = recovery_payload.get("conformance")
+    conformance = conformance_payload if isinstance(conformance_payload, Mapping) else {}
+    reason_code = _recovery_conformance_reason_code(recovery_payload, conformance)
+    if reason_code != CONFORMANCE_REQUIRES_AWF_VALIDATION:
+        return None
+    try:
+        plan_path = render_workspace_path(
+            _recovery_conformance_path(
+                conformance,
+                key="plan_path",
+                fallback=profile.planning.plan_path,
+            ),
+            workspace_id=workspace_id,
+        )
+        report_path = render_workspace_path(
+            _recovery_conformance_path(
+                conformance,
+                key="report_path",
+                fallback=profile.planning.conformance_report_path,
+            ),
+            workspace_id=workspace_id,
+        )
+    except ValueError:
+        plan_path = render_workspace_path(
+            profile.planning.plan_path,
+            workspace_id=workspace_id,
+        )
+        report_path = render_workspace_path(
+            profile.planning.conformance_report_path,
+            workspace_id=workspace_id,
+        )
+    gaps = _recovery_conformance_gaps(conformance)
+    summary_value = conformance.get("summary")
+    summary = (
+        summary_value.strip()
+        if isinstance(summary_value, str) and summary_value.strip()
+        else "Conformance requires AWF-owned validation evidence."
+    )
+    iteration = _int_or_none(conformance.get("iteration"))
+    if iteration is None:
+        iteration = _int_or_none(recovery_payload.get("iteration"))
+    max_iterations = _int_or_none(conformance.get("max_iterations"))
+    if max_iterations is None:
+        max_iterations = _int_or_none(recovery_payload.get("max_iterations"))
+    return _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary=summary,
+            gaps=gaps or ("AWF-owned validation evidence is missing or stale.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=plan_path,
+        report_path=report_path,
+        iteration=iteration if iteration is not None else 0,
+        max_iterations=(
+            max_iterations if max_iterations is not None else profile.planning.max_iterations
+        ),
+    )
+
+
+def _recovery_conformance_reason_code(
+    recovery_payload: Mapping[str, Any],
+    conformance: Mapping[str, Any],
+) -> str | None:
+    for value in (
+        conformance.get("report_reason_code"),
+        conformance.get("reason_code"),
+        recovery_payload.get("conformance_reason_code"),
+        recovery_payload.get("conformance_handoff_reason_code"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper().replace("-", "_")
+    return None
+
+
+def _recovery_conformance_path(
+    conformance: Mapping[str, Any],
+    *,
+    key: str,
+    fallback: str,
+) -> str:
+    value = conformance.get(key)
+    return value if isinstance(value, str) and value.strip() else fallback
+
+
+def _recovery_conformance_gaps(conformance: Mapping[str, Any]) -> tuple[str, ...]:
+    value = conformance.get("gaps")
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    if isinstance(value, str) and value.strip():
+        return (value.strip(),)
+    return ()
+
+
+def _recovery_needs_existing_pr_push(
     recovery_payload: Mapping[str, Any],
     *,
     validated_workspace_head_sha: str | None,
     rebase_recovery_result: _RebaseRecoveryResult | None,
 ) -> bool:
     """Return true when recovery produced local commits that are not on the PR yet."""
-    if recovery_payload.get("recovery_mode") != "validate_only":
-        return False
-    if rebase_recovery_result is not None:
-        return False
     if not validated_workspace_head_sha:
         return False
-    source_head_sha = recovery_payload.get("source_head_sha")
-    if not isinstance(source_head_sha, str) or not source_head_sha.strip():
+    validated_head = validated_workspace_head_sha.strip()
+    if not validated_head:
         return False
-    return validated_workspace_head_sha != source_head_sha.strip()
+    recovery_mode = recovery_payload.get("recovery_mode")
+    if recovery_mode == "validate_only":
+        if rebase_recovery_result is not None:
+            return False
+        source_head_sha = recovery_payload.get("source_head_sha")
+        if not isinstance(source_head_sha, str) or not source_head_sha.strip():
+            return False
+        return validated_head != source_head_sha.strip()
+    if recovery_mode == "rebase_only":
+        if rebase_recovery_result is None:
+            return False
+        # Push only when AWF-owned work, such as validation fixes or a
+        # conformance report commit, advanced HEAD past the pushed rebase commit.
+        return validated_head != rebase_recovery_result.head_sha
+    return False
 
 
 def _is_callback_terminal_status(status: str) -> bool:
@@ -1164,6 +1364,7 @@ class WorkspaceExecutor:
         agent_exit_note: str | None = None
         agent_run_reason_code: str | None = None
         agent_run_details: Mapping[str, Any] | None = None
+        planning_validation_handoff: _PlanningValidationHandoff | None = None
         expected_branch = ws.branch_name or f"awf/{workspace_id}"
         adapter: AgentAdapter | None = None
         defaults: AgentDefaults | None = None
@@ -1249,7 +1450,13 @@ class WorkspaceExecutor:
                     model=default_model,
                     command_evidence=agent_command_evidence,
                 )
-                if planning_failure is not None:
+                if isinstance(planning_failure, _PlanningValidationHandoff):
+                    planning_validation_handoff = planning_failure
+                    await self._record_planning_validation_handoff_event(
+                        workspace_id=workspace_id,
+                        handoff=planning_failure,
+                    )
+                elif planning_failure is not None:
                     failure_message = (
                         planning_failure
                         if isinstance(planning_failure, str)
@@ -1286,6 +1493,11 @@ class WorkspaceExecutor:
                     source=recovery.get("source"),
                     recovery_mode=recovery.get("recovery_mode"),
                     reason=recovery.get("reason"),
+                )
+                planning_validation_handoff = _planning_validation_handoff_from_recovery_payload(
+                    workspace_id=workspace_id,
+                    profile=profile,
+                    recovery_payload=recovery,
                 )
         except ComposeExecCleanupError as exc:
             _log.error(
@@ -1864,9 +2076,24 @@ class WorkspaceExecutor:
         last_failure_message: str | None = None
         successful_validation_run_id: str | None = None
         successful_validation_workspace_head_sha: str | None = None
-        for pass_number in range(max_fix_passes + 1):
-            # pass_number == 0 is the initial run (already-committed agent
-            # work). 1..N are fix attempts driven by the retry prompt.
+        validation_fix_passes_used = 0
+        post_validation_conformance_fix_attempts = 0
+        post_validation_conformance_fix_pass_budget = (
+            max(
+                0,
+                planning_validation_handoff.max_iterations
+                - planning_validation_handoff.iteration,
+            )
+            if planning_validation_handoff is not None and recovery is None
+            else 0
+        )
+        max_validation_attempts = (
+            max_fix_passes + post_validation_conformance_fix_pass_budget + 1
+        )
+        for pass_number in range(max_validation_attempts):
+            # This loop covers the initial validation plus any validation or
+            # post-validation conformance fix prompts. The per-category
+            # counters below enforce their separate budgets.
             if not await self._recheck_status(
                 workspace_id,
                 expected=WorkspaceStatus.validating,
@@ -2016,58 +2243,346 @@ class WorkspaceExecutor:
                 val_result,
                 baseline_coverage=baseline_coverage,
             )
+            validation_coverage = _validation_run_coverage_metadata(
+                val_result,
+                baseline_coverage=baseline_coverage,
+            )
             await self._finish_validation_run(
                 validation_run_id,
                 status="succeeded" if val_result.all_passed else "failed",
                 reason_code=_validation_run_reason_code(val_result),
                 retry_count=val_result.total_retries,
-                coverage=_validation_run_coverage_metadata(
-                    val_result,
-                    baseline_coverage=baseline_coverage,
-                ),
+                coverage=validation_coverage,
                 command_retries=[c.retry_count for c in val_result.commands],
                 coverage_evidence_status=coverage_evidence.evidence_status,
                 coverage_evidence_reason_code=coverage_evidence.reason_code,
                 coverage_evidence_source_run_id=coverage_evidence.source_run_id,
             )
             if val_result.all_passed:
-                successful_validation_run_id = validation_run_id
-                successful_validation_workspace_head_sha = validation_workspace_head_sha
-                await self._finish_pending_validate_operations(
-                    workspace_id=workspace_id,
-                    status=OperationStatus.succeeded,
-                    validation_run_id=validation_run_id,
-                    requested_tier=validation_tier,
-                    reason_code="VALIDATION_OK",
-                    coverage=_validation_run_coverage_metadata(
-                        val_result,
-                        baseline_coverage=baseline_coverage,
-                    ),
-                )
-                if pass_number > 0:
-                    _log.info(
-                        "executor.validation_recovered",
+                conformance_failure: _PlanningRunFailure | None = None
+                if planning_validation_handoff is not None:
+                    conformance_handoff = planning_validation_handoff
+                    try:
+                        if post_validation_conformance_fix_attempts:
+                            conformance_handoff = replace(
+                                planning_validation_handoff,
+                                iteration=(
+                                    planning_validation_handoff.iteration
+                                    + post_validation_conformance_fix_attempts
+                                ),
+                            )
+                        if recovery is not None:
+                            _log.info(
+                                "executor.post_validation_conformance_recovery_single_attempt",
+                                workspace_id=workspace_id,
+                                validation_run_id=validation_run_id,
+                                recovery_mode=recovery.get("recovery_mode"),
+                                source=recovery.get("source"),
+                                max_fix_passes=post_validation_conformance_fix_pass_budget,
+                                will_retry=False,
+                            )
+                        conformance_failure = await self._run_post_validation_conformance_check(
+                            adapter=adapter,
+                            workspace=ws,
+                            profile=profile,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            worktree_path=worktree_path,
+                            model=default_model,
+                            handoff=conformance_handoff,
+                            validation_run_id=validation_run_id,
+                        )
+                    except ComposeExecCleanupError as exc:
+                        message = cleanup_failure_message(exc)
+                        _log.error(
+                            "executor.post_validation_conformance_cleanup_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            source=exc.source,
+                            label=exc.label,
+                            invocation_id=exc.invocation_id,
+                            reason_code=exc.reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                        )
+                        return
+                    except AgentRunError as exc:
+                        reason_code = exc.reason_code or "AGENT_CLI_FAILED"
+                        message = _post_validation_conformance_agent_failure_message(exc)
+                        _log.warning(
+                            "executor.post_validation_conformance_agent_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            returncode=exc.result.returncode,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.agent_failure,
+                            message=message,
+                            reason_code=reason_code,
+                            details=_post_validation_conformance_agent_failure_details(
+                                exc,
+                                validation_run_id=validation_run_id,
+                            ),
+                        )
+                        return
+                    except _PostValidationConformanceReportGitError as exc:
+                        reason_code = POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
+                        message = str(exc)
+                        _log.error(
+                            "executor.post_validation_conformance_report_git_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            operation=exc.operation,
+                            returncode=exc.returncode,
+                            command_reason_code=exc.command_reason_code,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        failure_details: dict[str, Any] = {
+                            "validation_run_id": validation_run_id,
+                            "report_path": conformance_handoff.report_path.as_posix(),
+                            "operation": exc.operation,
+                            "returncode": exc.returncode,
+                        }
+                        if exc.command_reason_code is not None:
+                            failure_details["command_reason_code"] = exc.command_reason_code
+                        if exc.cleanup_operation is not None:
+                            failure_details["cleanup_operation"] = exc.cleanup_operation
+                            failure_details["cleanup_returncode"] = exc.cleanup_returncode
+                            failure_details["report_left_staged"] = True
+                        if exc.cleanup_command_reason_code is not None:
+                            failure_details["cleanup_command_reason_code"] = (
+                                exc.cleanup_command_reason_code
+                            )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=reason_code,
+                            details=failure_details,
+                        )
+                        return
+                    except _PostValidationConformanceReportWriteError as exc:
+                        reason_code = (
+                            POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
+                        )
+                        message = str(exc)
+                        _log.error(
+                            "executor.post_validation_conformance_report_write_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            report_path=exc.report_path.as_posix(),
+                            error_type=exc.error_type,
+                            errno=exc.errno,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        write_failure_details: dict[str, Any] = {
+                            "validation_run_id": validation_run_id,
+                            "report_path": exc.report_path.as_posix(),
+                            "operation": "write",
+                            "error_type": exc.error_type,
+                        }
+                        if exc.errno is not None:
+                            write_failure_details["errno"] = exc.errno
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=reason_code,
+                            details=write_failure_details,
+                        )
+                        return
+                    except Exception as exc:
+                        reason_code = POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE
+                        message = (
+                            f"post-validation conformance check failed: {exc!r}"
+                        )[:2000]
+                        _log.exception(
+                            "executor.post_validation_conformance_unexpected_failed",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            reason_code=reason_code,
+                        )
+                        await self._finish_pending_validate_operations(
+                            workspace_id=workspace_id,
+                            status=OperationStatus.failed,
+                            validation_run_id=validation_run_id,
+                            requested_tier=validation_tier,
+                            reason_code=reason_code,
+                            coverage=validation_coverage,
+                            error_message=message,
+                        )
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.validating,
+                            failure_reason=FailureReason.infrastructure_failure,
+                            message=message,
+                            reason_code=reason_code,
+                        )
+                        return
+                    if conformance_failure is not None:
+                        remaining_conformance_iterations = max(
+                            0,
+                            conformance_handoff.max_iterations
+                            - conformance_handoff.iteration,
+                        )
+                        # Recovery skips feature execution; retrying this
+                        # conformance miss would only rerun validation.
+                        if (
+                            recovery is not None
+                            or remaining_conformance_iterations <= 0
+                        ):
+                            await self._finish_pending_validate_operations(
+                                workspace_id=workspace_id,
+                                status=OperationStatus.failed,
+                                validation_run_id=validation_run_id,
+                                requested_tier=validation_tier,
+                                reason_code=conformance_failure.reason_code
+                                or PLAN_CONFORMANCE_UNSATISFIED,
+                                coverage=validation_coverage,
+                                error_message=conformance_failure.message,
+                            )
+                            await self._mark_failed(
+                                workspace_id=workspace_id,
+                                from_status=WorkspaceStatus.validating,
+                                failure_reason=FailureReason.agent_failure,
+                                message=conformance_failure.message[:2000],
+                                reason_code=conformance_failure.reason_code,
+                                details=conformance_failure.details,
+                            )
+                            return
+                        _log.info(
+                            "executor.post_validation_conformance_needs_fix_pass",
+                            workspace_id=workspace_id,
+                            validation_run_id=validation_run_id,
+                            fix_pass=post_validation_conformance_fix_attempts + 1,
+                            max_fix_passes=post_validation_conformance_fix_pass_budget,
+                            validation_fix_passes_used=validation_fix_passes_used,
+                            remaining_conformance_iterations=remaining_conformance_iterations,
+                            reason_code=(
+                                conformance_failure.reason_code
+                                or PLAN_CONFORMANCE_UNSATISFIED
+                            ),
+                        )
+                        post_validation_conformance_fix_attempts += 1
+                        val_result = _post_validation_conformance_fix_result(
+                            failure=conformance_failure,
+                            workspace_id=workspace_id,
+                            artifacts_root=self._config.compose_projects_root,
+                            attempt=post_validation_conformance_fix_attempts,
+                        )
+                if conformance_failure is None:
+                    successful_validation_run_id = validation_run_id
+                    successful_validation_workspace_head_sha = validation_workspace_head_sha
+                    if (
+                        recovery is not None
+                        and ws.pr_url
+                        and planning_validation_handoff is not None
+                    ):
+                        post_conformance_head_sha = await self._capture_workspace_head_sha(
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                        )
+                        if post_conformance_head_sha:
+                            successful_validation_workspace_head_sha = post_conformance_head_sha
+                    await self._finish_pending_validate_operations(
                         workspace_id=workspace_id,
-                        fix_passes_used=pass_number,
+                        status=OperationStatus.succeeded,
+                        validation_run_id=validation_run_id,
+                        requested_tier=validation_tier,
+                        reason_code="VALIDATION_OK",
+                        coverage=validation_coverage,
                     )
-                break
+                    if validation_fix_passes_used or post_validation_conformance_fix_attempts:
+                        _log.info(
+                            "executor.validation_recovered",
+                            workspace_id=workspace_id,
+                            fix_passes_used=validation_fix_passes_used,
+                            post_validation_conformance_fix_attempts=(
+                                post_validation_conformance_fix_attempts
+                            ),
+                        )
+                    break
 
             first_fail = val_result.first_failure
+            is_post_validation_conformance_fix_pass = (
+                first_fail is not None
+                and first_fail.phase == "conformance"
+                and first_fail.command == "post-validation plan conformance"
+            )
             _log.info(
                 "executor.validation_failed",
                 workspace_id=workspace_id,
                 failed_command=first_fail.command if first_fail else None,
                 fix_pass=pass_number,
                 max_fix_passes=max_fix_passes,
+                validation_fix_passes_used=validation_fix_passes_used,
+                post_validation_conformance_fix_attempts=(
+                    post_validation_conformance_fix_attempts
+                ),
             )
             last_failure_message = _validation_failure_message(
                 val_result,
                 baseline_coverage=baseline_coverage,
             )
 
-            if pass_number >= max_fix_passes or first_fail is None:
+            if (
+                first_fail is None
+                or (
+                    not is_post_validation_conformance_fix_pass
+                    and validation_fix_passes_used >= max_fix_passes
+                )
+            ):
                 # Exhausted our budget (or no failure details to anchor a
                 # fix prompt on) — mark failed and let the operator triage.
+                # If a post-validation conformance fix already consumed a
+                # prior successful run, this terminal path intentionally
+                # reports coverage from the fresh failing validation result.
                 await self._finish_pending_validate_operations(
                     workspace_id=workspace_id,
                     status=OperationStatus.failed,
@@ -2099,13 +2614,21 @@ class WorkspaceExecutor:
 
             # Fire a fix pass: re-invoke the coding CLI with the failure
             # context, then re-commit whatever it changed.
+            if is_post_validation_conformance_fix_pass:
+                fix_pass_number = max(1, post_validation_conformance_fix_attempts)
+                fix_pass_total_passes = max(1, post_validation_conformance_fix_pass_budget)
+                fix_pass_kind = "post-validation conformance"
+            else:
+                fix_pass_number = validation_fix_passes_used + 1
+                fix_pass_total_passes = max_fix_passes
+                fix_pass_kind = "validation"
             fix_context = ValidationFixContext(
                 failed_command=first_fail.command,
                 returncode=first_fail.returncode,
                 stdout_tail=read_output_tail(first_fail.stdout_path),
                 stderr_tail=read_output_tail(first_fail.stderr_path),
-                pass_number=pass_number + 1,
-                total_passes=max_fix_passes,
+                pass_number=fix_pass_number,
+                total_passes=fix_pass_total_passes,
                 test_commands=test_commands_tuple,
                 reason_code=_validation_run_reason_code(val_result),
                 coverage_percent=val_result.coverage.percent if val_result.coverage else None,
@@ -2130,8 +2653,9 @@ class WorkspaceExecutor:
             _log.info(
                 "executor.fix_pass_start",
                 workspace_id=workspace_id,
-                pass_number=pass_number + 1,
-                max_fix_passes=max_fix_passes,
+                pass_number=fix_pass_number,
+                max_fix_passes=fix_pass_total_passes,
+                fix_pass_kind=fix_pass_kind,
                 failed_command=first_fail.command,
             )
             if not await self._recheck_status(
@@ -2168,7 +2692,8 @@ class WorkspaceExecutor:
                 _log.error(
                     "executor.fix_pass_cleanup_failed",
                     workspace_id=workspace_id,
-                    pass_number=pass_number + 1,
+                    pass_number=fix_pass_number,
+                    fix_pass_kind=fix_pass_kind,
                     source=exc.source,
                     label=exc.label,
                     invocation_id=exc.invocation_id,
@@ -2211,10 +2736,14 @@ class WorkspaceExecutor:
                 _log.warning(
                     "executor.fix_pass_agent_nonzero_exit",
                     workspace_id=workspace_id,
-                    pass_number=pass_number + 1,
+                    pass_number=fix_pass_number,
+                    fix_pass_kind=fix_pass_kind,
                     returncode=exc.result.returncode,
                     reason_code=exc.reason_code,
                 )
+
+            if not is_post_validation_conformance_fix_pass:
+                validation_fix_passes_used += 1
 
             if not await self._recheck_status(
                 workspace_id,
@@ -2343,10 +2872,10 @@ class WorkspaceExecutor:
                     requested_tier=validation_tier,
                 ):
                     return
-                commit_msg = f"awf: fix pass {pass_number + 1} for {ws.task_title}"[:72]
+                commit_msg = f"awf: fix pass {fix_pass_number} for {ws.task_title}"[:72]
                 commit_body = (
-                    f"AWF validation fix pass {pass_number + 1} of "
-                    f"{max_fix_passes} for workspace {workspace_id} "
+                    f"AWF {fix_pass_kind} fix pass {fix_pass_number} of "
+                    f"{fix_pass_total_passes} for workspace {workspace_id} "
                     f"(agent: {ws.agent}). Failed command: "
                     f"{first_fail.command}."
                 )
@@ -2378,11 +2907,12 @@ class WorkspaceExecutor:
         # ── Recovery skip-push guard ───────────────────────────────────────
         # Recovery for a workspace that already has an open PR must NOT
         # re-create the PR. Clean validate-only recovery does not push; if a
-        # fix pass created a new validated local commit, update the existing PR
-        # branch before handing back to the monitor. Rebase-only recovery
-        # already pushed the rebased branch above.
+        # fix pass or handoff report created a new validated local commit,
+        # update the existing PR branch before handing back to the monitor.
+        # Rebase-only recovery already pushed the rebased branch above, but
+        # later validation work can still advance local HEAD.
         if recovery is not None and ws.pr_url:
-            recovery_requires_pr_update = _validate_only_recovery_needs_existing_pr_push(
+            recovery_requires_pr_update = _recovery_needs_existing_pr_push(
                 recovery,
                 validated_workspace_head_sha=successful_validation_workspace_head_sha,
                 rebase_recovery_result=rebase_recovery_result,
@@ -3338,8 +3868,8 @@ class WorkspaceExecutor:
                     now=datetime.now(UTC),
                 )
             if reusable is not None:
-                metadata = (reusable.log_stream_refs or {}).get("coverage")
-                if isinstance(metadata, Mapping):
+                metadata = validation_run_coverage_payload(reusable)
+                if metadata:
                     return _CoverageEvidenceResult(
                         coverage=_coverage_result_from_metadata(metadata),
                         evidence_status="reused",
@@ -3380,6 +3910,341 @@ class WorkspaceExecutor:
             return None
         return max(1, int(reservation.steady_cpu))
 
+    async def _record_planning_validation_handoff_event(
+        self,
+        *,
+        workspace_id: str,
+        handoff: _PlanningValidationHandoff,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                return
+            await repo.add_event(
+                workspace,
+                event_type="workspace.planning_conformance_requires_awf_validation",
+                reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                payload={
+                    "summary": handoff.report.summary,
+                    "gaps": list(handoff.report.gaps),
+                    "report_reason_code": handoff.report.reason_code,
+                    "plan_path": handoff.plan_path.as_posix(),
+                    "report_path": handoff.report_path.as_posix(),
+                    "iteration": handoff.iteration,
+                    "max_iterations": handoff.max_iterations,
+                },
+            )
+            await session.commit()
+
+    async def _run_post_validation_conformance_check(
+        self,
+        *,
+        adapter: AgentAdapter,
+        workspace: Workspace,
+        profile: WorkspaceProfile,
+        compose_project: str,
+        compose_file: Path,
+        worktree_path: Path,
+        model: str | None,
+        handoff: _PlanningValidationHandoff,
+        validation_run_id: str,
+    ) -> _PlanningRunFailure | None:
+        # Post-validation conformance is strictly report-only, regardless of
+        # ordinary planning unexplained-deviation policy.
+        del profile
+        evidence = await self._validation_run_evidence_for_conformance(validation_run_id)
+        # Snapshot before the adapter run and before any AWF-synthesized
+        # satisfied report write below; this scope check only polices changes
+        # made during the report-only conformance command.
+        before_compare = await self._changed_paths(worktree_path)
+        before_compare_head = await self._git_rev_parse_head(worktree_path)
+        allowed_paths = {handoff.report_path}
+        # Path-set subtraction misses edits to already-dirty paths, so keep a
+        # content snapshot for every pre-dirty non-report path.
+        before_dirty_digests = {
+            path: self._digest_dirty_content(worktree_path, {path})
+            for path in before_compare - allowed_paths
+        }
+        # A stale handoff report may still be present at this path; prefer
+        # stdout unless the conformance rerun actually refreshed the file.
+        report_path = worktree_path / handoff.report_path
+        before_report_text = _read_text_if_present(report_path)
+        before_report_digest = _digest_text(before_report_text) if before_report_text else None
+        await self._update_subphase(workspace.id, "conformance")
+        compare_result = await adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=build_conformance_prompt(
+                task_prompt=workspace.task_prompt,
+                plan_path=handoff.plan_path,
+                report_path=handoff.report_path,
+                iteration=handoff.iteration + 1,
+                validation_evidence=evidence,
+            ),
+            model=model,
+            workspace_id=workspace.id,
+        )
+        after_compare = await self._changed_paths(worktree_path)
+        committed_compare = (
+            await self._committed_paths_since(worktree_path, before_compare_head)
+            if before_compare_head is not None
+            else set()
+        )
+        edited_pre_dirty_extra = {
+            path
+            for path, digest in before_dirty_digests.items()
+            if self._digest_dirty_content(worktree_path, {path}) != digest
+        }
+        dirty_extra = after_compare - before_compare - allowed_paths
+        committed_extra = committed_compare - allowed_paths
+        extra = sorted(dirty_extra | committed_extra | edited_pre_dirty_extra)
+        if extra:
+            return _build_planning_scope_failure(
+                scope_phase="conformance",
+                required_paths=(handoff.report_path,),
+                offending_paths=extra,
+                summary=(
+                    "post-validation conformance phase changed files outside "
+                    f"`{handoff.report_path}`"
+                ),
+            )
+
+        report_text = _read_text_if_present(report_path)
+        report_from_fresh_file = (
+            report_text is not None and _digest_text(report_text) != before_report_digest
+        )
+        if not report_from_fresh_file:
+            report_text = None
+        if report_text is None and compare_result.stdout:
+            report_text = compare_result.stdout
+        report = parse_conformance_report(report_text or "")
+        if report.satisfied:
+            if not report_from_fresh_file:
+                try:
+                    self._write_satisfied_post_validation_conformance_report(
+                        worktree_path=worktree_path,
+                        report_path=handoff.report_path,
+                        report=report,
+                    )
+                except OSError as exc:
+                    raise _PostValidationConformanceReportWriteError(
+                        report_path=handoff.report_path,
+                        error=exc,
+                    ) from exc
+            await self._commit_post_validation_conformance_report(
+                workspace_id=workspace.id,
+                worktree_path=worktree_path,
+                report_path=handoff.report_path,
+                validation_run_id=validation_run_id,
+            )
+            await self._record_post_validation_conformance_event(
+                workspace_id=workspace.id,
+                handoff=handoff,
+                report=report,
+                validation_run_id=validation_run_id,
+            )
+            return None
+
+        gap_text = "; ".join(report.gaps) or report.summary
+        return _PlanningRunFailure(
+            message=f"post-validation plan conformance was not satisfied: {gap_text}",
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            details={
+                "conformance": build_conformance_failure_evidence(
+                    report=report,
+                    iterations_used=handoff.iteration + 2,
+                    max_iterations=handoff.max_iterations,
+                    plan_path=handoff.plan_path,
+                    report_path=handoff.report_path,
+                ),
+                "validation_run_id": validation_run_id,
+            },
+        )
+
+    @staticmethod
+    def _write_satisfied_post_validation_conformance_report(
+        *,
+        worktree_path: Path,
+        report_path: Path,
+        report: PlanConformanceReport,
+    ) -> None:
+        path = worktree_path / report_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "status": report.status.value,
+                    "summary": report.summary,
+                    "reason_code": report.reason_code,
+                    "gaps": list(report.gaps),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    async def _commit_post_validation_conformance_report(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        report_path: Path,
+        validation_run_id: str,
+    ) -> bool:
+        report_path_text = report_path.as_posix()
+        git_base = [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+        ]
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_validation_conformance_report_git_add",
+        )
+        add_result = await self._runner.run([*git_base, "add", "--", report_path_text])
+        if not add_result.ok:
+            raise _PostValidationConformanceReportGitError(
+                operation="add",
+                result=add_result,
+            )
+
+        cached = await self._runner.run(
+            [*git_base, "diff", "--cached", "--name-only", "--", report_path_text]
+        )
+        if not cached.ok:
+            reset_result = await self._runner.run(
+                [*git_base, "reset", "-q", "--", report_path_text]
+            )
+            if not reset_result.ok:
+                _log.warning(
+                    "executor.post_validation_conformance_report_unstage_failed",
+                    workspace_id=workspace_id,
+                    report_path=report_path_text,
+                    triggering_operation="diff",
+                    returncode=reset_result.returncode,
+                    command_reason_code=reset_result.reason_code,
+                )
+            raise _PostValidationConformanceReportGitError(
+                operation="diff",
+                result=cached,
+                cleanup_operation="reset" if not reset_result.ok else None,
+                cleanup_result=reset_result if not reset_result.ok else None,
+            )
+        staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
+        if report_path_text not in staged_paths:
+            _log.info(
+                "executor.post_validation_conformance_report_no_commit_needed",
+                workspace_id=workspace_id,
+                report_path=report_path_text,
+                validation_run_id=validation_run_id,
+            )
+            return False
+
+        commit_result = await self._runner.run(
+            [
+                *git_base,
+                *git_identity_config_args(),
+                "commit",
+                "-m",
+                "awf: post-validation conformance report",
+                "-m",
+                (
+                    "Persist satisfied post-validation conformance report "
+                    f"for validation run {validation_run_id}."
+                ),
+                "--",
+                report_path_text,
+            ],
+        )
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_validation_conformance_report_git_commit",
+        )
+        if not commit_result.ok:
+            raise _PostValidationConformanceReportGitError(
+                operation="commit",
+                result=commit_result,
+            )
+        return True
+
+    async def _record_post_validation_conformance_event(
+        self,
+        *,
+        workspace_id: str,
+        handoff: _PlanningValidationHandoff,
+        report: PlanConformanceReport,
+        validation_run_id: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                return
+            await repo.add_event(
+                workspace,
+                event_type="workspace.post_validation_conformance_satisfied",
+                reason_code=report.reason_code,
+                payload={
+                    "summary": report.summary,
+                    "plan_path": handoff.plan_path.as_posix(),
+                    "report_path": handoff.report_path.as_posix(),
+                    "validation_run_id": validation_run_id,
+                },
+            )
+            await session.commit()
+
+    async def _validation_run_evidence_for_conformance(self, validation_run_id: str) -> str:
+        async with self._session_factory() as session:
+            run = await ValidationRunRepository(session).get(validation_run_id)
+            if run is None:
+                payload: dict[str, Any] = {
+                    "validation_run_id": validation_run_id,
+                    "status": "missing",
+                    "reason_code": "VALIDATION_RUN_NOT_FOUND",
+                }
+            else:
+                log_stream_refs = dict(run.log_stream_refs or {})
+                log_stream_refs.pop("coverage", None)
+                coverage = validation_run_coverage_payload(run)
+                payload = {
+                    "validation_run_id": run.id,
+                    "status": run.status,
+                    "reason_code": run.reason_code,
+                    "coverage": coverage,
+                    "workspace_head_sha": run.workspace_head_sha,
+                    "target_branch": run.target_branch,
+                    "target_head_sha": run.target_head_sha,
+                    "base_commit": run.base_commit,
+                    "base_sha": run.base_sha,
+                    "tier": run.tier,
+                    "retry_count": run.retry_count,
+                    "command_set_hash": run.command_set_hash,
+                    # Command records are metadata-only; stdout/stderr stay in log refs.
+                    # If that changes, update evidence compaction before passing them through.
+                    "commands": list(run.commands or []),
+                    "log_stream_refs": log_stream_refs,
+                    "profile_name": run.profile_name,
+                    "profile_version": run.profile_version,
+                    "profile_source": run.profile_source,
+                    "resolved_profile_digest": run.resolved_profile_digest,
+                    "environment_identity_digest": run.environment_identity_digest,
+                }
+        # Preserve the complete evidence shape when it fits. If it does not,
+        # compact bulky fields as JSON values so the fenced evidence stays
+        # parseable while retaining the validation result fields first.
+        safe_serialized_payload = _validation_evidence_json(payload)
+        return (
+            "AWF persisted validation run evidence:\n"
+            "```json\n"
+            f"{safe_serialized_payload}\n"
+            "```"
+        )
+
     async def _run_agent_task_with_optional_planning(
         self,
         *,
@@ -3391,7 +4256,7 @@ class WorkspaceExecutor:
         worktree_path: Path,
         model: str | None,
         command_evidence: list[str] | None = None,
-    ) -> str | _PlanningRunFailure | None:
+    ) -> str | _PlanningRunFailure | _PlanningValidationHandoff | None:
         planning = profile.planning
         coordination_warnings = coordination_warnings_from_task_policy(
             getattr(workspace, "task_policy", None)
@@ -3664,6 +4529,23 @@ class WorkspaceExecutor:
                     summary=report.summary,
                 )
                 return None
+
+            if report is not None and conformance_requires_awf_validation(report):
+                _log.info(
+                    "executor.planning_conformance_requires_awf_validation",
+                    workspace_id=workspace.id,
+                    iteration=iteration,
+                    max_iterations=planning.max_iterations,
+                    gaps=list(report.gaps),
+                    reason_code=report.reason_code,
+                )
+                return _PlanningValidationHandoff(
+                    report=report,
+                    plan_path=plan_path,
+                    report_path=report_path,
+                    iteration=iteration,
+                    max_iterations=planning.max_iterations,
+                )
 
             stall = classify_conformance_stall(
                 history=iteration_history,
@@ -5092,6 +5974,141 @@ class WorkspaceExecutor:
             await session.commit()
 
 
+def _validation_evidence_json(payload: dict[str, Any]) -> str:
+    safe_payload = cast(dict[str, Any], redact_audit_value(payload))
+    serialized = _serialize_validation_evidence_payload(safe_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    compact_payload = dict(safe_payload)
+    compact_payload["evidence_truncated"] = True
+    compact_payload["commands"] = _validation_evidence_size_summary(
+        safe_payload.get("commands")
+    )
+    compact_payload["log_stream_refs"] = _validation_evidence_size_summary(
+        safe_payload.get("log_stream_refs")
+    )
+    serialized = _serialize_validation_evidence_payload(compact_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    compact_payload["coverage"] = _validation_evidence_coverage_summary(
+        safe_payload.get("coverage")
+    )
+    serialized = _serialize_validation_evidence_payload(compact_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    minimal_payload = {
+        key: compact_payload.get(key)
+        for key in _VALIDATION_EVIDENCE_CORE_KEYS
+        if key in compact_payload
+    }
+    minimal_payload["evidence_truncated"] = True
+    minimal_payload["commands"] = _validation_evidence_size_summary(
+        safe_payload.get("commands")
+    )
+    minimal_payload["log_stream_refs"] = _validation_evidence_size_summary(
+        safe_payload.get("log_stream_refs")
+    )
+    serialized = _serialize_validation_evidence_payload(minimal_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    oversized_serialized_length = len(json.dumps(safe_payload, default=str))
+    floor_payload = _validation_evidence_floor_payload(
+        safe_payload,
+        oversized_serialized_length=oversized_serialized_length,
+    )
+    serialized = _serialize_validation_evidence_payload(floor_payload)
+    if len(serialized) <= _VALIDATION_EVIDENCE_JSON_LIMIT:
+        return serialized
+
+    return _serialize_validation_evidence_payload(
+        {
+            "evidence_truncated": True,
+            "truncation_reason": "validation_evidence_json_limit",
+            "oversized_serialized_length": oversized_serialized_length,
+        }
+    )
+
+
+def _serialize_validation_evidence_payload(payload: Mapping[str, Any]) -> str:
+    serialized = json.dumps(payload, default=str)
+    return redact_audit_text(serialized, limit=_VALIDATION_EVIDENCE_JSON_LIMIT)
+
+
+def _validation_evidence_coverage_summary(value: object) -> object:
+    if not isinstance(value, Mapping):
+        return _validation_evidence_size_summary(value)
+    summary = _validation_evidence_size_summary(value)
+    for key in _VALIDATION_EVIDENCE_COVERAGE_PRIORITY_KEYS:
+        if key in value:
+            summary[key] = value[key]
+    return summary
+
+
+def _validation_evidence_floor_payload(
+    payload: Mapping[str, Any],
+    *,
+    oversized_serialized_length: int,
+) -> dict[str, Any]:
+    floor_payload = {
+        key: _validation_evidence_floor_value(payload[key])
+        for key in _VALIDATION_EVIDENCE_CORE_KEYS
+        if key in payload and key != "coverage"
+    }
+    if "coverage" in payload:
+        floor_payload["coverage"] = _validation_evidence_size_summary(payload["coverage"])
+    floor_payload["evidence_truncated"] = True
+    floor_payload["truncation_reason"] = "validation_evidence_json_limit"
+    floor_payload["oversized_serialized_length"] = oversized_serialized_length
+    floor_payload["commands"] = _validation_evidence_size_summary(payload.get("commands"))
+    floor_payload["log_stream_refs"] = _validation_evidence_size_summary(
+        payload.get("log_stream_refs")
+    )
+    return floor_payload
+
+
+def _validation_evidence_floor_value(value: object) -> object:
+    if isinstance(value, str):
+        if len(value) <= 512:
+            return value
+        return _validation_evidence_size_summary(value)
+    if isinstance(value, int | float | bool) or value is None:
+        return value
+    return _validation_evidence_size_summary(value)
+
+
+def _validation_evidence_size_summary(value: object) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        retained_keys = [
+            str(key) for key in list(value)[:_VALIDATION_EVIDENCE_RETAINED_KEY_COUNT]
+        ]
+        return {
+            "truncated": True,
+            "original_type": "mapping",
+            "original_entry_count": len(value),
+            "retained_keys": retained_keys,
+        }
+    if isinstance(value, list):
+        return {
+            "truncated": True,
+            "original_type": "list",
+            "original_length": len(value),
+        }
+    if isinstance(value, str):
+        return {
+            "truncated": True,
+            "original_type": "string",
+            "original_length": len(value),
+        }
+    return {
+        "truncated": True,
+        "original_type": type(value).__name__,
+    }
+
+
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:/|$)")
 
 
@@ -5845,6 +6862,101 @@ def _validation_failure_message(
             details += f"; logs: {log_hint}"
         return details
     return f"validation failed: {first_fail.command}" if first_fail else "validation failed"
+
+
+def _post_validation_conformance_fix_result(
+    *,
+    failure: _PlanningRunFailure,
+    workspace_id: str,
+    artifacts_root: Path,
+    attempt: int | None = None,
+) -> ValidationResult:
+    artifacts_dir = artifacts_root / workspace_id / "post_validation_conformance"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    attempt_value: object = attempt
+    if attempt_value is None and failure.details:
+        attempt_value = failure.details.get("attempt")
+    suffix = (
+        f".{attempt_value}"
+        if isinstance(attempt_value, int)
+        and not isinstance(attempt_value, bool)
+        and attempt_value > 0
+        else ""
+    )
+    stdout_path = artifacts_dir / f"post_validation_conformance{suffix}.stdout"
+    stderr_path = artifacts_dir / f"post_validation_conformance{suffix}.stderr"
+    stdout_path.write_text(_post_validation_conformance_failure_text(failure), encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    return ValidationResult(
+        commands=[
+            ValidationCommandResult(
+                command="post-validation plan conformance",
+                returncode=1,
+                duration_seconds=0.0,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                phase="conformance",
+                reason_code=failure.reason_code or PLAN_CONFORMANCE_UNSATISFIED,
+                policy_failed=True,
+            )
+        ]
+    )
+
+
+def _post_validation_conformance_failure_text(failure: _PlanningRunFailure) -> str:
+    lines = [failure.message]
+    details = failure.details or {}
+    conformance = details.get("conformance")
+    if isinstance(conformance, Mapping):
+        summary = conformance.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            lines.append(f"Summary: {summary.strip()}")
+        report_reason = conformance.get("report_reason_code")
+        if isinstance(report_reason, str) and report_reason.strip():
+            lines.append(f"Report reason code: {report_reason.strip()}")
+        gaps = conformance.get("gaps")
+        if isinstance(gaps, list):
+            gap_lines = [str(gap).strip() for gap in gaps if str(gap).strip()]
+            if gap_lines:
+                lines.append("Remaining conformance gaps:")
+                lines.extend(f"- {gap}" for gap in gap_lines)
+    return "\n".join(lines)
+
+
+def _post_validation_conformance_agent_failure_message(exc: AgentRunError) -> str:
+    reason_code = exc.reason_code or "AGENT_CLI_FAILED"
+    output = (exc.result.stderr.strip() or exc.result.stdout.strip() or "<no output>")
+    safe_output = redact_audit_text(output, limit=1000)
+    return (
+        "post-validation conformance agent failed "
+        f"({reason_code}, exit {exc.result.returncode}): {safe_output}"
+    )[:2000]
+
+
+def _post_validation_conformance_agent_failure_details(
+    exc: AgentRunError,
+    *,
+    validation_run_id: str,
+) -> dict[str, Any]:
+    reason_code = exc.reason_code or "AGENT_CLI_FAILED"
+    conformance: dict[str, Any] = {
+        "phase": "post_validation",
+        "reason_code": reason_code,
+        "returncode": exc.result.returncode,
+    }
+    stdout = redact_audit_text(exc.result.stdout.strip(), limit=1000)
+    stderr = redact_audit_text(exc.result.stderr.strip(), limit=1000)
+    if stdout:
+        conformance["stdout"] = stdout
+    if stderr:
+        conformance["stderr"] = stderr
+    details: dict[str, Any] = {
+        "conformance": conformance,
+        "validation_run_id": validation_run_id,
+    }
+    if exc.details:
+        details["agent"] = redact_audit_value(exc.details)
+    return details
 
 
 def _git_name_lines(output: str) -> list[str]:

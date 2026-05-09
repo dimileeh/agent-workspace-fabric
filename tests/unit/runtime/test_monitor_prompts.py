@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from awf.runtime.monitor_prompts import (
+    _clean_metadata_lines,
     address_review_comment_prompt,
     address_thread_prompt,
     fix_ci_prompt,
@@ -26,6 +27,13 @@ _ADVERSARIAL_REVIEW_LINES = [
 
 def _assert_only_quoted(prompt: str, phrase: str) -> None:
     assert [line for line in prompt.splitlines() if phrase in line] == [f"AWF-EVIDENCE> {phrase}"]
+
+
+@pytest.mark.unit
+def test_clean_metadata_lines_skips_blank_values() -> None:
+    assert _clean_metadata_lines((("path", "src/app.py"), ("line", " \n\t "))) == [
+        "path: src/app.py"
+    ]
 
 
 class TestAddressThread:

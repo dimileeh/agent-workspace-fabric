@@ -55,9 +55,9 @@ class ValidationFixContext:
     """1-indexed — "this is attempt 1 of N". Never 0."""
 
     total_passes: int
-    """The configured ``max_validation_fix_passes``. The coding CLI
-    sees both counters so it can pace itself (conservative on attempt
-    1, more aggressive near the cap)."""
+    """The retry budget for this failure category. The coding CLI sees
+    both counters so it can pace itself (conservative on attempt 1,
+    more aggressive near the cap)."""
 
     test_commands: tuple[str, ...]
     """All validation commands that will run on the NEXT pass —
@@ -132,13 +132,16 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
     stdout_block = context.stdout_tail.rstrip() or "(empty)"
     stderr_block = context.stderr_tail.rstrip() or "(empty)"
     test_cmds_block = "\n".join(f"  - {cmd}" for cmd in context.test_commands)
-    coverage_below_threshold = (
+    provider_fail_under = context.reason_code == "COVERAGE_FAIL_UNDER_NOT_REACHED"
+    numeric_coverage_below_threshold = (
         context.coverage_percent is not None
         and context.coverage_minimum_percent is not None
         and context.coverage_percent < context.coverage_minimum_percent
     )
+    coverage_below_threshold = provider_fail_under or numeric_coverage_below_threshold
     coverage_meets_threshold = (
-        context.coverage_percent is not None
+        not provider_fail_under
+        and context.coverage_percent is not None
         and context.coverage_minimum_percent is not None
         and context.coverage_percent >= context.coverage_minimum_percent
     )
@@ -150,7 +153,15 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
         "`pytest.ini`, or CI workflow files unless the task explicitly "
         "asked you to change those policies.",
     ]
-    if coverage_below_threshold:
+    if provider_fail_under:
+        policy_lines.append(
+            "  - Coverage provider reported fail-under was not reached; add "
+            "meaningful tests for the relevant code paths after fixing any named "
+            "failing tests. If the threshold is already unreachable on the "
+            "unchanged base branch, preserve the threshold and make the smallest "
+            "honest coverage improvement you can."
+        )
+    elif numeric_coverage_below_threshold:
         policy_lines.append(
             "  - Coverage is below the configured threshold; add meaningful "
             "tests for the relevant code paths after fixing any named failing "
@@ -184,9 +195,11 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
         coverage_lines.append(
             f"Pre-agent base-branch coverage: {context.baseline_coverage_percent:.2f}%"
         )
-    if coverage_meets_threshold:
+    if provider_fail_under:
+        coverage_lines.append("Coverage provider reported fail-under was not reached")
+    elif coverage_meets_threshold:
         coverage_lines.append("Coverage already meets the configured threshold")
-    elif coverage_below_threshold and failing_values:
+    if coverage_below_threshold and failing_values:
         coverage_lines.append("Fix the failing pytest tests first, then revisit coverage")
     coverage_block = ""
     if coverage_lines:

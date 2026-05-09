@@ -97,6 +97,7 @@ from awf.db.models import (
     WorkspaceSecretLease,
 )
 from awf.db.utils import escape_like_pattern as _escape_like_pattern
+from awf.db.validation_runs import validation_run_coverage_payload
 from awf.runtime.merge_eligibility import DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
 from awf.service.scheduler import (
     AGE_BOOST_INTERVAL_SECONDS,
@@ -1548,8 +1549,10 @@ class ValidationRunRepository:
         run.retry_count = retry_count
         run.finished_at = finished_at or datetime.now(UTC)
         if coverage is not None:
+            coverage_payload = dict(coverage)
+            run.coverage = coverage_payload
             log_stream_refs = dict(run.log_stream_refs or {})
-            log_stream_refs["coverage"] = dict(coverage)
+            log_stream_refs["coverage"] = coverage_payload
             run.log_stream_refs = log_stream_refs
         if command_retries is not None:
             updated_commands = list(run.commands)
@@ -1622,10 +1625,9 @@ class ValidationRunRepository:
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         for row in rows:
-            coverage = (row.log_stream_refs or {}).get("coverage")
+            coverage = validation_run_coverage_payload(row)
             if (
-                isinstance(coverage, Mapping)
-                and coverage.get("status") in {
+                coverage.get("status") in {
                     "passed",
                     "not_configured",
                 }

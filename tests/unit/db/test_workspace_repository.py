@@ -379,6 +379,14 @@ class TestValidationRunRepository:
                 coverage={"status": "passed", "reason_code": "COVERAGE_OK", "percent": 99.0},
                 finished_at=now,
             )
+            run.log_stream_refs = {
+                "coverage": {
+                    "status": "failed",
+                    "reason_code": "COVERAGE_BELOW_THRESHOLD",
+                    "failing_test_node_ids": ["tests/unit/test_widget.py::test_failed"],
+                }
+            }
+            await s.flush()
 
             reused = await repo.find_reusable_coverage_evidence(
                 workspace_id=workspace.id,

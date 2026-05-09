@@ -10,6 +10,7 @@ needed from that report.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
 PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
 PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
+CONFORMANCE_REQUIRES_AWF_VALIDATION = "CONFORMANCE_REQUIRES_AWF_VALIDATION"
 AGENT_PLAN_PHASE_SCOPE_VIOLATION = "AGENT_PLAN_PHASE_SCOPE_VIOLATION"
 AGENT_STALLED_IN_CONFORMANCE = "AGENT_STALLED_IN_CONFORMANCE"
 AGENT_IDLE_TIMEOUT_REASON_CODE = "AGENT_IDLE_TIMEOUT"
@@ -285,7 +287,13 @@ def build_conformance_prompt(
     plan_path: Path,
     report_path: Path,
     iteration: int,
+    validation_evidence: str | None = None,
 ) -> str:
+    validation_evidence_section = (
+        f"### Validation evidence\n{validation_evidence.strip()}\n\n"
+        if validation_evidence and validation_evidence.strip()
+        else ""
+    )
     return (
         "## Conformance phase\n\n"
         f"Compare the current workspace implementation against `{plan_path.as_posix()}`.\n"
@@ -296,10 +304,16 @@ def build_conformance_prompt(
         "logs, validation summaries, git diff, and artifacts instead. If validation "
         "evidence is missing, stale, or insufficient, report `needs_iteration` with "
         "a specific gap asking AWF to run the missing validation under the validation "
-        "phase.\n\n"
+        "phase. Set `reason_code` to `CONFORMANCE_REQUIRES_AWF_VALIDATION` only when "
+        "every remaining gap is missing, stale, or insufficient AWF-owned validation "
+        "evidence. Do not use it for implementation, API, plan, or documentation gaps.\n\n"
+        f"{validation_evidence_section}"
         f"Write a JSON object to `{report_path.as_posix()}` and also print the same JSON object "
         "as your final response. The object must have this shape:\n\n"
-        '```json\n{"status":"satisfied|needs_iteration","summary":"...","gaps":["..."]}\n```\n\n'
+        "```json\n"
+        '{"status":"satisfied|needs_iteration","summary":"...",'
+        '"gaps":["..."],"reason_code":"optional reason code"}\n'
+        "```\n\n"
         "Use `satisfied` only when the implementation fully achieves the saved plan. "
         "Use `needs_iteration` when any planned behavior, test, validation, or documented "
         "non-goal handling is missing. Keep gaps actionable and specific.\n\n"
@@ -328,6 +342,19 @@ def build_conformance_failure_evidence(
         "plan_path": plan_path.as_posix(),
         "report_path": report_path.as_posix(),
     }
+
+
+def conformance_requires_awf_validation(report: PlanConformanceReport) -> bool:
+    """Return true only for explicit validation-evidence-only conformance gaps."""
+
+    if report.status != PlanConformanceStatus.needs_iteration:
+        return False
+    normalized_reason = report.reason_code.strip().upper().replace("-", "_")
+    if normalized_reason != CONFORMANCE_REQUIRES_AWF_VALIDATION:
+        return False
+    if not report.gaps:
+        return False
+    return all(_is_awf_validation_evidence_gap(gap) for gap in report.gaps)
 
 
 def classify_conformance_stall(
@@ -463,6 +490,155 @@ def classify_conformance_stall(
     return None
 
 
+def _is_awf_validation_evidence_gap(gap: str) -> bool:
+    text = gap.strip().lower()
+
+    def has_marker(marker: str) -> bool:
+        return re.search(rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])", text) is not None
+
+    named_validation_command_handoff = (
+        re.search(r"(?<![a-z0-9_])(?:re-?run|run)(?![a-z0-9_])", text) is not None
+        and any(
+            has_marker(marker)
+            for marker in (
+                "awf",
+                "validation",
+                "validation phase",
+                "profile gate",
+                "profile gates",
+            )
+        )
+        and any(
+            has_marker(marker)
+            for marker in (
+                "pytest",
+                "ruff",
+                "mypy",
+                "coverage",
+                "npm",
+                "lint",
+                "build",
+            )
+        )
+    )
+    evidence_markers = (
+        "evidence",
+        "provenance",
+        "log",
+        "logs",
+        "missing",
+        "stale",
+        "insufficient",
+        "absent",
+        "unavailable",
+        "not available",
+        "not found",
+        "not run",
+        "has not run",
+        "run validation",
+        "validation run",
+        "profile gate",
+        "profile gates",
+    )
+    if not named_validation_command_handoff and not any(
+        has_marker(marker) for marker in evidence_markers
+    ):
+        return False
+    validation_subject_markers = (
+        "validation",
+        "coverage",
+        "profile",
+        "profile gate",
+        "profile gates",
+        "evidence",
+        "provenance",
+        "log",
+        "logs",
+    )
+    if not named_validation_command_handoff and not any(
+        has_marker(marker) for marker in validation_subject_markers
+    ):
+        return False
+    # Migration implementation gaps stay agent-owned; migration-gate evidence
+    # gaps are AWF-owned because the profile gate must produce that evidence.
+    migration_validation_evidence_gap = (
+        has_marker("migration") and _has_migration_validation_evidence_context(text)
+    )
+    if has_marker("migration") and not migration_validation_evidence_gap:
+        return False
+    deterministic_markers = (
+        "api",
+        "endpoint",
+        "implement",
+        "implementation",
+        "wire",
+        "function",
+        "class",
+    )
+    if any(has_marker(marker) for marker in deterministic_markers):
+        return False
+    if has_marker("schema") and not migration_validation_evidence_gap:
+        return False
+    deterministic_gap_patterns = (
+        r"(?:^|[.;:]\s*|(?<![a-z0-9_])please\s+)document(?![a-z0-9_])"
+        r"\s+(?:the\s+)?",
+        r"(?<![a-z0-9_])(?:must|should|need|needs|required)\s+"
+        r"(?:to\s+)?document(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:add|create|update|write|revise)\s+"
+        r"(?:the\s+)?(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])"
+        r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
+        r"need|needs|must|should|required|missing|absent|stale|outdated)",
+        r"(?<![a-z0-9_])(?:add|create|update|write|revise)\s+"
+        r"(?:the\s+)?(?:saved\s+)?plan(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
+        r"\s+(?:gap|gaps|task|tasks|todo|todos|update|updates|change|changes|"
+        r"need|needs|must|should|required|missing|absent|stale|outdated|lacks?)",
+        r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
+        r"(?:saved\s+)?plan(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:from|in|inside|within)\s+(?:the\s+)?"
+        r"(?:docs|documentation|document|doc|guide|readme)(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:saved\s+)?plan(?![a-z0-9_])"
+        r"[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
+        r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
+        r"not found|not run|has not run)\b",
+        r"(?<![a-z0-9_])(?:docs|documentation|document|doc|guide|readme)"
+        r"(?![a-z0-9_])[^.;:]*\b(?:evidence|coverage|profile gate|log|logs)\b[^.;:]*"
+        r"\b(?:missing|absent|stale|outdated|insufficient|unavailable|not available|"
+        r"not found|not run|has not run)\b",
+    )
+    if any(re.search(pattern, text) for pattern in deterministic_gap_patterns):
+        return False
+    # Mixed mentions remain agent-owned: only "code coverage" is AWF-validation
+    # evidence, while any other standalone "code" use is a deterministic gap.
+    for match in re.finditer(r"(?<![a-z0-9_])code(?![a-z0-9_])", text):
+        if re.match(r"[\s-]+coverage\b", text[match.end() :]):
+            continue
+        return False
+    # Test work is deterministic agent work; only coverage artifact phrases
+    # around test/test(s) remain validation evidence.
+    for match in re.finditer(r"(?<![a-z0-9_])tests?(?![a-z0-9_])", text):
+        if re.match(
+            r"[\s\-,:]+(?:coverage|evidence|provenance|logs?|"
+            r"(?:suites?|runners?|runs?|reports?)[\s\-,:]+"
+            r"(?:coverage|evidence|provenance|logs?))\b",
+            text[match.end() :],
+        ):
+            continue
+        return False
+    return True
+
+
+def _has_migration_validation_evidence_context(text: str) -> bool:
+    patterns = (
+        r"(?<![a-z0-9_])migration\s+validation\s+"
+        r"(?:evidence|provenance|logs?|runs?)(?![a-z0-9_])",
+        r"(?<![a-z0-9_])(?:(?:alembic(?:[/ -]profile)?|profile)\s+)?"
+        r"migration\s+(?:profile\s+)?gates?(?![a-z0-9_])",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
 def build_conformance_stall_failure_evidence(
     *,
     stall: ConformanceStallEvidence,
@@ -534,9 +710,15 @@ def build_conformance_stall_recovery_prompt(
         "git add, and git commit. Use existing validation evidence from logs, validation "
         "summaries, git diff, and artifacts. If validation evidence is missing, stale, "
         "or insufficient, report `needs_iteration` with a specific gap asking AWF to "
-        "run the missing validation under the validation phase.\n\n"
+        "run the missing validation under the validation phase. Set `reason_code` to "
+        "`CONFORMANCE_REQUIRES_AWF_VALIDATION` only when every remaining gap is missing, "
+        "stale, or insufficient AWF-owned validation evidence. Do not use it for "
+        "implementation, API, plan, or documentation gaps.\n\n"
         "The object must have this shape:\n\n"
-        '```json\n{"status":"satisfied|needs_iteration","summary":"...","gaps":["..."]}\n```\n\n'
+        "```json\n"
+        '{"status":"satisfied|needs_iteration","summary":"...",'
+        '"gaps":["..."],"reason_code":"optional reason code"}\n'
+        "```\n\n"
         f"### Prior gaps (advisory)\n{gap_lines}\n\n"
         f"### Original task\n{task_prompt}\n"
     )
