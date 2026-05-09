@@ -808,9 +808,7 @@ async def test_stale_recovery_callback_ignores_active_pr_monitor_non_recovery_op
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
         stale_events = [
-            event
-            for event in ws.events
-            if event.event_type == "workspace.stale_callback_ignored"
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
         ]
     assert len(stale_events) == 1
     assert stale_events[0].reason_code == "STALE_CALLBACK_IGNORED"

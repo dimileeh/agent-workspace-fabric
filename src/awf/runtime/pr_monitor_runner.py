@@ -3003,10 +3003,7 @@ class PullRequestMonitorRunner:
                         break
                     existing_operation_id = operation.id
                     existing_operation_status = operation.status
-                    if (
-                        existing_operation_status
-                        in _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES
-                    ):
+                    if existing_operation_status in _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES:
                         idempotency_key = await retryable_monitor_operation_idempotency_key(
                             operation_repo,
                             workspace_id=workspace_id,
