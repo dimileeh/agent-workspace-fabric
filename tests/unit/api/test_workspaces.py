@@ -2605,12 +2605,14 @@ class TestGetWorkspace:
         ws_id = create.json()["workspace_id"]
         original = ValidationRunRepository.list_for_workspace
         failures_remaining = 1
+        calls = 0
 
         async def _flaky_validation_runs(
             self: ValidationRunRepository,
             workspace_id: str,
         ) -> list[object]:
-            nonlocal failures_remaining
+            nonlocal failures_remaining, calls
+            calls += 1
             if failures_remaining:
                 failures_remaining -= 1
                 raise _closed_connection_error()
@@ -2627,6 +2629,7 @@ class TestGetWorkspace:
         assert response.status_code == 200
         assert response.json()["id"] == ws_id
         assert response.json()["validation_provenance"]["reason_code"] == "validation_unavailable"
+        assert calls == 2
 
     @pytest.mark.unit
     async def test_get_workspace_ignores_egress_audit_lookup_failure(
