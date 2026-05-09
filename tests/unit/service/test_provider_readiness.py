@@ -2025,6 +2025,7 @@ def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted
     assert "provider_readiness.ollama_probe_exception" in caplog.text
     assert "Traceback" in caplog.text
     assert "RuntimeError: transport failed for <redacted>" in caplog.text
+    assert "HTTP 503: busy <redacted>" in caplog.text
     assert "sk-proj-ollama-terminal-secret" not in caplog.text
     assert "ghp_ollama_terminal_secret" not in caplog.text
 
