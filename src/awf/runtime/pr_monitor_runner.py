@@ -309,6 +309,7 @@ def _monitor_recovery_conformance_payload(workspace: Workspace) -> dict[str, Any
 
 
 def _is_active_pr_monitor_recovery_operation(operation: Operation) -> bool:
+    """Return whether an operation is an unfinished PR monitor recovery action."""
     return (
         operation.status in _ACTIVE_RECOVERY_OPERATION_STATUSES
         and operation.type == OperationType.validate.value
@@ -387,6 +388,8 @@ class _NonCheckReviewerSettleDecision:
 
 @dataclass(frozen=True)
 class _NonCheckReviewerSettleWaitOperationContext:
+    """Monitor-state payload and identity fields for reviewer-settle waits."""
+
     extra_payload: dict[str, object]
     extra_identity: tuple[object, ...]
 
@@ -5735,6 +5738,7 @@ def _non_check_reviewer_settle_wait_operation_context(
     config: MonitorConfig,
     decision: _NonCheckReviewerSettleDecision,
 ) -> _NonCheckReviewerSettleWaitOperationContext:
+    """Build persisted wait-operation context for non-check reviewer settle state."""
     return _NonCheckReviewerSettleWaitOperationContext(
         extra_payload={
             "settle_seconds": config.non_check_reviewer_settle_seconds,
