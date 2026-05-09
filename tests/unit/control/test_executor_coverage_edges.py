@@ -28,6 +28,7 @@ from awf.control.executor import (
     _coverage_has_failing_tests,
     _coverage_preserves_below_threshold_baseline,
     _coverage_wrapped_pytest_failure_message,
+    _defer_final_coverage_to_pr_monitor,
     _failure_reason_for_phase,
     _failure_salvage_payload,
     _format_failing_test_evidence,
@@ -456,6 +457,52 @@ def test_validation_command_records_can_mark_coverage_skipped_by_policy() -> Non
     assert records[-1]["phase"] == "coverage"
     assert records[-1]["evidence_status"] == "skipped_by_policy"
     assert records[-1]["evidence_reason_code"] == "TARGETED_EDIT_GATE"
+
+
+@pytest.mark.unit
+def test_pr_monitored_targeted_profile_defers_final_coverage_to_check_rollup() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "awf-self",
+            "validation": {
+                "strategy": {
+                    "edit_gate": "targeted",
+                    "final_gate": "coverage",
+                },
+                "coverage": {
+                    "minimum_percent": 99,
+                    "enforce": True,
+                    "command": "uv run --python 3.12 --extra dev pytest --cov=awf",
+                },
+            },
+            "phases": {"validate": ["uv run pytest tests/unit/cli -q"]},
+        }
+    )
+
+    assert (
+        _defer_final_coverage_to_pr_monitor(
+            recovery=None,
+            has_pr_monitor=True,
+            profile=profile,
+        )
+        is True
+    )
+    assert (
+        _defer_final_coverage_to_pr_monitor(
+            recovery=None,
+            has_pr_monitor=False,
+            profile=profile,
+        )
+        is False
+    )
+    assert (
+        _defer_final_coverage_to_pr_monitor(
+            recovery={"recovery_mode": "validate_only"},
+            has_pr_monitor=True,
+            profile=profile,
+        )
+        is False
+    )
 
 
 @pytest.mark.unit

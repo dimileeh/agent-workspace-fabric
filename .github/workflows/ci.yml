@@ -38,23 +38,60 @@ jobs:
         # against them generates noise without catching real bugs.
         run: .venv/bin/mypy
 
-      - name: Unit tests with coverage
-        # ``--cov-fail-under=0`` overrides the 90% bar from pyproject
-        # because unit tests alone don't exercise ``pr_monitor_runner.py``
-        # and similar runtime orchestrators — those have dedicated
-        # integration tests that run in the ``integration`` job below.
-        # Enforcing 90% here would force either coverage-theatre or
-        # pulling integration tests into the unit suite; neither is
-        # what we want. The test-authoring bar still applies: new
-        # modules should come with >90% unit coverage of their pure
-        # logic (see Phase 1.5d/1.5e helpers, both at 94-100%).
-        run: .venv/bin/pytest tests/unit/ -v --cov=awf --cov-report=term-missing --cov-report=xml --cov-fail-under=0
+      - name: Unit tests
+        run: .venv/bin/pytest tests/unit/ -v
 
-      - name: Upload coverage artifact
+  python-full-coverage:
+    runs-on: ubuntu-latest-8-cores
+    needs: lint-and-test
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: awf
+          POSTGRES_PASSWORD: awf_ci
+          POSTGRES_DB: awf
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U awf"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.x"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --python 3.12 --extra dev
+
+      - name: Verify Docker and Compose
+        run: |
+          docker version
+          docker compose version
+
+      - name: Build agent runtime image
+        run: docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
+
+      - name: Full coverage
+        env:
+          CI: "true"
+          AWF_DATABASE_URL: postgresql+asyncpg://awf:awf_ci@localhost:5432/awf
+          AWF_TEST_DATABASE_URL: postgresql+asyncpg://awf:awf_ci@localhost:5432/awf
+        run: uv run --python 3.12 --extra dev pytest -n 8 --dist=loadscope --cov=awf --cov-report=term-missing --cov-report=xml --cov-fail-under=99
+
+      - name: Upload full coverage artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: full-coverage-report
           path: coverage.xml
           retention-days: 14
 
