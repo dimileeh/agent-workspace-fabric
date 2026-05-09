@@ -154,6 +154,7 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     ("scope", "value"),
     [
         ("workflow", "true"),
+        ("workflow", "True"),
         ("job", "yes"),
         ("step", "on"),
         ("step", True),
