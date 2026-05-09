@@ -1635,10 +1635,11 @@ class TestOwnedPathOverlapLookup:
         assert "FOR UPDATE" in sql
         assert "SKIP LOCKED" in sql
         assert "OFFSET" not in sql
-        assert "< coalesce((SELECT" in sql
-        assert "= coalesce((SELECT" in sql
+        assert "WITH scheduler_cursor_order AS" in sql
+        assert "scheduler_cursor_order.class_priority" in sql
+        assert "scheduler_cursor_order.effective_score" in sql
+        assert sql.count("scheduler_cursor_workspace.id = 'ws_cursor'") == 2
         assert "scheduler_cursor_workspace" in sql
-        assert "scheduler_cursor_workspace.id = 'ws_cursor'" in sql
         assert "workspaces.created_at >" in sql
         assert "workspaces.created_at =" in sql
         assert "workspaces.id > 'ws_cursor'" in sql

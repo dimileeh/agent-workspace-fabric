@@ -3826,16 +3826,20 @@ def _scheduler_cursor_order_expressions(
         .where(cursor_workspace.id == after.workspace_id)
         .scalar_subquery(),
         literal(after.class_priority),
-    )
+    ).label("class_priority")
     cursor_effective_score = func.coalesce(
         select(cursor_order.effective_score)
         .where(cursor_workspace.id == after.workspace_id)
         .scalar_subquery(),
         literal(after.effective_score),
-    )
+    ).label("effective_score")
+    cursor_order_cte = select(
+        cursor_class_priority,
+        cursor_effective_score,
+    ).cte("scheduler_cursor_order")
     return _SchedulerOrderExpressions(
-        class_priority=cursor_class_priority,
-        effective_score=cursor_effective_score,
+        class_priority=cursor_order_cte.c.class_priority,
+        effective_score=cursor_order_cte.c.effective_score,
     )
 
 
