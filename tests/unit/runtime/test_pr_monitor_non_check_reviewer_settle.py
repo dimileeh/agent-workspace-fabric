@@ -309,6 +309,7 @@ def test_pr_166_regression_visible_greptile_check_still_waits_for_codex_review()
 
 @pytest.mark.unit
 def test_non_check_reviewer_wait_operation_context_centralizes_payload_and_identity() -> None:
+    """The settle wait helper owns the persisted payload and idempotency identity."""
     state = MonitorState()
     cfg = MonitorConfig(
         auto_merge=True,

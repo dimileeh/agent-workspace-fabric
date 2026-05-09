@@ -768,6 +768,7 @@ async def test_stale_recovery_callback_ignores_active_pr_monitor_non_recovery_op
     tmp_path: Path,
     operation_type: OperationType,
 ) -> None:
+    """Non-recovery monitor work must not keep a completed dispatch callback live."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -928,6 +929,7 @@ async def test_recovery_dispatch_retries_cancelled_idempotent_snapshot(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A cancelled snapshot is retryable and must produce a fresh recovery operation."""
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
@@ -1056,6 +1058,7 @@ async def test_recovery_dispatch_waits_when_idempotent_create_loses_race_to_acti
         payload: dict[str, object] | None = None,
         idempotency_key: str,
     ) -> tuple[object, bool]:
+        """Simulate a concurrent recovery create winning before the runner insert."""
         nonlocal inserted
         if not inserted:
             inserted = True

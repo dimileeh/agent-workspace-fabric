@@ -2528,6 +2528,7 @@ class PullRequestMonitorRunner:
         return _supply_chain_policy_blocked_message(blocking_codes)
 
     async def _recovery_dispatch_status_is_stale(self, workspace_id: str) -> bool:
+        """Return whether a recovery-dispatch callback no longer owns the workspace."""
         from awf.db.repositories import WorkspaceRepository
 
         async with self._deps.session_factory() as s:
@@ -2754,6 +2755,7 @@ class PullRequestMonitorRunner:
         monitor_log: WorkspaceLogSink | None,
         skip_initial_review_grace: bool = False,
     ) -> bool | None:
+        """Handle merge-gate blocks by waiting, dispatching recovery, or notifying humans."""
         stale_reason = gate.stale_reason
         req_action = gate.req_action
         ws = gate.workspace

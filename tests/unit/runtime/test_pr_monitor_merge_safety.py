@@ -760,6 +760,7 @@ async def test_auto_merge_dispatches_recovery_despite_active_monitor_non_recover
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
+    """Active non-recovery monitor work must not block stale validation recovery."""
     seed = await _seed_merge_candidate(
         factory,
         pr_number=511,
