@@ -59,7 +59,7 @@ class TestUp:
         assert cmd[:2] == ("docker", "compose")
         env = mock_exec.call_args.kwargs["env"]
         assert env["COMPOSE_PROJECT_NAME"] == spec.project_name()
-        assert env["COMPOSE_FILE"].endswith("/compose.yml")
+        assert Path(env["COMPOSE_FILE"]).name == "compose.yml"
         assert "up" in cmd and "-d" in cmd and "--wait" in cmd
         assert "--remove-orphans" in cmd
         assert "--wait-timeout" in cmd and "300" in cmd
