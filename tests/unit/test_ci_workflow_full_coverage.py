@@ -122,9 +122,7 @@ def test_pull_request_ci_runs_for_every_target_branch() -> None:
     assert "pull_request" in triggers
     pull_request_trigger = triggers.get("pull_request")
 
-    assert not (
-        isinstance(pull_request_trigger, dict) and pull_request_trigger.get("branches")
-    )
+    assert not (isinstance(pull_request_trigger, dict) and pull_request_trigger.get("branches"))
 
 
 @pytest.mark.unit
@@ -148,7 +146,9 @@ def test_ci_has_authoritative_python_full_coverage_job() -> None:
     commands = _run_steps(job)
     assert "docker version" in commands
     assert "docker compose version" in commands
-    assert "docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile ." in commands
+    assert (
+        "docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile ." in commands
+    )
 
     full_coverage_run = _step_run(job, "Full coverage")
     assert "uv run --python 3.12 pytest" in full_coverage_run
@@ -226,9 +226,7 @@ def test_full_coverage_is_the_only_python_test_job() -> None:
     assert "integration" not in jobs
 
     python_test_jobs = [
-        name
-        for name, job in jobs.items()
-        if isinstance(job, dict) and "pytest" in _run_steps(job)
+        name for name, job in jobs.items() if isinstance(job, dict) and "pytest" in _run_steps(job)
     ]
     assert python_test_jobs == ["python-full-coverage"]
 
