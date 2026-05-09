@@ -148,7 +148,7 @@ jobs:
       - name: Install wheel and verify entrypoints
         run: |
           uv venv --python 3.12 .venv-install
-          .venv-install/bin/pip install dist/*.whl
+          uv pip install --python .venv-install/bin/python dist/*.whl
           .venv-install/bin/awf --help
           .venv-install/bin/awf service readiness --help
 
