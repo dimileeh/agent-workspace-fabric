@@ -45,7 +45,7 @@ async def test_workspace_summary_returns_zero_counts_for_empty_db(
 
 
 @pytest.mark.unit
-async def test_resource_saturation_local_capacity_accepts_async_provider() -> None:
+async def test_resource_saturation_local_capacity_accepts_async_provider_with_simple_request() -> None:
     async def _provider(_settings: object) -> LocalCapacityLimits:
         return LocalCapacityLimits(cpu_cores=12, memory_gb=48, source="test")
 
@@ -328,13 +328,24 @@ async def test_resource_saturation_local_capacity_skips_detection_for_configured
     from awf.common.config import Settings
     from awf.service.resource_capacity import LocalCapacityLimits
 
+    detector_called = False
+
+    async def _detector_should_not_run(_settings: Settings) -> LocalCapacityLimits:
+        nonlocal detector_called
+        detector_called = True
+        raise AssertionError(
+            "local_capacity_detector should not be called when limits are configured"
+        )
+
     request = Request(
         {
             "type": "http",
             "method": "GET",
             "path": "/v1/metrics/resources/saturation",
             "headers": [],
-            "app": SimpleNamespace(state=SimpleNamespace()),
+            "app": SimpleNamespace(
+                state=SimpleNamespace(local_capacity_detector=_detector_should_not_run)
+            ),
         }
     )
 
@@ -348,6 +359,7 @@ async def test_resource_saturation_local_capacity_skips_detection_for_configured
     )
 
     assert result == LocalCapacityLimits()
+    assert detector_called is False
 
 
 @pytest.mark.unit
