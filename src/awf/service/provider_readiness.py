@@ -1940,6 +1940,13 @@ def _probe_ollama_model(
         saw_model_response = True
         available_models.update(available)
 
+    for logged_exc in exceptions:
+        _log_redacted_exception(
+            "provider_readiness.ollama_model_probe_exception",
+            logged_exc,
+            secrets,
+        )
+
     if saw_model_response:
         detail = f"selected={model}; available_count={len(available_models)}"
         if failures:
@@ -1954,12 +1961,6 @@ def _probe_ollama_model(
             ),
         }
 
-    for logged_exc in exceptions:
-        _log_redacted_exception(
-            "provider_readiness.ollama_model_probe_exception",
-            logged_exc,
-            secrets,
-        )
     return {
         "status": "fail",
         "reason_code": "OLLAMA_MODEL_PROBE_FAILED",

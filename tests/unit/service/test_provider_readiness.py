@@ -2245,6 +2245,36 @@ def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:
 
 
 @pytest.mark.unit
+def test_ollama_model_probe_logs_exception_before_missing_model(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://primary.local/api/tags":
+            raise RuntimeError("connect failed for sk-proj-ollama-secret")
+        return SimpleNamespace(
+            status_code=200,
+            text='{"models":[{"name":"other-model:latest"}]}',
+        )
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
+    assert "provider_readiness.ollama_model_probe_exception" in caplog.text
+    assert "RuntimeError: connect failed for <redacted>" in caplog.text
+    assert "sk-proj-ollama-secret" not in caplog.text
+    assert "sk-proj-ollama-secret" not in json.dumps(result, sort_keys=True)
+
+
+@pytest.mark.unit
 def test_ollama_model_probe_rejects_invalid_json() -> None:
     def _http_get(_url: str, *, timeout: float) -> Any:
         assert timeout > 0
