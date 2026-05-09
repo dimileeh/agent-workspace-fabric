@@ -1824,10 +1824,59 @@ def test_provider_readiness_opencode_default_host_gateway_falls_back_to_localhos
         "http://localhost:11434/api/version",
     ]
     serialized = json.dumps(payload, sort_keys=True)
+    assert "debug" not in opencode
     assert "provider_readiness.ollama_probe_exception" not in caplog.text
     assert "Traceback" not in caplog.text
     assert "nodename nor servname provided" not in caplog.text
     assert "nodename nor servname provided" not in serialized
+
+
+@pytest.mark.unit
+def test_ollama_http_probe_records_recovered_failures_as_redacted_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
+    urls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        urls.append(url)
+        if url == "http://host.docker.internal:11434/api/version":
+            raise RuntimeError("transport failed for sk-proj-ollama-fallback-secret")
+        if url == "http://localhost:11434/api/version":
+            return SimpleNamespace(status_code=200, text="ok")
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = provider_readiness._probe_ollama(
+        (
+            "http://host.docker.internal:11434/api/version",
+            "http://localhost:11434/api/version",
+        ),
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-fallback-secret"}),
+    )
+
+    assert result == {
+        "ok": True,
+        "debug": {
+            "recovered_failures": [
+                {
+                    "url": "http://host.docker.internal:11434/api/version",
+                    "status": "exception",
+                    "detail": "RuntimeError: transport failed for <redacted>",
+                }
+            ]
+        },
+    }
+    assert urls == [
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+    ]
+    serialized = json.dumps(result, sort_keys=True)
+    assert "provider_readiness.ollama_probe_exception" not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "sk-proj-ollama-fallback-secret" not in serialized
+    assert "sk-proj-ollama-fallback-secret" not in caplog.text
 
 
 @pytest.mark.unit

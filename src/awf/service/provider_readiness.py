@@ -1219,6 +1219,9 @@ def _check_opencode(
             ),
         )
 
+    # Keep successful readiness payloads schema-stable. `_probe_ollama` retains
+    # recovered candidate failures under debug for internal diagnostics; only
+    # terminal probe failures become operator-facing provider detail.
     reason = "OPENCODE_FILE_AUTH_PRESENT"
     if not opencode_config and ollama_files:
         reason = "OLLAMA_FILE_AUTH_PRESENT"
@@ -1802,6 +1805,24 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
     return (primary,)
 
 
+def _ollama_probe_failure_debug(
+    *,
+    url: str,
+    status: str,
+    detail: str,
+    secrets: frozenset[str],
+    status_code: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "url": _redact(url, secrets),
+        "status": status,
+        "detail": _redact(_truncate(detail), secrets),
+    }
+    if status_code is not None:
+        payload["status_code"] = status_code
+    return payload
+
+
 def _probe_ollama(
     urls: tuple[str, ...],
     *,
@@ -1809,6 +1830,7 @@ def _probe_ollama(
     secrets: frozenset[str],
 ) -> dict[str, Any]:
     failures: list[str] = []
+    recovered_failures: list[dict[str, Any]] = []
     exceptions: list[Exception] = []
     for url in urls:
         try:
@@ -1817,12 +1839,32 @@ def _probe_ollama(
             exceptions.append(exc)
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
+            recovered_failures.append(
+                _ollama_probe_failure_debug(
+                    url=url,
+                    status="exception",
+                    detail=detail,
+                    secrets=secrets,
+                )
+            )
             continue
         if 200 <= response.status_code < 300:
-            return {"ok": True}
+            payload: dict[str, Any] = {"ok": True}
+            if recovered_failures:
+                payload["debug"] = {"recovered_failures": recovered_failures}
+            return payload
         detail = response.text or f"HTTP {response.status_code}"
         failure = f"HTTP {response.status_code}: {detail}"
         failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
+        recovered_failures.append(
+            _ollama_probe_failure_debug(
+                url=url,
+                status="http_error",
+                status_code=response.status_code,
+                detail=failure,
+                secrets=secrets,
+            )
+        )
     for exc in exceptions:
         _log_redacted_exception(
             "provider_readiness.ollama_probe_exception",
