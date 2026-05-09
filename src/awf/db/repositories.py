@@ -3887,12 +3887,22 @@ def _scheduler_age_boost_expr(
     wait_seconds: ColumnElement[Any]
     intervals: ColumnElement[Any]
     if dialect_name == "postgresql":
-        wait_seconds = func.extract(
-            "epoch",
-            sql_cast(literal(scoring_at), DateTime(timezone=True)) - Workspace.created_at,
+        scoring_time = sql_cast(literal(scoring_at), DateTime(timezone=True))
+        return case(
+            *(
+                (
+                    Workspace.created_at
+                    <= scoring_time
+                    - text(
+                        f"INTERVAL '{boost * AGE_BOOST_INTERVAL_SECONDS} seconds'"
+                    ),
+                    boost,
+                )
+                for boost in range(AGE_BOOST_MAX, 0, -1)
+            ),
+            else_=0,
         )
-        intervals = sql_cast(func.floor(wait_seconds / AGE_BOOST_INTERVAL_SECONDS), Integer)
-    elif dialect_name == "sqlite":
+    if dialect_name == "sqlite":
         wait_seconds = sql_cast(func.strftime("%s", literal(scoring_at)), Integer) - sql_cast(
             func.strftime("%s", Workspace.created_at),
             Integer,

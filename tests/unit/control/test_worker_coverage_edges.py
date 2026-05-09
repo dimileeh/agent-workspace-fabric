@@ -292,7 +292,10 @@ async def test_stale_active_execution_recovery_continues_after_candidate_error()
     worker._list_stale_active_execution_candidates = _list_candidates  # type: ignore[method-assign]
     worker._recover_stale_active_execution = _recover  # type: ignore[method-assign]
 
-    with structlog.testing.capture_logs() as captured:
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(RuntimeError, match="candidate recovery failed"),
+    ):
         await worker._recover_stale_active_executions()
 
     assert recovered == ["ws_bad", "ws_good"]

@@ -1585,6 +1585,38 @@ class TestOwnedPathOverlapLookup:
         assert "workspaces.id > 'ws_cursor'" in sql
 
     @pytest.mark.unit
+    async def test_postgres_scheduler_cursor_age_boost_uses_timestamp_thresholds(
+        self,
+    ) -> None:
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.ready,
+            limit=1,
+            after=SchedulerOrderCursor(
+                class_priority=2,
+                effective_score=42,
+                queued_at=datetime(2026, 1, 1, tzinfo=UTC),
+                workspace_id="ws_cursor",
+                scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+            ),
+        )
+
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "EXTRACT(epoch" not in sql
+        assert "INTERVAL '900 seconds'" in sql
+
+    @pytest.mark.unit
     async def test_postgres_scheduler_cursor_reuses_cursor_scoring_timestamp(
         self,
     ) -> None:

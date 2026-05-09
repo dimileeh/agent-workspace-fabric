@@ -782,6 +782,7 @@ class ControlWorker:
         candidates = await self._list_stale_active_execution_candidates(
             exclude_ids=set(self._execution_tasks)
         )
+        recovery_errors: list[Exception] = []
         for candidate in candidates:
             try:
                 await self._recover_stale_active_execution(candidate)
@@ -805,6 +806,14 @@ class ControlWorker:
                     error_type=type(exc).__name__,
                     error=str(exc)[:240],
                 )
+                recovery_errors.append(exc)
+        if len(recovery_errors) == 1:
+            raise recovery_errors[0]
+        if recovery_errors:
+            raise ExceptionGroup(
+                "stale active execution recovery failed",
+                recovery_errors,
+            )
 
     async def _record_db_connection_closed_event(
         self,
