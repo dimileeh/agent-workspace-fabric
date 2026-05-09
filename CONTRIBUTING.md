@@ -26,6 +26,13 @@ npm --prefix apps/console run typecheck
 npm --prefix apps/console run build
 ```
 
+## Required GitHub Status Check
+
+Branch protection for `main` and `development` must require the CI
+`ci-required` job. That rollup job depends on `lint-and-test`,
+`python-full-coverage`, `console`, `release-artifacts`, and `integration`, so
+the 99% coverage gate cannot be bypassed by other green jobs in the workflow.
+
 Before a local Core release, run:
 
 ```bash
@@ -130,4 +137,3 @@ uv run --python 3.12 --extra dev pytest tests/unit/api -q
 uv run --python 3.12 --extra dev pytest tests/unit/runtime -q
 uv run --python 3.12 --extra dev pytest tests/unit/common/test_github_client.py -q
 ```
-

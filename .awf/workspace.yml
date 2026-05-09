@@ -40,6 +40,7 @@ awf:
     strategy:
       baseline_coverage: skip
       edit_gate: targeted
+      # PR-monitored workspaces defer this authoritative gate to GitHub Actions.
       final_gate: coverage
       reuse_evidence: true
       freshness_max_age_seconds: 86400
