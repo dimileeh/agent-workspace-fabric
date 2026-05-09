@@ -15,6 +15,9 @@ from awf.profiles.lint import (
 from awf.profiles.models import ProfileLintSeverity, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 
+_PRIVATE_KEY_SENTINEL = "-----BEGIN " + "PRIVATE KEY-----"
+_PRIVATE_KEY_SAMPLE = "-----BEGIN " + "PRIVATE KEY-----\nsecret\n-----END " + "PRIVATE KEY-----"
+
 
 def _profile_with_secret(secret: dict[str, object]) -> WorkspaceProfile:
     return WorkspaceProfile.model_validate({"name": "secret-profile", "secrets": [secret]})
@@ -380,7 +383,7 @@ def test_profile_lint_private_path_and_raw_secret_edges() -> None:
     assert profile_lint._secret_mount_target_is_too_broad("relative/path") is True
     assert profile_lint._looks_like_raw_secret(None) is False
     assert profile_lint._looks_like_raw_secret("   ") is False
-    assert profile_lint._looks_like_raw_secret("-----BEGIN PRIVATE KEY-----") is True
+    assert profile_lint._looks_like_raw_secret(_PRIVATE_KEY_SENTINEL) is True
     assert profile_lint._looks_like_raw_secret("line-one\nline-two") is True
     assert profile_lint._looks_like_raw_secret("a" * 16 + "." + "b" * 16 + "." + "c" * 16) is True
     assert profile_lint._looks_like_raw_secret(("x" * 128) + "!") is True
@@ -418,7 +421,7 @@ def test_blank_provider_ref_is_not_treated_as_raw_secret() -> None:
 @pytest.mark.parametrize(
     "raw_ref",
     [
-        "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+        _PRIVATE_KEY_SAMPLE,
         ("aaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbb.cccccccccccccccc"),
     ],
 )

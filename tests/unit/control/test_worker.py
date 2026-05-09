@@ -1557,20 +1557,18 @@ class TestRunOnceExecution:
             ),
         )
 
-        assert (
-            await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
-        )
+        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
         await asyncio.wait_for(started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
         requested_id = await _create_requested(session_factory, origin_repo, "new-request")
-        assert (
-            await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
-        )
+        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
         assert provisioner.calls == [requested_id]
         assert executor.calls == [ready_id]
 
         release.set()
-        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+        await asyncio.wait_for(
+            worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+        )
 
     @pytest.mark.unit
     async def test_execution_limit_is_independent_from_provisioning_limit(
@@ -2332,9 +2330,7 @@ class TestRunOnceMonitorRecovery:
             ),
         )
 
-        assert (
-            await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
-        )
+        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
         await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
         assert len(claim_cutoffs) == 1
@@ -2387,7 +2383,9 @@ class TestRunOnceMonitorRecovery:
         assert recovery_events[0].payload["claim_cleanup"] == operation.payload["claim_cleanup"]
 
         executor.release.set()
-        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+        await asyncio.wait_for(
+            worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+        )
 
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(monitor_id)
@@ -2686,14 +2684,10 @@ class TestRunOnceMonitorRecovery:
             ),
         )
 
-        assert (
-            await asyncio.wait_for(worker_a.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
-        )
+        assert await asyncio.wait_for(worker_a.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
         await asyncio.wait_for(executor_a.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
 
-        assert (
-            await asyncio.wait_for(worker_b.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 0
-        )
+        assert await asyncio.wait_for(worker_b.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 0
         await worker_b.wait_for_execution_tasks()
 
         assert executor_b.calls == []
@@ -2723,7 +2717,9 @@ class TestRunOnceMonitorRecovery:
         )
 
         executor_a.release.set()
-        await asyncio.wait_for(worker_a.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+        await asyncio.wait_for(
+            worker_a.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+        )
 
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(monitor_id)
@@ -3908,7 +3904,9 @@ class TestRunOnceStaleActiveExecutionRecovery:
             if call_number == 1:
                 first_selected.set()
                 assert not has_event
-                await asyncio.wait_for(allow_first_recording.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+                await asyncio.wait_for(
+                    allow_first_recording.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+                )
             return has_event
 
         monkeypatch.setattr(
