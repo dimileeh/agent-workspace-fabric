@@ -208,6 +208,15 @@ def test_unit_smoke_job_is_not_the_authoritative_coverage_gate() -> None:
 
 
 @pytest.mark.unit
+def test_release_artifacts_installs_wheel_with_uv_pip() -> None:
+    run = _step_run(_job(_workflow(), "release-artifacts"), "Install wheel and verify entrypoints")
+
+    assert "uv pip install --python .venv-install/bin/python dist/*.whl" in run
+    assert ".venv-install/bin/pip install" not in run
+    assert ".venv-install/bin/awf --help" in run
+
+
+@pytest.mark.unit
 def test_required_ci_gate_rolls_up_full_coverage_and_required_jobs() -> None:
     job = _job(_workflow(), "ci-required")
 
