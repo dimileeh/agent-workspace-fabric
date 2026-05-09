@@ -35,7 +35,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
@@ -3694,7 +3694,13 @@ def _schedulable_workspace_ids_stmt(
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
     if after is not None:
-        stmt = stmt.where(_scheduler_after_cursor_condition(order_expressions, after))
+        stmt = stmt.where(
+            _scheduler_after_cursor_condition(
+                order_expressions,
+                after,
+                dialect_name=dialect_name,
+            )
+        )
     stmt = stmt.order_by(
         order_expressions.class_priority.desc(),
         order_expressions.effective_score.desc(),
@@ -3724,13 +3730,22 @@ def _scheduler_order_expressions(
     *,
     scoring_at: datetime,
     dialect_name: str | None,
+    workspace_entity: Any = Workspace,
 ) -> _SchedulerOrderExpressions:
-    class_priority = _task_class_case(TASK_CLASS_PRIORITIES)
-    class_bias = _task_class_case(TASK_CLASS_BIASES)
+    class_priority = _task_class_case(TASK_CLASS_PRIORITIES, workspace_entity=workspace_entity)
+    class_bias = _task_class_case(TASK_CLASS_BIASES, workspace_entity=workspace_entity)
     base_priority = _bounded_scheduler_int_expr(
         func.coalesce(
-            _scheduler_json_int_expr((SCHEDULER_POLICY_KEY, "base_priority"), dialect_name),
-            _scheduler_json_int_expr(("priority",), dialect_name),
+            _scheduler_json_int_expr(
+                (SCHEDULER_POLICY_KEY, "base_priority"),
+                dialect_name,
+                workspace_entity=workspace_entity,
+            ),
+            _scheduler_json_int_expr(
+                ("priority",),
+                dialect_name,
+                workspace_entity=workspace_entity,
+            ),
             0,
         ),
         lower=0,
@@ -3738,12 +3753,21 @@ def _scheduler_order_expressions(
     )
     human_boost = _bounded_scheduler_int_expr(
         func.coalesce(
-            _scheduler_json_int_expr((SCHEDULER_POLICY_KEY, "human_boost"), dialect_name),
+            _scheduler_json_int_expr(
+                (SCHEDULER_POLICY_KEY, "human_boost"),
+                dialect_name,
+                workspace_entity=workspace_entity,
+            ),
             _scheduler_json_int_expr(
                 (SCHEDULER_POLICY_KEY, "human_escalation_boost"),
                 dialect_name,
+                workspace_entity=workspace_entity,
             ),
-            _scheduler_json_int_expr(("human_boost",), dialect_name),
+            _scheduler_json_int_expr(
+                ("human_boost",),
+                dialect_name,
+                workspace_entity=workspace_entity,
+            ),
             0,
         ),
         lower=0,
@@ -3753,10 +3777,12 @@ def _scheduler_order_expressions(
         _scheduler_json_string_expr(
             (SCHEDULER_POLICY_KEY, "parent_failure_reason"),
             dialect_name,
+            workspace_entity=workspace_entity,
         ),
         _scheduler_json_string_expr(
             ("provider_recovery_state", "parent_failure_reason"),
             dialect_name,
+            workspace_entity=workspace_entity,
         ),
     )
     retry_bonus = case(
@@ -3766,22 +3792,69 @@ def _scheduler_order_expressions(
         ),
         else_=0,
     )
-    age_boost = _scheduler_age_boost_expr(scoring_at=scoring_at, dialect_name=dialect_name)
+    age_boost = _scheduler_age_boost_expr(
+        scoring_at=scoring_at,
+        dialect_name=dialect_name,
+        workspace_entity=workspace_entity,
+    )
     return _SchedulerOrderExpressions(
         class_priority=class_priority,
         effective_score=base_priority + class_bias + age_boost + retry_bonus + human_boost,
     )
 
 
-def _task_class_case(values: Mapping[str, int]) -> ColumnElement[Any]:
+def _scheduler_cursor_order_expressions(
+    *,
+    after: SchedulerOrderCursor,
+    dialect_name: str | None,
+) -> _SchedulerOrderExpressions:
+    cursor_workspace = aliased(Workspace, name="scheduler_cursor_workspace")
+    cursor_order = _scheduler_order_expressions(
+        scoring_at=after.scoring_at,
+        dialect_name=dialect_name,
+        workspace_entity=cursor_workspace,
+    )
+    # Keep the boundary comparisons in the same SQL scoring domain used for
+    # page ordering. The Python cursor values remain a fallback for synthetic
+    # cursors whose row is no longer present.
+    cursor_class_priority = func.coalesce(
+        select(cursor_order.class_priority)
+        .where(cursor_workspace.id == after.workspace_id)
+        .scalar_subquery(),
+        literal(after.class_priority),
+    )
+    cursor_effective_score = func.coalesce(
+        select(cursor_order.effective_score)
+        .where(cursor_workspace.id == after.workspace_id)
+        .scalar_subquery(),
+        literal(after.effective_score),
+    )
+    return _SchedulerOrderExpressions(
+        class_priority=cursor_class_priority,
+        effective_score=cursor_effective_score,
+    )
+
+
+def _task_class_case(
+    values: Mapping[str, int],
+    *,
+    workspace_entity: Any = Workspace,
+) -> ColumnElement[Any]:
     return case(
-        *((Workspace.task_class == task_class, value) for task_class, value in values.items()),
+        *(
+            (workspace_entity.task_class == task_class, value)
+            for task_class, value in values.items()
+        ),
         else_=0,
     )
 
 
-def _scheduler_json_path_expr(path: tuple[str, ...]) -> ColumnElement[Any]:
-    expr: Any = Workspace.task_policy
+def _scheduler_json_path_expr(
+    path: tuple[str, ...],
+    *,
+    workspace_entity: Any = Workspace,
+) -> ColumnElement[Any]:
+    expr: Any = workspace_entity.task_policy
     for key in path:
         expr = expr[key]
     return cast("ColumnElement[Any]", expr)
@@ -3790,17 +3863,31 @@ def _scheduler_json_path_expr(path: tuple[str, ...]) -> ColumnElement[Any]:
 def _scheduler_json_string_expr(
     path: tuple[str, ...],
     dialect_name: str | None,
+    *,
+    workspace_entity: Any = Workspace,
 ) -> ColumnElement[Any]:
     del dialect_name
-    return func.nullif(func.trim(_scheduler_json_path_expr(path).as_string()), "")
+    return func.nullif(
+        func.trim(
+            _scheduler_json_path_expr(path, workspace_entity=workspace_entity).as_string()
+        ),
+        "",
+    )
 
 
 def _scheduler_json_int_expr(
     path: tuple[str, ...],
     dialect_name: str | None,
+    *,
+    workspace_entity: Any = Workspace,
 ) -> ColumnElement[Any]:
     if dialect_name == "postgresql":
-        text_value = func.nullif(func.trim(_scheduler_json_path_expr(path).as_string()), "")
+        text_value = func.nullif(
+            func.trim(
+                _scheduler_json_path_expr(path, workspace_entity=workspace_entity).as_string()
+            ),
+            "",
+        )
         numeric_value = case(
             (
                 text_value.op("~")(POLICY_INT_TEXT_PATTERN),
@@ -3816,8 +3903,8 @@ def _scheduler_json_int_expr(
         return sql_cast(clamped_value, Integer)
     if dialect_name == "sqlite":
         json_path = _sqlite_json_path(path)
-        json_type = func.json_type(Workspace.task_policy, json_path)
-        json_value = func.json_extract(Workspace.task_policy, json_path)
+        json_type = func.json_type(workspace_entity.task_policy, json_path)
+        json_value = func.json_extract(workspace_entity.task_policy, json_path)
         text_value = func.trim(json_value)
         decimal_pos = func.instr(text_value, ".")
         whole_text = case(
@@ -3859,7 +3946,10 @@ def _scheduler_json_int_expr(
             ),
             else_=None,
         )
-    return cast("ColumnElement[Any]", _scheduler_json_path_expr(path).as_integer())
+    return cast(
+        "ColumnElement[Any]",
+        _scheduler_json_path_expr(path, workspace_entity=workspace_entity).as_integer(),
+    )
 
 
 def _sqlite_json_path(path: tuple[str, ...]) -> str:
@@ -3883,6 +3973,7 @@ def _scheduler_age_boost_expr(
     *,
     scoring_at: datetime,
     dialect_name: str | None,
+    workspace_entity: Any = Workspace,
 ) -> ColumnElement[Any]:
     wait_seconds: ColumnElement[Any]
     intervals: ColumnElement[Any]
@@ -3891,7 +3982,7 @@ def _scheduler_age_boost_expr(
         return case(
             *(
                 (
-                    Workspace.created_at
+                    workspace_entity.created_at
                     <= scoring_time
                     - text(
                         f"INTERVAL '{boost * AGE_BOOST_INTERVAL_SECONDS} seconds'"
@@ -3904,7 +3995,7 @@ def _scheduler_age_boost_expr(
         )
     if dialect_name == "sqlite":
         wait_seconds = sql_cast(func.strftime("%s", literal(scoring_at)), Integer) - sql_cast(
-            func.strftime("%s", Workspace.created_at),
+            func.strftime("%s", workspace_entity.created_at),
             Integer,
         )
         intervals = sql_cast(wait_seconds / AGE_BOOST_INTERVAL_SECONDS, Integer)
@@ -3920,21 +4011,27 @@ def _scheduler_age_boost_expr(
 def _scheduler_after_cursor_condition(
     order_expressions: _SchedulerOrderExpressions,
     after: SchedulerOrderCursor,
+    *,
+    dialect_name: str | None,
 ) -> ColumnElement[bool]:
+    cursor_order = _scheduler_cursor_order_expressions(
+        after=after,
+        dialect_name=dialect_name,
+    )
     return or_(
-        order_expressions.class_priority < after.class_priority,
+        order_expressions.class_priority < cursor_order.class_priority,
         and_(
-            order_expressions.class_priority == after.class_priority,
-            order_expressions.effective_score < after.effective_score,
+            order_expressions.class_priority == cursor_order.class_priority,
+            order_expressions.effective_score < cursor_order.effective_score,
         ),
         and_(
-            order_expressions.class_priority == after.class_priority,
-            order_expressions.effective_score == after.effective_score,
+            order_expressions.class_priority == cursor_order.class_priority,
+            order_expressions.effective_score == cursor_order.effective_score,
             Workspace.created_at > after.queued_at,
         ),
         and_(
-            order_expressions.class_priority == after.class_priority,
-            order_expressions.effective_score == after.effective_score,
+            order_expressions.class_priority == cursor_order.class_priority,
+            order_expressions.effective_score == cursor_order.effective_score,
             Workspace.created_at == after.queued_at,
             Workspace.id > after.workspace_id,
         ),

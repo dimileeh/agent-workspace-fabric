@@ -1426,6 +1426,63 @@ class TestOwnedPathOverlapLookup:
         assert listed == [oversized_high.id, normal.id, oversized_low.id]
 
     @pytest.mark.unit
+    async def test_scheduler_cursor_recomputes_database_score_for_page_boundary(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        before_cursor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="before cursor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        cursor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="cursor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        after_cursor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="after cursor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        before_cursor.created_at = scoring_at - timedelta(seconds=1)
+        cursor.created_at = scoring_at
+        after_cursor.created_at = scoring_at + timedelta(seconds=1)
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=10,
+            scoring_at=scoring_at,
+            after=SchedulerOrderCursor(
+                class_priority=0,
+                effective_score=999,
+                queued_at=cursor.created_at,
+                workspace_id=cursor.id,
+                scoring_at=scoring_at,
+            ),
+        )
+
+        assert listed == [after_cursor.id]
+
+    @pytest.mark.unit
     async def test_scheduler_keeps_owned_path_overlap_advisory_only(
         self,
         session: AsyncSession,
@@ -1578,8 +1635,10 @@ class TestOwnedPathOverlapLookup:
         assert "FOR UPDATE" in sql
         assert "SKIP LOCKED" in sql
         assert "OFFSET" not in sql
-        assert "< 2" in sql
-        assert "< 42" in sql
+        assert "< coalesce((SELECT" in sql
+        assert "= coalesce((SELECT" in sql
+        assert "scheduler_cursor_workspace" in sql
+        assert "scheduler_cursor_workspace.id = 'ws_cursor'" in sql
         assert "workspaces.created_at >" in sql
         assert "workspaces.created_at =" in sql
         assert "workspaces.id > 'ws_cursor'" in sql
