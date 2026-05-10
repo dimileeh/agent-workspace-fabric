@@ -966,8 +966,22 @@ class WorkspaceControlService:
             WorkspaceStatus.destroyed.value,
         }:
             return
+        pending_control_state = _session_has_pending_state(self._session)
         try:
             await self._session.flush()
+        except Exception as exc:
+            if pending_control_state:
+                # This flush covers the control transition and related state that must
+                # commit before the optional release audit event can be isolated.
+                raise
+            _log.warning(
+                "controls.terminal_runtime_release_event_record_failed",
+                workspace_id=workspace.id,
+                source=source,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
+            return
+        try:
             async with self._session.begin_nested():
                 await record_terminal_runtime_release_event(
                     self._session,
@@ -2700,6 +2714,10 @@ def _control_terminal_runtime_release_claim_owner(workspace: Workspace) -> str |
     if not terminal_runtime_release_claim_active(workspace):
         return None
     return owner_id
+
+
+def _session_has_pending_state(session: AsyncSession) -> bool:
+    return bool(session.new or session.dirty or session.deleted)
 
 
 def _json_datetime(value: datetime | None) -> str | None:

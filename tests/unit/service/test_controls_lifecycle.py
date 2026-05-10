@@ -1770,6 +1770,79 @@ async def test_cancel_and_stop_fail_precommitted_operation_when_post_teardown_db
 
 @pytest.mark.unit
 @pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_fail_precommitted_operation_when_terminal_release_preflush_fails(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    service, stopper, cleaner = _service(session)
+    original_transition = WorkspaceRepository.transition
+    original_flush = session.flush
+    fail_next_flush = False
+    flush_failures = 0
+
+    async def _mark_transition_pending(
+        self: WorkspaceRepository,
+        workspace: Workspace,
+        *args: object,
+        **kwargs: object,
+    ) -> Workspace:
+        nonlocal fail_next_flush
+        transitioned = await original_transition(self, workspace, *args, **kwargs)
+        fail_next_flush = True
+        return transitioned
+
+    async def _fail_release_preflush_once(*args: object, **kwargs: object) -> None:
+        nonlocal fail_next_flush, flush_failures
+        if fail_next_flush and flush_failures == 0:
+            fail_next_flush = False
+            flush_failures += 1
+            raise SQLAlchemyError("terminal release preflush failed")
+        await original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(WorkspaceRepository, "transition", _mark_transition_pending)
+    monkeypatch.setattr(session, "flush", _fail_release_preflush_once)
+
+    with pytest.raises(SQLAlchemyError, match="terminal release preflush failed"):
+        if action == "cancel":
+            await service.cancel_workspace(
+                workspace_id,
+                reason="operator requested",
+                stop_stack=True,
+            )
+        else:
+            await service.stop_workspace(
+                workspace_id,
+                reason="operator requested",
+            )
+
+    await session.rollback()
+    persisted = await WorkspaceRepository(session).get(workspace_id)
+    operations = await _operations(session, workspace_id)
+    release_events = [
+        event
+        for event in await _events(session, workspace_id)
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+
+    assert persisted is not None
+    assert persisted.status == WorkspaceStatus.ready.value
+    assert flush_failures == 1
+    assert stopper.calls == [compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert len(operations) == 1
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
+    assert operations[0].error_message == "SQLAlchemyError: terminal release preflush failed"
+    assert operations[0].finished_at is not None
+    assert release_events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
 async def test_cancel_and_stop_fail_precommitted_operation_when_cancelled_after_teardown(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
