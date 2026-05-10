@@ -576,11 +576,6 @@ async def _resource_saturation_local_capacity(
     request: Request,
     settings: Settings,
 ) -> LocalCapacityLimits:
-    if (
-        settings.local_capacity_cpu_cores is not None
-        and settings.local_capacity_memory_gb is not None
-    ):
-        return LocalCapacityLimits()
     provider = cast(
         LocalCapacityProvider | None,
         getattr(request.app.state, "local_capacity_detector", None),
@@ -590,6 +585,11 @@ async def _resource_saturation_local_capacity(
         if inspect.isawaitable(result):
             return await result
         return result
+    if (
+        settings.local_capacity_cpu_cores is not None
+        and settings.local_capacity_memory_gb is not None
+    ):
+        return LocalCapacityLimits()
     return await asyncio.to_thread(detect_local_capacity, settings)
 
 

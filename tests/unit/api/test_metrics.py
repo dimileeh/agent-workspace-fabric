@@ -289,19 +289,17 @@ async def test_resource_saturation_local_capacity_accepts_async_provider() -> No
 
 
 @pytest.mark.unit
-async def test_resource_saturation_local_capacity_skips_detection_for_configured_limits() -> None:
+async def test_resource_saturation_local_capacity_uses_provider_over_configured_limits() -> None:
     from awf.api.routes import metrics as metrics_route
     from awf.common.config import Settings
     from awf.service.resource_capacity import LocalCapacityLimits
 
-    detector_called = False
+    provider_called = False
 
-    async def _detector_should_not_run(_settings: Settings) -> LocalCapacityLimits:
-        nonlocal detector_called
-        detector_called = True
-        raise AssertionError(
-            "local_capacity_detector should not be called when limits are configured"
-        )
+    async def _provider(_settings: Settings) -> LocalCapacityLimits:
+        nonlocal provider_called
+        provider_called = True
+        return LocalCapacityLimits(cpu_cores=12.0, memory_gb=32.0, source="test")
 
     request = Request(
         {
@@ -309,9 +307,42 @@ async def test_resource_saturation_local_capacity_skips_detection_for_configured
             "method": "GET",
             "path": "/v1/metrics/resources/saturation",
             "headers": [],
-            "app": SimpleNamespace(
-                state=SimpleNamespace(local_capacity_detector=_detector_should_not_run)
-            ),
+            "app": SimpleNamespace(state=SimpleNamespace(local_capacity_detector=_provider)),
+        }
+    )
+
+    result = await metrics_route._resource_saturation_local_capacity(
+        request,
+        Settings(
+            _env_file=None,
+            local_capacity_cpu_cores=4.0,
+            local_capacity_memory_gb=8.0,
+        ),
+    )
+
+    assert result == LocalCapacityLimits(cpu_cores=12.0, memory_gb=32.0, source="test")
+    assert provider_called is True
+
+
+@pytest.mark.unit
+async def test_resource_saturation_local_capacity_skips_detection_for_configured_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.api.routes import metrics as metrics_route
+    from awf.common.config import Settings
+    from awf.service.resource_capacity import LocalCapacityLimits
+
+    def _detect_should_not_run(_settings: Settings) -> LocalCapacityLimits:
+        raise AssertionError("detect_local_capacity should not run when limits are configured")
+
+    monkeypatch.setattr(metrics_route, "detect_local_capacity", _detect_should_not_run)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/metrics/resources/saturation",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace()),
         }
     )
 
@@ -325,7 +356,6 @@ async def test_resource_saturation_local_capacity_skips_detection_for_configured
     )
 
     assert result == LocalCapacityLimits()
-    assert detector_called is False
 
 
 @pytest.mark.unit
