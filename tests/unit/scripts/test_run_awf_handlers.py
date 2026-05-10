@@ -37,9 +37,9 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import REDACTION_MARKER
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from scripts import run_awf
 from tests.postgres import postgres_test_engine, postgres_test_url
@@ -524,6 +524,79 @@ async def test_monitor_handoff_failure_message_redacts_secrets(
     assert REDACTION_MARKER in message
     assert "ghp_secret123456" not in message
     assert "ghp_anothersecret123" not in message
+
+
+@pytest.mark.unit
+async def test_monitor_handoff_failure_records_blocked_callback_during_active_teardown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    monitor = _CrashingMonitor()
+    releaser = _RecordingTerminalRuntimeReleaser()
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            branch_base="development",
+            task_title="blocked monitor crash",
+            task_prompt="preserve monitor crash handoff",
+            agent="codex",
+            profile_ref=None,
+            requested_profile=None,
+            test_commands=[],
+            requires_database=False,
+        )
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+        ):
+            await repo.transition(ws, to=target, reason_code="TEST")
+        operation = await OperationRepository(s).create(
+            workspace_id=ws.id,
+            operation_type=OperationType.stop,
+            status=OperationStatus.running,
+            payload={"source": "operator_api"},
+        )
+        await s.commit()
+        workspace_id = ws.id
+        operation_id = operation.id
+
+    with pytest.raises(RuntimeError, match="synthetic monitor crash"):
+        await run_awf._run_monitor_with_release_fallback(
+            monitor,
+            workspace_id=workspace_id,
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            session_factory=factory,
+            terminal_runtime_releaser=releaser,
+        )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ignored_events = [
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert ws.status == WorkspaceStatus.monitoring_pr.value
+    assert ws.failure_reason is None
+    assert ws.failure_message is None
+    assert ignored_events[-1].payload == {
+        "callback_source": "run_awf",
+        "callback_action": "monitor_handoff_failed",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": WorkspaceStatus.monitoring_pr.value,
+        "requested_status": WorkspaceStatus.failed.value,
+        "operation_id": operation_id,
+        "reason_code": "RUN_AWF_MONITOR_CRASHED",
+        "failure_reason": "infrastructure_failure",
+        "failure_message": "monitor handoff crashed: RuntimeError('synthetic monitor crash')",
+    }
+    assert releaser.calls == []
 
 
 @pytest.mark.unit

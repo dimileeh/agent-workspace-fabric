@@ -51,7 +51,10 @@ from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import (
+    WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.node.cleanup import WorkspaceCleaner
 from awf.node.compose_manager import (
@@ -725,22 +728,65 @@ async def _mark_monitor_handoff_failed(
     session_factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
     message: str,
-) -> None:
+) -> bool:
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.get(workspace_id)
         if ws is None or ws.status == WorkspaceStatus.failed.value:
-            return
+            return True
         if ws.status != WorkspaceStatus.monitoring_pr.value:
-            return
-        ws.failure_reason = "infrastructure_failure"
-        ws.failure_message = redact_audit_text(message, limit=2000)
-        await repo.transition(
-            ws,
-            to=WorkspaceStatus.failed,
-            reason_code="RUN_AWF_MONITOR_CRASHED",
-        )
+            return True
+        failure_reason = "infrastructure_failure"
+        failure_message = redact_audit_text(message, limit=2000)
+        ws.failure_reason = failure_reason
+        ws.failure_message = failure_message
+        try:
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.failed,
+                reason_code="RUN_AWF_MONITOR_CRASHED",
+            )
+        except WorkspaceTransitionBlockedByActiveOperationError as exc:
+            operation_id = exc.operation.id
+            await s.rollback()
+            await _record_blocked_monitor_handoff_failed(
+                s,
+                workspace_id=workspace_id,
+                operation_id=operation_id,
+                failure_reason=failure_reason,
+                failure_message=failure_message,
+            )
+            return False
         await s.commit()
+        return True
+
+
+async def _record_blocked_monitor_handoff_failed(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    operation_id: str,
+    failure_reason: str,
+    failure_message: str,
+) -> None:
+    repo = WorkspaceRepository(session)
+    ws = await repo.get(workspace_id)
+    if ws is None:
+        return
+    event = await repo.record_ignored_stale_callback(
+        ws,
+        callback_source="run_awf",
+        callback_action="monitor_handoff_failed",
+        expected_status=WorkspaceStatus.monitoring_pr,
+        requested_status=WorkspaceStatus.failed,
+        operation_id=operation_id,
+        reason_code="RUN_AWF_MONITOR_CRASHED",
+    )
+    payload = dict(event.payload or {})
+    payload["failure_reason"] = failure_reason
+    payload["failure_message"] = redact_audit_text(failure_message, limit=2000)
+    event.payload = payload
+    await session.commit()
 
 
 async def _run_monitor_with_release_fallback(
@@ -759,18 +805,22 @@ async def _run_monitor_with_release_fallback(
             compose_file=compose_file,
         )
     except Exception as exc:
-        with suppress(Exception):
-            await _mark_monitor_handoff_failed(
+        release_failed_runtime = True
+        try:
+            release_failed_runtime = await _mark_monitor_handoff_failed(
                 session_factory=session_factory,
                 workspace_id=workspace_id,
                 message=f"monitor handoff crashed: {exc!r}",
             )
-        with suppress(Exception):
-            await terminal_runtime_releaser.release(
-                workspace_id,
-                source="run_awf",
-                expected_status=WorkspaceStatus.failed,
-            )
+        except Exception:
+            pass
+        if release_failed_runtime:
+            with suppress(Exception):
+                await terminal_runtime_releaser.release(
+                    workspace_id,
+                    source="run_awf",
+                    expected_status=WorkspaceStatus.failed,
+                )
         raise
 
 
