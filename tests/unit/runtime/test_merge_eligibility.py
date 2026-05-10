@@ -8,7 +8,6 @@ from awf.db.repositories import sync_candidate_readiness
 from awf.runtime.merge_eligibility import (
     VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
     _successful_validation_run_tier,
-    _validation_run_deferred_required_coverage,
     compute_stale_reason,
     compute_stale_reason_for_attempt,
 )
@@ -160,7 +159,7 @@ def test_compute_stale_reason_uses_persisted_validation_run_tier() -> None:
 
 
 @pytest.mark.unit
-def test_compute_stale_reason_rejects_targeted_only_validation_when_coverage_was_deferred() -> None:
+def test_compute_stale_reason_accepts_targeted_validation_when_no_local_coverage_gate() -> None:
     workspace = _workspace_with_operations(
         task_class=TaskClass.refactor_task.value,
         operations=[],
@@ -171,69 +170,30 @@ def test_compute_stale_reason_rejects_targeted_only_validation_when_coverage_was
             started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
             commands=[
                 {"phase": "validate", "command": "pytest tests/unit/cli -q"},
-                {
-                    "phase": "coverage",
-                    "command": "pytest --cov=awf",
-                    "evidence_status": "skipped_by_policy",
-                    "evidence_reason_code": "TARGETED_EDIT_GATE",
-                },
             ],
         )
     ]
 
-    assert compute_stale_reason(workspace) == (
-        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
-        "validate",
-    )
+    assert compute_stale_reason(workspace) == (None, None)
 
 
 @pytest.mark.unit
-def test_successful_validation_run_tier_excludes_deferred_coverage_runs() -> None:
+def test_successful_validation_run_tier_counts_targeted_validation_without_local_gate() -> None:
     run = _validation_run(
         tier=2,
         started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
-        commands=[
-            {
-                "phase": "coverage",
-                "command": "pytest --cov=awf",
-                "evidence_status": "skipped_by_policy",
-                "evidence_reason_code": "TARGETED_EDIT_GATE",
-            }
-        ],
+        commands=[{"phase": "validate", "command": "pytest tests/unit/cli -q"}],
     )
 
-    assert _successful_validation_run_tier(run) is None
-
-
-@pytest.mark.unit
-def test_validation_run_deferred_coverage_ignores_completed_coverage_command() -> None:
-    run = _validation_run(
-        tier=2,
-        started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
-        commands=[
-            {"phase": "validate", "command": "pytest -q"},
-            {"phase": "coverage", "command": "pytest --cov=awf", "evidence_status": "complete"},
-        ],
-    )
-
-    assert not _validation_run_deferred_required_coverage(run)
     assert _successful_validation_run_tier(run) == 2
 
 
 @pytest.mark.unit
-def test_sync_candidate_readiness_keeps_tier_one_deferred_coverage_stale() -> None:
+def test_sync_candidate_readiness_accepts_targeted_validation_without_local_gate() -> None:
     validation_run = _validation_run(
         tier=1,
         started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
-        commands=[
-            {"phase": "validate", "command": "pytest tests/unit/cli -q"},
-            {
-                "phase": "coverage",
-                "command": "pytest --cov=awf",
-                "evidence_status": "skipped_by_policy",
-                "evidence_reason_code": "TARGETED_EDIT_GATE",
-            },
-        ],
+        commands=[{"phase": "validate", "command": "pytest tests/unit/cli -q"}],
     )
     validate_operation = _operation(
         operation_type="validate",
@@ -253,7 +213,7 @@ def test_sync_candidate_readiness_keeps_tier_one_deferred_coverage_stale() -> No
         is_canonical_for_merge=True,
     )
     candidate = MergeCandidate(
-        id="mc_tier_one_deferred_coverage",
+        id="mc_tier_one_scm_check_coverage",
         workspace=workspace,
         attempt=attempt,
         status="open",
@@ -262,9 +222,9 @@ def test_sync_candidate_readiness_keeps_tier_one_deferred_coverage_stale() -> No
 
     sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
 
-    assert candidate.ready is False
-    assert candidate.stale is True
-    assert candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+    assert candidate.ready is True
+    assert candidate.stale is False
+    assert candidate.stale_reason is None
 
 
 @pytest.mark.unit

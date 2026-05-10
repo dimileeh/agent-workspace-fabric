@@ -40,19 +40,6 @@ awf:
     strategy:
       baseline_coverage: skip
       edit_gate: targeted
-      # PR-monitored workspaces defer this authoritative gate to GitHub Actions.
-      final_gate: coverage
-      reuse_evidence: true
-      freshness_max_age_seconds: 86400
-      full_gate_concurrency: 0
-    coverage:
-      minimum_percent: 99
-      enforce: true
-      provider: python
-      parallel_workers: 3
-      command:
-        command: uv run --python 3.12 --extra dev pytest --cov=awf --cov-report=term-missing
-        timeout_seconds: 7200
   phases:
     setup:
       - command: uv sync --extra dev

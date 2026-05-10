@@ -11,7 +11,7 @@ import pytest
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.profiles import compose as profile_compose
-from awf.profiles.models import ProfileHealthCheck, WorkspaceProfile
+from awf.profiles.models import ProfileCoverage, ProfileHealthCheck, WorkspaceProfile
 from awf.runtime import validation as validation_module
 from awf.runtime import validation_identity as validation_identity_module
 from awf.runtime.logs import CommandLogSinks, LogStore
@@ -1635,6 +1635,7 @@ class TestCoverageEnforcement:
                         "provider": "go",
                         "minimum_percent": 80,
                         "enforce": False,
+                        "command": "go test ./...",
                     }
                 },
             }
@@ -1647,6 +1648,7 @@ class TestCoverageEnforcement:
                         "provider": "go",
                         "minimum_percent": 80,
                         "enforce": True,
+                        "command": "go test ./...",
                     }
                 },
             }
@@ -1745,12 +1747,7 @@ class TestCoverageEnforcement:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        no_command = WorkspaceProfile.model_validate(
-            {
-                "name": "no-command",
-                "validation": {"coverage": {"minimum_percent": 99, "parallel_workers": 3}},
-            }
-        ).validation.coverage
+        no_command = ProfileCoverage()
         non_pytest = WorkspaceProfile.model_validate(
             {
                 "name": "non-pytest",
@@ -2384,7 +2381,7 @@ class TestCoverageEnforcement:
         assert result.first_failure.reason_code == "COVERAGE_BELOW_THRESHOLD"
 
     @pytest.mark.unit
-    async def test_coverage_without_command_streams_artifacts_instead_of_eager_reads(
+    async def test_coverage_without_command_is_not_parsed_from_validation_artifacts(
         self,
         runner: tuple[FakeCommandRunner, ValidationRunner],
         monkeypatch: pytest.MonkeyPatch,
@@ -2402,12 +2399,6 @@ class TestCoverageEnforcement:
             {
                 "name": "coverage-from-validation-artifacts",
                 "phases": {"validate": ["pytest --cov=awf --cov-report=term"]},
-                "validation": {
-                    "coverage": {
-                        "minimum_percent": 90,
-                        "enforce": True,
-                    }
-                },
             }
         )
 
@@ -2425,8 +2416,7 @@ class TestCoverageEnforcement:
         )
 
         assert result.all_passed
-        assert result.coverage is not None
-        assert result.coverage.percent == 96
+        assert result.coverage is None
 
     @pytest.mark.unit
     async def test_runs_baseline_coverage_with_distinct_artifact_label(
