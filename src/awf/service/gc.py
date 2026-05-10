@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import threading
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -67,7 +66,6 @@ TERMINAL_WORKSPACE_GC_STATUSES = frozenset(
 
 _FAILED_NO_WORK_TERMINAL_STATUSES = frozenset({WorkspaceStatus.failed.value, "superseded"})
 _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS = ("sleep infinity", "tail -f /dev/null")
-_RUN_AWAITABLE_BLOCKING_TIMEOUT_SECONDS = 120.0
 
 _log = get_logger(__name__)
 _RUNTIME_INSPECTOR = RuntimeInspector()
@@ -1482,28 +1480,9 @@ def _run_awaitable_blocking(awaitable: Coroutine[Any, Any, str]) -> str:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(awaitable)
-
-    results: list[str] = []
-    errors: list[BaseException] = []
-
-    def _runner() -> None:
-        try:
-            results.append(asyncio.run(awaitable))
-        except BaseException as exc:  # pragma: no cover - re-raised in caller thread.
-            errors.append(exc)
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    thread.join(timeout=_RUN_AWAITABLE_BLOCKING_TIMEOUT_SECONDS)
-    if thread.is_alive():
-        _log.warning(
-            "gc.awaitable_blocking_timeout",
-            timeout_seconds=_RUN_AWAITABLE_BLOCKING_TIMEOUT_SECONDS,
-        )
-        return "unknown"
-    if errors:
-        raise errors[0]
-    return results[0] if results else "unknown"
+    awaitable.close()
+    _log.warning("gc.awaitable_blocking_running_loop")
+    return "unknown"
 
 
 def _compose_project_name_for_workspace(workspace: Workspace) -> str | None:

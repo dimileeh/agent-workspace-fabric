@@ -4327,10 +4327,7 @@ async def test_monitor_terminal_callbacks_ignore_active_runtime_teardown_operati
         ]
 
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
-    if callback == "completed":
-        assert workspace.pr_merge_sha == "blocked-merge-sha"
-    else:
-        assert workspace.pr_merge_sha is None
+    assert workspace.pr_merge_sha is None
     assert workspace.failure_reason is None
     assert workspace.failure_message is None
     assert cmd.calls == []
@@ -4369,6 +4366,7 @@ async def test_monitor_terminal_callbacks_ignore_active_runtime_teardown_operati
         assert workspace is not None
 
     assert workspace.status == WorkspaceStatus.cancelled.value
+    assert workspace.pr_merge_sha is None
     assert workspace.failure_reason is None
     assert workspace.failure_message is None
 

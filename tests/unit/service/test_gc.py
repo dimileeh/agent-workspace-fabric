@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1974,41 +1975,24 @@ def test_failed_terminal_workspace_has_no_work_exception(monkeypatch: pytest.Mon
 
 
 @pytest.mark.unit
-async def test_run_awaitable_blocking_returns_unknown_when_worker_exceeds_timeout(
+async def test_run_awaitable_blocking_returns_unknown_without_thread_in_running_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    join_timeouts: list[float | None] = []
-
-    class _HungThread:
-        def __init__(self, target: Callable[[], None], *, daemon: bool) -> None:
-            self.target = target
-            self.daemon = daemon
-
-        def start(self) -> None:
-            pass
-
-        def join(self, timeout: float | None = None) -> None:
-            join_timeouts.append(timeout)
-
-        def is_alive(self) -> bool:
-            return True
+    def _thread_should_not_start(*_args: object, **_kwargs: object) -> threading.Thread:
+        raise AssertionError("running-loop fallback must not start a worker thread")
 
     async def _worker_result() -> str:
         return "no_work"
 
-    monkeypatch.setattr(gc.threading, "Thread", _HungThread)
+    monkeypatch.setattr(threading, "Thread", _thread_should_not_start)
     awaitable = _worker_result()
     try:
         with structlog.testing.capture_logs() as logs:
             assert gc._run_awaitable_blocking(awaitable) == "unknown"  # noqa: SLF001
     finally:
         awaitable.close()
-    assert join_timeouts == [120]
-    assert any(
-        entry.get("event") == "gc.awaitable_blocking_timeout"
-        and entry.get("timeout_seconds") == 120
-        for entry in logs
-    )
+    assert awaitable.cr_frame is None
+    assert any(entry.get("event") == "gc.awaitable_blocking_running_loop" for entry in logs)
 
 
 @pytest.mark.unit
