@@ -508,19 +508,25 @@ async def test_reset_egress_audit_summary_counts_task_cancels_app_lookup() -> No
             raise
 
     leaked_task = asyncio.create_task(_leaked_lookup())
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=1.0)
     health_route._track_egress_audit_summary_counts_task(state, leaked_task)
 
     try:
         health_route.reset_egress_audit_summary_counts_task(state)
 
         assert health_route._pending_egress_audit_summary_counts_task(state) is None
-        await asyncio.gather(leaked_task, return_exceptions=True)
-        assert cancelled.is_set()
+        await asyncio.wait_for(
+            asyncio.gather(leaked_task, return_exceptions=True),
+            timeout=1.0,
+        )
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
     finally:
         if not leaked_task.done():
             leaked_task.cancel()
-            await asyncio.gather(leaked_task, return_exceptions=True)
+            await asyncio.wait_for(
+                asyncio.gather(leaked_task, return_exceptions=True),
+                timeout=1.0,
+            )
 
 
 @pytest.mark.unit
@@ -623,12 +629,12 @@ async def test_egress_audit_summary_timeout_consumes_inner_task_on_outer_cancel(
     task = asyncio.create_task(
         health_route._egress_audit_summary_counts_with_timeout(_Session, state)
     )
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=1.0)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
-        await task
-    assert cancelled.is_set()
+        await asyncio.wait_for(task, timeout=1.0)
+    await asyncio.wait_for(cancelled.wait(), timeout=1.0)
 
 
 @pytest.mark.unit
