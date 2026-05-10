@@ -44,6 +44,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#conformance_requires_awf_validation](#conformance_requires_awf_validation)
 
+### CONTROL_OPERATION_FAILED
+**Problem:** An operator control operation failed after AWF accepted it.
+**Likely Cause:** Runtime teardown, database persistence, or post-control audit recording failed during a cancel, stop, destroy, refresh, validate, or rebase operation.
+**Operator Fix:** Inspect the operation error payload and workspace events, then retry after the reported runtime or database issue is fixed.
+**Related Command:** `awf workspace operations <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#control_operation_failed](#control_operation_failed)
+
 ### DISK_USAGE_UNAVAILABLE
 **Problem:** Free disk could not be inspected for the AWF work directory.
 **Likely Cause:** Permission denied or path does not exist.
@@ -295,3 +302,10 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect worker logs with awf service logs --service worker.
 **Related Command:** `awf service logs --service worker`
 **Docs Link:** [docs/REASON_CATALOG.md#worker_unhealthy](#worker_unhealthy)
+
+### WORKSPACE_TERMINAL_RUNTIME_RELEASE_IN_PROGRESS
+**Problem:** A workspace cannot accept the requested control action because terminal runtime release is still in progress.
+**Likely Cause:** AWF is stopping live containers or networks for a terminal workspace while preserving salvage evidence.
+**Operator Fix:** Wait for terminal runtime release to finish, then retry the requested control action if it is still needed.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_terminal_runtime_release_in_progress](#workspace_terminal_runtime_release_in_progress)

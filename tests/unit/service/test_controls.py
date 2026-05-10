@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -203,7 +204,17 @@ async def test_stop_project_containers_stops_matching_container_ids() -> None:
         await stop_project_containers("awf_ws_running")
 
     assert mock_exec.call_count == 2
+    assert mock_exec.call_args_list[0].args == (
+        "docker",
+        "ps",
+        "-q",
+        "--filter",
+        "label=com.docker.compose.project=awf_ws_running",
+    )
     assert mock_exec.call_args_list[1].args[:4] == ("docker", "stop", "abc123", "def456")
+    all_args = [arg for call in mock_exec.call_args_list for arg in call.args]
+    assert "down" not in all_args
+    assert "--volumes" not in all_args
 
 
 @pytest.mark.unit
@@ -348,6 +359,77 @@ async def test_stop_workspace_transitions_active_workspace_and_replays(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_stop_and_cancel_record_terminal_cleanup_before_version_conflict(
+    engine: AsyncEngine,
+    action: str,
+) -> None:
+    factory = make_session_factory(engine)
+    cleaner = _RecordingCleaner()
+    async with factory() as seed_session:
+        workspace = await _create_control_workspace(
+            seed_session,
+            status=WorkspaceStatus.running,
+            compose_project_name=f"awf_ws_{action}_conflict",
+        )
+        expected_version = workspace.version
+        workspace_id = workspace.id
+        await seed_session.commit()
+
+    class _VersionBumpingStopper:
+        calls: list[str | None] = []
+
+        async def __call__(self, compose_project_name: str | None) -> None:
+            self.calls.append(compose_project_name)
+            async with factory() as bump_session:
+                bumped = await WorkspaceRepository(bump_session).get_for_update(workspace_id)
+                assert bumped is not None
+                bumped.subphase = f"{action}-external-stop"
+                bumped.version += 1
+                await bump_session.commit()
+
+    stopper = _VersionBumpingStopper()
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=stopper,
+            cleaner_factory=lambda: cleaner,
+        )
+        with pytest.raises(controls.VersionConflictError) as exc_info:
+            if action == "cancel":
+                await service.cancel_workspace(
+                    workspace_id,
+                    reason="operator cancel races version",
+                    stop_stack=True,
+                    expected_version=expected_version,
+                )
+            else:
+                await service.stop_workspace(
+                    workspace_id,
+                    reason="operator stop races version",
+                    expected_version=expected_version,
+                )
+
+    assert exc_info.value.detail["expected_version"] == expected_version
+    assert stopper.calls == [f"awf_ws_{action}_conflict"]
+    assert cleaner.calls[0]["remove_volumes"] is False
+    assert cleaner.calls[0]["remove_worktree"] is False
+    async with factory() as session:
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.cancel if action == "cancel" else OperationType.stop,
+        )
+
+    release_event = next(
+        event for event in events if event.event_type == "workspace.terminal_runtime_released"
+    )
+    assert release_event.payload["source"] == f"service.controls.{action}"
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "VERSION_CONFLICT"
+
+
+@pytest.mark.unit
 async def test_stop_workspace_records_event_for_inactive_workspace(
     engine: AsyncEngine,
 ) -> None:
@@ -376,6 +458,469 @@ async def test_stop_workspace_records_event_for_inactive_workspace(
     assert response.operation_status == OperationStatus.succeeded.value
     assert stopper.calls == ["awf_ws_completed"]
     assert any(event.event_type == "workspace.stack_stopped" for event in events)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("method_name", "operation_type", "extra_kwargs"),
+    [
+        ("cancel_workspace", OperationType.cancel, {"stop_stack": True}),
+        ("stop_workspace", OperationType.stop, {}),
+    ],
+)
+async def test_control_runtime_claim_check_failure_marks_precommitted_operation_failed(
+    engine: AsyncEngine,
+    method_name: str,
+    operation_type: OperationType,
+    extra_kwargs: Mapping[str, object],
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.running,
+            compose_project_name=f"awf_ws_{method_name}",
+        )
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        async def fail_claim_check(_workspace: object) -> bool:
+            raise RuntimeError("database temporarily unavailable")
+
+        service._terminal_runtime_release_claim_active_for_control = fail_claim_check  # type: ignore[method-assign]  # noqa: SLF001
+        control_method = getattr(service, method_name)
+        with pytest.raises(RuntimeError, match="database temporarily unavailable"):
+            await control_method(
+                workspace.id,
+                reason="operator requested teardown",
+                idempotency_key=f"{method_name}-claim-failure",
+                **extra_kwargs,
+            )
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace.id,
+            operation_type=operation_type,
+        )
+
+    assert len(operations) == 1
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
+    assert "RuntimeError: database temporarily unavailable" in str(operations[0].error_message)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error_kind", ["runtime", "cancelled"])
+async def test_cancel_workspace_records_post_cleanup_failures_after_precommit(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    error_kind: str,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_ws_cancel_post_cleanup_failure",
+        )
+        workspace_id = workspace.id
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        async def fail_transition(*_args: object, **_kwargs: object) -> object:
+            if error_kind == "cancelled":
+                raise asyncio.CancelledError()
+            raise RuntimeError("transition after cleanup failed")
+
+        monkeypatch.setattr(controls, "_transition_workspace_for_control", fail_transition)
+
+        if error_kind == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await service.cancel_workspace(
+                    workspace_id,
+                    reason="operator cancel races post-cleanup",
+                    stop_stack=True,
+                    idempotency_key="cancel-post-cleanup-cancelled",
+                )
+        else:
+            with pytest.raises(RuntimeError, match="transition after cleanup failed"):
+                await service.cancel_workspace(
+                    workspace_id,
+                    reason="operator cancel races post-cleanup",
+                    stop_stack=True,
+                    idempotency_key="cancel-post-cleanup-runtime",
+                )
+
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.cancel,
+        )
+
+    assert len(operations) == 1
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
+    if error_kind == "cancelled":
+        assert operations[0].error_message == "CancelledError: operation was cancelled"
+    else:
+        assert operations[0].error_message == "RuntimeError: transition after cleanup failed"
+
+
+@pytest.mark.unit
+async def test_teardown_operation_heartbeat_helper_handles_sessionless_and_stopped_lease(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
+        )
+
+        async def _done() -> str:
+            return "done"
+
+        service._session_factory = None  # type: ignore[assignment]  # noqa: SLF001
+        assert (
+            await service._run_with_teardown_operation_heartbeat("op-sessionless", _done())  # noqa: SLF001
+            == "done"
+        )
+        service._session_factory = factory  # type: ignore[assignment]  # noqa: SLF001
+
+        async def _lease_stopped(*_args: object, **_kwargs: object) -> str:
+            return "operation lease is no longer active"
+
+        monkeypatch.setattr(
+            controls,
+            "_renew_runtime_teardown_operation_lease_loop",
+            _lease_stopped,
+        )
+        assert (
+            await service._run_with_teardown_operation_heartbeat("op-done", _done())  # noqa: SLF001
+            == "done"
+        )
+
+        async def _pending() -> str:
+            await asyncio.Event().wait()
+            return "unreachable"
+
+        with pytest.raises(RuntimeError, match="operation lease is no longer active"):
+            await service._run_with_teardown_operation_heartbeat("op-lost", _pending())  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_claim_heartbeat_helper_handles_stopped_heartbeat(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
+        )
+
+        async def _claim_loop_done(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        monkeypatch.setattr(
+            controls,
+            "_refresh_terminal_runtime_release_claim_loop",
+            _claim_loop_done,
+        )
+
+        async def _done() -> str:
+            return "done"
+
+        assert (
+            await service._run_with_terminal_runtime_release_claim_heartbeat(  # noqa: SLF001
+                "ws-done",
+                owner_id="owner",
+                work=_done(),
+            )
+            == "done"
+        )
+
+        async def _pending() -> str:
+            await asyncio.Event().wait()
+            return "unreachable"
+
+        with pytest.raises(
+            RuntimeError,
+            match="terminal runtime release claim heartbeat stopped",
+        ):
+            await service._run_with_terminal_runtime_release_claim_heartbeat(  # noqa: SLF001
+                "ws-lost",
+                owner_id="owner",
+                work=_pending(),
+            )
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_claim_heartbeat_helper_cancels_pending_work(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
+        )
+        work_cancelled = asyncio.Event()
+
+        async def _claim_loop_waits(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        async def _pending_work() -> str:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                work_cancelled.set()
+                raise
+            return "unreachable"
+
+        monkeypatch.setattr(
+            controls,
+            "_refresh_terminal_runtime_release_claim_loop",
+            _claim_loop_waits,
+        )
+        helper = asyncio.create_task(
+            service._run_with_terminal_runtime_release_claim_heartbeat(  # noqa: SLF001
+                "ws-cancel",
+                owner_id="owner",
+                work=_pending_work(),
+            )
+        )
+        await asyncio.sleep(0)
+        helper.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await helper
+
+    assert work_cancelled.is_set()
+
+
+@pytest.mark.unit
+def test_terminal_runtime_release_claim_owner_helpers_cover_ineligible_owners() -> None:
+    assert (
+        controls._control_terminal_runtime_release_claim_owner(  # noqa: SLF001
+            SimpleNamespace(status=WorkspaceStatus.ready.value)
+        )
+        is None
+    )
+    assert (
+        controls._control_terminal_runtime_release_claim_owner(  # noqa: SLF001
+            SimpleNamespace(
+                status=WorkspaceStatus.completed.value,
+                execution_claimed_by="worker-1",
+                execution_claim_expires_at=datetime.now(UTC) + timedelta(minutes=1),
+            )
+        )
+        is None
+    )
+    assert (
+        controls._control_terminal_runtime_release_claim_owner(  # noqa: SLF001
+            SimpleNamespace(
+                status=WorkspaceStatus.completed.value,
+                execution_claimed_by="terminal-runtime-release:control:owner",
+                execution_claim_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+async def test_control_private_helpers_cover_defensive_branches() -> None:
+    assert controls._derive_control_session_factory(SimpleNamespace(bind=None)) is None  # noqa: SLF001
+
+    operation = SimpleNamespace(
+        status=OperationStatus.failed.value,
+        type=OperationType.cancel.value,
+        started_at=None,
+        lease_renewed_at=None,
+        finished_at=datetime.now(UTC),
+        error_code="OLD",
+        error_message="old",
+        result={"old": True},
+    )
+    controls._renew_runtime_teardown_operation(operation)  # noqa: SLF001
+    assert operation.status == OperationStatus.running.value
+    assert operation.started_at is not None
+    assert operation.finished_at is None
+    assert operation.error_code is None
+    assert operation.result is None
+
+    class _Operations:
+        async def list_for_workspace(
+            self,
+            _workspace_id: str,
+            *,
+            status: OperationStatus,
+            limit: int,
+        ) -> list[object]:
+            del limit
+            if status is OperationStatus.pending:
+                return [
+                    SimpleNamespace(
+                        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                        id="old-stop",
+                        type=OperationType.stop.value,
+                        status=OperationStatus.running.value,
+                        started_at=datetime.now(UTC) - timedelta(minutes=20),
+                        lease_renewed_at=datetime.now(UTC) - timedelta(minutes=20),
+                        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+                    )
+                ]
+            return [
+                SimpleNamespace(
+                    created_at=datetime(2026, 1, 2, tzinfo=UTC),
+                    id="validate",
+                    type=OperationType.validate.value,
+                    status=OperationStatus.running.value,
+                )
+            ]
+
+    active = await controls._find_active_operation(  # noqa: SLF001
+        _Operations(),  # type: ignore[arg-type]
+        workspace_id="ws_1",
+        operation_types={OperationType.stop.value, OperationType.validate.value},
+    )
+    assert active is not None
+    assert active.id == "validate"
+
+    await controls._release_active_resource_reservation_for_control(  # noqa: SLF001
+        SimpleNamespace(),
+        SimpleNamespace(status=WorkspaceStatus.ready.value),
+    )
+
+
+@pytest.mark.unit
+async def test_preserve_precommitted_cancelled_operation_uses_dedicated_session(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.running)
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace.id,
+            operation_type=OperationType.cancel,
+            status=OperationStatus.running,
+        )
+        await session.commit()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
+        )
+        rollback = AsyncMock(side_effect=AssertionError("parent session reused"))
+        monkeypatch.setattr(session, "rollback", rollback)
+
+        await service._preserve_precommitted_cancelled_operation(operation.id)  # noqa: SLF001
+
+    rollback.assert_not_awaited()
+    async with factory() as verify_session:
+        persisted = await OperationRepository(verify_session).get(operation.id)
+
+    assert persisted is not None
+    assert persisted.status == OperationStatus.running.value
+    assert persisted.lease_renewed_at is not None
+
+
+@pytest.mark.unit
+async def test_precommitted_cancelled_operation_helpers_use_current_session_without_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(rollback=AsyncMock())
+    service = controls.WorkspaceControlService(
+        session,  # type: ignore[arg-type]
+        project_stopper=lambda _compose_project_name: None,
+        cleaner_factory=lambda: controls.WorkspaceCleanupResult(
+            status="succeeded",
+            reason_code="CLEANUP_SUCCEEDED",
+        ),
+    )
+    service._session_factory = None  # type: ignore[attr-defined]  # noqa: SLF001
+    preserved: list[tuple[str, object]] = []
+    failed: list[dict[str, object]] = []
+
+    async def preserve(operation_id: str, *, session: object) -> None:
+        preserved.append((operation_id, session))
+
+    async def finish_failed(session: object, **kwargs: object) -> None:
+        failed.append({"session": session, **kwargs})
+
+    service._preserve_precommitted_cancelled_operation_unshielded = preserve  # type: ignore[method-assign]  # noqa: SLF001
+    monkeypatch.setattr(
+        controls,
+        "_finish_precommitted_control_operation_failed",
+        finish_failed,
+    )
+
+    await service._preserve_precommitted_cancelled_operation("op_current")  # noqa: SLF001
+    await service._finish_precommitted_cancelled_control_operation_failed(  # noqa: SLF001
+        operation_id="op_failed",
+        workspace_id="ws_failed",
+        exc=asyncio.CancelledError("cancelled"),
+        terminal_runtime_release_claim_owner_id="terminal-runtime-release:owner",
+    )
+
+    assert preserved == [("op_current", session)]
+    assert len(failed) == 1
+    assert failed[0]["session"] is session
+    assert failed[0]["operation_id"] == "op_failed"
+    assert failed[0]["workspace_id"] == "ws_failed"
+    assert isinstance(failed[0]["exc"], asyncio.CancelledError)
+    assert failed[0]["terminal_runtime_release_claim_owner_id"] == "terminal-runtime-release:owner"
+
+
+@pytest.mark.unit
+async def test_preserve_precommitted_cancelled_operation_unshielded_edges(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.running)
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace.id,
+            operation_type=OperationType.stop,
+            status=OperationStatus.running,
+        )
+        operation_id = operation.id
+        await session.commit()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=None,
+        )
+
+        await service._preserve_precommitted_cancelled_operation_unshielded(  # noqa: SLF001
+            operation_id,
+            session=session,
+        )
+        service._session_factory = None  # type: ignore[assignment]  # noqa: SLF001
+        await service._preserve_precommitted_cancelled_operation_unshielded(  # noqa: SLF001
+            "ignored-without-session-factory",
+        )
+
+        persisted = await OperationRepository(session).get(operation_id)
+
+    assert persisted is not None
+    assert persisted.status == OperationStatus.running.value
+    assert persisted.lease_renewed_at is not None
 
 
 @pytest.mark.unit
@@ -460,6 +1005,34 @@ async def test_remonitor_workspace_rejects_wrong_state_and_missing_pr_url(
         ],
     }
     assert pr_error.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}
+
+
+@pytest.mark.unit
+async def test_refresh_active_coalesce_rejects_destroyed_workspace_state(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.ready)
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        operation = await service.request_refresh_workspace(
+            workspace.id,
+            reason="retry provider check",
+        )
+        assert operation.status == OperationStatus.pending.value
+        workspace.status = WorkspaceStatus.destroyed.value
+        await session.flush()
+
+        with pytest.raises(controls.WorkspaceRefreshStateError):
+            await service.request_refresh_workspace(
+                workspace.id,
+                reason="retry provider check",
+            )
 
 
 @pytest.mark.unit
@@ -898,15 +1471,320 @@ def test_default_cleaner_uses_configured_work_dir(tmp_path: Path) -> None:
         get_settings.cache_clear()
 
         cleaner = controls.default_cleaner()
+        worktrees_root = controls.default_worktrees_root()
 
         assert cleaner._git._work_dir == tmp_path / "git"  # noqa: SLF001
         assert cleaner._compose._projects_dir == tmp_path / "compose"  # noqa: SLF001
+        assert worktrees_root == tmp_path / "git" / "worktrees"
     finally:
         if previous is None:
             os.environ.pop("AWF_WORK_DIR", None)
         else:
             os.environ["AWF_WORK_DIR"] = previous
         get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_finish_version_conflict_operation_records_failed_operation_and_audit(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.running)
+        operations = OperationRepository(session)
+        operation = await operations.create(
+            workspace_id=workspace.id,
+            operation_type=OperationType.cancel,
+            status=OperationStatus.running,
+            payload={"stop_stack": True, "expected_version": 12},
+        )
+        exc = controls.VersionConflictError(expected_version=12, actual_version=13)
+
+        await controls._finish_version_conflict_operation(  # noqa: SLF001
+            session,
+            operations,
+            operation,
+            workspace=workspace,
+            exc=exc,
+        )
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+
+    assert operation.status == OperationStatus.failed.value
+    assert operation.error_code == "VERSION_CONFLICT"
+    assert operation.error_message == exc.message
+    audit_event = next(
+        event for event in events if event.event_type == "workspace.audit.control_operation"
+    )
+    assert audit_event.reason_code == "VERSION_CONFLICT"
+    assert audit_event.payload["stop_stack"] is True
+    assert audit_event.payload["expected_version"] == 12
+    assert audit_event.payload["evidence"] == exc.detail
+
+
+@pytest.mark.unit
+async def test_preserve_precommitted_running_operation_renews_existing_only(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.destroying)
+        operations = OperationRepository(session)
+        operation = await operations.create(
+            workspace_id=workspace.id,
+            operation_type=OperationType.cancel,
+            status=OperationStatus.running,
+        )
+        operation_id = operation.id
+        await session.commit()
+        before = operation.lease_renewed_at
+
+        await controls._preserve_precommitted_running_operation(  # noqa: SLF001
+            session,
+            "missing-operation",
+        )
+        await controls._preserve_precommitted_running_operation(  # noqa: SLF001
+            session,
+            operation_id,
+        )
+        refreshed = await OperationRepository(session).get(operation_id)
+
+    assert refreshed is not None
+    assert refreshed.lease_renewed_at is not None
+    assert refreshed.lease_renewed_at != before
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_claim_for_control_now_logs_release_errors(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        async def fail_release(
+            self: WorkspaceRepository,
+            workspace_id: str,
+            *,
+            owner_id: str,
+        ) -> bool:
+            raise RuntimeError(f"release failed for {workspace_id}:{owner_id}")
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "release_execution_claim",
+            fail_release,
+        )
+
+        await service._release_terminal_runtime_claim_for_control_now(  # noqa: SLF001
+            "ws_missing",
+            owner_id="terminal_runtime_release:control:test",
+        )
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_claim_active_for_control_handles_missing_workspace(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        with pytest.raises(controls.WorkspaceNotFoundError):
+            await service._terminal_runtime_release_claim_active_for_control(  # noqa: SLF001
+                SimpleNamespace(id="ws_missing"),
+            )
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_claim_for_control_preserves_unmatched_claim(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.completed)
+        workspace.execution_claimed_by = "someone-else"
+        workspace.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        await service._release_terminal_runtime_claim_for_control(  # noqa: SLF001
+            workspace,
+            release=controls._ControlTerminalRuntimeCleanup(  # noqa: SLF001
+                cleanup=controls.WorkspaceCleanupResult(
+                    status="succeeded",
+                    reason_code="CLEANUP_SUCCEEDED",
+                ),
+                preserved_worktree_host_path=None,
+                claim_owner_id="terminal_runtime_release:control:mine",
+            ),
+        )
+
+    assert workspace.execution_claimed_by == "someone-else"
+
+
+@pytest.mark.unit
+async def test_record_terminal_runtime_release_for_control_skips_nonterminal_workspace(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def record_failure(*_args: object, **_kwargs: object) -> None:
+        calls.append("recorded")
+
+    monkeypatch.setattr(
+        controls,
+        "record_terminal_runtime_release_event",
+        record_failure,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.running)
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        await service._record_terminal_runtime_release_for_control(  # noqa: SLF001
+            workspace,
+            release=controls._ControlTerminalRuntimeCleanup(  # noqa: SLF001
+                cleanup=controls.WorkspaceCleanupResult(
+                    status="succeeded",
+                    reason_code="CLEANUP_SUCCEEDED",
+                ),
+                preserved_worktree_host_path=None,
+                claim_owner_id=None,
+            ),
+            source="unit-test",
+        )
+
+    assert calls == []
+
+
+@pytest.mark.unit
+async def test_finish_precommitted_control_operation_failed_handles_audit_failure(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.destroying)
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace.id,
+            operation_type=OperationType.destroy,
+            status=OperationStatus.running,
+            payload={"stop_stack": True, "expected_version": 5},
+        )
+        await session.commit()
+
+        async def fail_audit(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("audit insert failed")
+
+        monkeypatch.setattr(controls, "_add_control_audit_event", fail_audit)
+
+        await controls._finish_precommitted_control_operation_failed(  # noqa: SLF001
+            session,
+            operation_id=operation.id,
+            workspace_id=workspace.id,
+            exc=RuntimeError("cleanup failed"),
+        )
+        await session.refresh(operation)
+
+    assert operation.status == OperationStatus.failed.value
+    assert operation.error_code == "CONTROL_OPERATION_FAILED"
+    assert operation.error_message == "RuntimeError: cleanup failed"
+
+
+@pytest.mark.unit
+async def test_teardown_operation_heartbeat_edges(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        async def immediate_heartbeat_stop(
+            *_args: object,
+            **_kwargs: object,
+        ) -> str:
+            return "lease row disappeared"
+
+        monkeypatch.setattr(
+            controls,
+            "_renew_runtime_teardown_operation_lease_loop",
+            immediate_heartbeat_stop,
+        )
+
+        with pytest.raises(RuntimeError, match="lease row disappeared"):
+            await service._run_with_teardown_operation_heartbeat(  # noqa: SLF001
+                "op_lost",
+                asyncio.sleep(60, result="unused"),
+            )
+
+        service._session_factory = None  # type: ignore[assignment]  # noqa: SLF001
+        result = await service._run_with_teardown_operation_heartbeat(  # noqa: SLF001
+            "op_inline",
+            asyncio.sleep(0, result="inline-result"),
+        )
+
+    assert result == "inline-result"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode", ["raise", "lost"])
+async def test_terminal_runtime_release_claim_refresh_loop_stops_on_error_or_lost_claim(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    factory = make_session_factory(engine)
+
+    async def refresh_claim(
+        self: WorkspaceRepository,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        del self, workspace_id, owner_id, lease_expires_at
+        if mode == "raise":
+            raise RuntimeError("database unavailable")
+        return False
+
+    monkeypatch.setattr(
+        controls,
+        "_terminal_runtime_release_claim_heartbeat_interval_seconds",
+        lambda: 0.001,
+    )
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "refresh_execution_claim",
+        refresh_claim,
+    )
+
+    await controls._refresh_terminal_runtime_release_claim_loop(  # noqa: SLF001
+        factory,
+        workspace_id="ws_refresh",
+        owner_id="terminal_runtime_release:control:test",
+    )
 
 
 async def _create_control_workspace(

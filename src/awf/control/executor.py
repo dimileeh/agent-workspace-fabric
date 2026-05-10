@@ -82,6 +82,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     ValidationRunRepository,
     WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
     sync_candidate_readiness,
 )
 from awf.db.validation_runs import validation_run_coverage_payload
@@ -160,6 +161,7 @@ from awf.service.supply_chain_policy import (
     SupplyChainPolicyRefreshResult,
     SupplyChainPolicyRefreshService,
 )
+from awf.service.terminal_runtime import TerminalRuntimeReleaserProtocol
 
 
 class _MonitorRunnerProto(Protocol):
@@ -791,6 +793,7 @@ class WorkspaceExecutor:
         pr_monitor: _MonitorRunnerProto | None = None,
         pr_monitor_factory: Callable[..., _MonitorRunnerProto] | None = None,
         log_store: LogStore | None = None,
+        terminal_runtime_releaser: TerminalRuntimeReleaserProtocol | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -819,6 +822,7 @@ class WorkspaceExecutor:
         self._pr_monitor = pr_monitor
         self._pr_monitor_factory = pr_monitor_factory
         self._log_store = log_store
+        self._terminal_runtime_releaser = terminal_runtime_releaser
 
     async def _record_executor_pr_audit_event(
         self,
@@ -1199,18 +1203,27 @@ class WorkspaceExecutor:
                 )
                 persisted.failure_reason = FailureReason.infrastructure_failure.value
                 persisted.failure_message = safe_message
-                await repo.transition(
+                if not await self._transition_or_record_blocked_active_operation(
+                    session,
+                    repo,
                     persisted,
                     to=WorkspaceStatus.failed,
                     reason_code=_PR_ADOPTION_METADATA_MISSING_REASON_CODE,
+                    action="sync_feature_pr_adoption",
+                    expected=WorkspaceStatus.running,
                     payload={
                         "failure_reason": FailureReason.infrastructure_failure.value,
                         "reason_code": _PR_ADOPTION_METADATA_MISSING_REASON_CODE,
                         "message": safe_message,
                         "details": {"missing": missing},
                     },
-                )
+                ):
+                    return
                 await session.commit()
+                await self._release_terminal_runtime(
+                    workspace_id,
+                    expected_status=WorkspaceStatus.failed,
+                )
                 return
 
             head_sha = _required_metadata_str(persisted_metadata, "head_sha")
@@ -1247,16 +1260,25 @@ class WorkspaceExecutor:
                     "source": "existing_github_pr",
                 },
             )
-            await repo.transition(
+            if not await self._transition_or_record_blocked_active_operation(
+                session,
+                repo,
                 persisted,
                 to=WorkspaceStatus.validating,
                 reason_code=_PR_ADOPTION_SKIP_AGENT_REASON_CODE,
+                action="sync_feature_pr_validate",
+                expected=WorkspaceStatus.running,
                 payload={"source": "existing_github_pr"},
-            )
-            await repo.transition(
+            ):
+                return
+            if not await self._transition_or_record_blocked_active_operation(
+                session,
+                repo,
                 persisted,
                 to=WorkspaceStatus.monitoring_pr,
                 reason_code=_PR_MONITOR_ADOPTED_REASON_CODE,
+                action="sync_feature_pr_handoff",
+                expected=WorkspaceStatus.validating,
                 payload={
                     "pr_number": pr_number,
                     "pr_url": pr_url,
@@ -1264,7 +1286,8 @@ class WorkspaceExecutor:
                     "base_sha": base_sha,
                     "source": "existing_github_pr",
                 },
-            )
+            ):
+                return
             await session.commit()
 
         _log.info(
@@ -2937,14 +2960,25 @@ class WorkspaceExecutor:
                     has_monitor = (
                         self._pr_monitor is not None or self._pr_monitor_factory is not None
                     )
-                    await repo.transition(
-                        persisted,
-                        to=WorkspaceStatus.monitoring_pr
-                        if has_monitor
-                        else WorkspaceStatus.completed,
-                        reason_code="RECOVERY_VALIDATION_OK",
+                    recovered_status = (
+                        WorkspaceStatus.monitoring_pr if has_monitor else WorkspaceStatus.completed
                     )
+                    if not await self._transition_or_record_blocked_active_operation(
+                        session,
+                        repo,
+                        persisted,
+                        to=recovered_status,
+                        reason_code="RECOVERY_VALIDATION_OK",
+                        action="recovery_skip_push",
+                        expected=WorkspaceStatus.validating,
+                    ):
+                        return
                     await session.commit()
+                if not has_monitor:
+                    await self._release_terminal_runtime(
+                        workspace_id,
+                        expected_status=WorkspaceStatus.completed,
+                    )
                 _log.info(
                     "executor.recovery_skip_push",
                     workspace_id=workspace_id,
@@ -3168,21 +3202,35 @@ class WorkspaceExecutor:
             if monitor is not None:
                 # Hand off to the monitor — it will transition to completed
                 # (on merge) or failed (on abort / cap / close).
-                await repo.transition(
+                if not await self._transition_or_record_blocked_active_operation(
+                    session,
+                    repo,
                     persisted,
                     to=WorkspaceStatus.monitoring_pr,
                     reason_code=pr_reason_code,
-                )
+                    action="persist_pr",
+                    expected=WorkspaceStatus.pushing,
+                ):
+                    return
                 await session.commit()
             else:
                 # No monitor wired (legacy executor path / unit-test shim) —
                 # preserve the original ``pushing → completed`` contract.
-                await repo.transition(
+                if not await self._transition_or_record_blocked_active_operation(
+                    session,
+                    repo,
                     persisted,
                     to=WorkspaceStatus.completed,
                     reason_code=pr_reason_code,
-                )
+                    action="persist_pr",
+                    expected=WorkspaceStatus.pushing,
+                ):
+                    return
                 await session.commit()
+                await self._release_terminal_runtime(
+                    workspace_id,
+                    expected_status=WorkspaceStatus.completed,
+                )
 
         if successful_validation_run_id is not None and pr.head_sha:
             try:
@@ -3671,14 +3719,23 @@ class WorkspaceExecutor:
             )
             persisted.failure_reason = FailureReason.infrastructure_failure.value
             persisted.failure_message = message
-            await repo.transition(
+            if not await self._transition_or_record_blocked_active_operation(
+                session,
+                repo,
                 persisted,
                 to=WorkspaceStatus.failed,
                 reason_code=PR_REEXECUTION_GUARD_REASON_CODE,
-            )
+                action="pr_reexecution_guard",
+                expected=WorkspaceStatus.running,
+            ):
+                return _PrReexecutionGuardResult(blocked=True)
             blocked_pr_number = persisted.pr_number
             blocked_pr_url = persisted.pr_url
             await session.commit()
+        await self._release_terminal_runtime(
+            workspace_id,
+            expected_status=WorkspaceStatus.failed,
+        )
         _log.error(
             "executor.pr_reexecution_blocked",
             workspace_id=workspace_id,
@@ -3757,12 +3814,21 @@ class WorkspaceExecutor:
                 )
             ws.failure_reason = FailureReason.infrastructure_failure.value
             ws.failure_message = message[:2000]
-            await repo.transition(
+            if not await self._transition_or_record_blocked_active_operation(
+                session,
+                repo,
                 ws,
                 to=WorkspaceStatus.failed,
                 reason_code=WORKTREE_MISSING_REASON_CODE,
-            )
+                action=action,
+                expected=expected,
+            ):
+                return False
             await session.commit()
+            await self._release_terminal_runtime(
+                workspace_id,
+                expected_status=WorkspaceStatus.failed,
+            )
             return False
 
     def _defaults_for(self, agent: AgentRuntime) -> AgentDefaults | None:
@@ -4945,12 +5011,27 @@ class WorkspaceExecutor:
         """Atomically transition a ready workspace to running before execution."""
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.transition_if_current(
-                workspace_id,
-                from_status=WorkspaceStatus.ready,
-                to=WorkspaceStatus.running,
-                reason_code="EXECUTOR_CLAIMED",
-            )
+            try:
+                ws = await repo.transition_if_current(
+                    workspace_id,
+                    from_status=WorkspaceStatus.ready,
+                    to=WorkspaceStatus.running,
+                    reason_code="EXECUTOR_CLAIMED",
+                )
+            except WorkspaceTransitionBlockedByActiveOperationError as exc:
+                operation_id = exc.operation.id
+                await session.rollback()
+                await self._record_active_operation_blocked_callback_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    action="execute",
+                    expected=WorkspaceStatus.ready,
+                    requested=WorkspaceStatus.running,
+                    reason_code="EXECUTOR_CLAIMED",
+                    operation_id=operation_id,
+                )
+                await session.commit()
+                return None
             if ws is not None:
                 ws.execution_claimed_by = execution_owner_id
                 ws.execution_claim_expires_at = execution_lease_expires_at
@@ -5046,9 +5127,84 @@ class WorkspaceExecutor:
                     )
                 await session.commit()
                 return False
-            await repo.transition(ws, to=to, reason_code=reason)
+            if not await self._transition_or_record_blocked_active_operation(
+                session,
+                repo,
+                ws,
+                to=to,
+                reason_code=reason,
+                action=action,
+                expected=from_status,
+            ):
+                return False
             await session.commit()
             return True
+
+    async def _transition_or_record_blocked_active_operation(
+        self,
+        session: AsyncSession,
+        repo: WorkspaceRepository,
+        ws: Workspace,
+        *,
+        to: WorkspaceStatus,
+        reason_code: str,
+        action: str,
+        expected: WorkspaceStatus,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        workspace_id = ws.id
+        try:
+            await repo.transition(ws, to=to, reason_code=reason_code, payload=payload)
+        except WorkspaceTransitionBlockedByActiveOperationError as exc:
+            operation_id = exc.operation.id
+            await session.rollback()
+            await self._record_active_operation_blocked_callback_in_session(
+                session,
+                workspace_id=workspace_id,
+                action=action,
+                expected=expected,
+                requested=to,
+                reason_code=reason_code,
+                operation_id=operation_id,
+            )
+            await session.commit()
+            return False
+        return True
+
+    async def _record_active_operation_blocked_callback_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        action: str,
+        expected: WorkspaceStatus,
+        requested: WorkspaceStatus,
+        reason_code: str,
+        operation_id: str,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        if ws is None:  # pragma: no cover - row disappeared during teardown
+            return
+        _log.info(
+            "executor.transition_blocked_by_active_operation",
+            workspace_id=workspace_id,
+            action=action,
+            expected_status=expected.value,
+            actual_status=ws.status,
+            requested_status=requested.value,
+            operation_id=operation_id,
+            reason_code=reason_code,
+        )
+        await repo.record_ignored_stale_callback(
+            ws,
+            callback_source="executor",
+            callback_action=action,
+            expected_status=expected,
+            requested_status=requested,
+            operation_id=operation_id,
+            reason_code=reason_code,
+        )
 
     async def _record_stale_action_skip(
         self,
@@ -5150,6 +5306,7 @@ class WorkspaceExecutor:
                 await session.commit()
                 return
             safe_message = redact_audit_text(message, limit=2000)
+            resolved_reason_code = reason_code or failure_reason.value.upper()
             ws.failure_reason = failure_reason.value
             ws.failure_message = safe_message
             if reason_code == EXEC_PROCESS_CLEANUP_FAILED:
@@ -5163,20 +5320,52 @@ class WorkspaceExecutor:
             if details is not None or salvage is not None:
                 payload = {
                     "failure_reason": failure_reason.value,
-                    "reason_code": reason_code or failure_reason.value.upper(),
+                    "reason_code": resolved_reason_code,
                     "message": safe_message,
                 }
                 if details is not None:
                     payload["details"] = dict(details)
                 if salvage is not None:
                     payload["salvage"] = dict(salvage)
-            await repo.transition(
+            if not await self._transition_or_record_blocked_active_operation(
+                session,
+                repo,
                 ws,
                 to=WorkspaceStatus.failed,
-                reason_code=reason_code or failure_reason.value.upper(),
+                reason_code=resolved_reason_code,
+                action="mark_failed",
+                expected=from_status,
                 payload=payload,
-            )
+            ):
+                return
             await session.commit()
+        await self._release_terminal_runtime(
+            workspace_id,
+            expected_status=WorkspaceStatus.failed,
+        )
+
+    async def _release_terminal_runtime(
+        self,
+        workspace_id: str,
+        *,
+        expected_status: WorkspaceStatus,
+    ) -> None:
+        releaser = self._terminal_runtime_releaser
+        if releaser is None:
+            return
+        try:
+            await releaser.release(
+                workspace_id,
+                source="executor",
+                expected_status=expected_status,
+            )
+        except Exception as exc:  # pragma: no cover - defensive; terminal state already landed.
+            _log.warning(
+                "executor.terminal_runtime_release_failed",
+                workspace_id=workspace_id,
+                expected_status=expected_status.value,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
 
     async def _prepare_provider_recovery(self, workspace_id: str) -> None:
         async with self._session_factory() as session:

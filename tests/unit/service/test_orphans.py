@@ -6,11 +6,12 @@ import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, get_type_hints
+from typing import Any, Literal, cast, get_type_hints
 
 import pytest
 
 from awf.db.enums import WorkspaceStatus
+from awf.service import orphans
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.orphans import (
     ACTIVE_WORKSPACE_STATUSES,
@@ -630,11 +631,14 @@ def test_unknown_workspace_status_and_naive_retention_timestamp(tmp_path: Path) 
     ).to_check_payload()
 
     assert unknown["examples"][0]["reason"] == "WORKSPACE_STATUS_UNKNOWN"
-    assert retained["reason"] == "NO_ORPHANS"
-    assert retained["retained_count"] == 1
+    assert retained["reason"] == "ORPHANS_PRESENT"
+    assert retained["leaked_live_count"] == 1
+    assert retained["examples"][0]["reason"] == "TERMINAL_LIVE_RUNTIME_RESOURCE"
 
 
-def test_completed_workspace_within_retention_not_flagged(tmp_path: Path) -> None:
+def test_completed_workspace_within_retention_flags_live_runtime_leaks(
+    tmp_path: Path,
+) -> None:
     now = datetime(2026, 4, 28, tzinfo=UTC)
     (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
 
@@ -676,17 +680,55 @@ def test_completed_workspace_within_retention_not_flagged(tmp_path: Path) -> Non
         now=now,
     ).to_check_payload()
 
-    assert summary["ok"] is True
-    assert summary["reason"] == "NO_ORPHANS"
-    assert summary["retained_count"] == 4
-    assert summary["retained_counts_by_kind"] == {
+    assert summary["ok"] is False
+    assert summary["reason"] == "ORPHANS_PRESENT"
+    assert summary["orphan_count"] == 2
+    assert summary["orphan_terminal_count"] == 2
+    assert summary["leaked_live_count"] == 2
+    assert summary["leaked_live_counts_by_kind"] == {
         "container": 1,
         "network": 1,
+    }
+    assert summary["retained_count"] == 2
+    assert summary["retained_evidence_count"] == 2
+    assert summary["retained_evidence_counts_by_kind"] == {
         "volume": 1,
         "worktree": 1,
     }
-    assert summary["orphan_count"] == 0
-    assert summary["examples"] == []
+    assert {example["reason"] for example in summary["examples"]} == {
+        "TERMINAL_LIVE_RUNTIME_RESOURCE"
+    }
+
+
+def test_retained_terminal_resource_kind_must_be_explicitly_classified() -> None:
+    now = datetime(2026, 4, 28, tzinfo=UTC)
+    resource = orphans.ManagedResource(
+        resource_kind=cast(Any, "snapshot"),
+        resource_id="snapshot-1",
+        resource_name="snapshot-1",
+        workspace_id="ws_done",
+    )
+
+    with pytest.raises(AssertionError, match="snapshot"):
+        orphans._classify_resource(
+            resource,
+            workspace_view=_view(
+                _snapshot(
+                    "ws_done",
+                    status=WorkspaceStatus.completed,
+                    updated_at=now - timedelta(hours=1),
+                )
+            ),
+            workspaces={
+                "ws_done": _snapshot(
+                    "ws_done",
+                    status=WorkspaceStatus.completed,
+                    updated_at=now - timedelta(hours=1),
+                )
+            },
+            now=now,
+            min_retention_hours=DEFAULT_MIN_AGE_HOURS,
+        )
 
 
 def test_completed_workspace_past_retention_is_cleanup_ready(tmp_path: Path) -> None:

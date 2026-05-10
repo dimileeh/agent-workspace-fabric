@@ -584,7 +584,8 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
     assert not candidate.manual_merge_required
     assert _call_index(cmd, _is_docker_down) > _call_index(cmd, _is_pr_comment)
     docker_down = _calls(cmd, _is_docker_down)[0]
-    assert docker_down[-3:] == ["down", "--remove-orphans", "--volumes"]
+    assert docker_down[-2:] == ["down", "--remove-orphans"]
+    assert "--volumes" not in docker_down
     assert worktree.exists()
     assert compose_dir.exists()
     assert auth_dir.exists()
@@ -599,14 +600,21 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
 
 
 @pytest.mark.unit
-async def test_manual_merge_closed_unmerged_aborts_without_cleanup(
+async def test_manual_merge_closed_unmerged_aborts_with_salvage_preserving_cleanup(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
 ) -> None:
+    work_dir = tmp_path / "service"
+    worktrees_root = work_dir / "git" / "worktrees"
     ws_id = await seed_monitoring_workspace(factory, auto_merge=False)
+    worktree_file = worktrees_root / ws_id / "repo.txt"
+    log_file = work_dir / "logs" / ws_id / "monitor.log"
+    _write(worktree_file, "repo")
+    _write(log_file, "keep logs")
+
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(closed=True, merged=False))
@@ -616,7 +624,7 @@ async def test_manual_merge_closed_unmerged_aborts_without_cleanup(
         cmd=cmd,
         adapter=adapter,
         sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
+        worktrees_root=worktrees_root,
         auto_merge=False,
     )
     with structlog.testing.capture_logs() as captured:
@@ -641,7 +649,13 @@ async def test_manual_merge_closed_unmerged_aborts_without_cleanup(
     assert candidate.close_reason == "WORKSPACE_FAILED"
     assert candidate.merged_at is None
     assert not _has_call(cmd, _is_pr_comment)
-    assert not _has_call(cmd, _is_docker_down)
+    teardown_calls = _calls(cmd, _is_docker_down)
+    assert len(teardown_calls) == 1
+    docker_down = teardown_calls[0]
+    assert docker_down[-2:] == ["down", "--remove-orphans"]
+    assert "--volumes" not in docker_down
+    assert worktree_file.exists()
+    assert log_file.exists()
     assert not _has_call(cmd, _is_pr_merge)
     assert sleep_fn.calls == []
 

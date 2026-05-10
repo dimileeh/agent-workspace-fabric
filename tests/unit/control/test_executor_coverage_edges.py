@@ -76,6 +76,8 @@ from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PLAN_CONFORMANCE_UNSATISFIED,
+    ConformanceStallEvidence,
+    ConformanceStallKind,
     PlanConformanceReport,
     PlanConformanceStatus,
 )
@@ -523,6 +525,151 @@ def test_validation_evidence_serializer_uses_evidence_limit_for_redaction_expans
     assert "[redacted]" in evidence
     assert "SECRET=a" not in evidence
     assert evidence.endswith("...[truncated]")
+
+
+@pytest.mark.unit
+def test_read_ref_sha_uses_loose_refs_and_packed_refs_edges(tmp_path: Path) -> None:
+    loose_ref = tmp_path / "refs" / "heads" / "feature"
+    loose_ref.parent.mkdir(parents=True)
+    loose_ref.write_text(" loose-sha \n", encoding="utf-8")
+
+    assert _read_ref_sha(tmp_path, "refs/heads/feature") == "loose-sha"
+
+    loose_ref.unlink()
+    (tmp_path / "packed-refs").write_text(
+        "\n".join(
+            [
+                "# pack-refs with: peeled fully-peeled sorted",
+                "^peeled-tag-sha",
+                "malformed-line-without-space",
+                "packed-sha refs/heads/feature",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert _read_ref_sha(tmp_path, "refs/heads/feature") == "packed-sha"
+    assert _read_ref_sha(tmp_path, "refs/heads/missing") is None
+
+
+@pytest.mark.unit
+def test_recovery_conformance_gaps_accepts_string_and_ignores_empty_shapes() -> None:
+    assert executor_mod._recovery_conformance_gaps({"gaps": " rerun validation "}) == (
+        "rerun validation",
+    )
+    assert executor_mod._recovery_conformance_gaps({"gaps": "   "}) == ()
+    assert executor_mod._recovery_conformance_gaps({"gaps": {"unexpected": True}}) == ()
+
+
+@pytest.mark.unit
+def test_validation_evidence_json_uses_compact_fallbacks_before_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(executor_mod, "_VALIDATION_EVIDENCE_JSON_LIMIT", 700)
+    payload = {
+        "validation_run_id": "validation-run-1",
+        "status": "failed",
+        "reason_code": "COVERAGE_BELOW_THRESHOLD",
+        "coverage": {
+            "status": "failed",
+            "reason_code": "COVERAGE_BELOW_THRESHOLD",
+            "percent": 98.1,
+            "minimum_percent": 99,
+            "enforce": True,
+            "provider": "python",
+            "large": "x" * 3000,
+        },
+        "commands": [{"command": "pytest", "stdout": "x" * 3000}],
+        "log_stream_refs": {"stdout": "x" * 3000},
+    }
+
+    evidence = executor_mod._validation_evidence_json(payload)
+
+    decoded = json.loads(evidence)
+    assert decoded["evidence_truncated"] is True
+    assert decoded["coverage"]["percent"] == 98.1
+    assert decoded["commands"]["original_type"] == "list"
+    assert decoded["log_stream_refs"]["original_type"] == "mapping"
+
+
+@pytest.mark.unit
+def test_validation_evidence_json_uses_floor_of_floor_when_limit_is_tiny(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(executor_mod, "_VALIDATION_EVIDENCE_JSON_LIMIT", 180)
+    payload = {
+        "validation_run_id": "validation-run-" + ("x" * 1000),
+        "status": "failed",
+        "reason_code": "COVERAGE_BELOW_THRESHOLD",
+        "target_branch": "main-" + ("y" * 1000),
+        "commands": [{"command": "pytest", "stdout": "z" * 1000}],
+        "log_stream_refs": {"stdout": "s" * 1000},
+        "coverage": {"percent": {"pkg": "c" * 1000}},
+    }
+
+    evidence = executor_mod._validation_evidence_json(payload)
+
+    decoded = json.loads(evidence)
+    assert decoded["evidence_truncated"] is True
+    assert decoded["truncation_reason"] == "validation_evidence_json_limit"
+
+
+@pytest.mark.unit
+def test_validation_evidence_summaries_cover_scalar_and_collection_shapes() -> None:
+    assert executor_mod._validation_evidence_coverage_summary("raw coverage") == {
+        "truncated": True,
+        "original_type": "string",
+        "original_length": len("raw coverage"),
+    }
+    assert executor_mod._validation_evidence_floor_value("short") == "short"
+    assert executor_mod._validation_evidence_floor_value(3) == 3
+    assert executor_mod._validation_evidence_floor_value(False) is False
+    assert executor_mod._validation_evidence_floor_value(None) is None
+    assert executor_mod._validation_evidence_floor_value(Path("artifact.txt")) == {
+        "truncated": True,
+        "original_type": "PosixPath",
+    }
+    assert executor_mod._validation_evidence_size_summary({"a": 1, "b": 2}) == {
+        "truncated": True,
+        "original_type": "mapping",
+        "original_entry_count": 2,
+        "retained_keys": ["a", "b"],
+    }
+    assert executor_mod._validation_evidence_size_summary(["a", "b"]) == {
+        "truncated": True,
+        "original_type": "list",
+        "original_length": 2,
+    }
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_agent_failure_message_prefers_safe_output() -> None:
+    stderr_exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=7, stdout="stdout", stderr="stderr SECRET=value"),
+        reason_code="CONFORMANCE_AGENT_FAILED",
+    )
+    stdout_exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=8, stdout="stdout only", stderr=""),
+    )
+    empty_exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=9, stdout="", stderr=""),
+    )
+
+    assert "CONFORMANCE_AGENT_FAILED, exit 7" in (
+        executor_mod._post_validation_conformance_agent_failure_message(stderr_exc)
+    )
+    stderr_message = executor_mod._post_validation_conformance_agent_failure_message(stderr_exc)
+    assert "[redacted]" in stderr_message
+    assert "SECRET=value" not in stderr_message
+    assert "stdout only" in executor_mod._post_validation_conformance_agent_failure_message(
+        stdout_exc
+    )
+    assert "<no output>" in executor_mod._post_validation_conformance_agent_failure_message(
+        empty_exc
+    )
 
 
 @pytest.mark.unit
@@ -1668,6 +1815,44 @@ async def test_baseline_coverage_preflight_skips_when_strategy_disables_it(
 
 
 @pytest.mark.unit
+async def test_baseline_and_final_coverage_skip_when_profile_has_no_coverage_gate(
+    tmp_path: Path,
+) -> None:
+    validation = _CoverageValidation(_coverage(tmp_path, percent=100, status="passed"))
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path, validation=validation)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "no-coverage-gate",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 0,
+                    "enforce": False,
+                },
+            },
+        }
+    )
+
+    baseline = await executor._run_baseline_coverage_preflight(
+        workspace_id="ws_no_coverage",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+    )
+    final = await executor._run_final_coverage_gate(
+        workspace_id="ws_no_coverage",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        validation_tier=1,
+        workspace_head_sha="head",
+    )
+
+    assert baseline is None
+    assert final.coverage is None
+    assert validation.calls == []
+
+
+@pytest.mark.unit
 async def test_final_coverage_gate_reuses_exact_fresh_evidence(
     tmp_path: Path,
 ) -> None:
@@ -1838,6 +2023,382 @@ async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
 
         assert result.coverage is coverage
         assert validation.kwargs[0]["parallel_worker_cpu_limit"] == 3
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_final_coverage_gate_executes_when_reuse_has_no_successful_match(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    try:
+        factory = make_session_factory(engine)
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "final-gate-no-reuse",
+                "validation": {
+                    "strategy": {
+                        "final_gate": "coverage",
+                        "reuse_evidence": True,
+                        "freshness_max_age_seconds": 3600,
+                    },
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "command": "pytest --cov=awf",
+                    },
+                },
+            }
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/awf.git",
+                branch_base="main",
+                task_title="execute final coverage",
+                task_prompt="execute final coverage",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+            workspace_id = workspace.id
+
+        coverage = _coverage(tmp_path, percent=99.4, status="passed", reason_code="COVERAGE_OK")
+        validation = _CoverageValidation(coverage)
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=FakeCommandRunner(),
+            compose=object(),  # type: ignore[arg-type]
+            validation=validation,  # type: ignore[arg-type]
+            pr_creator=object(),  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "worktrees",
+                compose_projects_root=tmp_path / "compose",
+            ),
+        )
+
+        result = await executor._run_final_coverage_gate(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            profile=profile,
+            validation_tier=1,
+            workspace_head_sha="head",
+        )
+
+        assert result.coverage is coverage
+        assert result.evidence_status == "executed"
+        assert validation.calls == ["final_coverage"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_final_coverage_gate_executes_when_reusable_run_has_no_coverage_metadata(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    try:
+        factory = make_session_factory(engine)
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "final-gate-empty-reuse",
+                "validation": {
+                    "strategy": {
+                        "final_gate": "coverage",
+                        "reuse_evidence": True,
+                        "freshness_max_age_seconds": 3600,
+                    },
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "command": "pytest --cov=awf",
+                    },
+                },
+            }
+        )
+        commands = _validation_run_command_records(
+            profile=profile,
+            phase_names=("post_agent", "validate"),
+            run_healthchecks=True,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/awf.git",
+                branch_base="main",
+                task_title="execute final coverage without reusable metadata",
+                task_prompt="execute final coverage without reusable metadata",
+                agent="codex",
+                test_commands=[],
+            )
+            run = await ValidationRunRepository(session).start(
+                workspace_id=workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=commands,
+                base_commit="base",
+                target_branch="main",
+                target_head_sha=None,
+                workspace_head_sha="head",
+                resolved_profile_digest=resolved_profile_digest(profile),
+                environment_identity_digest=environment_identity_digest(profile),
+                log_stream_refs={},
+            )
+            await ValidationRunRepository(session).finish(
+                run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                coverage={},
+            )
+            await session.commit()
+            workspace_id = workspace.id
+
+        coverage = _coverage(tmp_path, percent=99.8, status="passed", reason_code="COVERAGE_OK")
+        validation = _CoverageValidation(coverage)
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=FakeCommandRunner(),
+            compose=object(),  # type: ignore[arg-type]
+            validation=validation,  # type: ignore[arg-type]
+            pr_creator=object(),  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "worktrees",
+                compose_projects_root=tmp_path / "compose",
+            ),
+        )
+
+        result = await executor._run_final_coverage_gate(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            profile=profile,
+            validation_tier=1,
+            workspace_head_sha="head",
+        )
+
+        assert result.coverage is coverage
+        assert result.evidence_status == "executed"
+        assert validation.calls == ["final_coverage"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_parallel_worker_cpu_limit_handles_disabled_policy_and_missing_reservation(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    try:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/awf.git",
+                branch_base="main",
+                task_title="missing reservation",
+                task_prompt="missing reservation",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+            workspace_id = workspace.id
+
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=FakeCommandRunner(),
+            compose=object(),  # type: ignore[arg-type]
+            validation=_CoverageValidation(_coverage(tmp_path, percent=100)),
+            pr_creator=object(),  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "worktrees",
+                compose_projects_root=tmp_path / "compose",
+            ),
+        )
+        serial_profile = WorkspaceProfile.model_validate(
+            {
+                "name": "serial",
+                "validation": {"coverage": {"minimum_percent": 99, "command": "pytest --cov=awf"}},
+            }
+        )
+        parallel_profile = WorkspaceProfile.model_validate(
+            {
+                "name": "parallel-missing-reservation",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "command": "pytest --cov=awf",
+                        "parallel_workers": 3,
+                    }
+                },
+            }
+        )
+
+        assert (
+            await executor._parallel_worker_cpu_limit_for_workspace(
+                workspace_id,
+                profile=serial_profile,
+            )
+            is None
+        )
+        assert (
+            await executor._parallel_worker_cpu_limit_for_workspace(
+                workspace_id,
+                profile=parallel_profile,
+            )
+            is None
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_available_records_terminal_stale_callback(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    try:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/awf.git",
+                branch_base="main",
+                task_title="terminal stale callback",
+                task_prompt="terminal stale callback",
+                agent="codex",
+                test_commands=[],
+            )
+            workspace.status = WorkspaceStatus.completed.value
+            run = await ValidationRunRepository(session).start(
+                workspace_id=workspace.id,
+                attempt_id=None,
+                tier=2,
+                commands=[],
+                base_commit=None,
+                target_branch="main",
+                target_head_sha=None,
+                log_stream_refs={"stdout": "validation.stdout"},
+            )
+            await session.commit()
+            workspace_id = workspace.id
+            validation_run_id = run.id
+
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=FakeCommandRunner(),
+            compose=object(),  # type: ignore[arg-type]
+            validation=_CoverageValidation(_coverage(tmp_path, percent=100)),
+            pr_creator=object(),  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "worktrees",
+                compose_projects_root=tmp_path / "compose",
+            ),
+        )
+
+        assert not await executor._ensure_worktree_available(  # noqa: SLF001
+            workspace_id=workspace_id,
+            worktree_path=tmp_path / "missing-worktree",
+            expected=WorkspaceStatus.running,
+            action="validate",
+            validation_run_id=validation_run_id,
+            requested_tier=2,
+        )
+
+        async with factory() as session:
+            events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+
+        assert any(event.reason_code == "EXECUTOR_STALE_STATUS" for event in events)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_ensure_worktree_available_marks_running_workspace_failed_when_missing(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    try:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/awf.git",
+                branch_base="main",
+                task_title="missing worktree",
+                task_prompt="missing worktree",
+                agent="codex",
+                test_commands=[],
+            )
+            workspace.status = WorkspaceStatus.running.value
+            await session.commit()
+            workspace_id = workspace.id
+
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=FakeCommandRunner(),
+            compose=object(),  # type: ignore[arg-type]
+            validation=_CoverageValidation(_coverage(tmp_path, percent=100)),
+            pr_creator=object(),  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "worktrees",
+                compose_projects_root=tmp_path / "compose",
+            ),
+        )
+        executor._release_terminal_runtime = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+
+        assert not await executor._ensure_worktree_available(  # noqa: SLF001
+            workspace_id=workspace_id,
+            worktree_path=tmp_path / "missing-worktree",
+            expected=WorkspaceStatus.running,
+            action="post_agent_commit",
+        )
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == FailureReason.infrastructure_failure.value
+        assert any(event.event_type == "workspace.executor_worktree_missing" for event in events)
+        executor._release_terminal_runtime.assert_awaited_once_with(  # type: ignore[attr-defined]
+            workspace_id,
+            expected_status=WorkspaceStatus.failed,
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_record_planning_validation_handoff_event_ignores_missing_workspace(
+    tmp_path: Path,
+) -> None:
+    engine = await create_postgres_test_engine()
+    try:
+        factory = make_session_factory(engine)
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=FakeCommandRunner(),
+            compose=object(),  # type: ignore[arg-type]
+            validation=_CoverageValidation(_coverage(tmp_path, percent=100)),
+            pr_creator=object(),  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "worktrees",
+                compose_projects_root=tmp_path / "compose",
+            ),
+        )
+        handoff = _PlanningValidationHandoff(
+            report=PlanConformanceReport(
+                status=PlanConformanceStatus.needs_iteration,
+                summary="needs AWF validation",
+                gaps=("rerun validation",),
+                reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+            ),
+            plan_path=Path("docs/awf-plans/ws_missing.md"),
+            report_path=Path("docs/awf-plans/ws_missing.conformance.json"),
+            iteration=0,
+            max_iterations=1,
+        )
+
+        await executor._record_planning_validation_handoff_event(
+            workspace_id="ws_missing",
+            handoff=handoff,
+        )
     finally:
         await engine.dispose()
 
@@ -3463,6 +4024,191 @@ def test_post_validation_conformance_result_uses_attempt_from_failure_details(
     assert f"Report reason code: {CONFORMANCE_REQUIRES_AWF_VALIDATION}" in text
     assert "- pytest coverage evidence is stale" in text
     assert "- 42" in text
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_failure_text_omits_empty_conformance_shapes() -> None:
+    failure = executor_mod._PlanningRunFailure(  # noqa: SLF001
+        message="Plan conformance still requires validation evidence.",
+        details={
+            "conformance": {
+                "summary": "  ",
+                "report_reason_code": object(),
+                "gaps": ["  "],
+            }
+        },
+    )
+    non_mapping = executor_mod._PlanningRunFailure(  # noqa: SLF001
+        message="Plan conformance still requires validation evidence.",
+        details={"conformance": "not-a-mapping"},
+    )
+
+    assert (
+        executor_mod._post_validation_conformance_failure_text(failure)  # noqa: SLF001
+        == "Plan conformance still requires validation evidence."
+    )
+    assert (
+        executor_mod._post_validation_conformance_failure_text(non_mapping)  # noqa: SLF001
+        == "Plan conformance still requires validation evidence."
+    )
+
+
+@pytest.mark.unit
+def test_existing_pr_remote_push_url_handles_non_adoption_and_invalid_repo() -> None:
+    assert (
+        executor_mod._existing_pr_remote_push_url(  # noqa: SLF001
+            SimpleNamespace(task_kind="normal", repo_url="not-a-url")
+        )
+        is None
+    )
+    assert (
+        executor_mod._existing_pr_remote_push_url(  # noqa: SLF001
+            SimpleNamespace(task_kind="sync_feature_pr", repo_url="not-a-url")
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+async def test_build_conformance_stall_failure_preserves_diff_failure_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    repo_get_calls: list[str] = []
+
+    class FakeWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> object | None:
+            repo_get_calls.append(workspace_id)
+            return None
+
+        async def add_event(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("missing persisted workspace should not record event")
+
+    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+    executor._git_rev_parse_head = AsyncMock(return_value="head-sha")  # type: ignore[method-assign]  # noqa: SLF001
+    executor._git_commit_count_since = AsyncMock(return_value=2)  # type: ignore[method-assign]  # noqa: SLF001
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+        side_effect=RuntimeError("diff failed")
+    )
+
+    failure = await executor._build_conformance_stall_failure(  # noqa: SLF001
+        workspace=SimpleNamespace(id="ws_stalled"),
+        worktree_path=tmp_path / "worktree",
+        baseline_sha="base-sha",
+        last_report=None,
+        stall=ConformanceStallEvidence(
+            kind=ConformanceStallKind.no_output,
+            iteration_index=3,
+            elapsed_seconds=1800.0,
+            no_output_seconds=600.0,
+            repeated_output_count=0,
+            last_report_digest="digest",
+            plan_path="docs/plan.md",
+            report_path="docs/report.json",
+        ),
+        iterations_used=4,
+        max_iterations=5,
+        plan_path=Path("docs/plan.md"),
+        report_path=Path("docs/report.json"),
+        recovery_action="preserve",
+    )
+
+    assert failure.reason_code == executor_mod.AGENT_STALLED_IN_CONFORMANCE
+    evidence = failure.details["conformance_stall"]
+    assert evidence["salvage_hint"]["head_sha"] == "head-sha"
+    assert evidence["salvage_hint"]["implementation_commit_count"] == 2
+    assert evidence["salvage_hint"]["changed_paths"] == []
+    assert repo_get_calls == ["ws_stalled"]
+    assert session.commits == 0
+
+
+@pytest.mark.unit
+async def test_build_conformance_stall_failure_records_salvage_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    persisted = SimpleNamespace(id="ws_stalled")
+    recorded_events: list[dict[str, object]] = []
+
+    class FakeWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> object | None:
+            assert workspace_id == "ws_stalled"
+            return persisted
+
+        async def add_event(
+            self,
+            workspace: object,
+            *,
+            event_type: str,
+            reason_code: str,
+            payload: dict[str, object],
+        ) -> None:
+            recorded_events.append(
+                {
+                    "workspace": workspace,
+                    "event_type": event_type,
+                    "reason_code": reason_code,
+                    "payload": payload,
+                }
+            )
+
+    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+    executor._git_rev_parse_head = AsyncMock(return_value="head-sha")  # type: ignore[method-assign]  # noqa: SLF001
+    executor._git_commit_count_since = AsyncMock(return_value=2)  # type: ignore[method-assign]  # noqa: SLF001
+    executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+        return_value={Path("src/awf/service/controls.py")}
+    )
+
+    failure = await executor._build_conformance_stall_failure(  # noqa: SLF001
+        workspace=SimpleNamespace(id="ws_stalled"),
+        worktree_path=tmp_path / "worktree",
+        baseline_sha="base-sha",
+        last_report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="still missing coverage",
+            gaps=("add regression test",),
+        ),
+        stall=ConformanceStallEvidence(
+            kind=ConformanceStallKind.repeated_output,
+            iteration_index=4,
+            elapsed_seconds=1200.0,
+            no_output_seconds=0.0,
+            repeated_output_count=5,
+            last_report_digest="digest",
+            plan_path="docs/plan.md",
+            report_path="docs/report.json",
+        ),
+        iterations_used=5,
+        max_iterations=5,
+        plan_path=Path("docs/plan.md"),
+        report_path=Path("docs/report.json"),
+        recovery_action=None,
+    )
+
+    assert "conformance" in failure.details
+    evidence = failure.details["conformance_stall"]
+    assert evidence["salvage_hint"]["changed_paths"] == ["src/awf/service/controls.py"]
+    assert recorded_events == [
+        {
+            "workspace": persisted,
+            "event_type": "workspace.planning_conformance_stalled",
+            "reason_code": executor_mod.AGENT_STALLED_IN_CONFORMANCE,
+            "payload": evidence,
+        }
+    ]
+    assert session.commits == 1
 
 
 @pytest.mark.unit

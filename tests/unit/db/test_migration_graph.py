@@ -17,6 +17,46 @@ from awf.db.session import make_engine
 from tests.postgres import postgres_empty_test_url
 
 
+def _migration_assignment(tree: ast.Module, name: str) -> object:
+    for node in tree.body:
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.value is not None
+        ):
+            return ast.literal_eval(node.value)
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return ast.literal_eval(node.value)
+    raise AssertionError(f"missing migration assignment: {name}")
+
+
+def _column_ops(tree: ast.Module) -> set[tuple[str, str, str]]:
+    ops: set[tuple[str, str, str]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "op"
+            and node.func.attr in {"add_column", "drop_column"}
+        ):
+            continue
+
+        table_name = ast.literal_eval(node.args[0])
+        if node.func.attr == "add_column":
+            column_call = node.args[1]
+            assert isinstance(column_call, ast.Call)
+            column_name = ast.literal_eval(column_call.args[0])
+        else:
+            column_name = ast.literal_eval(node.args[1])
+        ops.add((node.func.attr, table_name, column_name))
+    return ops
+
+
 @pytest.mark.unit
 def test_alembic_revision_graph_has_single_head() -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -24,11 +64,11 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["c5d6e7f8a9b0"]
+    assert script.get_heads() == ["d6e7f8a9b0c1"]
 
 
 @pytest.mark.unit
-def test_validation_run_coverage_migration_uses_metadata_only_column_ops() -> None:
+def test_validation_run_coverage_keeps_released_revision_id() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     migration_path = (
         repo_root / "migrations" / "versions" / "c5d6e7f8a9b0_validation_run_coverage.py"
@@ -45,8 +85,30 @@ def test_validation_run_coverage_migration_uses_metadata_only_column_ops() -> No
         and node.func.value.id == "op"
     }
 
+    assert _migration_assignment(tree, "revision") == "c5d6e7f8a9b0"
+    assert _migration_assignment(tree, "down_revision") == "b3c4d5e6f7a8"
     assert "batch_alter_table" not in call_attrs
     assert op_call_attrs == {"add_column", "drop_column"}
+    assert _column_ops(tree) == {
+        ("add_column", "validation_runs", "coverage"),
+        ("drop_column", "validation_runs", "coverage"),
+    }
+
+
+@pytest.mark.unit
+def test_operation_lease_heartbeat_migration_follows_released_coverage_head() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration_path = (
+        repo_root / "migrations" / "versions" / "d6e7f8a9b0c1_operation_lease_heartbeat.py"
+    )
+    tree = ast.parse(migration_path.read_text(encoding="utf-8"))
+
+    assert _migration_assignment(tree, "revision") == "d6e7f8a9b0c1"
+    assert _migration_assignment(tree, "down_revision") == "c5d6e7f8a9b0"
+    assert _column_ops(tree) == {
+        ("add_column", "operations", "lease_renewed_at"),
+        ("drop_column", "operations", "lease_renewed_at"),
+    }
 
 
 @pytest.mark.unit
@@ -122,6 +184,14 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
                         lambda sync_conn: [
                             column["name"]
                             for column in inspect(sync_conn).get_columns("validation_runs")
+                        ]
+                    )
+                )
+                operation_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("operations")
                         ]
                     )
                 )
@@ -219,6 +289,7 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "environment_identity_inputs",
         "coverage",
     } <= validation_run_columns
+    assert "lease_renewed_at" in operation_columns
     assert "workspace_secret_leases" in tables
     assert {
         "id",

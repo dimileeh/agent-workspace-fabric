@@ -41,9 +41,16 @@ from awf.control.executor import (
     _call_pr_monitor_factory,
     _required_metadata_str,
 )
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    OperationRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -260,6 +267,39 @@ class _RemovingValidation:
         return None
 
 
+class _RecordingTerminalRuntimeReleaser:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> object:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "source": source,
+                "expected_status": expected_status,
+            }
+        )
+        return None
+
+
+class _RaisingTerminalRuntimeReleaser:
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> object:
+        del workspace_id, source, expected_status
+        raise RuntimeError("release failed Authorization: Bearer terminal-secret-token")
+
+
 async def _move_to_operator_control_status(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -276,6 +316,135 @@ async def _move_to_operator_control_status(
         else:
             assert final_status == WorkspaceStatus.cancelled
         await s.commit()
+
+
+async def _seed_running_with_active_teardown(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    operation_type: OperationType = OperationType.stop,
+) -> tuple[str, str]:
+    ws_id = await _seed_ready(factory)
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        operation = await OperationRepository(s).create(
+            workspace_id=ws_id,
+            operation_type=operation_type,
+            status=OperationStatus.running,
+            payload={"source": "operator_api"},
+        )
+        await s.commit()
+        return ws_id, operation.id
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_failure_log_redacts_exception_text(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake, factory, tmp_path)
+    executor._terminal_runtime_releaser = _RaisingTerminalRuntimeReleaser()  # type: ignore[attr-defined]
+
+    with structlog.testing.capture_logs() as captured:
+        await executor._release_terminal_runtime(
+            "ws_release_secret",
+            expected_status=WorkspaceStatus.failed,
+        )
+
+    log_entry = next(
+        event
+        for event in captured
+        if event.get("event") == "executor.terminal_runtime_release_failed"
+    )
+    assert log_entry["workspace_id"] == "ws_release_secret"
+    assert log_entry["expected_status"] == WorkspaceStatus.failed.value
+    assert "Authorization: Bearer [redacted]" in log_entry["error"]
+    assert "terminal-secret-token" not in log_entry["error"]
+
+
+@pytest.mark.unit
+async def test_transition_if_current_records_blocked_callback_for_active_teardown(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id, operation_id = await _seed_running_with_active_teardown(
+        factory,
+        operation_type=OperationType.stop,
+    )
+    executor = _make_executor(fake, factory, tmp_path)
+
+    transitioned = await executor._transition_if_current(
+        ws_id,
+        from_status=WorkspaceStatus.running,
+        to=WorkspaceStatus.validating,
+        reason="AGENT_RUN_OK",
+        action="start_validation",
+    )
+
+    assert transitioned is False
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ignored_events = [
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
+        ]
+    assert ws.status == WorkspaceStatus.running.value
+    assert ignored_events[-1].payload == {
+        "callback_source": "executor",
+        "callback_action": "start_validation",
+        "expected_status": WorkspaceStatus.running.value,
+        "actual_status": WorkspaceStatus.running.value,
+        "requested_status": WorkspaceStatus.validating.value,
+        "operation_id": operation_id,
+        "reason_code": "AGENT_RUN_OK",
+    }
+
+
+@pytest.mark.unit
+async def test_mark_failed_records_blocked_callback_for_active_teardown(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id, operation_id = await _seed_running_with_active_teardown(
+        factory,
+        operation_type=OperationType.cancel,
+    )
+    terminal_releaser = _RecordingTerminalRuntimeReleaser()
+    executor = _make_executor(fake, factory, tmp_path)
+    executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
+
+    await executor._mark_failed(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        failure_reason=FailureReason.infrastructure_failure,
+        message="late executor failure",
+        reason_code="EXECUTOR_LATE_FAILURE",
+    )
+
+    assert terminal_releaser.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ignored_events = [
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
+        ]
+    assert ws.status == WorkspaceStatus.running.value
+    assert ws.failure_reason is None
+    assert ws.failure_message is None
+    assert ignored_events[-1].payload == {
+        "callback_source": "executor",
+        "callback_action": "mark_failed",
+        "expected_status": WorkspaceStatus.running.value,
+        "actual_status": WorkspaceStatus.running.value,
+        "requested_status": WorkspaceStatus.failed.value,
+        "operation_id": operation_id,
+        "reason_code": "EXECUTOR_LATE_FAILURE",
+    }
 
 
 async def _seed_ready(
@@ -1056,6 +1225,8 @@ class TestMissingWorktreeFailure:
         worktree_path = _test_worktree_path(factory, ws_id)
         fake.queue_result(returncode=0, stdout="adapter ok")
         executor = _make_executor(fake, factory, tmp_path)
+        terminal_releaser = _RecordingTerminalRuntimeReleaser()
+        executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
 
         await executor.execute(ws_id)
 
@@ -1075,6 +1246,13 @@ class TestMissingWorktreeFailure:
             for event in ws.events
         )
         assert git_calls == []
+        assert terminal_releaser.calls == [
+            {
+                "workspace_id": ws_id,
+                "source": "executor",
+                "expected_status": WorkspaceStatus.failed,
+            }
+        ]
 
     @pytest.mark.unit
     async def test_missing_worktree_before_pr_push_marks_infrastructure_failure(
@@ -1163,6 +1341,38 @@ class TestMissingWorktreeFailure:
             and event.reason_code == "WORKTREE_MISSING"
             for event in ws.events
         )
+
+
+@pytest.mark.unit
+async def test_open_pr_reexecution_guard_releases_terminal_runtime(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        ws.pr_url = "https://github.com/x/y/pull/9"
+        ws.pr_number = 9
+        ws.monitor_started_at = datetime.now(UTC)
+        await s.commit()
+    executor = _make_executor(fake, factory, tmp_path)
+    terminal_releaser = _RecordingTerminalRuntimeReleaser()
+    executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
+
+    blocked = await executor._block_open_pr_reexecution_without_recovery(workspace_id=ws_id)
+
+    assert blocked.blocked is True
+    assert terminal_releaser.calls == [
+        {
+            "workspace_id": ws_id,
+            "source": "executor",
+            "expected_status": WorkspaceStatus.failed,
+        }
+    ]
 
 
 class TestAgentWatchdogConfig:
@@ -3285,6 +3495,8 @@ class TestExecutorCoverageEdges:
             tmp_path,
             pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
         )
+        terminal_releaser = _RecordingTerminalRuntimeReleaser()
+        executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
 
         async def _ensure_available(**_kwargs: Any) -> bool:
             async with factory() as s:
@@ -3308,6 +3520,13 @@ class TestExecutorCoverageEdges:
             assert ws.failure_reason == "infrastructure_failure"
             assert "task_policy.pr_adoption.base_sha" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "PR_ADOPTION_METADATA_MISSING"
+        assert terminal_releaser.calls == [
+            {
+                "workspace_id": ws_id,
+                "source": "executor",
+                "expected_status": WorkspaceStatus.failed,
+            }
+        ]
 
     @pytest.mark.unit
     async def test_sync_feature_pr_persisted_status_change_skips_handoff(

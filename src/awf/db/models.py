@@ -824,6 +824,9 @@ class Operation(Base):
         DateTime(timezone=True), default=_now, nullable=False
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_renewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     workspace: Mapped[Workspace] = relationship(back_populates="operations")

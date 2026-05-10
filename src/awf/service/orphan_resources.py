@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, assert_never
 
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -26,7 +26,7 @@ ORPHAN_EXAMPLE_LIMIT = 5
 AWF_PROJECT_PREFIXES = ("awf_", "awf-")
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
-Classification = Literal["expected", "terminal", "missing", "unknown"]
+Classification = Literal["expected", "retained_evidence", "terminal", "missing", "unknown"]
 
 RESOURCE_KINDS: tuple[ResourceKind, ...] = ("container", "network", "volume", "worktree")
 ACTIVE_WORKSPACE_STATUSES = frozenset(
@@ -208,6 +208,10 @@ class OrphanResourceSummary:
     counts_by_kind: dict[str, int]
     orphan_counts_by_kind: dict[str, int]
     expected_counts_by_kind: dict[str, int]
+    retained_evidence_count: int
+    retained_evidence_counts_by_kind: dict[str, int]
+    leaked_live_count: int
+    leaked_live_counts_by_kind: dict[str, int]
     unknown_counts_by_kind: dict[str, int]
     orphan_classification_counts: dict[str, int]
     cleanup_readiness: CleanupReadiness
@@ -228,6 +232,10 @@ class OrphanResourceSummary:
             "counts_by_kind": self.counts_by_kind,
             "orphan_counts_by_kind": self.orphan_counts_by_kind,
             "expected_counts_by_kind": self.expected_counts_by_kind,
+            "retained_evidence_count": self.retained_evidence_count,
+            "retained_evidence_counts_by_kind": self.retained_evidence_counts_by_kind,
+            "leaked_live_count": self.leaked_live_count,
+            "leaked_live_counts_by_kind": self.leaked_live_counts_by_kind,
             "unknown_counts_by_kind": self.unknown_counts_by_kind,
             "orphan_classification_counts": self.orphan_classification_counts,
             "cleanup_readiness": self.cleanup_readiness.to_dict(),
@@ -496,9 +504,17 @@ def build_orphan_resource_summary(
         record for record in records if record.classification in {"terminal", "missing"}
     )
     expected_records = tuple(record for record in records if record.classification == "expected")
+    retained_evidence_records = tuple(
+        record for record in records if record.classification == "retained_evidence"
+    )
+    leaked_live_records = tuple(
+        record for record in orphan_records if record.reason == "TERMINAL_LIVE_RUNTIME_RESOURCE"
+    )
     unknown_records = tuple(record for record in records if record.classification == "unknown")
     orphan_counts_by_kind = _kind_counts(orphan_records)
     expected_counts_by_kind = _kind_counts(expected_records)
+    retained_evidence_counts_by_kind = _kind_counts(retained_evidence_records)
+    leaked_live_counts_by_kind = _kind_counts(leaked_live_records)
     unknown_counts_by_kind = _kind_counts(unknown_records)
     orphan_classification_counts = {
         "terminal": sum(1 for record in orphan_records if record.classification == "terminal"),
@@ -532,6 +548,10 @@ def build_orphan_resource_summary(
             counts_by_kind=counts_by_kind,
             orphan_counts_by_kind=orphan_counts_by_kind,
             expected_counts_by_kind=expected_counts_by_kind,
+            retained_evidence_count=len(retained_evidence_records),
+            retained_evidence_counts_by_kind=retained_evidence_counts_by_kind,
+            leaked_live_count=len(leaked_live_records),
+            leaked_live_counts_by_kind=leaked_live_counts_by_kind,
             unknown_counts_by_kind=unknown_counts_by_kind,
             orphan_classification_counts=orphan_classification_counts,
             cleanup_readiness=readiness,
@@ -560,6 +580,10 @@ def build_orphan_resource_summary(
             counts_by_kind=counts_by_kind,
             orphan_counts_by_kind=orphan_counts_by_kind,
             expected_counts_by_kind=expected_counts_by_kind,
+            retained_evidence_count=len(retained_evidence_records),
+            retained_evidence_counts_by_kind=retained_evidence_counts_by_kind,
+            leaked_live_count=len(leaked_live_records),
+            leaked_live_counts_by_kind=leaked_live_counts_by_kind,
             unknown_counts_by_kind=unknown_counts_by_kind,
             orphan_classification_counts=orphan_classification_counts,
             cleanup_readiness=readiness,
@@ -588,6 +612,10 @@ def build_orphan_resource_summary(
             counts_by_kind=counts_by_kind,
             orphan_counts_by_kind=orphan_counts_by_kind,
             expected_counts_by_kind=expected_counts_by_kind,
+            retained_evidence_count=len(retained_evidence_records),
+            retained_evidence_counts_by_kind=retained_evidence_counts_by_kind,
+            leaked_live_count=len(leaked_live_records),
+            leaked_live_counts_by_kind=leaked_live_counts_by_kind,
             unknown_counts_by_kind=unknown_counts_by_kind,
             orphan_classification_counts=orphan_classification_counts,
             cleanup_readiness=readiness,
@@ -612,6 +640,10 @@ def build_orphan_resource_summary(
         counts_by_kind=counts_by_kind,
         orphan_counts_by_kind=orphan_counts_by_kind,
         expected_counts_by_kind=expected_counts_by_kind,
+        retained_evidence_count=len(retained_evidence_records),
+        retained_evidence_counts_by_kind=retained_evidence_counts_by_kind,
+        leaked_live_count=len(leaked_live_records),
+        leaked_live_counts_by_kind=leaked_live_counts_by_kind,
         unknown_counts_by_kind=unknown_counts_by_kind,
         orphan_classification_counts=orphan_classification_counts,
         cleanup_readiness=readiness,
@@ -776,6 +808,10 @@ def summary_not_collected() -> OrphanResourceSummary:
         counts_by_kind=_zero_kind_counts(),
         orphan_counts_by_kind=_zero_kind_counts(),
         expected_counts_by_kind=_zero_kind_counts(),
+        retained_evidence_count=0,
+        retained_evidence_counts_by_kind=_zero_kind_counts(),
+        leaked_live_count=0,
+        leaked_live_counts_by_kind=_zero_kind_counts(),
         unknown_counts_by_kind=_zero_kind_counts(),
         orphan_classification_counts={"terminal": 0, "missing": 0},
         cleanup_readiness=readiness,
@@ -841,11 +877,21 @@ def _classify(resource: DetectedResource, *, workspace_view: WorkspaceIdView) ->
             reason="WORKSPACE_ACTIVE",
         )
     if resource.workspace_id in workspace_view.retained_ids:
-        return ClassifiedResource(
-            resource=resource,
-            classification="expected",
-            reason="WORKSPACE_TERMINAL_WITHIN_RETENTION",
-        )
+        match resource.kind:
+            case "container" | "network":
+                return ClassifiedResource(
+                    resource=resource,
+                    classification="terminal",
+                    reason="TERMINAL_LIVE_RUNTIME_RESOURCE",
+                )
+            case "worktree" | "volume":
+                return ClassifiedResource(
+                    resource=resource,
+                    classification="retained_evidence",
+                    reason="WORKSPACE_TERMINAL_RETAINED_EVIDENCE",
+                )
+            case _:
+                assert_never(resource.kind)
     if resource.workspace_id in workspace_view.terminal_ids:
         return ClassifiedResource(
             resource=resource,

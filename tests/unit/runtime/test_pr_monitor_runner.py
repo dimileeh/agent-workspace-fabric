@@ -3014,6 +3014,8 @@ async def test_run_handles_provider_recovery_exceptions_without_crashing(
             workspace_id,
             message="monitor: provider recovery fallback triggered",
             reason_code="PROVIDER_FALLBACK",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
         )
     else:
         assert "monitor.provider_retry" in logged_events
@@ -3067,6 +3069,8 @@ async def test_run_handles_provider_recovery_before_state_is_loaded(
             workspace_id,
             message="monitor: provider recovery fallback triggered",
             reason_code="PROVIDER_FALLBACK",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
         )
     else:
         assert "monitor.provider_retry" in logged_events
@@ -3625,6 +3629,73 @@ async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_conte
     assert len(state_events) == 1
     assert state_events[0].old_state == WorkspaceStatus.monitoring_pr.value
     assert state_events[0].new_state == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_dispatch_records_blocked_callback_when_teardown_active(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 77
+    head_sha = "d" * 40
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    await _mark_refactor_task(factory, workspace_id)
+    async with factory() as session:
+        teardown_operation = await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.stop,
+            status=OperationStatus.running,
+            payload={"source": "operator_api"},
+        )
+        await session.commit()
+        teardown_operation_id = teardown_operation.id
+
+    terminal = await _dispatch_merge_recovery(
+        factory=factory,
+        tmp_path=tmp_path,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+
+    assert terminal is True
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+        stale_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+        recovery_events = [
+            event for event in workspace.events if event.event_type == "monitor.recovery_dispatched"
+        ]
+        state_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_DISPATCH"
+        ]
+
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert [op.type for op in operations] == [OperationType.stop.value]
+    assert recovery_events == []
+    assert state_events == []
+    assert len(stale_events) == 1
+    assert stale_events[0].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "recovery_dispatch",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": WorkspaceStatus.monitoring_pr.value,
+        "requested_status": WorkspaceStatus.ready.value,
+        "operation_id": teardown_operation_id,
+        "reason_code": "RECOVERY_DISPATCH",
+    }
 
 
 @pytest.mark.unit

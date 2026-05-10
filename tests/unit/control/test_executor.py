@@ -27,8 +27,9 @@ from awf.control.executor import (
     WorkspaceExecutor,
     _apply_baseline_coverage_ratchet,
 )
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
+    OperationRepository,
     ValidationRunRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
@@ -137,6 +138,27 @@ def _created_pr_body(fake: FakeCommandRunner) -> str:
 
 def _json_value(value: object) -> object:
     return json.loads(value) if isinstance(value, str) else value
+
+
+class _RecordingTerminalRuntimeReleaser:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> object:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "source": source,
+                "expected_status": expected_status,
+            }
+        )
+        return None
 
 
 async def _insert_validate_handoff_recovery_operation(
@@ -371,6 +393,46 @@ class TestHappyPath:
             assert persisted.status == WorkspaceStatus.running.value
             assert persisted.execution_claimed_by == "worker-a"
             assert persisted.execution_claim_expires_at == lease_expires_at
+
+    @pytest.mark.unit
+    async def test_claim_ready_records_blocked_callback_when_teardown_is_active(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        async with factory() as s:
+            operation = await OperationRepository(s).create(
+                workspace_id=ws_id,
+                operation_type=OperationType.stop,
+                status=OperationStatus.running,
+                payload={"source": "operator_api"},
+            )
+            await s.commit()
+            operation_id = operation.id
+
+        ws = await executor._claim_ready(ws_id)
+
+        assert ws is None
+        async with factory() as s:
+            persisted = await WorkspaceRepository(s).get(ws_id)
+            assert persisted is not None
+            assert persisted.status == WorkspaceStatus.ready.value
+            assert persisted.execution_claimed_by is None
+            ignored_events = [
+                event
+                for event in persisted.events
+                if event.event_type == "workspace.stale_callback_ignored"
+            ]
+        assert ignored_events[-1].payload == {
+            "callback_source": "executor",
+            "callback_action": "execute",
+            "expected_status": WorkspaceStatus.ready.value,
+            "actual_status": WorkspaceStatus.ready.value,
+            "requested_status": WorkspaceStatus.running.value,
+            "operation_id": operation_id,
+            "reason_code": "EXECUTOR_CLAIMED",
+        }
 
     @pytest.mark.unit
     async def test_drives_ready_to_completed_and_records_pr_url(
@@ -2270,6 +2332,8 @@ class TestHappyPath:
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        terminal_releaser = _RecordingTerminalRuntimeReleaser()
+        executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
         ws_id = await _seed_ready_workspace(
             factory,
             resolved_profile={
@@ -2332,6 +2396,13 @@ class TestHappyPath:
                 "branch_name": f"awf/{ws_id}",
                 "remote_push_branch": f"awf/{ws_id}",
             }
+        assert terminal_releaser.calls == [
+            {
+                "workspace_id": ws_id,
+                "source": "executor",
+                "expected_status": WorkspaceStatus.failed,
+            }
+        ]
 
     @pytest.mark.unit
     async def test_planning_profile_fails_when_plan_phase_changes_code(
@@ -3541,6 +3612,8 @@ class TestFailurePaths:
                 max_validation_fix_passes=0,
             ),
         )
+        terminal_releaser = _RecordingTerminalRuntimeReleaser()
+        executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)  # adapter ok
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
@@ -3555,10 +3628,20 @@ class TestFailurePaths:
         await executor.execute(ws_id)
 
         async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
+            ws = await WorkspaceRepository(s).get_with_validation_runs(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "validation_failure"
+            validation_runs = list(ws.validation_runs)
+            assert len(validation_runs) == 1
+            assert validation_runs[0].status == "failed"
+        assert terminal_releaser.calls == [
+            {
+                "workspace_id": ws_id,
+                "source": "executor",
+                "expected_status": WorkspaceStatus.failed,
+            }
+        ]
 
     @pytest.mark.unit
     async def test_coverage_below_threshold_fails_validation_with_structured_reason(

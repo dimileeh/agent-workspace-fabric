@@ -336,6 +336,52 @@ class TaskExternalIdConflictError(ValueError):
         )
 
 
+class WorkspaceTransitionBlockedByActiveOperationError(RuntimeError):
+    """Raised when a pending control operation owns workspace transition rights."""
+
+    def __init__(self, operation: Operation) -> None:
+        self.operation = operation
+        super().__init__(
+            f"Workspace transition blocked by active {operation.type} operation {operation.id}."
+        )
+
+
+_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES: Final[tuple[str, ...]] = (
+    OperationType.cancel.value,
+    OperationType.stop.value,
+)
+_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES: Final[tuple[str, ...]] = (
+    OperationStatus.pending.value,
+    OperationStatus.running.value,
+)
+EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TIMEOUT_SECONDS: Final = 15 * 60
+
+
+def external_runtime_teardown_operation_blocks_controls(
+    operation: Operation,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether a stop/cancel operation still owns the teardown gate."""
+    if operation.type not in _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES:
+        return False
+    if operation.status not in _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES:
+        return False
+    return _as_utc_naive(_runtime_teardown_operation_lease_timestamp(operation)) > _as_utc_naive(
+        external_runtime_teardown_operation_cutoff(now=now)
+    )
+
+
+def external_runtime_teardown_operation_cutoff(*, now: datetime | None = None) -> datetime:
+    return (now or datetime.now(UTC)) - timedelta(
+        seconds=EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TIMEOUT_SECONDS
+    )
+
+
+def _runtime_teardown_operation_lease_timestamp(operation: Operation) -> datetime:
+    return operation.lease_renewed_at or operation.started_at or operation.created_at
+
+
 class TaskRepository:
     """CRUD helpers for first-class task rows."""
 
@@ -2660,7 +2706,11 @@ class WorkspaceRepository:
 
     async def get_for_update(self, workspace_id: str) -> Workspace | None:
         """Load one workspace with a row lock when the database supports it."""
-        stmt = select(Workspace).where(Workspace.id == workspace_id)
+        stmt = (
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .execution_options(populate_existing=True)
+        )
         if self._dialect_name == "postgresql":
             stmt = stmt.with_for_update(of=Workspace)
         return (await self._session.execute(stmt)).scalar_one_or_none()
@@ -3060,6 +3110,7 @@ class WorkspaceRepository:
         to: WorkspaceStatus,
         reason_code: str,
         payload: dict[str, Any] | None = None,
+        allow_active_operation_id: str | None = None,
     ) -> Workspace:
         """Move a workspace to the given status, recording an event.
 
@@ -3069,17 +3120,82 @@ class WorkspaceRepository:
         current = WorkspaceStatus(workspace.status)
         WorkspaceStateMachine.assert_transition(current, to)
 
-        old_state = workspace.status
-        workspace.status = to.value
-        workspace.version += 1
+        old_state = current.value
+        expected_version = workspace.version
+        now = datetime.now(UTC)
+        values: dict[str, Any] = {
+            "status": to.value,
+            "version": Workspace.version + 1,
+            "updated_at": now,
+        }
+        if to == WorkspaceStatus.monitoring_pr:
+            values["monitor_started_at"] = case(
+                (Workspace.monitor_started_at.is_(None), now),
+                else_=Workspace.monitor_started_at,
+            )
+
+        row = None
+        while True:
+            with self._session.no_autoflush:
+                result = await self._session.execute(
+                    update(Workspace)
+                    .where(
+                        Workspace.id == workspace.id,
+                        Workspace.status == old_state,
+                        Workspace.version == expected_version,
+                        ~_active_external_runtime_teardown_operation_exists(
+                            workspace.id,
+                            allow_active_operation_id=allow_active_operation_id,
+                        ),
+                    )
+                    .values(**values)
+                    .returning(
+                        Workspace.version,
+                        Workspace.updated_at,
+                        Workspace.monitor_started_at,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+            row = result.one_or_none()
+            if row is not None:
+                break
+
+            with self._session.no_autoflush:
+                active_teardown = await self._active_external_runtime_teardown_operation(
+                    workspace.id,
+                    allow_active_operation_id=allow_active_operation_id,
+                )
+                preconditions_match = await self._transition_if_current_preconditions_match(
+                    workspace.id,
+                    from_status=current,
+                    expected_version=expected_version,
+                    extra_conditions=(),
+                )
+            if active_teardown is not None:
+                raise WorkspaceTransitionBlockedByActiveOperationError(active_teardown)
+            # The teardown operation may have finished between the guarded UPDATE and
+            # the diagnostic read. If the workspace row is otherwise unchanged, retry.
+            if not preconditions_match:
+                break
+
+        if row is None:
+            raise RuntimeError(
+                f"Workspace transition did not update workspace {workspace.id}; "
+                "it may have been concurrently modified."
+            )
+
+        version, updated_at, monitor_started_at = row
+        set_committed_value(workspace, "status", to.value)
+        set_committed_value(workspace, "version", version)
+        set_committed_value(workspace, "updated_at", updated_at)
+        set_committed_value(workspace, "monitor_started_at", monitor_started_at)
+
         attempt = await TaskAttemptRepository(
             self._session,
             dialect_name=self._dialect_name,
         ).get_by_workspace_id(workspace.id)
         if attempt is not None:
             attempt.status = to.value
-        if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
-            workspace.monitor_started_at = datetime.now(UTC)
         await self._sync_merge_candidate_lifecycle(workspace, attempt=attempt, to=to)
         if _releases_resource_reservation(to):
             await ResourceReservationRepository(self._session).release_active_for_workspace(
@@ -3106,9 +3222,18 @@ class WorkspaceRepository:
         to: WorkspaceStatus,
         reason_code: str,
         extra_conditions: tuple[ColumnElement[bool], ...] = (),
+        allow_active_operation_id: str | None = None,
     ) -> Workspace | None:
         """Atomically transition a row only if it is still in ``from_status``."""
         WorkspaceStateMachine.assert_transition(from_status, to)
+
+        expected_version = await self._transition_if_current_expected_version(
+            workspace_id,
+            from_status=from_status,
+            extra_conditions=extra_conditions,
+        )
+        if expected_version is None:
+            return None
 
         now = datetime.now(UTC)
         result = await self._session.execute(
@@ -3116,7 +3241,12 @@ class WorkspaceRepository:
             .where(
                 Workspace.id == workspace_id,
                 Workspace.status == from_status.value,
+                Workspace.version == expected_version,
                 *extra_conditions,
+                ~_active_external_runtime_teardown_operation_exists(
+                    workspace_id,
+                    allow_active_operation_id=allow_active_operation_id,
+                ),
             )
             .values(
                 status=to.value,
@@ -3126,6 +3256,18 @@ class WorkspaceRepository:
             .returning(Workspace.id)
         )
         if result.scalar_one_or_none() is None:
+            if await self._transition_if_current_preconditions_match(
+                workspace_id,
+                from_status=from_status,
+                expected_version=expected_version,
+                extra_conditions=extra_conditions,
+            ):
+                active_teardown = await self._active_external_runtime_teardown_operation(
+                    workspace_id,
+                    allow_active_operation_id=allow_active_operation_id,
+                )
+                if active_teardown is not None:
+                    raise WorkspaceTransitionBlockedByActiveOperationError(active_teardown)
             return None
 
         workspace = await self.get(workspace_id)
@@ -3158,6 +3300,61 @@ class WorkspaceRepository:
         )
         await self._session.flush()
         return workspace
+
+    async def _transition_if_current_expected_version(
+        self,
+        workspace_id: str,
+        *,
+        from_status: WorkspaceStatus,
+        extra_conditions: tuple[ColumnElement[bool], ...],
+    ) -> int | None:
+        result = await self._session.execute(
+            select(Workspace.version).where(
+                Workspace.id == workspace_id,
+                Workspace.status == from_status.value,
+                *extra_conditions,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def _transition_if_current_preconditions_match(
+        self,
+        workspace_id: str,
+        *,
+        from_status: WorkspaceStatus,
+        expected_version: int,
+        extra_conditions: tuple[ColumnElement[bool], ...],
+    ) -> bool:
+        result = await self._session.execute(
+            select(Workspace.id).where(
+                Workspace.id == workspace_id,
+                Workspace.status == from_status.value,
+                Workspace.version == expected_version,
+                *extra_conditions,
+            )
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def _active_external_runtime_teardown_operation(
+        self,
+        workspace_id: str,
+        *,
+        allow_active_operation_id: str | None,
+    ) -> Operation | None:
+        stmt = (
+            select(Operation)
+            .where(
+                Operation.workspace_id == workspace_id,
+                Operation.type.in_(_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES),
+                Operation.status.in_(_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES),
+                _active_external_runtime_teardown_operation_lease_current(),
+            )
+            .order_by(Operation.created_at.asc(), Operation.id.asc())
+            .limit(1)
+        )
+        if allow_active_operation_id is not None:
+            stmt = stmt.where(Operation.id != allow_active_operation_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def _sync_merge_candidate_lifecycle(
         self,
@@ -3649,6 +3846,28 @@ def _schedulable_workspace_ids_stmt(
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt
+
+
+def _active_external_runtime_teardown_operation_exists(
+    workspace_id: str,
+    *,
+    allow_active_operation_id: str | None = None,
+) -> ColumnElement[bool]:
+    stmt = select(Operation.id).where(
+        Operation.workspace_id == workspace_id,
+        Operation.type.in_(_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES),
+        Operation.status.in_(_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES),
+        _active_external_runtime_teardown_operation_lease_current(),
+    )
+    if allow_active_operation_id is not None:
+        stmt = stmt.where(Operation.id != allow_active_operation_id)
+    return stmt.exists()
+
+
+def _active_external_runtime_teardown_operation_lease_current() -> ColumnElement[bool]:
+    return func.coalesce(
+        Operation.lease_renewed_at, Operation.started_at, Operation.created_at
+    ) > _as_utc_naive(external_runtime_teardown_operation_cutoff())
 
 
 def _owned_paths_overlap(left: str, right: str) -> bool:
@@ -4268,6 +4487,25 @@ class OperationRepository:
             operation.started_at = datetime.now(UTC)
         await self._session.flush()
         return operation
+
+    async def renew_teardown_lease(
+        self,
+        operation_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> Operation | None:
+        result = await self._session.execute(
+            update(Operation)
+            .where(
+                Operation.id == operation_id,
+                Operation.type.in_(_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES),
+                Operation.status.in_(_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES),
+            )
+            .values(lease_renewed_at=now or datetime.now(UTC))
+            .returning(Operation)
+            .execution_options(synchronize_session=False)
+        )
+        return result.scalar_one_or_none()
 
     async def get_by_idempotency_key(self, key: str) -> Operation | None:
         stmt = (

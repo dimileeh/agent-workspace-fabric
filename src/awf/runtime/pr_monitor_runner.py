@@ -62,6 +62,7 @@ from awf.db.repositories import (
     ProviderModelCircuitBreakerRepository,
     WorkspaceEventCreate,
     WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
     pr_feedback_body_hash,
 )
 from awf.runtime.logs import LogStore, WorkspaceLogSink
@@ -130,6 +131,7 @@ from awf.service.provider_recovery import (
     provider_for_agent_model,
     provider_recovery_metadata_from_failure,
 )
+from awf.service.terminal_runtime import TerminalRuntimeReleaserProtocol
 
 _log = get_logger(__name__)
 
@@ -398,6 +400,7 @@ class PullRequestMonitorRunner:
         log_store: LogStore | None = None,
         merge_coordinator: MergeCoordinator | None = None,
         post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
+        terminal_runtime_releaser: TerminalRuntimeReleaserProtocol | None = None,
     ) -> None:
         self._deps = _RunnerDeps(
             session_factory=session_factory,
@@ -413,6 +416,7 @@ class PullRequestMonitorRunner:
         self._merge_coordinator = merge_coordinator or DEFAULT_MERGE_COORDINATOR
         self._worktrees_root = worktrees_root
         self._work_dir = _infer_service_work_dir(worktrees_root)
+        self._terminal_runtime_releaser = terminal_runtime_releaser
         # Orchestrator-facing JSON drops — one ``<ws_id>.defer-signal.json``
         # per terminal transition. Default layout matches ``run_awf.py``'s
         # ``<work_dir>/artifacts`` directory; since ``worktrees_root`` there
@@ -920,6 +924,8 @@ class PullRequestMonitorRunner:
                             "monitor: workspace reached monitoring_pr without a "
                             "pr_number — upstream provisioning must populate it"
                         ),
+                        compose_project=compose_project,
+                        compose_file=compose_file,
                     )
                     return
 
@@ -955,6 +961,8 @@ class PullRequestMonitorRunner:
                         workspace_id,
                         message=f"monitor: could not refresh base branch: {exc}"[:2000],
                         reason_code=base_fetch_result.reason_code,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
                     )
                     return
                 except BaseBehindCountError as exc:
@@ -971,6 +979,8 @@ class PullRequestMonitorRunner:
                         workspace_id,
                         message=f"monitor: could not calculate base-behind count: {exc}"[:2000],
                         reason_code=_GIT_BASE_BEHIND_FAILED_REASON,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
                     )
                     return
                 except GitHubClientError as exc:
@@ -994,6 +1004,8 @@ class PullRequestMonitorRunner:
                     await self._terminate_failed(
                         workspace_id,
                         message=f"monitor: github error: {exc}"[:2000],
+                        compose_project=compose_project,
+                        compose_file=compose_file,
                     )
                     return
                 if _clear_transient_base_fetch_retry_state(state, context="fetch_pr_status"):
@@ -1049,6 +1061,8 @@ class PullRequestMonitorRunner:
                             "attach_feature_pr_monitor.py so a fresh row "
                             "is provisioned with the column populated."
                         ),
+                        compose_project=compose_project,
+                        compose_file=compose_file,
                     )
                     return
 
@@ -1088,6 +1102,8 @@ class PullRequestMonitorRunner:
                     "monitor: hit max_outer_iterations without a terminal action "
                     "(likely a decision loop bug)"
                 ),
+                compose_project=compose_project,
+                compose_file=compose_file,
             )
         except ProviderRecoveryRetryError:
             await self._write_monitor_log(
@@ -1114,6 +1130,8 @@ class PullRequestMonitorRunner:
                 workspace_id,
                 message="monitor: provider recovery fallback triggered",
                 reason_code="PROVIDER_FALLBACK",
+                compose_project=compose_project,
+                compose_file=compose_file,
             )
             return
         finally:
@@ -1227,6 +1245,8 @@ class PullRequestMonitorRunner:
                 workspace_id,
                 message=f"monitor: abort ({action.reason.value})",
                 reason_code=action.reason,
+                compose_project=compose_project,
+                compose_file=compose_file,
             )
             return True
 
@@ -1360,6 +1380,8 @@ class PullRequestMonitorRunner:
                     workspace_id,
                     message=f"monitor: could not refresh base branch: {exc}"[:2000],
                     reason_code=base_fetch_result.reason_code,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
                 )
                 return True
             except ComposeExecCleanupError as exc:
@@ -1377,6 +1399,8 @@ class PullRequestMonitorRunner:
                     workspace_id,
                     message=cleanup_failure_message(exc),
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
                 )
                 return True
             if push_result.failed:
@@ -1525,6 +1549,8 @@ class PullRequestMonitorRunner:
                     workspace_id,
                     message=cleanup_failure_message(exc),
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
                 )
                 return True
             if push_result.failed:
@@ -1672,6 +1698,8 @@ class PullRequestMonitorRunner:
                     workspace_id,
                     message=cleanup_failure_message(exc),
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
                 )
                 return True
             if push_result.failed:
@@ -2155,6 +2183,8 @@ class PullRequestMonitorRunner:
                         f"{recheck_base_error}"
                     )[:2000],
                     reason_code=base_fetch_result.reason_code,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
                 )
                 return True
 
@@ -2166,6 +2196,8 @@ class PullRequestMonitorRunner:
                         f"pre-merge recheck: {recheck_behind_error}"
                     )[:2000],
                     reason_code=_GIT_BASE_BEHIND_FAILED_REASON,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
                 )
                 return True
 
@@ -2183,6 +2215,8 @@ class PullRequestMonitorRunner:
                     message=(f"monitor: github error during pre-merge recheck: {recheck_error}")[
                         :2000
                     ],
+                    compose_project=compose_project,
+                    compose_file=compose_file,
                 )
                 return True
 
@@ -2997,11 +3031,21 @@ class PullRequestMonitorRunner:
                     payload=operation_payload,
                     idempotency_key=idempotency_key,
                 )
-                await workspace_repo.transition(
-                    _ws,
-                    to=WorkspaceStatus.ready,
-                    reason_code="RECOVERY_DISPATCH",
-                )
+                try:
+                    await workspace_repo.transition(
+                        _ws,
+                        to=WorkspaceStatus.ready,
+                        reason_code="RECOVERY_DISPATCH",
+                    )
+                except WorkspaceTransitionBlockedByActiveOperationError as exc:
+                    operation_id = exc.operation.id
+                    await s.rollback()
+                    await _record_blocked_monitor_recovery_dispatch(
+                        s,
+                        workspace_id,
+                        operation_id=operation_id,
+                    )
+                    return True
                 await s.commit()
             dispatch_payload: dict[str, object] = {
                 "pr_number": pr_number,
@@ -4869,7 +4913,23 @@ class PullRequestMonitorRunner:
                 return
             if pr_merge_sha:
                 ws.pr_merge_sha = pr_merge_sha
-            await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
+            try:
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.completed,
+                    reason_code="MONITOR_DONE",
+                )
+            except WorkspaceTransitionBlockedByActiveOperationError as exc:
+                operation_id = exc.operation.id
+                await s.rollback()
+                await _record_blocked_monitor_terminal_callback(
+                    s,
+                    workspace_id,
+                    requested_status=WorkspaceStatus.completed,
+                    reason_code="MONITOR_DONE",
+                    operation_id=operation_id,
+                )
+                return
             await s.commit()
         if repo_url and base_branch:
             await self._reconcile_target_branch_after_merge(
@@ -4877,23 +4937,20 @@ class PullRequestMonitorRunner:
                 repo_url=repo_url,
                 base_branch=base_branch,
             )
-        # Tear down the workspace's compose stack now that its PR was
-        # merged (or short-circuited because it was already merged).
-        # Running stacks hold network subnets from Docker's finite
-        # default pool; leaking them is what caused the 2026-04-24
-        # ``all predefined address pools have been fully subnetted``
-        # storm that took AWF offline for ~8 hours. User's rule: only
-        # tear down on COMPLETED, never on FAILED — failed workspaces
-        # stay up for operator inspection.
-        #
-        # Best-effort: any error here is logged but never masks the
-        # completion signal. The DB transition already landed above.
         teardown_ok = True
-        if compose_project and compose_file is not None:
+        teardown_failure_reason = "compose_teardown_failed"
+        if self._terminal_runtime_releaser is not None:
+            teardown_failure_reason = "terminal_runtime_release_failed"
+            teardown_ok = await self._release_terminal_runtime(
+                workspace_id,
+                expected_status=WorkspaceStatus.completed,
+            )
+        elif compose_project and compose_file is not None:
             teardown_ok = await self._teardown_compose_stack(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
+                remove_volumes=False,
             )
         if teardown_ok:
             await self._gc_completed_workspace_filesystem(workspace_id)
@@ -4901,7 +4958,7 @@ class PullRequestMonitorRunner:
             _log.warning(
                 "monitor.filesystem_gc_skipped",
                 workspace_id=workspace_id,
-                reason="compose_teardown_failed",
+                reason=teardown_failure_reason,
             )
 
     async def _reconcile_target_branch_after_merge(
@@ -4973,9 +5030,10 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         compose_project: str,
         compose_file: Path,
+        remove_volumes: bool = False,
     ) -> bool:
-        """Run ``docker compose down --remove-orphans --volumes`` for a
-        terminated workspace. Never raises a regular ``Exception``.
+        """Run ``docker compose down --remove-orphans`` for a terminated workspace.
+        Never raises a regular ``Exception``.
 
         The call is wrapped in ``except Exception`` so the failure modes
         that routinely bubble up — ``FileNotFoundError`` (no ``docker``
@@ -4990,20 +5048,20 @@ class PullRequestMonitorRunner:
         ``except Exception`` clause does not match it). Cancellation
         must propagate cleanly — swallowing it would defeat the loop
         runner's shutdown path."""
+        args = [
+            "docker",
+            "compose",
+            "-p",
+            compose_project,
+            "-f",
+            str(compose_file),
+            "down",
+            "--remove-orphans",
+        ]
+        if remove_volumes:
+            args.append("--volumes")
         try:
-            r = await self._deps.runner.run(
-                [
-                    "docker",
-                    "compose",
-                    "-p",
-                    compose_project,
-                    "-f",
-                    str(compose_file),
-                    "down",
-                    "--remove-orphans",
-                    "--volumes",
-                ]
-            )
+            r = await self._deps.runner.run(args)
         except Exception as exc:
             # docker binary missing, transient I/O, subprocess-runner
             # hiccup — any of these would otherwise propagate and crash
@@ -5088,7 +5146,11 @@ class PullRequestMonitorRunner:
         *,
         message: str,
         reason_code: AbortReason | str | None = None,
+        compose_project: str | None = None,
+        compose_file: Path | None = None,
     ) -> None:
+        teardown_compose_project: str | None = None
+        teardown_compose_file: Path | None = None
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
@@ -5106,7 +5168,12 @@ class PullRequestMonitorRunner:
                 await s.commit()
                 return
             safe_message = redact_audit_text(message, limit=2000)
-            ws.failure_reason = FailureReason.infrastructure_failure.value
+            teardown_compose_project = compose_project or ws.compose_project_name
+            teardown_compose_file = compose_file
+            if teardown_compose_file is None and ws.compose_file_path:
+                teardown_compose_file = Path(ws.compose_file_path)
+            failure_reason = FailureReason.infrastructure_failure.value
+            ws.failure_reason = failure_reason
             ws.failure_message = safe_message
             if rc == EXEC_PROCESS_CLEANUP_FAILED:
                 await repo.add_event(
@@ -5115,8 +5182,66 @@ class PullRequestMonitorRunner:
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                     payload={"message": safe_message[:1000]},
                 )
-            await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc)
+            try:
+                await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc)
+            except WorkspaceTransitionBlockedByActiveOperationError as exc:
+                operation_id = exc.operation.id
+                await s.rollback()
+                await _record_blocked_monitor_terminal_callback(
+                    s,
+                    workspace_id,
+                    requested_status=WorkspaceStatus.failed,
+                    reason_code=rc,
+                    operation_id=operation_id,
+                    failure_reason=failure_reason,
+                    failure_message=safe_message,
+                )
+                return
             await s.commit()
+        if self._terminal_runtime_releaser is not None:
+            await self._release_terminal_runtime(
+                workspace_id,
+                expected_status=WorkspaceStatus.failed,
+            )
+        elif teardown_compose_project and teardown_compose_file is not None:
+            await self._teardown_compose_stack(
+                workspace_id=workspace_id,
+                compose_project=teardown_compose_project,
+                compose_file=teardown_compose_file,
+                remove_volumes=False,
+            )
+
+    async def _release_terminal_runtime(
+        self,
+        workspace_id: str,
+        *,
+        expected_status: WorkspaceStatus,
+    ) -> bool:
+        releaser = self._terminal_runtime_releaser
+        if releaser is None:
+            return False
+        try:
+            result = await releaser.release(
+                workspace_id,
+                source="pr_monitor",
+                expected_status=expected_status,
+            )
+        except Exception as exc:  # pragma: no cover - defensive; terminal state already landed.
+            _log.warning(
+                "monitor.terminal_runtime_release_failed",
+                workspace_id=workspace_id,
+                expected_status=expected_status.value,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
+            return False
+        ok = bool(getattr(result, "ok", False))
+        if not ok:
+            _log.warning(
+                "monitor.terminal_runtime_release_not_ok",
+                workspace_id=workspace_id,
+                expected_status=expected_status.value,
+            )
+        return ok
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -5128,8 +5253,11 @@ async def _record_ignored_monitor_terminal_callback(
     *,
     requested_status: WorkspaceStatus,
     reason_code: str,
+    operation_id: str | None = None,
+    failure_reason: str | None = None,
+    failure_message: str | None = None,
 ) -> None:
-    await repo.record_ignored_stale_callback(
+    event = await repo.record_ignored_stale_callback(
         workspace,
         callback_source="pr_monitor",
         callback_action=(
@@ -5139,8 +5267,64 @@ async def _record_ignored_monitor_terminal_callback(
         ),
         expected_status=WorkspaceStatus.monitoring_pr,
         requested_status=requested_status,
+        operation_id=operation_id,
         reason_code=reason_code,
     )
+    if failure_reason is not None or failure_message is not None:
+        payload = dict(event.payload or {})
+        if failure_reason is not None:
+            payload["failure_reason"] = failure_reason
+        if failure_message is not None:
+            payload["failure_message"] = redact_audit_text(failure_message, limit=2000)
+        event.payload = payload
+
+
+async def _record_blocked_monitor_terminal_callback(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    requested_status: WorkspaceStatus,
+    reason_code: str,
+    operation_id: str,
+    failure_reason: str | None = None,
+    failure_message: str | None = None,
+) -> None:
+    repo = WorkspaceRepository(session)
+    workspace = await repo.get(workspace_id)
+    if workspace is None:
+        return
+    await _record_ignored_monitor_terminal_callback(
+        repo,
+        workspace,
+        requested_status=requested_status,
+        reason_code=reason_code,
+        operation_id=operation_id,
+        failure_reason=failure_reason,
+        failure_message=failure_message,
+    )
+    await session.commit()
+
+
+async def _record_blocked_monitor_recovery_dispatch(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    operation_id: str,
+) -> None:
+    repo = WorkspaceRepository(session)
+    workspace = await repo.get(workspace_id)
+    if workspace is None:
+        return
+    await repo.record_ignored_stale_callback(
+        workspace,
+        callback_source="pr_monitor",
+        callback_action="recovery_dispatch",
+        expected_status=WorkspaceStatus.monitoring_pr,
+        requested_status=WorkspaceStatus.ready,
+        operation_id=operation_id,
+        reason_code="RECOVERY_DISPATCH",
+    )
+    await session.commit()
 
 
 def _is_callback_terminal_workspace_status(status: str) -> bool:

@@ -2064,8 +2064,9 @@ class TestCompleteWorkspaceTearsDownComposeStack:
     """2026-04-24 incident: Docker ran out of network subnets because
     every AWF workspace's compose stack survived its workspace's
     termination. ``_terminate_completed`` now runs
-    ``docker compose down`` as a best-effort cleanup. Failed
-    workspaces are preserved for operator inspection."""
+    ``docker compose down`` as a best-effort cleanup. Failed workspaces
+    stop live runtime resources while preserving salvage evidence for
+    operator inspection."""
 
     @pytest.mark.unit
     async def test_happy_merge_tears_down_compose(
@@ -2103,10 +2104,10 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         args = teardown_calls[0].args
         assert "-p" in args and "awf_ws_test" in args
         assert "--remove-orphans" in args
-        assert "--volumes" in args
+        assert "--volumes" not in args
 
     @pytest.mark.unit
-    async def test_failed_abort_does_not_tear_down_compose(
+    async def test_failed_abort_tears_down_compose_without_removing_volumes(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -2114,9 +2115,7 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """Failed workspaces stay up so the operator can inspect the
-        stack (read logs, exec into containers, etc.). Exercise via a
-        PR closed externally → Abort(pr_closed_externally) → failed."""
+        """Failed monitor fallback cleanup preserves compose volumes for inspection."""
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
@@ -2136,10 +2135,12 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         teardown_calls = [
             c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
         ]
-        assert teardown_calls == [], (
-            "failed workspaces must NOT be torn down automatically — "
-            "operator may need the stack for inspection"
-        )
+        assert len(teardown_calls) == 1
+        args = teardown_calls[0].args
+        assert "-p" in args
+        assert args[args.index("-p") + 1] == "awf_ws_abort"
+        assert "--remove-orphans" in args
+        assert "--volumes" not in args
 
     @pytest.mark.unit
     async def test_short_circuit_completed_tears_down_compose(

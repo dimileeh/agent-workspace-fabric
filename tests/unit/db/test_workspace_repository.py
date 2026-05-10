@@ -16,9 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
-from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    OperationRepository,
     SecretLeaseIssue,
     SecretLeaseRepository,
     TaskAttemptRepository,
@@ -26,6 +27,8 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
+    _active_external_runtime_teardown_operation_lease_current,
     validation_command_set_hash,
 )
 from awf.db.session import make_engine, make_session_factory
@@ -116,6 +119,17 @@ def _recorded_workspace_row(
         owned_paths=[],
         task_policy={},
     )
+
+
+@pytest.mark.unit
+def test_active_external_runtime_teardown_operation_sql_cutoff_is_timezone_naive() -> None:
+    expression = _active_external_runtime_teardown_operation_lease_current()
+
+    compiled = expression.compile(dialect=postgresql.dialect())
+    cutoff_values = [value for value in compiled.params.values() if isinstance(value, datetime)]
+
+    assert len(cutoff_values) == 1
+    assert cutoff_values[0].tzinfo is None
 
 
 class TestCreate:
@@ -1709,6 +1723,376 @@ class TestTransition:
         assert ws.events[-1].old_state == WorkspaceStatus.requested.value
         assert ws.events[-1].new_state == WorkspaceStatus.provisioning.value
         assert ws.events[-1].reason_code == "WORKER_CLAIMED"
+
+    @pytest.mark.unit
+    async def test_transition_rejects_stale_loaded_workspace_state(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+        await session.execute(
+            text(
+                """
+                UPDATE workspaces
+                SET status = :status, version = version + 1
+                WHERE id = :workspace_id
+                """
+            ),
+            {
+                "status": WorkspaceStatus.cancelled.value,
+                "workspace_id": ws.id,
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="concurrently modified"):
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.provisioning,
+                reason_code="WORKER_CLAIMED",
+            )
+
+        row = (
+            await session.execute(
+                text("SELECT status, version FROM workspaces WHERE id = :workspace_id"),
+                {"workspace_id": ws.id},
+            )
+        ).one()
+        assert row == (WorkspaceStatus.cancelled.value, 2)
+        assert ws.status == WorkspaceStatus.requested.value
+        assert ws.version == 1
+
+    @pytest.mark.unit
+    async def test_transition_blocks_teardown_started_between_check_and_update(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+        inserted = False
+        operation_id = "op_transition_race"
+        bind = session.get_bind()
+
+        def insert_active_stop_before_workspace_update(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            nonlocal inserted
+            del cursor, parameters, context, executemany
+            normalized = " ".join(statement.lower().split())
+            if inserted or not normalized.startswith("update workspaces set "):
+                return
+            inserted = True
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO operations (
+                        id, workspace_id, type, status, created_at, started_at
+                    )
+                    VALUES (
+                        :operation_id,
+                        :workspace_id,
+                        :operation_type,
+                        :operation_status,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {
+                    "operation_id": operation_id,
+                    "workspace_id": ws.id,
+                    "operation_type": OperationType.stop.value,
+                    "operation_status": OperationStatus.running.value,
+                },
+            )
+
+        event.listen(bind, "before_cursor_execute", insert_active_stop_before_workspace_update)
+        try:
+            with pytest.raises(WorkspaceTransitionBlockedByActiveOperationError) as exc_info:
+                await repo.transition(
+                    ws,
+                    to=WorkspaceStatus.provisioning,
+                    reason_code="WORKER_CLAIMED",
+                )
+        finally:
+            event.remove(bind, "before_cursor_execute", insert_active_stop_before_workspace_update)
+
+        assert inserted is True
+        assert exc_info.value.operation.id == operation_id
+        assert exc_info.value.operation.type == OperationType.stop.value
+        assert ws.status == WorkspaceStatus.requested.value
+        assert ws.version == 1
+
+    @pytest.mark.unit
+    async def test_transition_retries_when_teardown_finishes_before_diagnostic(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+        inserted = False
+        completed = False
+        operation_id = "op_transition_teardown_toc_tou"
+        bind = session.get_bind()
+
+        def finish_stop_before_diagnostic(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            nonlocal inserted, completed
+            del cursor, parameters, context, executemany
+            normalized = " ".join(statement.lower().split())
+            if not inserted and normalized.startswith("update workspaces set "):
+                inserted = True
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO operations (
+                            id, workspace_id, type, status, created_at, started_at
+                        )
+                        VALUES (
+                            :operation_id,
+                            :workspace_id,
+                            :operation_type,
+                            :operation_status,
+                            CURRENT_TIMESTAMP,
+                            CURRENT_TIMESTAMP
+                        )
+                        """
+                    ),
+                    {
+                        "operation_id": operation_id,
+                        "workspace_id": ws.id,
+                        "operation_type": OperationType.stop.value,
+                        "operation_status": OperationStatus.running.value,
+                    },
+                )
+                return
+            if (
+                inserted
+                and not completed
+                and normalized.startswith("select operations.")
+                and " from operations " in normalized
+            ):
+                completed = True
+                conn.execute(
+                    text(
+                        """
+                        UPDATE operations
+                        SET status = :operation_status
+                        WHERE id = :operation_id
+                        """
+                    ),
+                    {
+                        "operation_id": operation_id,
+                        "operation_status": OperationStatus.succeeded.value,
+                    },
+                )
+
+        event.listen(bind, "before_cursor_execute", finish_stop_before_diagnostic)
+        try:
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.provisioning,
+                reason_code="WORKER_CLAIMED",
+            )
+        finally:
+            event.remove(bind, "before_cursor_execute", finish_stop_before_diagnostic)
+
+        assert inserted is True
+        assert completed is True
+        assert ws.status == WorkspaceStatus.provisioning.value
+        assert ws.version == 2
+
+    @pytest.mark.unit
+    async def test_transition_if_current_treats_version_race_as_stale_when_teardown_also_started(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+        raced = False
+        operation_id = "op_tic_version_race"
+        bind = session.get_bind()
+
+        def bump_version_and_insert_stop_before_workspace_update(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            nonlocal raced
+            del cursor, parameters, context, executemany
+            normalized = " ".join(statement.lower().split())
+            if raced or not normalized.startswith("update workspaces set "):
+                return
+            raced = True
+            conn.execute(
+                text(
+                    """
+                    UPDATE workspaces
+                    SET version = version + 1
+                    WHERE id = :workspace_id
+                    """
+                ),
+                {"workspace_id": ws.id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO operations (
+                        id, workspace_id, type, status, created_at, started_at
+                    )
+                    VALUES (
+                        :operation_id,
+                        :workspace_id,
+                        :operation_type,
+                        :operation_status,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {
+                    "operation_id": operation_id,
+                    "workspace_id": ws.id,
+                    "operation_type": OperationType.stop.value,
+                    "operation_status": OperationStatus.running.value,
+                },
+            )
+
+        event.listen(
+            bind,
+            "before_cursor_execute",
+            bump_version_and_insert_stop_before_workspace_update,
+        )
+        try:
+            transitioned = await repo.transition_if_current(
+                ws.id,
+                from_status=WorkspaceStatus.requested,
+                to=WorkspaceStatus.provisioning,
+                reason_code="WORKER_CLAIMED",
+            )
+        finally:
+            event.remove(
+                bind,
+                "before_cursor_execute",
+                bump_version_and_insert_stop_before_workspace_update,
+            )
+
+        assert raced is True
+        assert transitioned is None
+        row = (
+            await session.execute(
+                text("SELECT status, version FROM workspaces WHERE id = :workspace_id"),
+                {"workspace_id": ws.id},
+            )
+        ).one()
+        assert row == (WorkspaceStatus.requested.value, 2)
+        assert ws.status == WorkspaceStatus.requested.value
+        assert ws.version == 1
+
+    @pytest.mark.unit
+    async def test_transition_ignores_expired_running_teardown_operation(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        stale_stop = await OperationRepository(session).create(
+            workspace_id=ws.id,
+            operation_type=OperationType.stop,
+            status=OperationStatus.running,
+            payload={"source": "operator_api"},
+        )
+        stale_stop.started_at = datetime.now(UTC) - timedelta(days=30)
+        await session.commit()
+
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="WORKER_CLAIMED")
+
+        assert ws.status == WorkspaceStatus.provisioning.value
+        assert ws.version == 2
+
+    @pytest.mark.unit
+    async def test_transition_blocks_old_running_teardown_operation_with_recent_lease(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        old = datetime.now(UTC) - timedelta(days=30)
+        active_lease = datetime.now(UTC)
+        old_stop = await OperationRepository(session).create(
+            workspace_id=ws.id,
+            operation_type=OperationType.stop,
+            status=OperationStatus.running,
+            payload={"source": "operator_api"},
+        )
+        old_stop.started_at = old
+        old_stop.lease_renewed_at = active_lease
+        await session.commit()
+
+        with pytest.raises(WorkspaceTransitionBlockedByActiveOperationError) as exc_info:
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="WORKER_CLAIMED")
+
+        assert exc_info.value.operation.id == old_stop.id
+        assert ws.status == WorkspaceStatus.requested.value
+        assert ws.version == 1
 
     @pytest.mark.unit
     async def test_transition_to_monitoring_pr_stamps_monitor_start(

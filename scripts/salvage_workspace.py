@@ -40,9 +40,12 @@ from awf.control.executor import ExecutorConfig, WorkspaceExecutor  # noqa: E402
 from awf.db.enums import AgentRuntime, WorkspaceStatus  # noqa: E402
 from awf.db.repositories import WorkspaceRepository  # noqa: E402
 from awf.db.session import make_engine, make_session_factory  # noqa: E402
+from awf.node.cleanup import WorkspaceCleaner  # noqa: E402
 from awf.node.compose_manager import ComposeManager  # noqa: E402
+from awf.node.git_manager import GitManager  # noqa: E402
 from awf.runtime.pr_creator import PullRequestCreator  # noqa: E402
 from awf.runtime.validation import ValidationRunner  # noqa: E402
+from awf.service.terminal_runtime import TerminalRuntimeReleaser  # noqa: E402
 
 _TEMPLATE = _ROOT / "docker" / "compose" / "workspace.base.yml.j2"
 _DEFAULT_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
@@ -185,7 +188,14 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
         _install_noop_adapter_factory()
         try:
             runner = AsyncioSubprocessRunner()
+            git = GitManager(work_dir / "git")
             compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
+            runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
+            terminal_runtime_releaser = TerminalRuntimeReleaser(
+                session_factory=factory,
+                cleaner_factory=lambda: runtime_cleaner,
+                worktrees_root=work_dir / "git" / "worktrees",
+            )
             validation = ValidationRunner(runner=runner, artifacts_dir=work_dir / "artifacts")
             pr_creator = PullRequestCreator(runner)
 
@@ -200,6 +210,7 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
                     compose_projects_root=work_dir / "compose" / "compose",
                     default_models={},
                 ),
+                terminal_runtime_releaser=terminal_runtime_releaser,
             )
 
             print("[salvage] running executor (agent step is a no-op) ...", flush=True)

@@ -184,8 +184,14 @@ class _RefreshLoopWorker(ControlWorker):
             raise RuntimeError("monitor refresh failed")
         return self.refreshed
 
-    async def _refresh_execution_claim(self, workspace_id: str) -> bool:
+    async def _refresh_execution_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> bool:
         assert workspace_id == "ws_loop"
+        assert owner_id is None or isinstance(owner_id, str)
         self.execution_refresh_calls += 1
         self.refreshed_once.set()
         if self.raises:
@@ -227,6 +233,90 @@ async def test_list_pending_delegates_to_requested_query_without_extra_filter() 
 
 
 @pytest.mark.unit
+async def test_wait_for_execution_tasks_prunes_completed_tasks(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    worker._execution_tasks["ws_done"] = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+
+    await worker.wait_for_execution_tasks()
+
+    assert worker._execution_tasks == {}  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_await_stale_cleanup_returns_none_when_heartbeat_finishes_first(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    cleanup = asyncio.create_task(
+        asyncio.sleep(
+            60,
+            result=SimpleNamespace(ok=True),  # type: ignore[arg-type]
+        )
+    )
+    heartbeat = asyncio.create_task(asyncio.sleep(0))
+
+    result = await worker._await_stale_cleanup_or_claim_loss(  # noqa: SLF001
+        cleanup,  # type: ignore[arg-type]
+        heartbeat,
+    )
+
+    assert result is None
+    assert cleanup.cancelled()
+
+
+@pytest.mark.unit
+async def test_finish_monitor_recovery_operation_edges(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    workspace_id = await _seed_status(
+        factory,
+        WorkspaceStatus.monitoring_pr,
+        title="monitor recovery finish",
+    )
+
+    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        workspace_id,
+        operation_id=None,
+        status=OperationStatus.succeeded,
+    )
+    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        workspace_id,
+        operation_id="missing-operation",
+        status=OperationStatus.failed,
+        error_code="MONITOR_FAILED",
+        error_message="monitor failed",
+    )
+    async with factory() as session:
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+            payload={"requested_action": OperationType.remonitor.value},
+        )
+        await session.commit()
+        operation_id = operation.id
+
+    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        workspace_id,
+        operation_id=operation_id,
+        status=OperationStatus.failed,
+        error_code="MONITOR_FAILED",
+        error_message="monitor failed",
+    )
+
+    async with factory() as session:
+        finished = await OperationRepository(session).get(operation_id)
+    assert finished is not None
+    assert finished.status == OperationStatus.failed.value
+    assert finished.error_code == "MONITOR_FAILED"
+    assert finished.result["requested_action"] == OperationType.remonitor.value
+    assert finished.result["pr_number"] == 123
+
+
+@pytest.mark.unit
 async def test_provider_recovery_filter_skips_stale_scheduler_ids(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -240,6 +330,21 @@ async def test_provider_recovery_filter_skips_stale_scheduler_ids(
         )
 
     assert filtered == [workspace_id]
+
+
+@pytest.mark.unit
+async def test_provider_recovery_filter_ignores_unrecognized_scheduler_items(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+
+    async with factory() as session:
+        filtered = await worker._filter_provider_recovery_suppressed(  # noqa: SLF001
+            session,
+            [object()],  # type: ignore[list-item]
+        )
+
+    assert filtered == []
 
 
 @pytest.mark.unit
@@ -948,3 +1053,154 @@ async def test_fail_stale_active_execution_skips_status_mismatch(
 
     assert ws is not None
     assert ws.status == WorkspaceStatus.running.value
+
+
+@pytest.mark.unit
+async def test_cleanup_claim_allows_failure_clears_or_preserves_claim_by_state(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    owner = worker._stale_active_execution_cleanup_owner()  # noqa: SLF001
+    changed_id = await _seed_status(factory, WorkspaceStatus.running, title="changed")
+    wrong_owner_id = await _seed_status(factory, WorkspaceStatus.running, title="wrong owner")
+    evidence_id = await _seed_status(factory, WorkspaceStatus.running, title="has evidence")
+    no_evidence_id = await _seed_status(factory, WorkspaceStatus.running, title="no evidence")
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        changed = await repo.get(changed_id)
+        wrong_owner = await repo.get(wrong_owner_id)
+        evidence = await repo.get(evidence_id)
+        no_evidence = await repo.get(no_evidence_id)
+        assert changed and wrong_owner and evidence and no_evidence
+        changed.status = WorkspaceStatus.ready.value
+        changed.execution_claimed_by = owner
+        changed.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        wrong_owner.execution_claimed_by = "other-worker"
+        wrong_owner.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        evidence.execution_claimed_by = owner
+        evidence.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        no_evidence.execution_claimed_by = owner
+        no_evidence.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        await session.commit()
+
+    evidence_calls = 0
+
+    async def _has_evidence(
+        _session: AsyncSession,
+        workspace: object,
+        _status: WorkspaceStatus,
+        *,
+        event_floor: datetime | None = None,
+    ) -> bool:
+        del _session, _status, event_floor
+        nonlocal evidence_calls
+        evidence_calls += 1
+        return workspace.id == evidence_id
+
+    worker._has_current_stale_active_execution_failure_evidence = _has_evidence  # type: ignore[method-assign]  # noqa: SLF001
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        assert not await worker._cleanup_claim_still_allows_stale_active_execution_failure(  # noqa: SLF001
+            session,
+            repo,
+            _ActiveExecutionCandidate(
+                workspace_id=changed_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_changed",
+            ),
+        )
+        assert not await worker._cleanup_claim_still_allows_stale_active_execution_failure(  # noqa: SLF001
+            session,
+            repo,
+            _ActiveExecutionCandidate(
+                workspace_id=wrong_owner_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_wrong",
+            ),
+        )
+        assert await worker._cleanup_claim_still_allows_stale_active_execution_failure(  # noqa: SLF001
+            session,
+            repo,
+            _ActiveExecutionCandidate(
+                workspace_id=evidence_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_evidence",
+            ),
+        )
+        assert not await worker._cleanup_claim_still_allows_stale_active_execution_failure(  # noqa: SLF001
+            session,
+            repo,
+            _ActiveExecutionCandidate(
+                workspace_id=no_evidence_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_no_evidence",
+            ),
+        )
+        await session.commit()
+
+    async with factory() as session:
+        changed = await WorkspaceRepository(session).get(changed_id)
+        no_evidence = await WorkspaceRepository(session).get(no_evidence_id)
+        evidence = await WorkspaceRepository(session).get(evidence_id)
+
+    assert evidence_calls == 2
+    assert changed is not None and changed.execution_claimed_by is None
+    assert no_evidence is not None and no_evidence.execution_claimed_by is None
+    assert evidence is not None and evidence.execution_claimed_by == owner
+
+
+@pytest.mark.unit
+async def test_record_ignored_stale_callback_logs_audit_failure_and_releases_claim(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_status(
+        factory,
+        WorkspaceStatus.running,
+        title="blocked transition stale callback",
+    )
+    now = datetime.now(UTC)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.execution_claimed_by = "owner-1"
+        ws.execution_claim_expires_at = now - timedelta(seconds=1)
+        ws.monitor_claimed_by = "monitor-1"
+        ws.monitor_claim_expires_at = now - timedelta(seconds=1)
+        await session.commit()
+
+    async def _raise_record_failure(self: object, *_args: object, **_kwargs: object) -> None:
+        del self
+        raise RuntimeError("audit sink unavailable")
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "record_ignored_stale_callback",
+        _raise_record_failure,
+    )
+    control_worker = _worker(factory)
+
+    async with factory() as session:
+        await control_worker._record_active_operation_blocked_transition_in_session(  # noqa: SLF001
+            session,
+            workspace_id=workspace_id,
+            action="execute",
+            expected=WorkspaceStatus.running,
+            requested=WorkspaceStatus.failed,
+            reason_code="STALE_CALLBACK",
+            operation_id="op_1",
+            release_execution_claim_owner_id="owner-1",
+            clear_stale_claims_for_status=WorkspaceStatus.monitoring_pr,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+
+    assert ws is not None
+    assert ws.execution_claimed_by is None
+    assert ws.execution_claim_expires_at is None
+    assert ws.monitor_claimed_by is None
+    assert ws.monitor_claim_expires_at is None

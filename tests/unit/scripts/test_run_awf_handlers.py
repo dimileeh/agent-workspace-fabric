@@ -269,10 +269,12 @@ def patch_handlers(
     monkeypatch.setattr(run_awf, "_stream_service_logs_best_effort", _noop_stream_service_logs)
 
     executors: list[_FakeExecutor] = []
+    executor_kwargs: list[dict[str, Any]] = []
     monitors: list[_FakeMonitor] = []
     monitor_builder_calls: list[dict[str, Any]] = []
 
     def _exec_ctor(**kwargs: Any) -> _FakeExecutor:
+        executor_kwargs.append(kwargs)
         e = _FakeExecutor(
             session_factory=kwargs["session_factory"],
             pr_monitor_factory=kwargs.get("pr_monitor_factory"),
@@ -324,6 +326,7 @@ def patch_handlers(
     return {
         "git_factory": fake_gitmanager_cls,
         "executors": executors,
+        "executor_kwargs": executor_kwargs,
         "monitors": monitors,
         "monitor_builder_calls": monitor_builder_calls,
         "compose_instances": compose_instances,
@@ -526,6 +529,27 @@ class TestFeatureBranchPrHandler:
         assert result["status"] == WorkspaceStatus.completed.value
         assert result["pr_url"] == "https://github.com/dimileeh/aira-web/pull/111"
 
+    @pytest.mark.unit
+    async def test_terminal_runtime_releaser_is_wired_to_executor_and_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="t",
+            git_email="t@e.com",
+        )
+
+        releaser = patch_handlers["executor_kwargs"][0]["terminal_runtime_releaser"]
+        assert releaser is not None
+        monitor_kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert monitor_kwargs["terminal_runtime_releaser"] is releaser
+
 
 # ── sync_release_pr handler ────────────────────────────────────────────────
 
@@ -649,6 +673,30 @@ class TestSyncReleasePrHandler:
         # Companion's worktree scope includes the owning workspace id.
         assert ws_id in adds[1]["new_branch"]
 
+    @pytest.mark.unit
+    async def test_terminal_runtime_releaser_is_wired_to_release_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(
+                task_kind="sync_release_pr",
+                branch_base="main",
+                source_branch="development",
+                pr_number=278,
+            ),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="t",
+            git_email="t@e.com",
+        )
+
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert kwargs["terminal_runtime_releaser"] is not None
+
 
 # ── sync_feature_pr handler ────────────────────────────────────────────────
 
@@ -709,6 +757,30 @@ class TestSyncFeaturePrHandler:
                 git_name="t",
                 git_email="t@e.com",
             )
+
+    @pytest.mark.unit
+    async def test_terminal_runtime_releaser_is_wired_to_feature_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(
+                task_kind="sync_feature_pr",
+                branch_base="development",
+                source_branch="fix/sprints-guard",
+                pr_number=277,
+            ),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="t",
+            git_email="t@e.com",
+        )
+
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert kwargs["terminal_runtime_releaser"] is not None
 
     @pytest.mark.unit
     async def test_default_auto_merge_true_routes_to_feature_monitor(

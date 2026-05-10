@@ -46,6 +46,7 @@ from awf.service.target_branch_monitor import (
     TargetBranchReconcileMonitor,
     reconcile_and_refresh_stale_candidates,
 )
+from awf.service.terminal_runtime import TerminalRuntimeReleaser
 
 _log = get_logger(__name__)
 
@@ -74,6 +75,11 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     )
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
+    terminal_runtime_releaser = TerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: runtime_cleaner,
+        worktrees_root=work_dir / "git" / "worktrees",
+    )
     runner = AsyncioSubprocessRunner()
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
     merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
@@ -138,6 +144,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         session_factory=session_factory,
         git=git,
         stack_launcher=stack_launcher,
+        terminal_runtime_releaser=terminal_runtime_releaser,
         config=ProvisionerConfig(
             node_id=node_id,
             branch_prefix=settings.branch_prefix,
@@ -172,6 +179,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "log_store": log_store,
             "merge_coordinator": merge_coordinator,
             "post_merge_target_reconciler": _post_merge_reconciler,
+            "terminal_runtime_releaser": terminal_runtime_releaser,
         }
         return monitor_builder(**monitor_kwargs)
 
@@ -194,12 +202,14 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         ),
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
+        terminal_runtime_releaser=terminal_runtime_releaser,
     )
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=provisioner,
         executor=executor,
         runtime_cleaner=runtime_cleaner,
+        worktrees_root=work_dir / "git" / "worktrees",
         config=WorkerConfig(
             poll_interval_seconds=settings.worker_poll_interval_seconds,
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,

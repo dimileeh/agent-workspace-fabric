@@ -14,11 +14,14 @@ from awf.db.session import make_session_factory
 from awf.service.controls import (
     IdempotencyConflictError,
     VersionConflictError,
+    WorkspaceActiveOperationConflictError,
     WorkspaceControlError,
     WorkspaceNotFoundError,
     WorkspaceRebaseMissingCandidateError,
     WorkspaceRebaseMissingPrUrlError,
     WorkspaceRemonitorMissingPrUrlError,
+    WorkspaceRemonitorTerminalRuntimeReleaseInProgressError,
+    WorkspaceStackStopError,
 )
 
 
@@ -69,6 +72,20 @@ def test_require_idempotency_key_strips_valid_values() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "error_type",
+    [
+        WorkspaceActiveOperationConflictError,
+        WorkspaceRemonitorTerminalRuntimeReleaseInProgressError,
+    ],
+)
+def test_http_error_explicitly_handles_runtime_teardown_conflicts(
+    error_type: type[WorkspaceControlError],
+) -> None:
+    assert error_type in controls._CONFLICT_CONTROL_ERRORS
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("error", "status_code"),
     [
         (
@@ -95,6 +112,27 @@ def test_require_idempotency_key_strips_valid_values() -> None:
         ),
         (
             VersionConflictError(expected_version=1, actual_version=2),
+            409,
+        ),
+        (
+            WorkspaceActiveOperationConflictError(
+                SimpleNamespace(id="op_1", type="cancel", status="running")
+            ),
+            409,
+        ),
+        (
+            WorkspaceRemonitorTerminalRuntimeReleaseInProgressError(
+                SimpleNamespace(status="failed")
+            ),
+            409,
+        ),
+        (
+            WorkspaceStackStopError(
+                operation="compose down",
+                returncode=1,
+                stdout="",
+                stderr="compose failed",
+            ),
             409,
         ),
     ],

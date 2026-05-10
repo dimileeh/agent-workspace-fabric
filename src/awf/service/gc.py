@@ -125,6 +125,14 @@ class WorkspaceGCPreserved:
     age_hours: int
     reason_code: str
 
+    @property
+    def retention_class(self) -> str:
+        if self.reason_code == FAILED_WORKSPACE_TRIAGE_PRESERVED:
+            return "salvage_evidence"
+        if self.reason_code == WORKSPACE_CLEANUP_DISABLED:
+            return "policy_disabled"
+        return "retention_policy"
+
     def to_dict(self) -> dict[str, object]:
         return {
             "workspace_id": self.workspace_id,
@@ -132,6 +140,7 @@ class WorkspaceGCPreserved:
             "updated_at": self.updated_at.isoformat(),
             "age_hours": self.age_hours,
             "reason_code": self.reason_code,
+            "retention_class": self.retention_class,
         }
 
 
@@ -517,8 +526,7 @@ async def plan_terminal_workspace_gc(
     preserved: list[WorkspaceGCPreserved] = []
     candidate_ids: set[str] = set()
     for workspace in candidate_rows:
-        classification = await asyncio.to_thread(
-            _classify_workspace_for_gc,
+        classification = await _classify_workspace_for_gc_async(
             workspace,
             work_dir=normalized_work_dir,
             now=current_time,
@@ -534,8 +542,7 @@ async def plan_terminal_workspace_gc(
     for workspace in preserved_rows:
         if workspace.id in candidate_ids:
             continue
-        classification = await asyncio.to_thread(
-            _classify_workspace_for_gc,
+        classification = await _classify_workspace_for_gc_async(
             workspace,
             work_dir=normalized_work_dir,
             now=current_time,
@@ -771,8 +778,7 @@ async def run_workspace_filesystem_gc(
     include_statuses: tuple[str, ...] = ()
     if workspace is not None:
         include_statuses = (workspace.status,)
-        classification = await asyncio.to_thread(
-            _classify_workspace_for_gc,
+        classification = await _classify_workspace_for_gc_async(
             workspace,
             work_dir=normalized_work_dir,
             now=current_time,
@@ -1189,6 +1195,64 @@ def _candidate_for_workspace(
     )
 
 
+async def _classify_workspace_for_gc_async(
+    workspace: Workspace,
+    *,
+    work_dir: Path,
+    now: datetime,
+    cutoff_at: datetime,
+    default_policy: bool,
+    cleanup_enabled: bool,
+) -> WorkspaceGCCandidate | WorkspaceGCPreserved | None:
+    failed_terminal_workspace_no_work: bool | None = None
+    if _needs_failed_terminal_workspace_no_work_inspection(
+        workspace,
+        cutoff_at=cutoff_at,
+        default_policy=default_policy,
+        cleanup_enabled=cleanup_enabled,
+    ):
+        failed_terminal_workspace_no_work = await _failed_terminal_workspace_has_no_work_async(
+            workspace
+        )
+    return await asyncio.to_thread(
+        _classify_workspace_for_gc,
+        workspace,
+        work_dir=work_dir,
+        now=now,
+        cutoff_at=cutoff_at,
+        default_policy=default_policy,
+        cleanup_enabled=cleanup_enabled,
+        failed_terminal_workspace_no_work=failed_terminal_workspace_no_work,
+    )
+
+
+def _needs_failed_terminal_workspace_no_work_inspection(
+    workspace: Workspace,
+    *,
+    cutoff_at: datetime,
+    default_policy: bool,
+    cleanup_enabled: bool,
+) -> bool:
+    if not cleanup_enabled:
+        return False
+    if workspace.status not in _FAILED_NO_WORK_TERMINAL_STATUSES:
+        return False
+    if _compose_project_name_for_workspace(workspace) is None:
+        return False
+    if default_policy:
+        return True
+    return _to_utc(workspace.updated_at) <= cutoff_at
+
+
+def _failed_terminal_workspace_no_work_decision(
+    workspace: Workspace,
+    precomputed: bool | None,
+) -> bool:
+    if precomputed is not None:
+        return precomputed
+    return _failed_terminal_workspace_has_no_work(workspace)
+
+
 def _classify_workspace_for_gc(
     workspace: Workspace,
     *,
@@ -1197,6 +1261,7 @@ def _classify_workspace_for_gc(
     cutoff_at: datetime,
     default_policy: bool,
     cleanup_enabled: bool,
+    failed_terminal_workspace_no_work: bool | None = None,
 ) -> WorkspaceGCCandidate | WorkspaceGCPreserved | None:
     if workspace.status in PROTECTED_WORKSPACE_GC_STATUSES:
         return None
@@ -1216,7 +1281,9 @@ def _classify_workspace_for_gc(
 
     if default_policy:
         if workspace.status == WorkspaceStatus.failed.value:
-            if _failed_terminal_workspace_has_no_work(workspace):
+            if _failed_terminal_workspace_no_work_decision(
+                workspace, failed_terminal_workspace_no_work
+            ):
                 if updated_at <= cutoff_at:
                     return _candidate_for_workspace(
                         workspace,
@@ -1239,7 +1306,9 @@ def _classify_workspace_for_gc(
                 reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
             )
         if workspace.status == "superseded":
-            if _failed_terminal_workspace_has_no_work(workspace):
+            if _failed_terminal_workspace_no_work_decision(
+                workspace, failed_terminal_workspace_no_work
+            ):
                 if updated_at <= cutoff_at:
                     return _candidate_for_workspace(
                         workspace,
@@ -1305,7 +1374,9 @@ def _classify_workspace_for_gc(
     if (
         workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES
         and workspace.compose_project_name is not None
-        and not _failed_terminal_workspace_has_no_work(workspace)
+        and not _failed_terminal_workspace_no_work_decision(
+            workspace, failed_terminal_workspace_no_work
+        )
     ):
         return WorkspaceGCPreserved(
             workspace_id=workspace.id,
@@ -1336,17 +1407,28 @@ def _classify_workspace_for_gc(
     )
 
 
-def _failed_terminal_workspace_has_no_work(workspace: Workspace) -> bool:
+async def _failed_terminal_workspace_has_no_work_async(workspace: Workspace) -> bool:
     """Return True when a failed terminal workspace has no active agent work."""
 
     compose_project_name = _compose_project_name_for_workspace(workspace)
     if compose_project_name is None:
         return False
     try:
-        snapshot = asyncio.run(_RUNTIME_INSPECTOR.inspect(compose_project_name))
+        snapshot = await _RUNTIME_INSPECTOR.inspect(compose_project_name)
     except Exception:
         return False
     return _snapshot_has_no_work(snapshot)
+
+
+def _failed_terminal_workspace_has_no_work(workspace: Workspace) -> bool:
+    """Synchronous fallback that preserves failed evidence unless precomputed.
+
+    Production GC planners await ``_failed_terminal_workspace_has_no_work_async``
+    before entering the synchronous filesystem classification step.
+    """
+
+    del workspace
+    return False
 
 
 def _compose_project_name_for_workspace(workspace: Workspace) -> str | None:

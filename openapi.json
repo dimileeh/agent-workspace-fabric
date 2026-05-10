@@ -412,6 +412,31 @@
             ],
             "title": "Expected Counts By Kind"
           },
+          "leaked_live_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leaked Live Count"
+          },
+          "leaked_live_counts_by_kind": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leaked Live Counts By Kind"
+          },
           "ok": {
             "title": "Ok",
             "type": "boolean"
@@ -476,6 +501,31 @@
               }
             ],
             "title": "Resource Count"
+          },
+          "retained_evidence_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retained Evidence Count"
+          },
+          "retained_evidence_counts_by_kind": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retained Evidence Counts By Kind"
           },
           "scanners": {
             "anyOf": [
@@ -1995,6 +2045,17 @@
             "title": "Expected Counts By Kind",
             "type": "object"
           },
+          "leaked_live_count": {
+            "title": "Leaked Live Count",
+            "type": "integer"
+          },
+          "leaked_live_counts_by_kind": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Leaked Live Counts By Kind",
+            "type": "object"
+          },
           "ok": {
             "title": "Ok",
             "type": "boolean"
@@ -2024,6 +2085,17 @@
           "resource_count": {
             "title": "Resource Count",
             "type": "integer"
+          },
+          "retained_evidence_count": {
+            "title": "Retained Evidence Count",
+            "type": "integer"
+          },
+          "retained_evidence_counts_by_kind": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Retained Evidence Counts By Kind",
+            "type": "object"
           },
           "scanners": {
             "additionalProperties": {
@@ -2060,6 +2132,10 @@
           "counts_by_kind",
           "orphan_counts_by_kind",
           "expected_counts_by_kind",
+          "retained_evidence_count",
+          "retained_evidence_counts_by_kind",
+          "leaked_live_count",
+          "leaked_live_counts_by_kind",
           "unknown_counts_by_kind",
           "orphan_classification_counts",
           "cleanup_readiness",

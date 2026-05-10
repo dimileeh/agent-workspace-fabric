@@ -115,6 +115,11 @@ def _disk_check() -> DiskCheck:
     )
 
 
+class _NoopCleaner:
+    async def cleanup(self, **_kwargs: object) -> list[str]:
+        return []
+
+
 @pytest.mark.unit
 async def test_create_v2_writes_admitted_decision_and_local_reservation(
     factory: async_sessionmaker[AsyncSession],
@@ -443,6 +448,47 @@ async def test_terminal_workspace_control_releases_active_reservation(
         reason="operator cancellation",
         stop_stack=False,
     )
+
+    async with factory() as session:
+        reservation = (await ResourceReservationRepository(session).list_for_workspace(created.id))[
+            0
+        ]
+        active = await ResourceReservationRepository(session).active_for_workspace(created.id)
+
+    assert active is None
+    assert reservation.released_at is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("control_action", ["cancel", "stop"])
+async def test_terminal_workspace_control_fallback_releases_leaked_active_reservation(
+    factory: async_sessionmaker[AsyncSession],
+    control_action: str,
+) -> None:
+    async def noop_stopper(_compose_project_name: str | None) -> None:
+        return None
+
+    service = WorkspaceService(
+        factory,
+        project_stopper=noop_stopper,
+        cleaner_factory=_NoopCleaner,
+    )
+    created = await service.create_v2(_request())
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.completed.value
+        await session.commit()
+
+    if control_action == "cancel":
+        await service.cancel_workspace(
+            created.id,
+            reason="operator cancellation",
+            stop_stack=False,
+        )
+    else:
+        await service.stop_workspace(created.id, reason="operator stop")
 
     async with factory() as session:
         reservation = (await ResourceReservationRepository(session).list_for_workspace(created.id))[

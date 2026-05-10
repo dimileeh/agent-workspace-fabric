@@ -11,7 +11,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, assert_never
 
 from awf.db.enums import WorkspaceStatus
 from awf.service.gc import (
@@ -29,7 +29,11 @@ TERMINAL_WORKSPACE_STATUSES = frozenset(TERMINAL_WORKSPACE_GC_STATUSES)
 KNOWN_WORKSPACE_STATUSES = tuple(sorted(ACTIVE_WORKSPACE_STATUSES | TERMINAL_WORKSPACE_STATUSES))
 
 _AWF_PROJECT_PREFIXES = ("awf_", "awf-")
-_RESOURCE_KINDS = ("container", "network", "volume", "worktree")
+ResourceKind = Literal["container", "network", "volume", "worktree"]
+_RESOURCE_KINDS: tuple[ResourceKind, ...] = ("container", "network", "volume", "worktree")
+_TERMINAL_ORPHAN_REASONS = frozenset(
+    {"WORKSPACE_TERMINAL_RETENTION_EXPIRED", "TERMINAL_LIVE_RUNTIME_RESOURCE"}
+)
 _WORKSPACE_ID_PATTERN = r"ws_[A-Za-z0-9][A-Za-z0-9_]*"
 _WORKSPACE_ID_RE = re.compile(rf"^{_WORKSPACE_ID_PATTERN}$")
 _HYPHEN_DELIMITED_MANAGED_TAIL_RE = re.compile(rf"^(?P<workspace_id>{_WORKSPACE_ID_PATTERN})-")
@@ -82,7 +86,7 @@ class WorkspaceIdView:
 class ManagedResource:
     """One Docker or filesystem resource managed by AWF."""
 
-    resource_kind: str
+    resource_kind: ResourceKind
     resource_id: str
     resource_name: str
     workspace_id: str | None
@@ -94,7 +98,7 @@ class ManagedResource:
 class ResourceFinding:
     """Structured operator-facing resource classification."""
 
-    resource_kind: str
+    resource_kind: ResourceKind
     resource_id: str
     resource_name: str
     workspace_id: str | None
@@ -129,6 +133,7 @@ class OrphanResourceSummary:
     resource_counts: dict[str, int]
     expected_counts_by_kind: dict[str, int]
     retained_counts_by_kind: dict[str, int]
+    leaked_live_counts_by_kind: dict[str, int]
     orphan_counts_by_kind: dict[str, int]
     examples: tuple[ResourceFinding, ...]
     warnings: tuple[ResourceFinding, ...]
@@ -146,6 +151,10 @@ class OrphanResourceSummary:
     @property
     def orphan_count(self) -> int:
         return sum(self.orphan_counts_by_kind.values())
+
+    @property
+    def leaked_live_count(self) -> int:
+        return sum(self.leaked_live_counts_by_kind.values())
 
     @property
     def warning_count(self) -> int:
@@ -190,8 +199,14 @@ class OrphanResourceSummary:
             "active_count": len(self.active_workspace_ids),
             "expected_count": self.expected_count,
             "expected_counts_by_kind": _nonzero_counts(self.expected_counts_by_kind),
+            # ``retained_*`` are the legacy API names for retained evidence.
+            # Keep them as aliases while newer clients use the explicit names.
             "retained_count": self.retained_count,
             "retained_counts_by_kind": _nonzero_counts(self.retained_counts_by_kind),
+            "retained_evidence_count": self.retained_count,
+            "retained_evidence_counts_by_kind": _nonzero_counts(self.retained_counts_by_kind),
+            "leaked_live_count": self.leaked_live_count,
+            "leaked_live_counts_by_kind": _nonzero_counts(self.leaked_live_counts_by_kind),
             "orphan_count": self.orphan_count,
             "orphan_counts_by_kind": _nonzero_counts(self.orphan_counts_by_kind),
             "warning_count": self.warning_count,
@@ -202,9 +217,7 @@ class OrphanResourceSummary:
                 1 for example in self.examples if example.reason == "WORKSPACE_MISSING"
             ),
             "orphan_terminal_count": sum(
-                1
-                for example in self.examples
-                if example.reason == "WORKSPACE_TERMINAL_RETENTION_EXPIRED"
+                1 for example in self.examples if example.reason in _TERMINAL_ORPHAN_REASONS
             ),
         }
         if self.unknown_examples:
@@ -261,6 +274,7 @@ def detect_orphan_resources(
     resource_counts = _kind_counts(resources)
     expected: Counter[str] = Counter()
     retained: Counter[str] = Counter()
+    leaked_live: Counter[str] = Counter()
     orphan_counts: Counter[str] = Counter()
     examples: list[ResourceFinding] = []
     unknown_examples: list[ResourceFinding] = []
@@ -283,12 +297,15 @@ def detect_orphan_resources(
             unknown_examples.append(finding)
         else:
             orphan_counts[resource.resource_kind] += 1
+            if finding.reason == "TERMINAL_LIVE_RUNTIME_RESOURCE":
+                leaked_live[resource.resource_kind] += 1
             examples.append(finding)
 
     return OrphanResourceSummary(
         resource_counts=dict(resource_counts),
         expected_counts_by_kind=dict(expected),
         retained_counts_by_kind=dict(retained),
+        leaked_live_counts_by_kind=dict(leaked_live),
         orphan_counts_by_kind=dict(orphan_counts),
         examples=tuple(examples),
         warnings=tuple(warnings),
@@ -348,9 +365,9 @@ def _collect_docker_resources(
 
 
 def _docker_skipped_findings(
-    commands: tuple[tuple[str, list[str]], ...],
+    commands: tuple[tuple[ResourceKind, list[str]], ...],
     *,
-    failed_kind: str,
+    failed_kind: ResourceKind,
     failure: ResourceFinding,
 ) -> list[ResourceFinding]:
     failed_detail = f": {failure.detail}" if failure.detail else ""
@@ -364,7 +381,7 @@ def _docker_skipped_findings(
     ]
 
 
-def _docker_list_commands() -> tuple[tuple[str, list[str]], ...]:
+def _docker_list_commands() -> tuple[tuple[ResourceKind, list[str]], ...]:
     return (
         (
             "container",
@@ -442,7 +459,7 @@ def _run_docker_command(
 def _docker_failure_finding(
     result: CompletedProcessLike | Exception,
     *,
-    resource_kind: str,
+    resource_kind: ResourceKind,
 ) -> ResourceFinding | None:
     if isinstance(result, FileNotFoundError):
         return _warning(
@@ -475,7 +492,7 @@ def _docker_failure_finding(
 def _parse_docker_lines(
     stdout: str,
     *,
-    resource_kind: str,
+    resource_kind: ResourceKind,
     project_to_workspace: Mapping[str, str],
 ) -> tuple[list[ManagedResource], list[ResourceFinding]]:
     resources: list[ManagedResource] = []
@@ -514,7 +531,7 @@ def _parse_docker_lines(
 
 
 def _resource_from_docker_row(
-    resource_kind: str,
+    resource_kind: ResourceKind,
     row: Mapping[str, Any],
     *,
     project_to_workspace: Mapping[str, str],
@@ -638,11 +655,21 @@ def _classify_resource(
 
     if snapshot.status in TERMINAL_WORKSPACE_STATUSES:
         if _within_retention(snapshot.updated_at, now=now, min_retention_hours=min_retention_hours):
-            return _finding(
-                resource,
-                classification="retained",
-                reason="WORKSPACE_TERMINAL_WITHIN_RETENTION",
-            )
+            match resource.resource_kind:
+                case "container" | "network":
+                    return _finding(
+                        resource,
+                        classification="cleanup_ready",
+                        reason="TERMINAL_LIVE_RUNTIME_RESOURCE",
+                    )
+                case "volume" | "worktree":
+                    return _finding(
+                        resource,
+                        classification="retained",
+                        reason="WORKSPACE_TERMINAL_RETAINED_EVIDENCE",
+                    )
+                case _:
+                    assert_never(resource.resource_kind)
         return _finding(
             resource,
             classification="cleanup_ready",
@@ -671,7 +698,7 @@ def _finding(
     )
 
 
-def _warning(*, resource_kind: str, reason: str, detail: str) -> ResourceFinding:
+def _warning(*, resource_kind: ResourceKind, reason: str, detail: str) -> ResourceFinding:
     return ResourceFinding(
         resource_kind=resource_kind,
         resource_id="",
@@ -752,7 +779,7 @@ def _compose_project_index(
 
 
 def _kind_counts(resources: list[ManagedResource]) -> dict[str, int]:
-    counts = dict.fromkeys(_RESOURCE_KINDS, 0)
+    counts: dict[str, int] = dict.fromkeys(_RESOURCE_KINDS, 0)
     counts.update(Counter(resource.resource_kind for resource in resources))
     return counts
 

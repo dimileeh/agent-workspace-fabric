@@ -15,10 +15,17 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.db.enums import EgressDecision, WorkspaceStatus
+from awf.db.enums import (
+    EgressDecision,
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
 from awf.db.models import Workspace
 from awf.db.repositories import (
     EgressAuditRepository,
+    OperationRepository,
     ResourceReservationRepository,
     SecretLeaseRepository,
     TaskAttemptRepository,
@@ -41,6 +48,7 @@ from awf.node.provisioner import (
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import EgressMode, ProfileSecret, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError
+from awf.service.terminal_runtime import TerminalRuntimeReleaseResult
 from tests.postgres import postgres_test_engine
 
 
@@ -198,6 +206,62 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.events[-1].event_type == "workspace.stale_action_skipped"
             assert reloaded.events[-1].payload["action"] == "provision"
+
+    @pytest.mark.unit
+    async def test_blocked_transition_preserves_pending_salvage_writes(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="blocked transition preserves salvage",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            operation = await OperationRepository(s).create(
+                workspace_id=ws.id,
+                operation_type=OperationType.cancel,
+                status=OperationStatus.running,
+                payload={"source": "operator_api"},
+            )
+            await s.commit()
+            workspace_id = ws.id
+            operation_id = operation.id
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.failure_reason = FailureReason.infrastructure_failure.value
+            ws.failure_message = "preserve me before recording blocked callback"
+
+            transitioned = await provisioner._transition_or_record_blocked_active_operation(  # noqa: SLF001
+                s,
+                repo,
+                ws,
+                to=WorkspaceStatus.ready,
+                reason_code="PROVISIONING_COMPLETE",
+                action="provision",
+                expected=WorkspaceStatus.provisioning,
+            )
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(workspace_id)
+
+        assert transitioned is False
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.provisioning.value
+        assert reloaded.failure_reason == FailureReason.infrastructure_failure.value
+        assert reloaded.failure_message == "preserve me before recording blocked callback"
+        assert reloaded.events[-1].event_type == "workspace.stale_callback_ignored"
+        assert reloaded.events[-1].payload["operation_id"] == operation_id
 
     @pytest.mark.unit
     async def test_transitions_to_ready_only_after_stack_launch_succeeds(
@@ -865,6 +929,85 @@ class TestFailureHandling:
             assert reloaded.failure_message is not None
             assert "docker compose up failed" in reloaded.failure_message
             assert "pull access denied for awf-agent-runtime:test" in reloaded.failure_message
+
+    @pytest.mark.unit
+    async def test_stack_startup_failure_releases_terminal_runtime_after_failure_transition(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _FailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                del request
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="container healthcheck failed",
+                )
+
+        class _RecordingTerminalRuntimeReleaser:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def release(
+                self,
+                workspace_id: str,
+                *,
+                source: str,
+                expected_status: WorkspaceStatus | None = None,
+            ) -> TerminalRuntimeReleaseResult:
+                async with session_factory() as s:
+                    reloaded = await WorkspaceRepository(s).get(workspace_id)
+                    assert reloaded is not None
+                    self.calls.append(
+                        {
+                            "workspace_id": workspace_id,
+                            "source": source,
+                            "expected_status": expected_status,
+                            "status_seen": reloaded.status,
+                            "failure_reason_seen": reloaded.failure_reason,
+                        }
+                    )
+                return TerminalRuntimeReleaseResult(
+                    workspace_id=workspace_id,
+                    status="released",
+                    reason_code="TERMINAL_RUNTIME_RELEASED",
+                )
+
+        releaser = _RecordingTerminalRuntimeReleaser()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingStackLauncher(),
+            terminal_runtime_releaser=releaser,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        assert releaser.calls == [
+            {
+                "workspace_id": ws_id,
+                "source": "provisioner.stack_startup_failed",
+                "expected_status": WorkspaceStatus.failed,
+                "status_seen": WorkspaceStatus.failed.value,
+                "failure_reason_seen": FailureReason.service_startup_failure.value,
+            }
+        ]
 
     @pytest.mark.unit
     async def test_stack_startup_failure_records_computed_egress_audit(
@@ -1608,6 +1751,206 @@ class TestOperatorControlRaces:
                 "expected_status": WorkspaceStatus.provisioning.value,
                 "actual_status": WorkspaceStatus.destroyed.value,
             }
+
+    @pytest.mark.unit
+    async def test_active_teardown_after_git_records_blocked_ready_callback(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        class _TeardownAfterHeadGit:
+            def __init__(self) -> None:
+                self.operation_id: str | None = None
+
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del workspace_id, repo_url, base_branch
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / "ws",
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                async with session_factory() as s:
+                    operation = await OperationRepository(s).create(
+                        workspace_id=workspace_id,
+                        operation_type=OperationType.stop,
+                        status=OperationStatus.running,
+                        payload={"source": "operator_api"},
+                    )
+                    await s.commit()
+                    self.operation_id = operation.id
+                return "e" * 40
+
+        fake_git = _TeardownAfterHeadGit()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=fake_git,  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=WorkspaceProfile(name="local").model_dump(mode="json"),
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            ignored_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_callback_ignored"
+            ]
+
+        assert reloaded.status == WorkspaceStatus.provisioning.value
+        assert reloaded.node_id == "test-node-01"
+        assert fake_git.operation_id is not None
+        assert ignored_events[-1].payload == {
+            "callback_source": "provisioner",
+            "callback_action": "provision",
+            "expected_status": WorkspaceStatus.provisioning.value,
+            "actual_status": WorkspaceStatus.provisioning.value,
+            "requested_status": WorkspaceStatus.ready.value,
+            "operation_id": fake_git.operation_id,
+            "reason_code": "PROVISIONING_COMPLETE",
+        }
+
+    @pytest.mark.unit
+    async def test_active_teardown_blocks_mark_failed_records_callback(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            operation = await OperationRepository(s).create(
+                workspace_id=ws.id,
+                operation_type=OperationType.cancel,
+                status=OperationStatus.running,
+                payload={"source": "operator_api"},
+            )
+            await s.commit()
+            ws_id = ws.id
+            operation_id = operation.id
+
+        await provisioner._mark_failed(
+            workspace_id=ws_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="late provisioning failure",
+            from_status=WorkspaceStatus.provisioning,
+            reason_code="PROVISIONER_LATE_FAILURE",
+        )
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            ignored_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_callback_ignored"
+            ]
+
+        assert reloaded.status == WorkspaceStatus.provisioning.value
+        assert reloaded.failure_reason == FailureReason.infrastructure_failure.value
+        assert reloaded.failure_message == "late provisioning failure"
+        assert ignored_events[-1].payload == {
+            "callback_source": "provisioner",
+            "callback_action": "mark_failed",
+            "expected_status": WorkspaceStatus.provisioning.value,
+            "actual_status": WorkspaceStatus.provisioning.value,
+            "requested_status": WorkspaceStatus.failed.value,
+            "operation_id": operation_id,
+            "reason_code": "PROVISIONER_LATE_FAILURE",
+        }
+
+    @pytest.mark.unit
+    async def test_active_teardown_blocks_initial_claim_records_callback(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            operation = await OperationRepository(s).create(
+                workspace_id=ws.id,
+                operation_type=OperationType.cancel,
+                status=OperationStatus.running,
+                payload={"source": "operator_api"},
+            )
+            await s.commit()
+            ws_id = ws.id
+            operation_id = operation.id
+
+        async with session_factory() as s:
+            claimed = await provisioner._load_and_claim(s, ws_id)  # noqa: SLF001
+
+        assert claimed is None
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            ignored_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_callback_ignored"
+            ]
+
+        assert reloaded.status == WorkspaceStatus.requested.value
+        assert ignored_events[-1].payload == {
+            "callback_source": "provisioner",
+            "callback_action": "provision",
+            "expected_status": WorkspaceStatus.requested.value,
+            "actual_status": WorkspaceStatus.requested.value,
+            "requested_status": WorkspaceStatus.provisioning.value,
+            "operation_id": operation_id,
+            "reason_code": "WORKER_CLAIMED",
+        }
 
 
 class TestSecretLeaseIssueEdges:

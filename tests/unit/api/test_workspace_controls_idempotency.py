@@ -1729,7 +1729,11 @@ async def test_recovery_route_handlers_return_operation_response_directly(
         async def request_rebase_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
             return rebase_operation
 
-    monkeypatch.setattr(controls_route, "_controls", lambda _session: _Service())
+    monkeypatch.setattr(
+        controls_route,
+        "_controls",
+        lambda _session, _session_factory: _Service(),
+    )
 
     refresh = await controls_route.refresh_workspace(
         "ws_direct",
@@ -1775,7 +1779,11 @@ async def test_recovery_route_handlers_map_control_errors_directly(
         async def request_rebase_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
             raise controls_route.WorkspaceNotFoundError("ws_direct")
 
-    monkeypatch.setattr(controls_route, "_controls", lambda _session: _Service())
+    monkeypatch.setattr(
+        controls_route,
+        "_controls",
+        lambda _session, _session_factory: _Service(),
+    )
 
     with pytest.raises(HTTPException) as refresh_error:
         await controls_route.refresh_workspace(

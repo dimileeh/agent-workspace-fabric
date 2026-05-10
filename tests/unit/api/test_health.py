@@ -1036,7 +1036,52 @@ async def test_readyz_retains_recent_terminal_worktree_without_failing(
     assert orphan_check["ok"] is True
     assert orphan_check["reason"] == "NO_ORPHANS"
     assert orphan_check["orphan_count"] == 0
-    assert orphan_check["expected_count"] == 1
+    assert orphan_check["expected_count"] == 0
+    assert orphan_check["retained_evidence_count"] == 1
+    assert orphan_check["retained_evidence_counts_by_kind"]["worktree"] == 1
+
+
+@pytest.mark.unit
+async def test_readyz_fails_recent_terminal_container_as_live_leak(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = ready_app_and_client
+    workspace_id = await create_workspace(
+        engine,
+        status=WorkspaceStatus.failed,
+        updated_at=datetime.now(UTC),
+    )
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    runner.queue_result(
+        stdout=json.dumps(
+            {
+                "id": "abc",
+                "name": f"awf_{workspace_id}-agent-1",
+                "project": f"awf_{workspace_id}",
+                "service": "agent",
+                "state": "running",
+                "status": "Up",
+            }
+        )
+        + "\n"
+    )
+    runner.queue_result(stdout="")
+    runner.queue_result(stdout="")
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 503
+    assert body["status"] == "fail"
+    orphan_check = body["checks"]["orphan_resources"]
+    assert orphan_check["ok"] is False
+    assert orphan_check["orphan_count"] == 1
+    assert orphan_check["leaked_live_count"] == 1
+    assert orphan_check["leaked_live_counts_by_kind"]["container"] == 1
+    assert orphan_check["examples"][0]["reason"] == "TERMINAL_LIVE_RUNTIME_RESOURCE"
 
 
 @pytest.mark.unit

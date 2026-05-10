@@ -21,6 +21,7 @@ from awf.db.repositories import (
     OperationRepository,
     PolicyFindingCreate,
     PolicyFindingRepository,
+    ProviderModelCircuitBreakerRepository,
     QueueDecisionRepository,
     ResourceReservationRepository,
     StaleReasonCreate,
@@ -31,9 +32,13 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
+    _as_utc_naive,
     _callback_delivery_insert_if_absent_stmt,
+    _callback_subscription_event_type_candidates,
     _callback_subscription_insert_if_absent_stmt,
     _candidate_terminal_close_reason,
+    _circuit_breaker_expired,
     _claims_non_docs_path,
     _operation_idempotency_advisory_lock_key,
     _owned_path_conflict_advisory_lock_key,
@@ -42,6 +47,7 @@ from awf.db.repositories import (
     _secret_lease_insert_if_absent_stmt,
     _wildcard_prefixes_overlap,
     _workspace_idempotency_advisory_lock_key,
+    external_runtime_teardown_operation_blocks_controls,
     owned_path_overlap_match,
     owned_paths_overlap,
     sync_candidate_readiness,
@@ -120,6 +126,107 @@ def test_idempotent_insert_helpers_support_postgres_and_fallback(
     assert "RETURNING" in sql
 
     assert helper(None) is None
+
+
+@pytest.mark.unit
+def test_repository_private_helper_edges() -> None:
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    active_teardown = type(
+        "OperationShape",
+        (),
+        {
+            "type": OperationType.cancel.value,
+            "status": OperationStatus.running.value,
+            "lease_renewed_at": now,
+            "started_at": now,
+            "created_at": now,
+        },
+    )()
+    finished_teardown = type(
+        "OperationShape",
+        (),
+        {
+            "type": OperationType.cancel.value,
+            "status": OperationStatus.succeeded.value,
+            "lease_renewed_at": now,
+            "started_at": now,
+            "created_at": now,
+        },
+    )()
+    non_teardown = type(
+        "OperationShape",
+        (),
+        {
+            "type": OperationType.validate.value,
+            "status": OperationStatus.running.value,
+            "lease_renewed_at": now,
+            "started_at": now,
+            "created_at": now,
+        },
+    )()
+    open_breaker = type(
+        "BreakerShape",
+        (),
+        {"state": "open", "cooldown_until": now - timedelta(seconds=1)},
+    )()
+    closed_breaker = type(
+        "BreakerShape",
+        (),
+        {"state": "closed", "cooldown_until": now - timedelta(seconds=1)},
+    )()
+    missing_cooldown = type(
+        "BreakerShape",
+        (),
+        {"state": "open", "cooldown_until": None},
+    )()
+
+    assert external_runtime_teardown_operation_blocks_controls(
+        active_teardown,  # type: ignore[arg-type]
+        now=now + timedelta(seconds=1),
+    )
+    assert not external_runtime_teardown_operation_blocks_controls(
+        finished_teardown,  # type: ignore[arg-type]
+        now=now,
+    )
+    assert not external_runtime_teardown_operation_blocks_controls(
+        non_teardown,  # type: ignore[arg-type]
+        now=now,
+    )
+    assert _callback_subscription_event_type_candidates("workspace.created") == (
+        "workspace.created",
+        "workspace.*",
+    )
+    assert _callback_subscription_event_type_candidates("not.public") == ()
+    assert _circuit_breaker_expired(open_breaker, now)  # type: ignore[arg-type]
+    assert not _circuit_breaker_expired(closed_breaker, now)  # type: ignore[arg-type]
+    assert not _circuit_breaker_expired(missing_cooldown, now)  # type: ignore[arg-type]
+    assert _as_utc_naive(now).tzinfo is None
+    assert _as_utc_naive(now.replace(tzinfo=None)).tzinfo is None
+
+
+@pytest.mark.unit
+async def test_provider_model_circuit_breaker_fallback_insert_path(
+    session: AsyncSession,
+) -> None:
+    repo = ProviderModelCircuitBreakerRepository(session, dialect_name=None)
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+
+    breaker = await repo.record_failure(
+        provider=" opencode ",
+        model=" glm-5.1:cloud ",
+        reason_code="PROVIDER_TIMEOUT",
+        failure_fingerprint="timeout",
+        workspace_id="ws_breaker",
+        attempt_id="attempt_breaker",
+        now=now,
+        failure_threshold=2,
+        cooldown_seconds=30,
+    )
+
+    assert breaker.provider == "opencode"
+    assert breaker.model == "glm-5.1:cloud"
+    assert breaker.failure_count == 1
+    assert breaker.state == "closed"
 
 
 async def _task(
@@ -608,7 +715,11 @@ async def test_validation_run_finish_updates_metadata_and_handles_missing(
         workspace_id=workspace.id,
         attempt_id=None,
         tier=2,
-        commands=[{"command": "pytest"}, {"command": "ruff"}],
+        commands=[
+            {"phase": "validate", "command": "pytest"},
+            {"phase": "validate", "command": "ruff"},
+            {"phase": "coverage", "command": "pytest --cov=awf"},
+        ],
         base_commit="a" * 40,
         target_branch="development",
         target_head_sha="b" * 40,
@@ -631,6 +742,9 @@ async def test_validation_run_finish_updates_metadata_and_handles_missing(
         retry_count=2,
         coverage={"total": 99.1},
         command_retries=[1, 0, 9],
+        coverage_evidence_status="reused",
+        coverage_evidence_reason_code="VALIDATION_EVIDENCE_REUSED",
+        coverage_evidence_source_run_id="vr_source",
     )
     updated = await repo.update_target_head_sha(
         run.id,
@@ -668,8 +782,16 @@ async def test_validation_run_finish_updates_metadata_and_handles_missing(
         "coverage": {"total": 99.1},
     }
     assert finished.commands == [
-        {"command": "pytest", "retry_count": 1},
-        {"command": "ruff", "retry_count": 0},
+        {"phase": "validate", "command": "pytest", "retry_count": 1},
+        {"phase": "validate", "command": "ruff", "retry_count": 0},
+        {
+            "phase": "coverage",
+            "command": "pytest --cov=awf",
+            "retry_count": 9,
+            "evidence_status": "reused",
+            "evidence_reason_code": "VALIDATION_EVIDENCE_REUSED",
+            "evidence_source_run_id": "vr_source",
+        },
     ]
     assert updated is not None
     assert updated.target_head_sha == "d" * 40
@@ -1227,6 +1349,155 @@ async def test_workspace_transition_if_current_releases_resources_and_claims_are
 
 
 @pytest.mark.unit
+async def test_workspace_transition_if_current_allows_current_teardown_operation(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    operation_repo = OperationRepository(session)
+    allowed_workspace = await _workspace(
+        session,
+        title="allowed current teardown transition",
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    current_stop = await operation_repo.create(
+        workspace_id=allowed_workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.running,
+        payload={"source": "operator_api"},
+    )
+
+    allowed = await workspace_repo.transition_if_current(
+        allowed_workspace.id,
+        from_status=WorkspaceStatus.monitoring_pr,
+        to=WorkspaceStatus.completed,
+        reason_code="CURRENT_TEARDOWN_FINISHED",
+        allow_active_operation_id=current_stop.id,
+    )
+
+    assert allowed is not None
+    assert allowed.status == WorkspaceStatus.completed.value
+
+    blocked_workspace = await _workspace(
+        session,
+        title="blocked by other teardown transition",
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    current_cancel = await operation_repo.create(
+        workspace_id=blocked_workspace.id,
+        operation_type=OperationType.cancel,
+        status=OperationStatus.running,
+        payload={"source": "operator_api"},
+    )
+    other_stop = await operation_repo.create(
+        workspace_id=blocked_workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.running,
+        payload={"source": "other_operator"},
+    )
+
+    with pytest.raises(WorkspaceTransitionBlockedByActiveOperationError) as exc_info:
+        await workspace_repo.transition_if_current(
+            blocked_workspace.id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            to=WorkspaceStatus.completed,
+            reason_code="CURRENT_TEARDOWN_FINISHED",
+            allow_active_operation_id=current_cancel.id,
+        )
+
+    assert exc_info.value.operation.id == other_stop.id
+    assert blocked_workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_workspace_transition_blocks_pending_teardown_operation(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    operation_repo = OperationRepository(session)
+    workspace = await _workspace(
+        session,
+        title="pending teardown transition block",
+        status=WorkspaceStatus.requested,
+    )
+    operation = await operation_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.cancel,
+        status=OperationStatus.pending,
+        payload={"source": "operator_api"},
+    )
+
+    with pytest.raises(WorkspaceTransitionBlockedByActiveOperationError) as exc_info:
+        await workspace_repo.transition(
+            workspace,
+            to=WorkspaceStatus.provisioning,
+            reason_code="WORKER_CLAIMED",
+        )
+
+    assert exc_info.value.operation.id == operation.id
+    assert exc_info.value.operation.status == OperationStatus.pending.value
+    assert workspace.status == WorkspaceStatus.requested.value
+
+
+@pytest.mark.unit
+async def test_workspace_transition_if_current_blocks_pending_teardown_operation(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    operation_repo = OperationRepository(session)
+    workspace = await _workspace(
+        session,
+        title="pending teardown transition_if_current block",
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    operation = await operation_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.pending,
+        payload={"source": "operator_api"},
+    )
+
+    with pytest.raises(WorkspaceTransitionBlockedByActiveOperationError) as exc_info:
+        await workspace_repo.transition_if_current(
+            workspace.id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            to=WorkspaceStatus.completed,
+            reason_code="MONITOR_DONE",
+        )
+
+    assert exc_info.value.operation.id == operation.id
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_workspace_transition_if_current_keeps_stale_status_race_as_none(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    operation_repo = OperationRepository(session)
+    workspace = await _workspace(
+        session,
+        title="stale status teardown transition_if_current race",
+        status=WorkspaceStatus.running,
+    )
+    await operation_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.pending,
+        payload={"source": "operator_api"},
+    )
+
+    transitioned = await workspace_repo.transition_if_current(
+        workspace.id,
+        from_status=WorkspaceStatus.monitoring_pr,
+        to=WorkspaceStatus.completed,
+        reason_code="MONITOR_DONE",
+    )
+
+    assert transitioned is None
+    assert workspace.status == WorkspaceStatus.running.value
+
+
+@pytest.mark.unit
 async def test_claim_monitoring_pr_with_active_postgres_expiry_uses_database_compare(
     session: AsyncSession,
 ) -> None:
@@ -1559,6 +1830,87 @@ async def test_operation_start_sets_running_started_at_once(session: AsyncSessio
     assert started.status == OperationStatus.running.value
     assert first_started_at is not None
     assert restarted.started_at == first_started_at
+
+
+@pytest.mark.unit
+async def test_operation_renew_teardown_lease_updates_only_active_teardown(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, title="operation teardown lease")
+    repo = OperationRepository(session)
+    active_stop = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.running,
+        payload={"source": "operator_api"},
+    )
+    active_validate = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+        payload={"source": "operator_api"},
+    )
+    terminal_stop = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.succeeded,
+        payload={"source": "operator_api"},
+    )
+    renewed_at = datetime(2026, 5, 8, 21, 45, tzinfo=UTC)
+
+    renewed = await repo.renew_teardown_lease(active_stop.id, now=renewed_at)
+    wrong_type = await repo.renew_teardown_lease(active_validate.id, now=renewed_at)
+    terminal = await repo.renew_teardown_lease(terminal_stop.id, now=renewed_at)
+    missing = await repo.renew_teardown_lease("op_missing", now=renewed_at)
+
+    assert renewed == active_stop
+    assert active_stop.lease_renewed_at == renewed_at
+    assert wrong_type is None
+    assert terminal is None
+    assert missing is None
+    assert active_validate.lease_renewed_at is None
+    assert terminal_stop.lease_renewed_at is None
+
+
+@pytest.mark.unit
+async def test_operation_renew_teardown_lease_does_not_refresh_stale_cached_operation() -> None:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        async with session_factory() as writer:
+            workspace = await _workspace(writer, title="operation stale teardown lease")
+            repo = OperationRepository(writer)
+            operation = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.stop,
+                status=OperationStatus.running,
+                payload={"source": "operator_api"},
+            )
+            await writer.commit()
+            operation_id = operation.id
+
+        renewed_at = datetime(2026, 5, 9, 1, 15, tzinfo=UTC)
+        async with session_factory() as stale_session:
+            stale_repo = OperationRepository(stale_session)
+            cached = await stale_repo.get(operation_id)
+            assert cached is not None
+            assert cached.status == OperationStatus.running.value
+
+            async with session_factory() as finisher:
+                current = await OperationRepository(finisher).get(operation_id)
+                assert current is not None
+                current.status = OperationStatus.succeeded.value
+                await finisher.commit()
+
+            renewed = await stale_repo.renew_teardown_lease(operation_id, now=renewed_at)
+            await stale_session.commit()
+
+        async with session_factory() as verifier:
+            persisted = await OperationRepository(verifier).get(operation_id)
+
+    assert renewed is None
+    assert persisted is not None
+    assert persisted.status == OperationStatus.succeeded.value
+    assert persisted.lease_renewed_at is None
 
 
 @pytest.mark.unit

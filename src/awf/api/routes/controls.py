@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session, require_api_token
+from awf.api.deps import get_db_session, get_db_session_factory, require_api_token
 from awf.api.schemas import (
     OperationResponse,
     WorkspaceControlRequest,
@@ -18,6 +18,7 @@ from awf.service.controls import (
     ActiveWorkspaceDestroyError,
     IdempotencyConflictError,
     VersionConflictError,
+    WorkspaceActiveOperationConflictError,
     WorkspaceControlError,
     WorkspaceControlService,
     WorkspaceNotFoundError,
@@ -28,9 +29,12 @@ from awf.service.controls import (
     WorkspaceRefreshStateError,
     WorkspaceRemonitorMissingPrUrlError,
     WorkspaceRemonitorStateError,
+    WorkspaceRemonitorTerminalRuntimeReleaseInProgressError,
+    WorkspaceStackStopError,
     WorkspaceValidateMissingPrUrlError,
     WorkspaceValidateStateError,
     default_cleaner,
+    default_worktrees_root,
     stop_project_containers,
 )
 
@@ -48,9 +52,10 @@ async def cancel_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> WorkspaceControlResponse:
     try:
-        return await _controls(session).cancel_workspace(
+        return await _controls(session, session_factory).cancel_workspace(
             workspace_id,
             reason=payload.reason,
             stop_stack=payload.stop_stack,
@@ -68,9 +73,10 @@ async def stop_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> WorkspaceControlResponse:
     try:
-        return await _controls(session).stop_workspace(
+        return await _controls(session, session_factory).stop_workspace(
             workspace_id,
             reason=payload.reason,
             idempotency_key=_require_idempotency_key(idempotency_key),
@@ -87,9 +93,10 @@ async def remonitor_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> WorkspaceControlResponse:
     try:
-        return await _controls(session).remonitor_workspace(
+        return await _controls(session, session_factory).remonitor_workspace(
             workspace_id,
             reason=payload.reason,
             idempotency_key=_require_idempotency_key(idempotency_key),
@@ -110,9 +117,10 @@ async def refresh_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> OperationResponse:
     try:
-        operation = await _controls(session).request_refresh_workspace(
+        operation = await _controls(session, session_factory).request_refresh_workspace(
             workspace_id,
             reason=payload.reason,
             idempotency_key=_require_idempotency_key(idempotency_key),
@@ -134,9 +142,10 @@ async def validate_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> OperationResponse:
     try:
-        operation = await _controls(session).request_validate_workspace(
+        operation = await _controls(session, session_factory).request_validate_workspace(
             workspace_id,
             reason=payload.reason,
             requested_tier=payload.requested_tier,
@@ -159,9 +168,10 @@ async def rebase_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> OperationResponse:
     try:
-        operation = await _controls(session).request_rebase_workspace(
+        operation = await _controls(session, session_factory).request_rebase_workspace(
             workspace_id,
             reason=payload.reason,
             idempotency_key=_require_idempotency_key(idempotency_key),
@@ -181,9 +191,10 @@ async def destroy_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> WorkspaceControlResponse:
     try:
-        return await _controls(session).destroy_workspace(
+        return await _controls(session, session_factory).destroy_workspace(
             workspace_id,
             force=force,
             remove_volumes=remove_volumes,
@@ -195,12 +206,32 @@ async def destroy_workspace(
         raise _http_error(exc) from exc
 
 
-def _controls(session: AsyncSession) -> WorkspaceControlService:
+def _controls(
+    session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> WorkspaceControlService:
     return WorkspaceControlService(
         session,
         project_stopper=_stop_project,
         cleaner_factory=_cleaner,
+        worktrees_root=default_worktrees_root(),
+        session_factory=session_factory,
     )
+
+
+_CONFLICT_CONTROL_ERRORS = (
+    ActiveWorkspaceDestroyError,
+    IdempotencyConflictError,
+    VersionConflictError,
+    WorkspaceRefreshStateError,
+    WorkspaceRemonitorStateError,
+    WorkspaceRemonitorTerminalRuntimeReleaseInProgressError,
+    WorkspaceStackStopError,
+    WorkspaceValidateStateError,
+    WorkspaceActiveOperationConflictError,
+    WorkspaceRebaseActiveConflictError,
+    WorkspaceRebaseStateError,
+)
 
 
 def _http_error(exc: WorkspaceControlError) -> HTTPException:
@@ -217,19 +248,7 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
         status_code = status.HTTP_400_BAD_REQUEST
     elif isinstance(exc, WorkspaceRebaseMissingCandidateError):
         status_code = status.HTTP_404_NOT_FOUND
-    elif isinstance(
-        exc,
-        (
-            ActiveWorkspaceDestroyError,
-            IdempotencyConflictError,
-            VersionConflictError,
-            WorkspaceRefreshStateError,
-            WorkspaceRemonitorStateError,
-            WorkspaceValidateStateError,
-            WorkspaceRebaseActiveConflictError,
-            WorkspaceRebaseStateError,
-        ),
-    ):
+    elif isinstance(exc, _CONFLICT_CONTROL_ERRORS):
         status_code = status.HTTP_409_CONFLICT
     else:  # pragma: no cover - future control error subclasses
         status_code = status.HTTP_409_CONFLICT

@@ -80,6 +80,10 @@ class CheckResult(BaseModel):
     counts_by_kind: dict[str, int] | None = None
     orphan_counts_by_kind: dict[str, int] | None = None
     expected_counts_by_kind: dict[str, int] | None = None
+    retained_evidence_count: int | None = None
+    retained_evidence_counts_by_kind: dict[str, int] | None = None
+    leaked_live_count: int | None = None
+    leaked_live_counts_by_kind: dict[str, int] | None = None
     unknown_counts_by_kind: dict[str, int] | None = None
     orphan_classification_counts: dict[str, int] | None = None
     egress_posture_counts: dict[str, int] | None = None

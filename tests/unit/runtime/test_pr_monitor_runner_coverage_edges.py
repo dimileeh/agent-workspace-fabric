@@ -15,7 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
-from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import (
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    WorkspaceStatus,
+)
 from awf.db.models import ValidationRun, Workspace
 from awf.db.repositories import (
     OperationRepository,
@@ -70,11 +76,13 @@ from awf.runtime.pr_monitor_runner import (
     _is_transient_base_fetch_error,
     _is_transient_github_client_error,
     _merge_rejection_reason,
+    _monitor_recovery_conformance_payload,
     _MonitorPolicyBlockedError,
     _non_check_reviewer_settle_started_key,
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
     _NonCheckReviewerSettleDecision,
+    _normalize_conformance_handoff_reason_code,
     _notify_human_reason,
     _redact_and_truncate_github_error,
     _remote_push_url_for_workspace,
@@ -144,6 +152,43 @@ class _RecordingLogSink:
         self.lines.append(data)
 
 
+class _TerminalRuntimeReleaseNotOk:
+    ok = False
+
+
+class _NotOkTerminalRuntimeReleaser:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> _TerminalRuntimeReleaseNotOk:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "source": source,
+                "expected_status": expected_status,
+            }
+        )
+        return _TerminalRuntimeReleaseNotOk()
+
+
+class _RaisingTerminalRuntimeReleaser:
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> object:
+        del workspace_id, source, expected_status
+        raise RuntimeError("release failed Authorization: Bearer terminal-secret-token")
+
+
 class _ExplodingRunner:
     async def run(self, args: list[str], **_kwargs: object) -> object:
         del args
@@ -173,6 +218,101 @@ class _QueueAfterLockRunner(PullRequestMonitorRunner):
         assert workspace_id
         self.blocker_calls += 1
         return [] if self.blocker_calls == 1 else [self._blocker]
+
+
+@pytest.mark.unit
+def test_monitor_recovery_conformance_payload_edges() -> None:
+    handoff_event = type(
+        "Event",
+        (),
+        {
+            "event_type": "workspace.planning_conformance_requires_awf_validation",
+            "reason_code": "ignored",
+            "payload": {
+                "report_reason_code": "conformance-requires-awf-validation",
+                "summary": "AWF validation evidence required.",
+                "gaps": ["rerun AWF validation"],
+                "plan_path": "docs/plan.md",
+                "report_path": "docs/report.json",
+                "iteration": 1,
+                "max_iterations": 3,
+            },
+        },
+    )()
+    satisfied_event = type(
+        "Event",
+        (),
+        {
+            "event_type": "workspace.post_validation_conformance_satisfied",
+            "reason_code": "POST_VALIDATION_CONFORMANCE_SATISFIED",
+            "payload": {},
+        },
+    )()
+    unrelated_event = type(
+        "Event",
+        (),
+        {
+            "event_type": "workspace.other",
+            "reason_code": None,
+            "payload": {},
+        },
+    )()
+
+    assert _normalize_conformance_handoff_reason_code(None) is None
+    assert _normalize_conformance_handoff_reason_code("  ") is None
+    assert (
+        _normalize_conformance_handoff_reason_code("conformance-requires-awf-validation")
+        == "CONFORMANCE_REQUIRES_AWF_VALIDATION"
+    )
+    payload = _monitor_recovery_conformance_payload(
+        type("WorkspaceShape", (), {"events": [unrelated_event, handoff_event]})()
+    )
+    assert payload == {
+        "conformance": {
+            "reason_code": "CONFORMANCE_REQUIRES_AWF_VALIDATION",
+            "report_reason_code": "CONFORMANCE_REQUIRES_AWF_VALIDATION",
+            "summary": "AWF validation evidence required.",
+            "gaps": ["rerun AWF validation"],
+            "plan_path": "docs/plan.md",
+            "report_path": "docs/report.json",
+            "iteration": 1,
+            "max_iterations": 3,
+        }
+    }
+    assert (
+        _monitor_recovery_conformance_payload(
+            type(
+                "WorkspaceShape",
+                (),
+                {"events": [handoff_event, satisfied_event]},
+            )()
+        )
+        is None
+    )
+    assert (
+        _monitor_recovery_conformance_payload(
+            type(
+                "WorkspaceShape",
+                (),
+                {
+                    "events": [
+                        type(
+                            "Event",
+                            (),
+                            {
+                                "event_type": (
+                                    "workspace.planning_conformance_requires_awf_validation"
+                                ),
+                                "reason_code": "OTHER_REASON",
+                                "payload": {},
+                            },
+                        )()
+                    ]
+                },
+            )()
+        )
+        is None
+    )
 
 
 class _StopAfterRetryError(RuntimeError):
@@ -248,6 +388,24 @@ async def _force_workspace_status(
         await s.commit()
 
 
+def _compose_down_args(
+    project: str, compose_file: Path, *, remove_volumes: bool = True
+) -> list[str]:
+    args = [
+        "docker",
+        "compose",
+        "-p",
+        project,
+        "-f",
+        str(compose_file),
+        "down",
+        "--remove-orphans",
+    ]
+    if remove_volumes:
+        args.append("--volumes")
+    return args
+
+
 @pytest.mark.unit
 async def test_monitor_run_fails_cleanly_when_pr_number_is_missing(
     factory: async_sessionmaker[AsyncSession],
@@ -275,7 +433,9 @@ async def test_monitor_run_fails_cleanly_when_pr_number_is_missing(
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert "without a pr_number" in (ws.failure_message or "")
-    assert cmd.calls == []
+    assert [call.args for call in cmd.calls] == [
+        _compose_down_args("proj", tmp_path / "compose.yml", remove_volumes=False)
+    ]
 
 
 @pytest.mark.unit
@@ -319,7 +479,11 @@ async def test_monitor_run_fails_cleanly_when_sync_workspace_has_no_remote_push_
         ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
         ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
         ["gh", "api", "graphql"],
+        ["docker", "compose", "-p"],
     ]
+    assert cmd.calls[-1].args == _compose_down_args(
+        "proj", tmp_path / "compose.yml", remove_volumes=False
+    )
 
 
 @pytest.mark.unit
@@ -2501,7 +2665,9 @@ async def test_monitor_adapter_cleanup_failure_terminates_without_push(
     )
 
     assert terminal is True
-    assert cmd.calls == []
+    assert [call.args for call in cmd.calls] == [
+        _compose_down_args("proj", tmp_path / "compose.yml", remove_volumes=False)
+    ]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -2549,7 +2715,9 @@ async def test_monitor_comment_cleanup_failure_terminates_without_push(
     )
 
     assert terminal is True
-    assert cmd.calls == []
+    assert [call.args for call in cmd.calls] == [
+        _compose_down_args("proj", tmp_path / "compose.yml", remove_volumes=False)
+    ]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -2730,12 +2898,15 @@ async def test_monitor_sync_base_cleanup_failure_terminates_without_push(
     )
 
     assert terminal is True
-    assert [call.args[-2:] for call in cmd.calls] == [
+    assert [call.args[-2:] for call in cmd.calls[:-1]] == [
         ["merge", "--abort"],
         ["origin", "+refs/heads/development:refs/remotes/origin/development"],
         ["--no-edit", "origin/development"],
         ["status", "--porcelain"],
     ]
+    assert cmd.calls[-1].args == _compose_down_args(
+        "proj", tmp_path / "compose.yml", remove_volumes=False
+    )
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -3651,6 +3822,413 @@ async def test_missing_workspace_terminal_helpers_return_without_side_effects(
 
 
 @pytest.mark.unit
+async def test_release_terminal_runtime_silently_skips_missing_releaser(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        released = await runner._release_terminal_runtime(
+            "ws_missing_releaser",
+            expected_status=WorkspaceStatus.failed,
+        )
+
+    assert released is False
+    assert not any(
+        (entry.get("event") or "").startswith("monitor.terminal_runtime_release")
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_failure_log_redacts_exception_text(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._terminal_runtime_releaser = _RaisingTerminalRuntimeReleaser()  # type: ignore[attr-defined]
+
+    with structlog.testing.capture_logs() as captured:
+        released = await runner._release_terminal_runtime(
+            "ws_release_secret",
+            expected_status=WorkspaceStatus.failed,
+        )
+
+    log_entry = next(
+        event
+        for event in captured
+        if event.get("event") == "monitor.terminal_runtime_release_failed"
+    )
+    assert released is False
+    assert log_entry["workspace_id"] == "ws_release_secret"
+    assert log_entry["expected_status"] == WorkspaceStatus.failed.value
+    assert "Authorization: Bearer [redacted]" in log_entry["error"]
+    assert "terminal-secret-token" not in log_entry["error"]
+
+
+@pytest.mark.unit
+async def test_release_terminal_runtime_logs_not_ok_result(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    releaser = _NotOkTerminalRuntimeReleaser()
+    runner._terminal_runtime_releaser = releaser  # type: ignore[attr-defined]
+
+    with structlog.testing.capture_logs() as captured:
+        released = await runner._release_terminal_runtime(
+            "ws_not_ok",
+            expected_status=WorkspaceStatus.failed,
+        )
+
+    assert released is False
+    assert releaser.calls == [
+        {
+            "workspace_id": "ws_not_ok",
+            "source": "pr_monitor",
+            "expected_status": WorkspaceStatus.failed,
+        }
+    ]
+    assert any(
+        entry.get("event") == "monitor.terminal_runtime_release_not_ok"
+        and entry.get("workspace_id") == "ws_not_ok"
+        and entry.get("expected_status") == WorkspaceStatus.failed.value
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_record_ignored_monitor_terminal_callback_without_failure_payload() -> None:
+    event = type("Event", (), {"payload": None})()
+    calls: list[dict[str, object]] = []
+
+    class Repo:
+        async def record_ignored_stale_callback(
+            self,
+            workspace: object,
+            *,
+            callback_source: str,
+            callback_action: str,
+            expected_status: WorkspaceStatus,
+            requested_status: WorkspaceStatus,
+            operation_id: str | None,
+            reason_code: str,
+        ) -> object:
+            calls.append(
+                {
+                    "workspace": workspace,
+                    "callback_source": callback_source,
+                    "callback_action": callback_action,
+                    "expected_status": expected_status,
+                    "requested_status": requested_status,
+                    "operation_id": operation_id,
+                    "reason_code": reason_code,
+                }
+            )
+            return event
+
+    workspace = object()
+
+    await pr_monitor_runner._record_ignored_monitor_terminal_callback(  # noqa: SLF001
+        Repo(),  # type: ignore[arg-type]
+        workspace,  # type: ignore[arg-type]
+        requested_status=WorkspaceStatus.completed,
+        reason_code="MONITOR_DONE",
+    )
+
+    assert calls == [
+        {
+            "workspace": workspace,
+            "callback_source": "pr_monitor",
+            "callback_action": "terminal_completed",
+            "expected_status": WorkspaceStatus.monitoring_pr,
+            "requested_status": WorkspaceStatus.completed,
+            "operation_id": None,
+            "reason_code": "MONITOR_DONE",
+        }
+    ]
+    assert event.payload is None
+
+
+@pytest.mark.unit
+async def test_failed_monitor_without_runtime_releaser_tears_down_stack_and_preserves_volumes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="monitor abort",
+        reason_code="MONITOR_ABORT",
+    )
+
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args == _compose_down_args(
+        f"awf_{workspace_id}",
+        Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+        remove_volumes=False,
+    )
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+
+
+@pytest.mark.unit
+async def test_completed_monitor_without_runtime_releaser_tears_down_stack_and_preserves_volumes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    gc_calls: list[str] = []
+
+    async def _record_gc_call(workspace_id: str) -> None:
+        gc_calls.append(workspace_id)
+
+    runner._gc_completed_workspace_filesystem = _record_gc_call  # type: ignore[method-assign]
+
+    await runner._terminate_completed(
+        workspace_id,
+        pr_merge_sha="merge-sha",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+    )
+
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args == _compose_down_args(
+        f"awf_{workspace_id}",
+        Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+        remove_volumes=False,
+    )
+    assert gc_calls == [workspace_id]
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.completed.value
+        assert workspace.pr_merge_sha == "merge-sha"
+
+
+@pytest.mark.unit
+async def test_completed_callback_logs_terminal_release_reason_when_gc_skipped(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    releaser = _NotOkTerminalRuntimeReleaser()
+    gc_calls: list[str] = []
+    reconcile_calls: list[tuple[str, str, str]] = []
+
+    async def _record_reconcile_call(
+        *,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+    ) -> None:
+        reconcile_calls.append((workspace_id, repo_url, base_branch))
+
+    async def _record_gc_call(workspace_id: str) -> None:
+        gc_calls.append(workspace_id)
+
+    runner._terminal_runtime_releaser = releaser  # type: ignore[attr-defined]
+    runner._reconcile_target_branch_after_merge = _record_reconcile_call  # type: ignore[method-assign]
+    runner._gc_completed_workspace_filesystem = _record_gc_call  # type: ignore[method-assign]
+
+    with structlog.testing.capture_logs() as captured:
+        await runner._terminate_completed(
+            workspace_id,
+            pr_merge_sha="merge-sha",
+            repo_url="git@github.com:example/repo.git",
+            base_branch="development",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    assert releaser.calls == [
+        {
+            "workspace_id": workspace_id,
+            "source": "pr_monitor",
+            "expected_status": WorkspaceStatus.completed,
+        }
+    ]
+    assert reconcile_calls == [(workspace_id, "git@github.com:example/repo.git", "development")]
+    assert gc_calls == []
+    assert any(
+        entry.get("event") == "monitor.filesystem_gc_skipped"
+        and entry.get("workspace_id") == workspace_id
+        and entry.get("reason") == "terminal_runtime_release_failed"
+        and entry.get("log_level") == "warning"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("callback", "operation_type"),
+    [
+        ("completed", OperationType.stop),
+        ("failed", OperationType.cancel),
+    ],
+)
+async def test_monitor_terminal_callbacks_ignore_active_runtime_teardown_operations(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    callback: str,
+    operation_type: OperationType,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        operation = await OperationRepository(s).create(
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            status=OperationStatus.running,
+            payload={"source": "operator_api"},
+        )
+        operation_id = operation.id
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    reconcile_calls: list[tuple[str, str, str]] = []
+    gc_calls: list[str] = []
+
+    async def _record_reconcile_call(
+        *,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+    ) -> None:
+        reconcile_calls.append((workspace_id, repo_url, base_branch))
+
+    async def _record_gc_call(workspace_id: str) -> None:
+        gc_calls.append(workspace_id)
+
+    runner._reconcile_target_branch_after_merge = _record_reconcile_call  # type: ignore[method-assign]
+    runner._gc_completed_workspace_filesystem = _record_gc_call  # type: ignore[method-assign]
+
+    if callback == "completed":
+        await runner._terminate_completed(
+            workspace_id,
+            pr_merge_sha="blocked-merge-sha",
+            repo_url="git@github.com:example/repo.git",
+            base_branch="development",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        requested_status = WorkspaceStatus.completed
+        reason_code = "MONITOR_DONE"
+    else:
+        failure_message = "monitor abort"
+        await runner._terminate_failed(
+            workspace_id,
+            message=failure_message,
+            reason_code="MONITOR_ABORT",
+        )
+        requested_status = WorkspaceStatus.failed
+        reason_code = "MONITOR_ABORT"
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        ignored_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.pr_merge_sha is None
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+    assert cmd.calls == []
+    assert reconcile_calls == []
+    assert gc_calls == []
+    expected_payload = {
+        "callback_source": "pr_monitor",
+        "callback_action": ("terminal_completed" if callback == "completed" else "terminal_failed"),
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": WorkspaceStatus.monitoring_pr.value,
+        "requested_status": requested_status.value,
+        "operation_id": operation_id,
+        "reason_code": reason_code,
+    }
+    if callback == "failed":
+        expected_payload["failure_message"] = failure_message
+        expected_payload["failure_reason"] = FailureReason.infrastructure_failure.value
+    assert ignored_events[-1].payload == expected_payload
+
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.cancelled,
+            reason_code="OPERATOR_CANCEL"
+            if operation_type == OperationType.cancel
+            else "OPERATOR_STOP",
+            allow_active_operation_id=operation_id,
+        )
+        await s.commit()
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "operator_status",
     [
@@ -3935,6 +4513,34 @@ async def test_terminate_completed_without_optional_merge_cleanup_inputs(
 
 
 @pytest.mark.unit
+async def test_compose_teardown_default_preserves_volumes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert (
+        await runner._teardown_compose_stack(
+            workspace_id="ws_teardown_default",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        is True
+    )
+
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args[-2:] == ["down", "--remove-orphans"]
+    assert "--volumes" not in cmd.calls[0].args
+
+
+@pytest.mark.unit
 async def test_compose_teardown_runner_exception_is_swallowed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -4052,6 +4658,44 @@ def test_protected_manual_ready_handoff_rejects_blocking_review_comments() -> No
     )
 
     assert _is_protected_manual_ready_handoff(status, MonitorState()) is False
+
+
+@pytest.mark.unit
+def test_protected_manual_ready_handoff_rejects_non_blocked_merge_state() -> None:
+    base = _status_for_helpers()
+    status = PRStatus(
+        number=base.number,
+        head_sha=base.head_sha,
+        mergeable=base.mergeable,
+        check_state=base.check_state,
+        unresolved_inline_threads=base.unresolved_inline_threads,
+        unresolved_review_comments=base.unresolved_review_comments,
+        base_behind_count=base.base_behind_count,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    assert _is_protected_manual_ready_handoff(status, MonitorState()) is False
+
+
+@pytest.mark.unit
+async def test_blocked_monitor_callbacks_ignore_missing_workspace(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await pr_monitor_runner._record_blocked_monitor_terminal_callback(  # noqa: SLF001
+            session,
+            "ws_missing",
+            requested_status=WorkspaceStatus.failed,
+            reason_code="MONITOR_DONE",
+            operation_id="op_missing",
+            failure_reason=FailureReason.infrastructure_failure.value,
+            failure_message="lost workspace row",
+        )
+        await pr_monitor_runner._record_blocked_monitor_recovery_dispatch(  # noqa: SLF001
+            session,
+            "ws_missing",
+            operation_id="op_missing",
+        )
 
 
 @pytest.mark.unit

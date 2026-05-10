@@ -7,7 +7,7 @@ import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
@@ -188,7 +188,7 @@ def test_active_workspace_resources_are_expected(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_retained_terminal_workspace_resources_are_not_orphans(tmp_path: Path) -> None:
+def test_retained_terminal_worktree_is_salvage_evidence_not_orphan(tmp_path: Path) -> None:
     (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
 
     summary = build_orphan_resource_summary(
@@ -201,10 +201,87 @@ def test_retained_terminal_workspace_resources_are_not_orphans(tmp_path: Path) -
     assert payload["ok"] is True
     assert payload["reason"] == "NO_ORPHANS"
     assert payload["resource_count"] == 1
-    assert payload["expected_count"] == 1
+    assert payload["expected_count"] == 0
+    assert payload["retained_evidence_count"] == 1
+    assert payload["retained_evidence_counts_by_kind"] == {
+        "container": 0,
+        "network": 0,
+        "volume": 0,
+        "worktree": 1,
+    }
     assert payload["orphan_count"] == 0
-    assert summary.records[0].classification == "expected"
-    assert summary.records[0].reason == "WORKSPACE_TERMINAL_WITHIN_RETENTION"
+    assert summary.records[0].classification == "retained_evidence"
+    assert summary.records[0].reason == "WORKSPACE_TERMINAL_RETAINED_EVIDENCE"
+
+
+@pytest.mark.unit
+def test_terminal_container_and_network_within_retention_are_live_leaks(tmp_path: Path) -> None:
+    docker = ResourceScan(
+        ok=True,
+        status="ok",
+        reason="DOCKER_RESOURCE_SCAN_OK",
+        resources=(
+            DetectedResource(
+                kind="container",
+                workspace_id="ws_done",
+                compose_project="awf_ws_done",
+                id="c1",
+                name="awf_ws_done-agent-1",
+                service="agent",
+                state="running",
+            ),
+            DetectedResource(
+                kind="network",
+                workspace_id="ws_done",
+                compose_project="awf_ws_done",
+                id="n1",
+                name="awf_ws_done_default",
+            ),
+            DetectedResource(
+                kind="volume",
+                workspace_id="ws_done",
+                compose_project="awf_ws_done",
+                name="awf_ws_done_pgdata",
+            ),
+        ),
+    )
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_done"}, retained={"ws_done"}),
+    )
+    payload = summary.to_dict()
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert payload["orphan_count"] == 2
+    assert payload["leaked_live_count"] == 2
+    assert payload["leaked_live_counts_by_kind"] == {
+        "container": 1,
+        "network": 1,
+        "volume": 0,
+        "worktree": 0,
+    }
+    assert payload["retained_evidence_count"] == 1
+    assert payload["retained_evidence_counts_by_kind"]["volume"] == 1
+    assert {example["reason"] for example in payload["examples"]} == {
+        "TERMINAL_LIVE_RUNTIME_RESOURCE"
+    }
+
+
+@pytest.mark.unit
+def test_retained_terminal_resource_kind_must_be_explicitly_classified() -> None:
+    resource = DetectedResource(
+        kind=cast(orphan_resources.ResourceKind, "snapshot"),
+        workspace_id="ws_done",
+    )
+
+    with pytest.raises(AssertionError, match="snapshot"):
+        orphan_resources._classify(
+            resource,
+            workspace_view=_ok_view(terminal={"ws_done"}, retained={"ws_done"}),
+        )
 
 
 @pytest.mark.unit

@@ -1636,7 +1636,7 @@ def test_orphan_check_extracts_labels_via_docker_template(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_service_status_treats_completed_within_retention_as_retained(
+def test_service_status_flags_completed_container_within_retention_as_live_leak(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path)
@@ -1681,10 +1681,13 @@ def test_service_status_treats_completed_within_retention_as_retained(
     )
 
     orphans = status["checks"]["orphan_workspaces"]
-    assert status["status"] == "ok"
-    assert orphans["reason"] == "NO_ORPHANS"
-    assert orphans["retained_count"] == 2
-    assert orphans["orphan_count"] == 0
+    assert status["status"] == "fail"
+    assert orphans["reason"] == "ORPHANS_PRESENT"
+    assert orphans["orphan_count"] == 1
+    assert orphans["leaked_live_count"] == 1
+    assert orphans["leaked_live_counts_by_kind"] == {"container": 1}
+    assert orphans["retained_evidence_count"] == 1
+    assert orphans["retained_evidence_counts_by_kind"] == {"worktree": 1}
 
 
 @pytest.mark.unit

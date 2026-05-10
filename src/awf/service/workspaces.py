@@ -89,6 +89,7 @@ from awf.service.controls import (
     ProjectStopper,
     WorkspaceControlService,
     default_cleaner,
+    default_worktrees_root,
     stop_project_containers,
 )
 from awf.service.coordination import (
@@ -939,6 +940,8 @@ class WorkspaceService:
             session,
             project_stopper=self._project_stopper,
             cleaner_factory=self._cleaner_factory,
+            worktrees_root=default_worktrees_root(self._settings),
+            session_factory=self._factory,
         )
 
 

@@ -1969,11 +1969,13 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             session_factory: object,
             git: object,
             stack_launcher: object,
+            terminal_runtime_releaser: object,
             config: object,
         ) -> None:
             created["provisioner_session_factory"] = session_factory
             created["provisioner_git"] = git
             created["provisioner_stack_launcher"] = stack_launcher
+            created["provisioner_terminal_runtime_releaser"] = terminal_runtime_releaser
             created["provisioner_config"] = config
 
     class _ControlWorker:
@@ -1984,12 +1986,14 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             provisioner: object,
             executor: object,
             runtime_cleaner: object,
+            worktrees_root: Path,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
             created["worker_provisioner"] = provisioner
             created["worker_executor"] = executor
             created["worker_runtime_cleaner"] = runtime_cleaner
+            created["worker_worktrees_root"] = worktrees_root
             created["worker_config"] = config
 
         async def run_once(self) -> int:
@@ -2063,7 +2067,9 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["provisioner_session_factory"] is session_factory
     assert created["worker_session_factory"] is session_factory
     assert created["provisioner_stack_launcher"].__class__ is _ComposeStackLauncher
+    assert created["provisioner_terminal_runtime_releaser"] is not None
     assert created["worker_executor"] is not None
+    assert created["worker_worktrees_root"] == host_work_dir / "git" / "worktrees"
     assert created["provisioner_config"].node_id == "node-1"
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2

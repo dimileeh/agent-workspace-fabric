@@ -673,6 +673,8 @@ async def test_recent_completed_pr_workspace_is_preserved(
     assert result.plan.preserved_count == 1
     assert result.plan.preserved[0].workspace_id == workspace_id
     assert result.plan.preserved[0].reason_code == WORKSPACE_WITHIN_RETENTION
+    payload = result.to_dict()
+    assert payload["preserved"][0]["retention_class"] == "retention_policy"
     assert result.deleted_paths == []
     assert worktree.exists()
     assert compose.exists()
@@ -716,6 +718,10 @@ async def test_failed_workspace_preserves_triage_assets_by_default(
     assert result.plan.preserved_count == 1
     assert result.plan.preserved[0].workspace_id == workspace_id
     assert result.plan.preserved[0].reason_code == FAILED_WORKSPACE_TRIAGE_PRESERVED
+    payload = result.to_dict()
+    assert payload["candidate_count"] == 0
+    assert payload["preserved"][0]["retention_class"] == "salvage_evidence"
+    assert payload["preserved"][0]["reason_code"] == FAILED_WORKSPACE_TRIAGE_PRESERVED
     assert result.deleted_paths == []
     assert worktree.exists()
     assert compose.exists()

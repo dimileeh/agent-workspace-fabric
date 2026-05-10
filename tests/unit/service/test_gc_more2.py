@@ -21,6 +21,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
+    FAILED_WORKSPACE_NO_WORK,
     TERMINAL_WORKSPACE_RETENTION_EXPIRED,
     WorkspaceGCCandidate,
     WorkspaceGCPath,
@@ -603,6 +604,63 @@ async def test_workspace_gc_plan_requires_pr_merge_property(
     assert plan.requires_pr_merge is True
     payload = plan.to_dict()
     assert payload["policy"]["requires_pr_merge"] is True
+
+
+async def test_failed_terminal_gc_plan_awaits_runtime_inspection_without_asyncio_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+    async with session_factory() as session:
+        await session.execute(
+            update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(
+                compose_project_name="awf_failed_no_work",
+                updated_at=now - timedelta(hours=200),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+    snapshot = RuntimeSnapshot(
+        stack_state="running",
+        services=[
+            RuntimeService(
+                name="agent",
+                state="running",
+                command="sleep infinity",
+                container_id="abc",
+                image="awf-agent",
+            )
+        ],
+    )
+    monkeypatch.setattr(gc, "_RUNTIME_INSPECTOR", _StaticRuntimeInspector(snapshot))
+
+    def _raise_asyncio_run(awaitable: object) -> None:
+        close = getattr(awaitable, "close", None)
+        if close is not None:
+            close()
+        raise AssertionError("GC runtime inspection must be awaited directly")
+
+    monkeypatch.setattr(gc.asyncio, "run", _raise_asyncio_run)
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert [candidate.workspace_id for candidate in plan.candidates] == [workspace_id]
+    assert plan.candidates[0].reason_code == FAILED_WORKSPACE_NO_WORK
+    assert plan.preserved == []
 
 
 async def test_single_workspace_gc_calls_worktree_remover(

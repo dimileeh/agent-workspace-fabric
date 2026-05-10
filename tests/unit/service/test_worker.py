@@ -136,11 +136,13 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             session_factory: object,
             git: object,
             stack_launcher: object,
+            terminal_runtime_releaser: object,
             config: object,
         ) -> None:
             created["provisioner_session_factory"] = session_factory
             created["provisioner_git"] = git
             created["provisioner_stack_launcher"] = stack_launcher
+            created["provisioner_terminal_runtime_releaser"] = terminal_runtime_releaser
             created["provisioner_config"] = config
 
     class _WorkspaceExecutor:
@@ -155,6 +157,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             config: object,
             pr_monitor_factory: object,
             log_store: object,
+            terminal_runtime_releaser: object,
         ) -> None:
             created["executor"] = self
             created["executor_session_factory"] = session_factory
@@ -165,6 +168,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["executor_config"] = config
             created["executor_monitor_factory"] = pr_monitor_factory
             created["executor_log_store"] = log_store
+            created["executor_terminal_runtime_releaser"] = terminal_runtime_releaser
 
     class _ControlWorker:
         def __init__(
@@ -174,12 +178,14 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             provisioner: object,
             executor: object,
             runtime_cleaner: object,
+            worktrees_root: Path,
             config: object,
         ) -> None:
             created["worker_session_factory"] = session_factory
             created["worker_provisioner"] = provisioner
             created["worker_executor"] = executor
             created["worker_runtime_cleaner"] = runtime_cleaner
+            created["worker_worktrees_root"] = worktrees_root
             created["worker_config"] = config
 
     engine = _Engine()
@@ -251,6 +257,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["log_root"] == work_dir / "logs"
     assert created["validation_artifacts_dir"] == work_dir / "artifacts"
     assert created["executor_config"].worktrees_root == work_dir / "git" / "worktrees"
+    assert created["worker_worktrees_root"] == work_dir / "git" / "worktrees"
     assert created["executor_config"].compose_projects_root == work_dir / "compose"
     assert created["executor_config"].agent_wall_timeout_seconds == 111
     assert created["executor_config"].agent_idle_timeout_seconds == 22
@@ -293,6 +300,14 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
+    assert (
+        created["feature_monitor_kwargs"]["terminal_runtime_releaser"]
+        is created["executor_terminal_runtime_releaser"]
+    )
+    assert (
+        created["provisioner_terminal_runtime_releaser"]
+        is created["executor_terminal_runtime_releaser"]
+    )
     assert "post_merge_target_reconciler" in created["feature_monitor_kwargs"]
     reconciler = created["feature_monitor_kwargs"]["post_merge_target_reconciler"]
     assert callable(reconciler)
@@ -319,6 +334,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["release_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
+    assert (
+        created["release_monitor_kwargs"]["terminal_runtime_releaser"]
+        is created["executor_terminal_runtime_releaser"]
+    )
     assert "post_merge_target_reconciler" in created["release_monitor_kwargs"]
     assert (
         created["release_monitor_kwargs"]["merge_coordinator"]
@@ -556,8 +575,10 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             session_factory: object,
             git: object,
             stack_launcher: object,
+            terminal_runtime_releaser: object,
             config: object,
         ) -> None:
+            del session_factory, git, stack_launcher, terminal_runtime_releaser
             created["provisioner_config"] = config
 
     class _ControlWorker:
@@ -568,10 +589,12 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             provisioner: object,
             executor: object,
             runtime_cleaner: object,
+            worktrees_root: Path,
             config: object,
         ) -> None:
             created["worker_config"] = config
             created["worker_runtime_cleaner"] = runtime_cleaner
+            created["worker_worktrees_root"] = worktrees_root
 
     engine = _Engine()
     session_factory = object()
@@ -613,6 +636,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
 
     assert created["provisioner_config"].node_id == "local"
     assert created["worker_config"].node_id == "local"
+    assert created["worker_worktrees_root"] == (tmp_path / "awf-work" / "git" / "worktrees")
 
 
 @pytest.mark.unit

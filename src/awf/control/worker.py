@@ -28,6 +28,7 @@ from typing import Any, Protocol, TypeGuard
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import redact_audit_text
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
@@ -39,6 +40,7 @@ from awf.db.repositories import (
     QueueDecisionRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
 )
 from awf.node.cleanup import WorkspaceCleanupResult
 from awf.node.provisioner import Provisioner
@@ -53,6 +55,7 @@ from awf.service.scheduler import (
     score_summary_with_suppression,
 )
 from awf.service.secret_leases import SecretLeaseService
+from awf.service.terminal_runtime import record_terminal_runtime_release_event
 from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
@@ -207,6 +210,7 @@ class ControlWorker:
         executor: WorkspaceExecutorProtocol | None = None,
         runtime_inspector: RuntimeInspectorProtocol | None = None,
         runtime_cleaner: RuntimeCleanerProtocol | None = None,
+        worktrees_root: Path | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
@@ -214,6 +218,7 @@ class ControlWorker:
         self._executor = executor
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._runtime_cleaner = runtime_cleaner
+        self._worktrees_root = worktrees_root
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
@@ -1131,16 +1136,67 @@ class ControlWorker:
             )
             return
 
-        cleanup = await self._runtime_cleaner.cleanup(
-            workspace_id=candidate.workspace_id,
-            repo_url=candidate.repo_url,
-            compose_project_name=candidate.compose_project_name,
-            compose_file_path=(
-                Path(candidate.compose_file_path) if candidate.compose_file_path else None
+        if not await self._claim_stale_active_execution_cleanup(candidate):
+            return
+
+        claim_owner = self._stale_active_execution_cleanup_owner()
+        heartbeat = asyncio.create_task(
+            self._refresh_execution_claim_loop(
+                candidate.workspace_id,
+                owner_id=claim_owner,
             ),
-            remove_volumes=True,
-            remove_worktree=False,
+            name=f"awf-stale-cleanup-claim-{candidate.workspace_id}",
         )
+        cleanup_task: asyncio.Task[WorkspaceCleanupResult] | None = None
+        try:
+            try:
+                cleanup_task = asyncio.create_task(
+                    self._runtime_cleaner.cleanup(
+                        workspace_id=candidate.workspace_id,
+                        repo_url=candidate.repo_url,
+                        compose_project_name=candidate.compose_project_name,
+                        compose_file_path=(
+                            Path(candidate.compose_file_path)
+                            if candidate.compose_file_path
+                            else None
+                        ),
+                        worktree_host_path=self._worktree_host_path(candidate.workspace_id),
+                        remove_volumes=False,
+                        remove_worktree=False,
+                    ),
+                    name=f"awf-stale-cleanup-runtime-{candidate.workspace_id}",
+                )
+                cleanup = await self._await_stale_cleanup_or_claim_loss(
+                    cleanup_task,
+                    heartbeat,
+                )
+                if cleanup is None:
+                    await self._release_execution_claim(
+                        candidate.workspace_id,
+                        owner_id=claim_owner,
+                    )
+                    return
+            except Exception as exc:
+                safe_exception = redact_audit_text(
+                    f"{type(exc).__name__}: {exc}",
+                    limit=400,
+                )
+                await self._record_stale_active_execution_cleanup_failed(
+                    candidate,
+                    snapshot,
+                    cleanup=None,
+                    message=f"runtime cleanup raised unexpected exception: {safe_exception}",
+                )
+                return
+        finally:
+            if cleanup_task is not None and not cleanup_task.done():
+                cleanup_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await cleanup_task
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+
         if not cleanup.ok:
             await self._record_stale_active_execution_cleanup_failed(
                 candidate,
@@ -1150,7 +1206,60 @@ class ControlWorker:
             )
             return
 
-        await self._fail_stale_active_execution(candidate, snapshot)
+        await self._fail_stale_active_execution(candidate, snapshot, cleanup=cleanup)
+
+    async def _await_stale_cleanup_or_claim_loss(
+        self,
+        cleanup_task: asyncio.Task[WorkspaceCleanupResult],
+        heartbeat: asyncio.Task[None],
+    ) -> WorkspaceCleanupResult | None:
+        done, _pending = await asyncio.wait(
+            {cleanup_task, heartbeat},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cleanup_task in done:
+            return cleanup_task.result()
+
+        if heartbeat in done:
+            cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cleanup_task
+            return None
+
+        return None  # pragma: no cover - asyncio.wait returned no completed task
+
+    async def _claim_stale_active_execution_cleanup(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        now = datetime.now(UTC)
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            if not _execution_claim_is_stale(ws, now):
+                return False
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
+            if not await self._has_current_stale_active_execution_failure_evidence(
+                session,
+                ws,
+                candidate.status,
+                event_floor=event_floor,
+            ):
+                return False
+
+            ws.execution_claimed_by = self._stale_active_execution_cleanup_owner()
+            ws.execution_claim_expires_at = self._execution_claim_expires_at()
+            await session.commit()
+            return True
+
+    def _stale_active_execution_cleanup_owner(self) -> str:
+        return f"stale-cleanup:{self._worker_id}"
 
     async def _stale_active_execution_can_fail(
         self,
@@ -1168,18 +1277,66 @@ class ControlWorker:
                 ws,
                 candidate.status,
             )
-            if await self._has_preserved_active_execution_event(
+            return await self._has_current_stale_active_execution_failure_evidence(
                 session,
-                candidate.workspace_id,
+                ws,
                 candidate.status,
                 event_floor=event_floor,
-            ):
-                return False
-            return await self._has_stale_active_execution_event(
-                session,
-                candidate.workspace_id,
-                event_floor=event_floor,
             )
+
+    async def _has_current_stale_active_execution_failure_evidence(
+        self,
+        session: AsyncSession,
+        workspace: Workspace,
+        status: WorkspaceStatus,
+        *,
+        event_floor: datetime | None = None,
+    ) -> bool:
+        if event_floor is None:
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                workspace,
+                status,
+            )
+        if await self._has_preserved_active_execution_event(
+            session,
+            workspace.id,
+            status,
+            event_floor=event_floor,
+        ):
+            return False
+        return await self._has_stale_active_execution_event(
+            session,
+            workspace.id,
+            event_floor=event_floor,
+        )
+
+    async def _cleanup_claim_still_allows_stale_active_execution_failure(
+        self,
+        session: AsyncSession,
+        repo: WorkspaceRepository,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        ws = await repo.get_for_update(candidate.workspace_id)
+        if ws is None or ws.status != candidate.status.value:
+            if (
+                ws is not None
+                and ws.execution_claimed_by == self._stale_active_execution_cleanup_owner()
+            ):
+                ws.execution_claimed_by = None
+                ws.execution_claim_expires_at = None
+            return False
+        if ws.execution_claimed_by != self._stale_active_execution_cleanup_owner():
+            return False
+        if await self._has_current_stale_active_execution_failure_evidence(
+            session,
+            ws,
+            candidate.status,
+        ):
+            return True
+        ws.execution_claimed_by = None
+        ws.execution_claim_expires_at = None
+        return False
 
     async def _record_stale_active_execution_cleanup_failed(
         self,
@@ -1203,7 +1360,10 @@ class ControlWorker:
             ws = await repo.get(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
-            if not _execution_claim_is_stale(ws, datetime.now(UTC)):
+            current_cleanup_claim = (
+                ws.execution_claimed_by == self._stale_active_execution_cleanup_owner()
+            )
+            if not _execution_claim_is_stale(ws, datetime.now(UTC)) and not current_cleanup_claim:
                 return
             await repo.add_event(
                 ws,
@@ -1211,6 +1371,9 @@ class ControlWorker:
                 reason_code=_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE,
                 payload=payload,
             )
+            if current_cleanup_claim:
+                ws.execution_claimed_by = None
+                ws.execution_claim_expires_at = None
             await session.commit()
 
         _log.error(
@@ -1226,23 +1389,87 @@ class ControlWorker:
         self,
         candidate: _ActiveExecutionCandidate,
         snapshot: RuntimeSnapshot,
+        *,
+        cleanup: WorkspaceCleanupResult | None = None,
     ) -> None:
-        message = _stale_active_execution_failure_message(candidate, snapshot)
+        message = (
+            _stale_active_execution_failure_message(candidate, snapshot)
+            if cleanup is None
+            else _stale_active_execution_released_message(candidate, snapshot)
+        )
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.transition_if_current(
-                candidate.workspace_id,
-                from_status=candidate.status,
-                to=WorkspaceStatus.failed,
-                reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
-                extra_conditions=(_stale_execution_claim_filter(datetime.now(UTC)),),
+            cleanup_owner = self._stale_active_execution_cleanup_owner()
+            if cleanup is not None and not (
+                await self._cleanup_claim_still_allows_stale_active_execution_failure(
+                    session,
+                    repo,
+                    candidate,
+                )
+            ):
+                await session.commit()
+                return
+            extra_conditions = (
+                (Workspace.execution_claimed_by == cleanup_owner,)
+                if cleanup is not None
+                else (_stale_execution_claim_filter(datetime.now(UTC)),)
             )
+            try:
+                ws = await repo.transition_if_current(
+                    candidate.workspace_id,
+                    from_status=candidate.status,
+                    to=WorkspaceStatus.failed,
+                    reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+                    extra_conditions=extra_conditions,
+                )
+            except WorkspaceTransitionBlockedByActiveOperationError as exc:
+                operation_id = exc.operation.id
+                await session.rollback()
+                await self._record_active_operation_blocked_transition_in_session(
+                    session,
+                    workspace_id=candidate.workspace_id,
+                    action="stale_active_execution_failure",
+                    expected=candidate.status,
+                    requested=WorkspaceStatus.failed,
+                    reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+                    operation_id=operation_id,
+                    release_execution_claim_owner_id=(
+                        cleanup_owner if cleanup is not None else None
+                    ),
+                )
+                await session.commit()
+                return
             if ws is None:
+                if cleanup is not None:
+                    await repo.release_execution_claim(
+                        candidate.workspace_id,
+                        owner_id=cleanup_owner,
+                    )
+                    await session.commit()
                 return
             ws.execution_claimed_by = None
             ws.execution_claim_expires_at = None
             ws.failure_reason = FailureReason.infrastructure_failure.value
             ws.failure_message = message[:2048]
+            if cleanup is not None:
+                source = "control_worker.stale_active_execution"
+                await session.flush()
+                try:
+                    async with session.begin_nested():
+                        await record_terminal_runtime_release_event(
+                            session,
+                            workspace_id=candidate.workspace_id,
+                            cleanup=cleanup,
+                            source=source,
+                            worktree_host_path=self._worktree_host_path(candidate.workspace_id),
+                        )
+                except Exception as exc:
+                    _log.warning(
+                        "worker.terminal_runtime_release_event_record_failed",
+                        workspace_id=candidate.workspace_id,
+                        source=source,
+                        error=redact_audit_text(repr(exc), limit=400),
+                    )
             await session.commit()
 
         _log.error(
@@ -1255,6 +1482,14 @@ class ControlWorker:
             reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
         )
 
+    def _worktree_host_path(self, workspace_id: str) -> Path | None:
+        if self._worktrees_root is None:
+            return None
+        candidate = self._worktrees_root / workspace_id
+        if candidate.exists():
+            return candidate
+        return None
+
     async def _fail_stranded_workspace(
         self,
         candidate: _ActiveExecutionCandidate,
@@ -1264,13 +1499,29 @@ class ControlWorker:
         message = _runtime_stranding_failure_message(candidate, finding)
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.transition_if_current(
-                candidate.workspace_id,
-                from_status=candidate.status,
-                to=WorkspaceStatus.failed,
-                reason_code=finding.reason_code,
-                extra_conditions=_claim_recheck_conditions(candidate.status),
-            )
+            try:
+                ws = await repo.transition_if_current(
+                    candidate.workspace_id,
+                    from_status=candidate.status,
+                    to=WorkspaceStatus.failed,
+                    reason_code=finding.reason_code,
+                    extra_conditions=_claim_recheck_conditions(candidate.status),
+                )
+            except WorkspaceTransitionBlockedByActiveOperationError as exc:
+                operation_id = exc.operation.id
+                await session.rollback()
+                await self._record_active_operation_blocked_transition_in_session(
+                    session,
+                    workspace_id=candidate.workspace_id,
+                    action="runtime_stranding_failure",
+                    expected=candidate.status,
+                    requested=WorkspaceStatus.failed,
+                    reason_code=finding.reason_code,
+                    operation_id=operation_id,
+                    clear_stale_claims_for_status=candidate.status,
+                )
+                await session.commit()
+                return
             if ws is None:
                 return
             ws.execution_claimed_by = None
@@ -1296,6 +1547,68 @@ class ControlWorker:
             runtime_reason=snapshot.reason,
             reason_code=finding.reason_code,
         )
+
+    async def _record_active_operation_blocked_transition_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        action: str,
+        expected: WorkspaceStatus,
+        requested: WorkspaceStatus,
+        reason_code: str,
+        operation_id: str,
+        release_execution_claim_owner_id: str | None = None,
+        clear_stale_claims_for_status: WorkspaceStatus | None = None,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        if ws is None:  # pragma: no cover - row disappeared during teardown
+            return
+        _log.info(
+            "worker.transition_blocked_by_active_operation",
+            workspace_id=workspace_id,
+            action=action,
+            expected_status=expected.value,
+            actual_status=ws.status,
+            requested_status=requested.value,
+            operation_id=operation_id,
+            reason_code=reason_code,
+        )
+        try:
+            async with session.begin_nested():
+                await repo.record_ignored_stale_callback(
+                    ws,
+                    callback_source="control_worker",
+                    callback_action=action,
+                    expected_status=expected,
+                    requested_status=requested,
+                    operation_id=operation_id,
+                    reason_code=reason_code,
+                )
+        except Exception as exc:
+            _log.warning(
+                "worker.ignored_stale_callback_record_failed",
+                workspace_id=workspace_id,
+                action=action,
+                operation_id=operation_id,
+                reason_code=reason_code,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
+        if release_execution_claim_owner_id is not None:
+            released = await repo.release_execution_claim(
+                workspace_id,
+                owner_id=release_execution_claim_owner_id,
+            )
+            if released:
+                ws.execution_claimed_by = None
+                ws.execution_claim_expires_at = None
+        if clear_stale_claims_for_status is not None:
+            _clear_stale_claims_for_blocked_transition(
+                ws,
+                clear_stale_claims_for_status,
+                now=datetime.now(UTC),
+            )
 
     async def _record_recoverable_runtime_stranding(
         self,
@@ -1494,12 +1807,27 @@ class ControlWorker:
     async def _claim_requested_for_provisioning(self, workspace_id: str) -> bool:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.transition_if_current(
-                workspace_id,
-                from_status=WorkspaceStatus.requested,
-                to=WorkspaceStatus.provisioning,
-                reason_code="WORKER_CLAIMED",
-            )
+            try:
+                ws = await repo.transition_if_current(
+                    workspace_id,
+                    from_status=WorkspaceStatus.requested,
+                    to=WorkspaceStatus.provisioning,
+                    reason_code="WORKER_CLAIMED",
+                )
+            except WorkspaceTransitionBlockedByActiveOperationError as exc:
+                operation_id = exc.operation.id
+                await session.rollback()
+                await self._record_active_operation_blocked_transition_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    action="provision",
+                    expected=WorkspaceStatus.requested,
+                    requested=WorkspaceStatus.provisioning,
+                    reason_code="WORKER_CLAIMED",
+                    operation_id=operation_id,
+                )
+                await session.commit()
+                return False
             if ws is not None:
                 await session.commit()
                 return True
@@ -1679,24 +2007,33 @@ class ControlWorker:
                 )
                 return
 
-    async def _refresh_execution_claim_loop(self, workspace_id: str) -> None:
+    async def _refresh_execution_claim_loop(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> None:
+        claim_owner = owner_id or self._worker_id
         interval = max(1.0, min(60.0, self._config.execution_claim_lease_seconds / 3))
         while True:
             await asyncio.sleep(interval)
             try:
-                refreshed = await self._refresh_execution_claim(workspace_id)
+                refreshed = await self._refresh_execution_claim(
+                    workspace_id,
+                    owner_id=claim_owner,
+                )
             except Exception:
                 _log.exception(
                     "worker.execution_claim_refresh_failed",
                     workspace_id=workspace_id,
-                    worker_id=self._worker_id,
+                    worker_id=claim_owner,
                 )
                 return
             if not refreshed:
                 _log.warning(
                     "worker.execution_claim_lost",
                     workspace_id=workspace_id,
-                    worker_id=self._worker_id,
+                    worker_id=claim_owner,
                 )
                 return
 
@@ -1716,29 +2053,40 @@ class ControlWorker:
     def _execution_claim_expires_at(self) -> datetime:
         return datetime.now(UTC) + timedelta(seconds=self._config.execution_claim_lease_seconds)
 
-    async def _refresh_execution_claim(self, workspace_id: str) -> bool:
+    async def _refresh_execution_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> bool:
         async with self._session_factory() as session:
             refreshed = await WorkspaceRepository(session).refresh_execution_claim(
                 workspace_id,
-                owner_id=self._worker_id,
+                owner_id=owner_id or self._worker_id,
                 lease_expires_at=self._execution_claim_expires_at(),
             )
             await session.commit()
             return refreshed
 
-    async def _release_execution_claim(self, workspace_id: str) -> None:
+    async def _release_execution_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str | None = None,
+    ) -> None:
+        claim_owner = owner_id or self._worker_id
         try:
             async with self._session_factory() as session:
                 await WorkspaceRepository(session).release_execution_claim(
                     workspace_id,
-                    owner_id=self._worker_id,
+                    owner_id=claim_owner,
                 )
                 await session.commit()
         except Exception:
             _log.exception(
                 "worker.execution_claim_release_failed",
                 workspace_id=workspace_id,
-                worker_id=self._worker_id,
+                worker_id=claim_owner,
             )
 
     async def _release_monitoring_pr_claim(self, workspace_id: str) -> None:
@@ -1918,6 +2266,20 @@ def _monitor_claim_is_stale(workspace: Workspace, claim_cutoff: datetime) -> boo
     if expires_at.tzinfo is None and claim_cutoff.tzinfo is not None:
         claim_cutoff = claim_cutoff.replace(tzinfo=None)
     return expires_at <= claim_cutoff
+
+
+def _clear_stale_claims_for_blocked_transition(
+    workspace: Workspace,
+    status: WorkspaceStatus,
+    *,
+    now: datetime,
+) -> None:
+    if status in _ACTIVE_EXECUTION_STATUSES and _execution_claim_is_stale(workspace, now):
+        workspace.execution_claimed_by = None
+        workspace.execution_claim_expires_at = None
+    if status == WorkspaceStatus.monitoring_pr and _monitor_claim_is_stale(workspace, now):
+        workspace.monitor_claimed_by = None
+        workspace.monitor_claim_expires_at = None
 
 
 def _candidate_claim_is_stale(
@@ -2184,12 +2546,7 @@ def _stale_active_execution_failure_message(
     candidate: _ActiveExecutionCandidate,
     snapshot: RuntimeSnapshot,
 ) -> str:
-    if not candidate.compose_project_name:
-        runtime_detail = "no compose project is persisted for the workspace"
-    else:
-        runtime_detail = f"compose runtime state is {snapshot.stack_state}"
-        if snapshot.reason:
-            runtime_detail = f"{runtime_detail}: {snapshot.reason.strip()}"
+    runtime_detail = _stale_active_execution_runtime_detail(candidate, snapshot)
 
     return (
         "active execution was lost after a service or Docker restart. "
@@ -2199,3 +2556,31 @@ def _stale_active_execution_failure_message(
         "surviving files were preserved for inspection. Inspect the workspace, then "
         "cancel and redispatch the task when ready."
     )
+
+
+def _stale_active_execution_released_message(
+    candidate: _ActiveExecutionCandidate,
+    snapshot: RuntimeSnapshot,
+) -> str:
+    runtime_detail = _stale_active_execution_runtime_detail(candidate, snapshot)
+
+    return (
+        "active execution was lost after a service or Docker restart. "
+        f"The workspace is still marked {candidate.status.value!r}, but this worker has "
+        f"no in-process execution task and {runtime_detail}. "
+        "AWF released the terminal runtime; logs, the worktree, and any surviving files "
+        "were preserved for inspection. Inspect the workspace, then cancel and "
+        "redispatch the task when ready."
+    )
+
+
+def _stale_active_execution_runtime_detail(
+    candidate: _ActiveExecutionCandidate,
+    snapshot: RuntimeSnapshot,
+) -> str:
+    if not candidate.compose_project_name:
+        return "no compose project is persisted for the workspace"
+    runtime_detail = f"compose runtime state is {snapshot.stack_state}"
+    if snapshot.reason:
+        runtime_detail = f"{runtime_detail}: {snapshot.reason.strip()}"
+    return runtime_detail

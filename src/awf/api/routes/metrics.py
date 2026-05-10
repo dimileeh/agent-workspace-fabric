@@ -374,6 +374,10 @@ class OrphanResourceSummaryResponse(BaseModel):
     counts_by_kind: dict[str, int]
     orphan_counts_by_kind: dict[str, int]
     expected_counts_by_kind: dict[str, int]
+    retained_evidence_count: int
+    retained_evidence_counts_by_kind: dict[str, int]
+    leaked_live_count: int
+    leaked_live_counts_by_kind: dict[str, int]
     unknown_counts_by_kind: dict[str, int]
     orphan_classification_counts: dict[str, int]
     cleanup_readiness: CleanupReadinessResponse

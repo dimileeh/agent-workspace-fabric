@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy import update as sa_update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, Workspace, WorkspaceEvent
@@ -22,12 +26,16 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
 )
+from awf.db.session import make_session_factory
+from awf.service import controls as controls_module
 from awf.service.controls import (
     _OPERATION_ERROR_MESSAGE_MAX_LENGTH,
     ActiveWorkspaceDestroyError,
     IdempotencyConflictError,
     VersionConflictError,
+    WorkspaceActiveOperationConflictError,
     WorkspaceControlService,
     WorkspaceNotFoundError,
     WorkspaceRebaseActiveConflictError,
@@ -44,7 +52,14 @@ from awf.service.controls import (
     default_cleaner,
     stop_project_containers,
 )
-from tests.postgres import postgres_test_session
+from awf.service.terminal_runtime import (
+    TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX,
+    TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE,
+    TerminalRuntimeReleaser,
+    TerminalRuntimeReleaseResult,
+    terminal_runtime_release_claim_active,
+)
+from tests.postgres import postgres_test_engine, postgres_test_session
 
 
 @pytest.fixture
@@ -117,6 +132,62 @@ class RecordingCleaner:
 
 
 @dataclass
+class RaisingCleaner(RecordingCleaner):
+    error_message: str = "cleanup exploded"
+
+    async def cleanup(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> list[str]:
+        self.calls.append(
+            CleanupCall(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                compose_project_name=compose_project_name,
+                compose_file_path=compose_file_path,
+                worktree_host_path=worktree_host_path,
+                remove_volumes=remove_volumes,
+                remove_worktree=remove_worktree,
+            )
+        )
+        raise RuntimeError(self.error_message)
+
+
+@dataclass
+class CancelledCleaner(RecordingCleaner):
+    async def cleanup(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> list[str]:
+        self.calls.append(
+            CleanupCall(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                compose_project_name=compose_project_name,
+                compose_file_path=compose_file_path,
+                worktree_host_path=worktree_host_path,
+                remove_volumes=remove_volumes,
+                remove_worktree=remove_worktree,
+            )
+        )
+        raise asyncio.CancelledError
+
+
+@dataclass
 class StaleCallbackCleaner(RecordingCleaner):
     session: AsyncSession | None = None
     final_status: WorkspaceStatus = WorkspaceStatus.cancelled
@@ -160,6 +231,275 @@ class StaleCallbackCleaner(RecordingCleaner):
         )
         await self.session.flush()
         return result
+
+
+async def _assert_workspace_row_unlocked_nowait(
+    session: AsyncSession,
+    workspace_id: str,
+) -> None:
+    await session.execute(
+        text("SELECT id FROM workspaces WHERE id = :workspace_id FOR UPDATE NOWAIT"),
+        {"workspace_id": workspace_id},
+    )
+
+
+@dataclass
+class LockObservingStopper:
+    session_factory: async_sessionmaker[AsyncSession]
+    workspace_id: str
+    subphase: str
+    calls: list[str | None] = field(default_factory=list)
+
+    async def __call__(self, compose_project_name: str | None) -> None:
+        self.calls.append(compose_project_name)
+        async with self.session_factory() as observer:
+            await _assert_workspace_row_unlocked_nowait(observer, self.workspace_id)
+            await WorkspaceRepository(observer).update_activity(
+                self.workspace_id,
+                subphase=self.subphase,
+            )
+            await observer.commit()
+
+
+class LockObservingCleaner(RecordingCleaner):
+    def __init__(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        workspace_id: str,
+        subphase: str,
+    ) -> None:
+        super().__init__()
+        self._session_factory = session_factory
+        self._workspace_id = workspace_id
+        self._subphase = subphase
+
+    async def cleanup(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> list[str]:
+        async with self._session_factory() as observer:
+            await _assert_workspace_row_unlocked_nowait(observer, self._workspace_id)
+            await WorkspaceRepository(observer).update_activity(
+                self._workspace_id,
+                subphase=self._subphase,
+            )
+            await observer.commit()
+        return await super().cleanup(
+            workspace_id=workspace_id,
+            repo_url=repo_url,
+            compose_project_name=compose_project_name,
+            compose_file_path=compose_file_path,
+            worktree_host_path=worktree_host_path,
+            remove_volumes=remove_volumes,
+            remove_worktree=remove_worktree,
+        )
+
+
+@dataclass
+class ConcurrentTransitionStopper:
+    session_factory: async_sessionmaker[AsyncSession]
+    workspace_id: str
+    to_status: WorkspaceStatus
+    calls: list[str | None] = field(default_factory=list)
+    blocked_operation_type: str | None = None
+
+    async def __call__(self, compose_project_name: str | None) -> None:
+        self.calls.append(compose_project_name)
+        async with self.session_factory() as actor:
+            await _assert_workspace_row_unlocked_nowait(actor, self.workspace_id)
+            repo = WorkspaceRepository(actor)
+            workspace = await asyncio.wait_for(
+                repo.get_for_update(self.workspace_id),
+                timeout=1,
+            )
+            assert workspace is not None
+            try:
+                await repo.transition(
+                    workspace,
+                    to=self.to_status,
+                    reason_code="TEST_CONCURRENT_TRANSITION",
+                    payload={"source": "unit_test"},
+                )
+            except WorkspaceTransitionBlockedByActiveOperationError as exc:
+                self.blocked_operation_type = exc.operation.type
+                await actor.rollback()
+            else:
+                await actor.commit()
+
+
+@dataclass
+class LeaseHeartbeatWaitingStopper:
+    session_factory: async_sessionmaker[AsyncSession]
+    workspace_id: str
+    operation_type: OperationType
+    calls: list[str | None] = field(default_factory=list)
+    heartbeat_seen_at: datetime | None = None
+
+    async def __call__(self, compose_project_name: str | None) -> None:
+        self.calls.append(compose_project_name)
+        deadline = asyncio.get_running_loop().time() + 1
+        while asyncio.get_running_loop().time() < deadline:
+            async with self.session_factory() as observer:
+                operations = await OperationRepository(observer).list_for_workspace(
+                    self.workspace_id,
+                    status=OperationStatus.running,
+                    operation_type=self.operation_type,
+                    limit=1,
+                )
+                if operations and operations[0].lease_renewed_at is not None:
+                    self.heartbeat_seen_at = operations[0].lease_renewed_at
+                    return
+            await asyncio.sleep(0.01)
+        raise AssertionError("teardown operation lease heartbeat was not renewed")
+
+
+@dataclass
+class LeaseLossBlockingStopper:
+    calls: list[str | None] = field(default_factory=list)
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    cancelled: bool = False
+
+    async def __call__(self, compose_project_name: str | None) -> None:
+        self.calls.append(compose_project_name)
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+@dataclass
+class ConcurrentTerminalRuntimeReleaseClaimStopper:
+    session_factory: async_sessionmaker[AsyncSession]
+    workspace_id: str
+    calls: list[str | None] = field(default_factory=list)
+
+    async def __call__(self, compose_project_name: str | None) -> None:
+        self.calls.append(compose_project_name)
+        async with self.session_factory() as actor:
+            await _assert_workspace_row_unlocked_nowait(actor, self.workspace_id)
+            workspace = await asyncio.wait_for(
+                WorkspaceRepository(actor).get_for_update(self.workspace_id),
+                timeout=1,
+            )
+            assert workspace is not None
+            workspace.execution_claimed_by = (
+                f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}existing"
+            )
+            workspace.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+            await actor.commit()
+
+
+class ConcurrentTerminalRuntimeReleaserCleaner(RecordingCleaner):
+    def __init__(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        workspace_id: str,
+    ) -> None:
+        super().__init__()
+        self._session_factory = session_factory
+        self._workspace_id = workspace_id
+        self.release_cleaner = RecordingCleaner()
+        self.claim_active_during_cleanup: bool | None = None
+        self.release_result: TerminalRuntimeReleaseResult | None = None
+
+    async def cleanup(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> list[str]:
+        async with self._session_factory() as observer:
+            workspace = await WorkspaceRepository(observer).get(self._workspace_id)
+            assert workspace is not None
+            self.claim_active_during_cleanup = terminal_runtime_release_claim_active(workspace)
+
+        releaser = TerminalRuntimeReleaser(
+            session_factory=self._session_factory,
+            cleaner_factory=lambda: self.release_cleaner,
+        )
+        self.release_result = await releaser.release(
+            self._workspace_id,
+            source="test.concurrent-control-cleanup",
+            expected_status=WorkspaceStatus.cancelled,
+        )
+        return await super().cleanup(
+            workspace_id=workspace_id,
+            repo_url=repo_url,
+            compose_project_name=compose_project_name,
+            compose_file_path=compose_file_path,
+            worktree_host_path=worktree_host_path,
+            remove_volumes=remove_volumes,
+            remove_worktree=remove_worktree,
+        )
+
+
+class TerminalRuntimeClaimHeartbeatWaitingCleaner(RecordingCleaner):
+    def __init__(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        workspace_id: str,
+    ) -> None:
+        super().__init__()
+        self._session_factory = session_factory
+        self._workspace_id = workspace_id
+        self.initial_claim_expires_at: datetime | None = None
+        self.heartbeat_seen_at: datetime | None = None
+
+    async def cleanup(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> list[str]:
+        self.calls.append(
+            CleanupCall(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                compose_project_name=compose_project_name,
+                compose_file_path=compose_file_path,
+                worktree_host_path=worktree_host_path,
+                remove_volumes=remove_volumes,
+                remove_worktree=remove_worktree,
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 1
+        while asyncio.get_running_loop().time() < deadline:
+            async with self._session_factory() as observer:
+                workspace = await WorkspaceRepository(observer).get(self._workspace_id)
+                assert workspace is not None
+                if self.initial_claim_expires_at is None:
+                    self.initial_claim_expires_at = workspace.execution_claim_expires_at
+                if (
+                    self.initial_claim_expires_at is not None
+                    and workspace.execution_claim_expires_at is not None
+                    and workspace.execution_claim_expires_at > self.initial_claim_expires_at
+                ):
+                    self.heartbeat_seen_at = workspace.execution_claim_expires_at
+                    return list(self.failures)
+            await asyncio.sleep(0.01)
+        raise AssertionError("terminal runtime release claim heartbeat was not renewed")
 
 
 async def _workspace(
@@ -226,6 +566,7 @@ def _service(
     *,
     stopper: RecordingStopper | None = None,
     cleaner: RecordingCleaner | None = None,
+    worktrees_root: Path | None = None,
 ) -> tuple[WorkspaceControlService, RecordingStopper, RecordingCleaner]:
     stopper = stopper or RecordingStopper()
     cleaner = cleaner or RecordingCleaner()
@@ -234,6 +575,7 @@ def _service(
             session,
             project_stopper=stopper,
             cleaner_factory=lambda: cleaner,
+            worktrees_root=worktrees_root,
         ),
         stopper,
         cleaner,
@@ -333,6 +675,1313 @@ async def test_cancel_active_workspace_stops_stack_transitions_and_replays(
         "stop_stack": True,
         "expected_version": 1,
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_release_workspace_lock_before_stack_stop(
+    action: str,
+) -> None:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        async with session_factory() as session:
+            workspace = await _workspace(session, status=WorkspaceStatus.ready)
+            workspace_id = workspace.id
+            compose_project_name = workspace.compose_project_name
+            await session.commit()
+
+        stopper = LockObservingStopper(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            subphase=f"{action}-stack-stop-observed-unlocked-row",
+        )
+        async with session_factory() as session:
+            service, _stopper, _cleaner = _service(session, stopper=stopper)
+            if action == "cancel":
+                response = await service.cancel_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    stop_stack=True,
+                )
+            else:
+                response = await service.stop_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                )
+            await session.commit()
+
+        async with session_factory() as session:
+            persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert stopper.calls == [compose_project_name]
+    assert persisted is not None
+    assert persisted.subphase == f"{action}-stack-stop-observed-unlocked-row"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_release_workspace_lock_before_terminal_runtime_cleanup(
+    action: str,
+) -> None:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        async with session_factory() as session:
+            workspace = await _workspace(session, status=WorkspaceStatus.ready)
+            workspace_id = workspace.id
+            compose_project_name = workspace.compose_project_name
+            await session.commit()
+
+        cleaner = LockObservingCleaner(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            subphase=f"{action}-terminal-cleanup-observed-unlocked-row",
+        )
+        async with session_factory() as session:
+            service, stopper, _cleaner = _service(session, cleaner=cleaner)
+            if action == "cancel":
+                response = await service.cancel_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    stop_stack=True,
+                )
+            else:
+                response = await service.stop_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                )
+            await session.commit()
+
+        async with session_factory() as session:
+            persisted = await WorkspaceRepository(session).get(workspace_id)
+            events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+
+    release_events = [
+        event for event in events if event.event_type == "workspace.terminal_runtime_released"
+    ]
+    assert response.status == WorkspaceStatus.cancelled
+    assert stopper.calls == [compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert persisted is not None
+    assert persisted.subphase == f"{action}-terminal-cleanup-observed-unlocked-row"
+    assert len(release_events) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_skip_cleanup_when_terminal_release_claim_is_active(
+    action: str,
+) -> None:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        async with session_factory() as session:
+            workspace = await _workspace(session, status=WorkspaceStatus.ready)
+            workspace_id = workspace.id
+            compose_project_name = workspace.compose_project_name
+            await session.commit()
+
+        stopper = ConcurrentTerminalRuntimeReleaseClaimStopper(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+        )
+        async with session_factory() as session:
+            service, _stopper, cleaner = _service(session, stopper=stopper)
+            if action == "cancel":
+                response = await service.cancel_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    stop_stack=True,
+                )
+            else:
+                response = await service.stop_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                )
+            await session.commit()
+
+        async with session_factory() as session:
+            persisted = await WorkspaceRepository(session).get(workspace_id)
+            events = await _events(session, workspace_id)
+
+    release_events = [
+        event
+        for event in events
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+    assert response.status == WorkspaceStatus.cancelled
+    assert stopper.calls == [compose_project_name]
+    assert cleaner.calls == []
+    assert persisted is not None
+    assert persisted.status == WorkspaceStatus.cancelled.value
+    assert persisted.execution_claimed_by == (
+        f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}existing"
+    )
+    assert release_events == []
+
+
+@pytest.mark.unit
+async def test_cancel_terminal_workspace_claims_release_before_cleanup() -> None:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        async with session_factory() as session:
+            workspace = await _workspace(session, status=WorkspaceStatus.cancelled)
+            workspace_id = workspace.id
+            await session.commit()
+
+        cleaner = ConcurrentTerminalRuntimeReleaserCleaner(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+        )
+        async with session_factory() as session:
+            service, stopper, _cleaner = _service(session, cleaner=cleaner)
+            response = await service.cancel_workspace(
+                workspace_id,
+                reason="repeat cancel",
+                stop_stack=True,
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            persisted = await WorkspaceRepository(session).get(workspace_id)
+            events = await _events(session, workspace_id)
+
+    release_events = [
+        event
+        for event in events
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+    assert response.status == WorkspaceStatus.cancelled
+    assert stopper.calls == [f"awf_{workspace_id}"]
+    assert cleaner.claim_active_during_cleanup is True
+    assert cleaner.release_result is not None
+    assert cleaner.release_result.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert cleaner.release_cleaner.calls == []
+    assert persisted is not None
+    assert persisted.execution_claimed_by is None
+    assert persisted.execution_claim_expires_at is None
+    assert [event.event_type for event in release_events] == ["workspace.terminal_runtime_released"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("action", "status"),
+    [
+        ("cancel", WorkspaceStatus.cancelled),
+        ("stop", WorkspaceStatus.completed),
+    ],
+)
+async def test_cancel_and_stop_refresh_terminal_release_claim_during_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    status: WorkspaceStatus,
+) -> None:
+    monkeypatch.setattr(
+        controls_module,
+        "_terminal_runtime_release_claim_heartbeat_interval_seconds",
+        lambda: 0.001,
+    )
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        async with session_factory() as session:
+            workspace = await _workspace(session, status=status)
+            workspace_id = workspace.id
+            compose_project_name = workspace.compose_project_name
+            await session.commit()
+
+        cleaner = TerminalRuntimeClaimHeartbeatWaitingCleaner(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+        )
+        async with session_factory() as session:
+            service, stopper, _cleaner = _service(session, cleaner=cleaner)
+            if action == "cancel":
+                response = await service.cancel_workspace(
+                    workspace_id,
+                    reason="repeat cancel",
+                    stop_stack=True,
+                )
+            else:
+                response = await service.stop_workspace(
+                    workspace_id,
+                    reason="repeat stop",
+                )
+            await session.commit()
+
+    assert response.status == status
+    assert stopper.calls == [compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert cleaner.initial_claim_expires_at is not None
+    assert cleaner.heartbeat_seen_at is not None
+    assert cleaner.heartbeat_seen_at > cleaner.initial_claim_expires_at
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_fence_external_stack_io_from_concurrent_version_bump(
+    action: str,
+) -> None:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        async with session_factory() as session:
+            workspace = await _workspace(session, status=WorkspaceStatus.ready)
+            workspace_id = workspace.id
+            compose_project_name = workspace.compose_project_name
+            expected_version = workspace.version
+            await session.commit()
+
+        stopper = ConcurrentTransitionStopper(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            to_status=WorkspaceStatus.running,
+        )
+        async with session_factory() as session:
+            service, _stopper, cleaner = _service(session, stopper=stopper)
+            if action == "cancel":
+                response = await service.cancel_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    stop_stack=True,
+                    expected_version=expected_version,
+                )
+            else:
+                response = await service.stop_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    expected_version=expected_version,
+                )
+
+        async with session_factory() as session:
+            persisted = await WorkspaceRepository(session).get(workspace_id)
+            operations = await _operations(session, workspace_id)
+            events = await _events(session, workspace_id)
+
+    release_events = [
+        event for event in events if event.event_type == "workspace.terminal_runtime_released"
+    ]
+    assert response.status == WorkspaceStatus.cancelled
+    assert stopper.calls == [compose_project_name]
+    assert stopper.blocked_operation_type == action
+    assert len(cleaner.calls) == 1
+    assert len(release_events) == 1
+    assert release_events[0].payload is not None
+    assert release_events[0].payload["source"] == f"service.controls.{action}"
+    assert release_events[0].payload["workspace_status"] == WorkspaceStatus.cancelled.value
+    assert persisted is not None
+    assert persisted.status == WorkspaceStatus.cancelled.value
+    assert persisted.version == expected_version + 1
+    assert len(operations) == 1
+    assert operations[0].status == OperationStatus.succeeded.value
+    assert operations[0].result == {"status": WorkspaceStatus.cancelled.value}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_renew_teardown_operation_lease_during_external_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    monkeypatch.setattr(
+        controls_module,
+        "_RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS",
+        0.01,
+    )
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        async with session_factory() as session:
+            workspace = await _workspace(session, status=WorkspaceStatus.ready)
+            workspace_id = workspace.id
+            compose_project_name = workspace.compose_project_name
+            await session.commit()
+
+        operation_type = OperationType.cancel if action == "cancel" else OperationType.stop
+        stopper = LeaseHeartbeatWaitingStopper(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+        )
+        async with session_factory() as session:
+            service, _stopper, cleaner = _service(session, stopper=stopper)
+            if action == "cancel":
+                response = await service.cancel_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    stop_stack=True,
+                )
+            else:
+                response = await service.stop_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                )
+
+        async with session_factory() as session:
+            operations = await _operations(session, workspace_id)
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert stopper.calls == [compose_project_name]
+    assert stopper.heartbeat_seen_at is not None
+    assert len(cleaner.calls) == 1
+    assert [operation.type for operation in operations] == [operation_type.value]
+    assert operations[0].lease_renewed_at is not None
+    assert operations[0].lease_renewed_at >= stopper.heartbeat_seen_at
+    assert operations[0].started_at is not None
+    assert operations[0].lease_renewed_at >= operations[0].started_at
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_abort_external_cleanup_when_teardown_lease_is_lost(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    monkeypatch.setattr(
+        controls_module,
+        "_RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS",
+        0.01,
+    )
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    lease_renew_attempts = 0
+
+    async def _lose_teardown_lease(
+        repo: OperationRepository,
+        operation_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> Operation | None:
+        nonlocal lease_renew_attempts
+        del repo, operation_id, now
+        lease_renew_attempts += 1
+        return None
+
+    monkeypatch.setattr(
+        OperationRepository,
+        "renew_teardown_lease",
+        _lose_teardown_lease,
+    )
+    stopper = LeaseLossBlockingStopper()
+    service, _stopper, cleaner = _service(session, stopper=stopper)  # type: ignore[arg-type]
+    expected_runtime_message = (
+        "teardown operation lease heartbeat stopped before external runtime work "
+        "completed: operation lease is no longer active"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="operation lease is no longer active",
+    ):
+        if action == "cancel":
+            await asyncio.wait_for(
+                service.cancel_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    stop_stack=True,
+                ),
+                timeout=1,
+            )
+        else:
+            await asyncio.wait_for(
+                service.stop_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                ),
+                timeout=1,
+            )
+
+    await session.rollback()
+    operations = await _operations(session, workspace_id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace_id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
+    release_events = [
+        event
+        for event in await _events(session, workspace_id)
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+
+    assert lease_renew_attempts == 1
+    assert stopper.started.is_set()
+    assert stopper.cancelled is True
+    assert stopper.calls == [compose_project_name]
+    assert cleaner.calls == []
+    assert len(operations) == 1
+    assert operations[0].type == action
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
+    assert operations[0].error_message == f"RuntimeError: {expected_runtime_message}"
+    assert operations[0].result == {"status": WorkspaceStatus.ready.value}
+    assert operations[0].finished_at is not None
+    assert len(audit_events) == 1
+    assert audit_events[0].reason_code == "CONTROL_OPERATION_FAILED"
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["action"] == action
+    assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["evidence"] == {
+        "error_type": "RuntimeError",
+        "error_message": f"RuntimeError: {expected_runtime_message}",
+    }
+    assert release_events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_abort_external_cleanup_when_teardown_lease_renew_fails(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    monkeypatch.setattr(
+        controls_module,
+        "_RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS",
+        0.01,
+    )
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    lease_renew_attempts = 0
+
+    async def _fail_teardown_lease_renew(
+        repo: OperationRepository,
+        operation_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> Operation | None:
+        nonlocal lease_renew_attempts
+        del repo, operation_id, now
+        lease_renew_attempts += 1
+        raise SQLAlchemyError("database unavailable")
+
+    monkeypatch.setattr(
+        OperationRepository,
+        "renew_teardown_lease",
+        _fail_teardown_lease_renew,
+    )
+    stopper = LeaseLossBlockingStopper()
+    service, _stopper, cleaner = _service(session, stopper=stopper)  # type: ignore[arg-type]
+    expected_runtime_message = (
+        "teardown operation lease heartbeat stopped before external runtime work "
+        "completed: lease renewal failed: SQLAlchemyError: database unavailable"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="lease renewal failed: SQLAlchemyError: database unavailable",
+    ):
+        if action == "cancel":
+            await asyncio.wait_for(
+                service.cancel_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    stop_stack=True,
+                ),
+                timeout=1,
+            )
+        else:
+            await asyncio.wait_for(
+                service.stop_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                ),
+                timeout=1,
+            )
+
+    await session.rollback()
+    operations = await _operations(session, workspace_id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace_id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
+
+    assert lease_renew_attempts == 1
+    assert stopper.started.is_set()
+    assert stopper.cancelled is True
+    assert stopper.calls == [compose_project_name]
+    assert cleaner.calls == []
+    assert len(operations) == 1
+    assert operations[0].type == action
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
+    assert operations[0].error_message == f"RuntimeError: {expected_runtime_message}"
+    assert operations[0].result == {"status": WorkspaceStatus.ready.value}
+    assert len(audit_events) == 1
+    assert audit_events[0].reason_code == "CONTROL_OPERATION_FAILED"
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["evidence"]["error_message"] == (
+        f"RuntimeError: {expected_runtime_message}"
+    )
+
+
+@pytest.mark.unit
+async def test_active_runtime_teardown_blocks_control_requests_and_atomic_transitions(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/77"
+    active_stop = await OperationRepository(session).create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.running,
+        payload={"source": "operator_api"},
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceActiveOperationConflictError) as conflict:
+        await service.request_validate_workspace(workspace.id, reason="rerun validation")
+
+    with pytest.raises(WorkspaceTransitionBlockedByActiveOperationError) as blocked:
+        await WorkspaceRepository(session).transition_if_current(
+            workspace.id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            to=WorkspaceStatus.completed,
+            reason_code="TEST_CONCURRENT_TRANSITION",
+        )
+
+    assert conflict.value.detail == {
+        "operation_id": active_stop.id,
+        "operation_type": OperationType.stop.value,
+        "operation_status": OperationStatus.running.value,
+    }
+    assert blocked.value.operation.id == active_stop.id
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.version == 1
+
+
+@pytest.mark.unit
+async def test_cancel_releases_terminal_runtime_with_preserved_worktree_path(
+    session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    worktrees_root = tmp_path / "git" / "worktrees"
+    worktree_path = worktrees_root / workspace.id
+    worktree_path.mkdir(parents=True)
+    service, _stopper, cleaner = _service(session, worktrees_root=worktrees_root)
+
+    await service.cancel_workspace(
+        workspace.id,
+        reason="operator requested",
+        stop_stack=True,
+    )
+
+    events = await _events(session, workspace.id)
+    release_event = next(
+        event for event in events if event.event_type == "workspace.terminal_runtime_released"
+    )
+    assert cleaner.calls[0].worktree_host_path == worktree_path
+    assert cleaner.calls[0].remove_volumes is False
+    assert cleaner.calls[0].remove_worktree is False
+    assert release_event.payload is not None
+    assert release_event.payload["preserved"]["worktree_path"] == str(worktree_path)
+
+
+@pytest.mark.unit
+async def test_cancel_omits_missing_terminal_runtime_worktree_path(
+    session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    worktrees_root = tmp_path / "git" / "worktrees"
+    worktrees_root.mkdir(parents=True)
+    service, _stopper, cleaner = _service(session, worktrees_root=worktrees_root)
+
+    await service.cancel_workspace(
+        workspace.id,
+        reason="operator requested",
+        stop_stack=True,
+    )
+
+    events = await _events(session, workspace.id)
+    release_event = next(
+        event for event in events if event.event_type == "workspace.terminal_runtime_released"
+    )
+    assert cleaner.calls[0].worktree_host_path is None
+    assert release_event.payload is not None
+    assert "worktree_path" not in release_event.payload["preserved"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_omit_terminal_runtime_worktree_path_when_root_absent(
+    session: AsyncSession,
+    tmp_path: Path,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace.compose_file_path = None
+    worktrees_root = tmp_path / "git" / "worktrees"
+    service, _stopper, cleaner = _service(session, worktrees_root=worktrees_root)
+
+    if action == "cancel":
+        await service.cancel_workspace(
+            workspace.id,
+            reason="operator requested",
+            stop_stack=True,
+        )
+    else:
+        await service.stop_workspace(
+            workspace.id,
+            reason="operator requested",
+        )
+
+    events = await _events(session, workspace.id)
+    release_event = next(
+        event for event in events if event.event_type == "workspace.terminal_runtime_released"
+    )
+    assert not worktrees_root.exists()
+    assert cleaner.calls[0].compose_file_path is None
+    assert cleaner.calls[0].worktree_host_path is None
+    assert release_event.payload is not None
+    assert "compose_file_path" not in release_event.payload["runtime"]
+    assert "worktree_path" not in release_event.payload["preserved"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_record_terminal_release_failure_when_cleanup_raises(
+    session: AsyncSession,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    cleaner = RaisingCleaner(error_message=f"{action} cleanup exploded")
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    if action == "cancel":
+        response = await service.cancel_workspace(
+            workspace.id,
+            reason="operator requested",
+            stop_stack=True,
+        )
+    else:
+        response = await service.stop_workspace(
+            workspace.id,
+            reason="operator requested",
+        )
+    operations = await _operations(session, workspace.id)
+    release_event = next(
+        event
+        for event in await _events(session, workspace.id)
+        if event.event_type == "workspace.terminal_runtime_release_failed"
+    )
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert stopper.calls == [workspace.compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert operations[0].status == OperationStatus.succeeded.value
+    assert operations[0].result == {"status": WorkspaceStatus.cancelled.value}
+    assert release_event.reason_code == "TERMINAL_RUNTIME_RELEASE_FAILED"
+    assert release_event.payload is not None
+    cleanup = release_event.payload["cleanup"]
+    assert cleanup["status"] == "partial"
+    assert cleanup["reason_code"] == "TERMINAL_RUNTIME_RELEASE_EXCEPTION"
+    assert cleanup["failed_steps"][0]["name"] == "terminal_runtime_release"
+    assert cleanup["failed_steps"][0]["reason_code"] == "TERMINAL_RUNTIME_RELEASE_EXCEPTION"
+    assert cleanup["failed_steps"][0]["error"] == (f"RuntimeError: {action} cleanup exploded")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_redact_terminal_release_cleanup_exception_evidence(
+    session: AsyncSession,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    credentialed_url = "https://svc-user:super-secret-token@github.com/example/private.git"
+    api_token = "ghp_1234567890abcdef"
+    cleaner = RaisingCleaner(
+        error_message=(
+            f"{action} cleanup failed for {credentialed_url} with GITHUB_TOKEN={api_token}"
+        )
+    )
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    if action == "cancel":
+        await service.cancel_workspace(
+            workspace.id,
+            reason="operator requested",
+            stop_stack=True,
+        )
+    else:
+        await service.stop_workspace(
+            workspace.id,
+            reason="operator requested",
+        )
+    release_event = next(
+        event
+        for event in await _events(session, workspace.id)
+        if event.event_type == "workspace.terminal_runtime_release_failed"
+    )
+
+    assert release_event.payload is not None
+    failed_step = release_event.payload["cleanup"]["failed_steps"][0]
+    assert "super-secret-token" not in failed_step["error"]
+    assert api_token not in failed_step["error"]
+    assert "https://[redacted]@github.com/example/private.git" in failed_step["error"]
+    assert "GITHUB_TOKEN=[redacted]" in failed_step["error"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_propagate_terminal_release_cancellation_without_success(
+    session: AsyncSession,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    await session.commit()
+    cleaner = CancelledCleaner()
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    with pytest.raises(asyncio.CancelledError):
+        if action == "cancel":
+            await service.cancel_workspace(
+                workspace_id,
+                reason="operator requested",
+                stop_stack=True,
+            )
+        else:
+            await service.stop_workspace(
+                workspace_id,
+                reason="operator requested",
+            )
+
+    await session.rollback()
+    persisted = await WorkspaceRepository(session).get(workspace_id)
+    operations = await _operations(session, workspace_id)
+    release_events = [
+        event
+        for event in await _events(session, workspace_id)
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+
+    assert persisted is not None
+    assert persisted.status == WorkspaceStatus.ready.value
+    assert stopper.calls == [compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert len(operations) == 1
+    assert operations[0].type == action
+    assert operations[0].status == OperationStatus.running.value
+    assert operations[0].finished_at is None
+    assert operations[0].error_code is None
+    assert operations[0].error_message is None
+    assert operations[0].result is None
+    assert release_events == []
+
+    with pytest.raises(WorkspaceTransitionBlockedByActiveOperationError) as blocked:
+        await WorkspaceRepository(session).transition(
+            persisted,
+            to=WorkspaceStatus.running,
+            reason_code="TEST_AFTER_CANCELLED_TEARDOWN",
+        )
+    assert blocked.value.operation.id == operations[0].id
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_retry_expired_idempotent_teardown_operation(
+    session: AsyncSession,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    reason = "operator requested"
+    idempotency_key = f"{action}-expired-teardown"
+    operation_type = OperationType.cancel if action == "cancel" else OperationType.stop
+    payload = {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": reason,
+        "reason_code": "OPERATOR_CANCEL" if action == "cancel" else "OPERATOR_STOP",
+        "requested_action": action,
+    }
+    if action == "cancel":
+        payload["stop_stack"] = True
+    operation = await OperationRepository(session).create(
+        workspace_id=workspace_id,
+        operation_type=operation_type,
+        status=OperationStatus.running,
+        payload=payload,
+        idempotency_key=idempotency_key,
+    )
+    stale_started_at = datetime.now(UTC) - timedelta(days=30)
+    operation.started_at = stale_started_at
+    await session.commit()
+    service, stopper, cleaner = _service(session)
+
+    if action == "cancel":
+        response = await service.cancel_workspace(
+            workspace_id,
+            reason=reason,
+            stop_stack=True,
+            idempotency_key=idempotency_key,
+        )
+    else:
+        response = await service.stop_workspace(
+            workspace_id,
+            reason=reason,
+            idempotency_key=idempotency_key,
+        )
+
+    operations = await _operations(session, workspace_id)
+
+    assert response.operation_id == operation.id
+    assert response.operation_status == OperationStatus.succeeded.value
+    assert response.status == WorkspaceStatus.cancelled
+    assert stopper.calls == [compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert [row.id for row in operations] == [operation.id]
+    assert operations[0].status == OperationStatus.succeeded.value
+    assert operations[0].started_at == stale_started_at
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_preserve_precommitted_operation_when_cancelled_again(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    cleaner = CancelledCleaner()
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+    original_rollback = session.rollback
+    cancel_task: asyncio.Task[None] | None = None
+    rollback_calls = 0
+
+    async def _rollback_with_second_cancel() -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+        if rollback_calls == 1:
+            assert cancel_task is not None
+            cancel_task.cancel()
+            await asyncio.sleep(0)
+        await original_rollback()
+
+    monkeypatch.setattr(session, "rollback", _rollback_with_second_cancel)
+
+    async def _cancel_or_stop() -> None:
+        if action == "cancel":
+            await service.cancel_workspace(
+                workspace_id,
+                reason="operator requested",
+                stop_stack=True,
+                idempotency_key="cancel-double-cancel",
+            )
+        else:
+            await service.stop_workspace(
+                workspace_id,
+                reason="operator requested",
+                idempotency_key="stop-double-cancel",
+            )
+
+    cancel_task = asyncio.create_task(_cancel_or_stop())
+    with pytest.raises(asyncio.CancelledError):
+        await cancel_task
+
+    await session.rollback()
+    operations = await _operations(session, workspace_id)
+
+    assert cleaner.calls
+    assert len(operations) == 1
+    assert operations[0].type == action
+    assert operations[0].status == OperationStatus.running.value
+    assert operations[0].finished_at is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_fail_precommitted_operation_when_claim_refresh_errors(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    claim_check_failures = 0
+    original_get_for_update = WorkspaceRepository.get_for_update
+
+    class ClaimCheckFailingStopper(RecordingStopper):
+        async def __call__(self, compose_project_name: str | None) -> None:
+            await super().__call__(compose_project_name)
+
+            async def _raise_claim_check_failure(
+                repo: WorkspaceRepository,
+                requested_workspace_id: str,
+            ) -> Workspace | None:
+                nonlocal claim_check_failures
+                if claim_check_failures == 0 and requested_workspace_id == workspace_id:
+                    claim_check_failures += 1
+                    raise SQLAlchemyError("terminal claim refresh failed")
+                return await original_get_for_update(repo, requested_workspace_id)
+
+            monkeypatch.setattr(
+                WorkspaceRepository,
+                "get_for_update",
+                _raise_claim_check_failure,
+            )
+
+    service, stopper, cleaner = _service(session, stopper=ClaimCheckFailingStopper())
+
+    with pytest.raises(SQLAlchemyError, match="terminal claim refresh failed"):
+        if action == "cancel":
+            await service.cancel_workspace(
+                workspace_id,
+                reason="operator requested",
+                stop_stack=True,
+            )
+        else:
+            await service.stop_workspace(
+                workspace_id,
+                reason="operator requested",
+            )
+
+    await session.rollback()
+    operations = await _operations(session, workspace_id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace_id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
+    release_events = [
+        event
+        for event in await _events(session, workspace_id)
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+
+    assert claim_check_failures == 1
+    assert stopper.calls == [compose_project_name]
+    assert cleaner.calls == []
+    assert len(operations) == 1
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
+    assert operations[0].error_message == "SQLAlchemyError: terminal claim refresh failed"
+    assert operations[0].result == {"status": WorkspaceStatus.ready.value}
+    assert operations[0].finished_at is not None
+    assert len(audit_events) == 1
+    assert audit_events[0].reason_code == "CONTROL_OPERATION_FAILED"
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["action"] == action
+    assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["evidence"] == {
+        "error_type": "SQLAlchemyError",
+        "error_message": "SQLAlchemyError: terminal claim refresh failed",
+    }
+    assert release_events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_fail_precommitted_operation_when_post_teardown_db_errors(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    service, stopper, cleaner = _service(session)
+    transition_calls = 0
+
+    async def _raise_transition_failure(
+        self: WorkspaceRepository,
+        workspace: Workspace,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal transition_calls
+        transition_calls += 1
+        raise SQLAlchemyError("post teardown transition failed")
+
+    monkeypatch.setattr(WorkspaceRepository, "transition", _raise_transition_failure)
+
+    with pytest.raises(SQLAlchemyError, match="post teardown transition failed"):
+        if action == "cancel":
+            await service.cancel_workspace(
+                workspace_id,
+                reason="operator requested",
+                stop_stack=True,
+            )
+        else:
+            await service.stop_workspace(
+                workspace_id,
+                reason="operator requested",
+            )
+
+    await session.rollback()
+    operations = await _operations(session, workspace_id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace_id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
+
+    assert transition_calls == 1
+    assert stopper.calls == [compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert len(operations) == 1
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
+    assert operations[0].error_message == "SQLAlchemyError: post teardown transition failed"
+    assert operations[0].result == {"status": WorkspaceStatus.ready.value}
+    assert operations[0].finished_at is not None
+    assert len(audit_events) == 1
+    assert audit_events[0].reason_code == "CONTROL_OPERATION_FAILED"
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["action"] == action
+    assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["evidence"] == {
+        "error_type": "SQLAlchemyError",
+        "error_message": "SQLAlchemyError: post teardown transition failed",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_fail_precommitted_operation_when_cancelled_after_teardown(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    service, stopper, cleaner = _service(session)
+    transition_calls = 0
+
+    async def _cancel_during_transition(
+        self: WorkspaceRepository,
+        workspace: Workspace,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal transition_calls
+        del self, workspace, args, kwargs
+        transition_calls += 1
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(WorkspaceRepository, "transition", _cancel_during_transition)
+
+    with pytest.raises(asyncio.CancelledError):
+        if action == "cancel":
+            await service.cancel_workspace(
+                workspace_id,
+                reason="operator requested",
+                stop_stack=True,
+            )
+        else:
+            await service.stop_workspace(
+                workspace_id,
+                reason="operator requested",
+            )
+
+    await session.rollback()
+    persisted = await WorkspaceRepository(session).get(workspace_id)
+    operations = await _operations(session, workspace_id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace_id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
+
+    assert persisted is not None
+    assert persisted.status == WorkspaceStatus.ready.value
+    assert transition_calls == 1
+    assert stopper.calls == [compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert len(operations) == 1
+    assert operations[0].type == action
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
+    assert operations[0].error_message == "CancelledError: operation was cancelled"
+    assert operations[0].result == {"status": WorkspaceStatus.ready.value}
+    assert operations[0].finished_at is not None
+    assert len(audit_events) == 1
+    assert audit_events[0].reason_code == "CONTROL_OPERATION_FAILED"
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["action"] == action
+    assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["evidence"] == {
+        "error_type": "CancelledError",
+        "error_message": "CancelledError: operation was cancelled",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_complete_when_terminal_release_event_recording_raises(
+    session: AsyncSession,
+    action: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    service, stopper, cleaner = _service(session)
+
+    async def _raise_event_recording_failure(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("terminal runtime release event insert failed")
+
+    monkeypatch.setattr(
+        "awf.service.controls.record_terminal_runtime_release_event",
+        _raise_event_recording_failure,
+    )
+
+    with capture_logs() as captured:
+        if action == "cancel":
+            response = await service.cancel_workspace(
+                workspace.id,
+                reason="operator requested",
+                stop_stack=True,
+            )
+        else:
+            response = await service.stop_workspace(
+                workspace.id,
+                reason="operator requested",
+            )
+
+    operations = await _operations(session, workspace.id)
+    release_events = [
+        event
+        for event in await _events(session, workspace.id)
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert stopper.calls == [workspace.compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert operations[0].status == OperationStatus.succeeded.value
+    assert operations[0].result == {"status": WorkspaceStatus.cancelled.value}
+    assert release_events == []
+    assert any(
+        entry["event"] == "controls.terminal_runtime_release_event_record_failed"
+        and entry["workspace_id"] == workspace.id
+        and entry["source"] == f"service.controls.{action}"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_complete_when_terminal_release_event_recording_hits_db_error(
+    session: AsyncSession,
+    action: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    service, stopper, cleaner = _service(session)
+
+    async def _raise_db_event_recording_failure(
+        session: AsyncSession,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        await session.execute(text("SELECT 1 / 0"))
+
+    monkeypatch.setattr(
+        "awf.service.controls.record_terminal_runtime_release_event",
+        _raise_db_event_recording_failure,
+    )
+
+    with capture_logs() as captured:
+        if action == "cancel":
+            response = await service.cancel_workspace(
+                workspace.id,
+                reason="operator requested",
+                stop_stack=True,
+            )
+        else:
+            response = await service.stop_workspace(
+                workspace.id,
+                reason="operator requested",
+            )
+
+    operations = await _operations(session, workspace.id)
+    release_events = [
+        event
+        for event in await _events(session, workspace.id)
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert stopper.calls == [workspace.compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert operations[0].status == OperationStatus.succeeded.value
+    assert operations[0].result == {"status": WorkspaceStatus.cancelled.value}
+    assert release_events == []
+    assert any(
+        entry["event"] == "controls.terminal_runtime_release_event_record_failed"
+        and entry["workspace_id"] == workspace.id
+        and entry["source"] == f"service.controls.{action}"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_cancel_with_no_stop_stack_skips_terminal_runtime_release(
+    session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    worktrees_root = tmp_path / "git" / "worktrees"
+    service, stopper, cleaner = _service(session, worktrees_root=worktrees_root)
+
+    response = await service.cancel_workspace(
+        workspace.id,
+        reason="operator requested",
+        stop_stack=False,
+    )
+    events = await _events(session, workspace.id)
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert stopper.calls == []
+    assert cleaner.calls == []
+    assert not any(
+        event.event_type.startswith("workspace.terminal_runtime_release") for event in events
+    )
+
+
+@pytest.mark.unit
+async def test_cancel_already_cancelled_workspace_with_stop_stack_releases_terminal_runtime(
+    session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.cancelled)
+    worktrees_root = tmp_path / "git" / "worktrees"
+    service, stopper, cleaner = _service(session, worktrees_root=worktrees_root)
+
+    response = await service.cancel_workspace(
+        workspace.id,
+        reason="repeat cancel",
+        stop_stack=True,
+    )
+    events = await _events(session, workspace.id)
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert stopper.calls == [workspace.compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert cleaner.calls[0].remove_volumes is False
+    assert cleaner.calls[0].remove_worktree is False
+    cancel_event = next(
+        event for event in events if event.event_type == "workspace.cancel_requested"
+    )
+    release_event = next(
+        event for event in events if event.event_type == "workspace.terminal_runtime_released"
+    )
+    assert cancel_event.payload == {"reason": "repeat cancel", "stop_stack": True}
+    assert release_event.reason_code == "TERMINAL_RUNTIME_RELEASED"
 
 
 @pytest.mark.unit
@@ -1122,6 +2771,60 @@ async def test_validate_monitoring_pr_creates_validate_only_operation_and_coales
     }
     assert state_event.old_state == WorkspaceStatus.monitoring_pr.value
     assert state_event.new_state == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_validate_translates_teardown_race_during_ready_transition(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/49"
+    await session.flush()
+    original_add_event = WorkspaceRepository.add_event
+    active_stop: Operation | None = None
+
+    async def add_event_and_start_teardown(
+        self: WorkspaceRepository,
+        target: Workspace,
+        *,
+        event_type: str,
+        reason_code: str,
+        payload: dict[str, object] | None = None,
+    ) -> WorkspaceEvent:
+        nonlocal active_stop
+        event = await original_add_event(
+            self,
+            target,
+            event_type=event_type,
+            reason_code=reason_code,
+            payload=payload,
+        )
+        if event_type == "workspace.validate_requested":
+            active_stop = await OperationRepository(session).create(
+                workspace_id=target.id,
+                operation_type=OperationType.stop,
+                status=OperationStatus.running,
+                payload={"source": "operator_api"},
+            )
+        return event
+
+    monkeypatch.setattr(WorkspaceRepository, "add_event", add_event_and_start_teardown)
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceActiveOperationConflictError) as exc_info:
+        await service.request_validate_workspace(
+            workspace.id,
+            reason="rerun required validation",
+        )
+
+    assert active_stop is not None
+    assert exc_info.value.detail == {
+        "operation_id": active_stop.id,
+        "operation_type": OperationType.stop.value,
+        "operation_status": OperationStatus.running.value,
+    }
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
 
 
 @pytest.mark.unit

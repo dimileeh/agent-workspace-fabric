@@ -3,27 +3,34 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Final, Protocol, TypeVar, cast
+from uuid import uuid4
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceControlResponse
-from awf.common.config import get_settings
+from awf.common.audit import redact_audit_text
+from awf.common.config import Settings, get_settings
 from awf.common.ids import new_event_id
+from awf.common.logging import get_logger
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TIMEOUT_SECONDS,
     MergeCandidateRepository,
     OperationRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
+    external_runtime_teardown_operation_blocks_controls,
 )
 from awf.node.cleanup import (
     WorkspaceCleaner,
@@ -39,14 +46,27 @@ from awf.service.secret_leases import (
     SecretLeaseService,
     secret_lease_revocation_summary,
 )
+from awf.service.terminal_runtime import (
+    TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX,
+    TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS,
+    TERMINAL_RUNTIME_RELEASE_EXCEPTION_REASON_CODE,
+    record_terminal_runtime_release_event,
+    terminal_runtime_release_claim_active,
+)
 from awf.service.workspace_runtime_health import (
     OPERATOR_REFRESH_EVENT_TYPE,
     OPERATOR_REFRESH_REASON_CODE,
 )
 
+# Fast pre-cleanup stop hook. Implementations must be non-destructive: terminal
+# runtime cleanup is responsible for removing containers/networks while preserving
+# volumes, worktrees, logs, and other salvage evidence.
 ProjectStopper = Callable[[str | None], Awaitable[None]]
 CleanupResultLike = WorkspaceCleanupResult | Sequence[str] | Mapping[str, object]
 CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
+ControlSessionFactory = async_sessionmaker[AsyncSession]
+_log = get_logger(__name__)
+_T = TypeVar("_T")
 _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,
@@ -64,6 +84,14 @@ _REBASE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _DESTROYING_OR_DESTROYED_STATUSES = frozenset(
     {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}
 )
+_RESOURCE_RESERVATION_RELEASE_STATUSES = frozenset(
+    {
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
+        WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroyed,
+    }
+)
 _REBASE_DESTRUCTIVE_CONFLICT_TYPES = frozenset(
     {
         OperationType.cancel.value,
@@ -79,7 +107,14 @@ _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
 _AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
+_CONTROL_OPERATION_FAILED_REASON_CODE = "CONTROL_OPERATION_FAILED"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
+_TEARDOWN_OPERATION_HEARTBEAT_STOPPED_MESSAGE = (
+    "teardown operation lease heartbeat stopped before external runtime work completed"
+)
+_RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS: Final = (
+    EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TIMEOUT_SECONDS / 3
+)
 
 
 class _PreparedOperationKind(StrEnum):
@@ -91,8 +126,16 @@ class _PreparedOperationKind(StrEnum):
 class _PreparedOperation:
     workspace: Workspace
     replay: Operation | None = None
+    resume: Operation | None = None
     kind: _PreparedOperationKind | None = None
     idempotency_key: str | None = None
+
+
+@dataclass(frozen=True)
+class _ControlTerminalRuntimeCleanup:
+    cleanup: WorkspaceCleanupResult
+    preserved_worktree_host_path: Path | None
+    claim_owner_id: str | None = None
 
 
 class WorkspaceCleanerProtocol(Protocol):
@@ -202,6 +245,15 @@ class WorkspaceRemonitorStateError(WorkspaceControlError):
         )
 
 
+class WorkspaceRemonitorTerminalRuntimeReleaseInProgressError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_TERMINAL_RUNTIME_RELEASE_IN_PROGRESS",
+            message="Workspace terminal runtime release is still cleaning up.",
+            detail={"status": workspace.status},
+        )
+
+
 class WorkspaceRefreshStateError(WorkspaceControlError):
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
@@ -277,6 +329,15 @@ class WorkspaceRebaseActiveConflictError(WorkspaceControlError):
         )
 
 
+class WorkspaceActiveOperationConflictError(WorkspaceControlError):
+    def __init__(self, operation: Operation) -> None:
+        super().__init__(
+            error_code="WORKSPACE_OPERATION_CONFLICT",
+            message="Workspace operation conflicts with active runtime teardown.",
+            detail=_operation_conflict_detail(operation),
+        )
+
+
 class WorkspaceControlService:
     """Business logic for sensitive workspace lifecycle controls."""
 
@@ -286,10 +347,14 @@ class WorkspaceControlService:
         *,
         project_stopper: ProjectStopper,
         cleaner_factory: CleanerFactory,
+        worktrees_root: Path | None = None,
+        session_factory: ControlSessionFactory | None = None,
     ) -> None:
         self._session = session
         self._project_stopper = project_stopper
         self._cleaner_factory = cleaner_factory
+        self._worktrees_root = worktrees_root
+        self._session_factory = session_factory or _derive_control_session_factory(session)
 
     async def cancel_workspace(
         self,
@@ -331,16 +396,25 @@ class WorkspaceControlService:
                 message="workspace cancellation requested",
             )
 
-        operation = await operations.create(
-            workspace_id=workspace_id,
-            operation_type=OperationType.cancel,
-            status=OperationStatus.running,
-            payload=operation_payload,
-            idempotency_key=prepared.idempotency_key,
-        )
+        operation = prepared.resume
+        if operation is None:
+            operation = await operations.create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.cancel,
+                status=OperationStatus.running,
+                payload=operation_payload,
+                idempotency_key=prepared.idempotency_key,
+            )
+        committed_before_external_io = False
+        terminal_runtime_cleanup: _ControlTerminalRuntimeCleanup | None = None
         if stop_stack:
+            await self._commit_before_external_runtime_io()
+            committed_before_external_io = True
             try:
-                await self._project_stopper(workspace.compose_project_name)
+                terminal_runtime_cleanup = await self._run_with_teardown_operation_heartbeat(
+                    operation.id,
+                    self._stop_external_runtime_for_control(workspace),
+                )
             except WorkspaceStackStopError as exc:
                 await _finish_stack_stop_failed_operation(
                     self._session,
@@ -350,43 +424,124 @@ class WorkspaceControlService:
                     exc=exc,
                 )
                 raise
-        if (
-            workspace.status != WorkspaceStatus.cancelled.value
-            and WorkspaceStateMachine.can_transition(
-                WorkspaceStatus(workspace.status),
-                WorkspaceStatus.cancelled,
+            except asyncio.CancelledError:
+                await self._preserve_precommitted_cancelled_operation(operation.id)
+                raise
+            except Exception as exc:
+                await _finish_precommitted_control_operation_failed(
+                    self._session,
+                    operation_id=operation.id,
+                    workspace_id=workspace.id,
+                    exc=exc,
+                )
+                raise
+        try:
+            if stop_stack:
+                workspace = await self._require_workspace_for_update(repo, workspace_id)
+                if conflict := _workspace_version_conflict(workspace, expected_version):
+                    if terminal_runtime_cleanup is not None:
+                        await self._record_terminal_runtime_release_for_control(
+                            workspace,
+                            release=terminal_runtime_cleanup,
+                            source="service.controls.cancel",
+                            require_terminal_status=False,
+                        )
+                        await self._release_terminal_runtime_claim_for_control(
+                            workspace,
+                            release=terminal_runtime_cleanup,
+                        )
+                    await _finish_version_conflict_operation(
+                        self._session,
+                        operations,
+                        operation,
+                        workspace=workspace,
+                        exc=conflict,
+                    )
+                    raise conflict
+            if (
+                workspace.status != WorkspaceStatus.cancelled.value
+                and WorkspaceStateMachine.can_transition(
+                    WorkspaceStatus(workspace.status),
+                    WorkspaceStatus.cancelled,
+                )
+            ):
+                await _transition_workspace_for_control(
+                    repo,
+                    workspace,
+                    to=WorkspaceStatus.cancelled,
+                    reason_code=_OPERATOR_CANCEL_REASON_CODE,
+                    payload=event_payload,
+                    allow_active_operation_id=operation.id,
+                )
+            else:
+                await repo.add_event(
+                    workspace,
+                    event_type="workspace.cancel_requested",
+                    reason_code=_OPERATOR_CANCEL_REASON_CODE,
+                    payload=event_payload,
+                )
+                await _release_active_resource_reservation_for_control(
+                    self._session,
+                    workspace,
+                )
+            if terminal_runtime_cleanup is not None:
+                await self._record_terminal_runtime_release_for_control(
+                    workspace,
+                    release=terminal_runtime_cleanup,
+                    source="service.controls.cancel",
+                )
+                await self._release_terminal_runtime_claim_for_control(
+                    workspace,
+                    release=terminal_runtime_cleanup,
+                )
+            await operations.finish(
+                operation,
+                status=OperationStatus.succeeded,
+                result={"status": workspace.status},
             )
-        ):
-            await repo.transition(
+            await _add_control_audit_event(
+                repo,
                 workspace,
-                to=WorkspaceStatus.cancelled,
+                operation=operation,
+                action=OperationType.cancel.value,
+                outcome="succeeded",
                 reason_code=_OPERATOR_CANCEL_REASON_CODE,
-                payload=event_payload,
+                extra={
+                    "stop_stack": stop_stack,
+                    "expected_version": expected_version,
+                },
             )
-        else:
-            await repo.add_event(
-                workspace,
-                event_type="workspace.cancel_requested",
-                reason_code=_OPERATOR_CANCEL_REASON_CODE,
-                payload=event_payload,
-            )
-        await operations.finish(
-            operation,
-            status=OperationStatus.succeeded,
-            result={"status": workspace.status},
-        )
-        await _add_control_audit_event(
-            repo,
-            workspace,
-            operation=operation,
-            action=OperationType.cancel.value,
-            outcome="succeeded",
-            reason_code=_OPERATOR_CANCEL_REASON_CODE,
-            extra={
-                "stop_stack": stop_stack,
-                "expected_version": expected_version,
-            },
-        )
+            if committed_before_external_io:
+                await self._session.commit()
+        except asyncio.CancelledError as exc:
+            if committed_before_external_io:
+                await self._finish_precommitted_cancelled_control_operation_failed(
+                    operation_id=operation.id,
+                    workspace_id=workspace_id,
+                    exc=exc,
+                    terminal_runtime_release_claim_owner_id=(
+                        terminal_runtime_cleanup.claim_owner_id
+                        if terminal_runtime_cleanup is not None
+                        else None
+                    ),
+                )
+            raise
+        except VersionConflictError:
+            raise
+        except Exception as exc:
+            if committed_before_external_io:
+                await _finish_precommitted_control_operation_failed(
+                    self._session,
+                    operation_id=operation.id,
+                    workspace_id=workspace_id,
+                    exc=exc,
+                    terminal_runtime_release_claim_owner_id=(
+                        terminal_runtime_cleanup.claim_owner_id
+                        if terminal_runtime_cleanup is not None
+                        else None
+                    ),
+                )
+            raise
         return _control_response(
             workspace=workspace,
             operation=operation,
@@ -431,15 +586,22 @@ class WorkspaceControlService:
                 message="workspace stack stopped",
             )
 
-        operation = await operations.create(
-            workspace_id=workspace_id,
-            operation_type=OperationType.stop,
-            status=OperationStatus.running,
-            payload=operation_payload,
-            idempotency_key=prepared.idempotency_key,
-        )
+        operation = prepared.resume
+        if operation is None:
+            operation = await operations.create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.stop,
+                status=OperationStatus.running,
+                payload=operation_payload,
+                idempotency_key=prepared.idempotency_key,
+            )
+        await self._commit_before_external_runtime_io()
+        terminal_runtime_cleanup: _ControlTerminalRuntimeCleanup | None = None
         try:
-            await self._project_stopper(workspace.compose_project_name)
+            terminal_runtime_cleanup = await self._run_with_teardown_operation_heartbeat(
+                operation.id,
+                self._stop_external_runtime_for_control(workspace),
+            )
         except WorkspaceStackStopError as exc:
             await _finish_stack_stop_failed_operation(
                 self._session,
@@ -449,42 +611,444 @@ class WorkspaceControlService:
                 exc=exc,
             )
             raise
-        if _is_active(WorkspaceStatus(workspace.status)) and WorkspaceStateMachine.can_transition(
-            WorkspaceStatus(workspace.status),
-            WorkspaceStatus.cancelled,
-        ):
-            await repo.transition(
-                workspace,
-                to=WorkspaceStatus.cancelled,
-                reason_code=_OPERATOR_STOP_REASON_CODE,
-                payload=event_payload,
+        except asyncio.CancelledError:
+            await self._preserve_precommitted_cancelled_operation(operation.id)
+            raise
+        except Exception as exc:
+            await _finish_precommitted_control_operation_failed(
+                self._session,
+                operation_id=operation.id,
+                workspace_id=workspace.id,
+                exc=exc,
             )
-        else:
-            await repo.add_event(
-                workspace,
-                event_type="workspace.stack_stopped",
-                reason_code=_OPERATOR_STOP_REASON_CODE,
-                payload=event_payload,
+            raise
+        try:
+            workspace = await self._require_workspace_for_update(repo, workspace_id)
+            if conflict := _workspace_version_conflict(workspace, expected_version):
+                if terminal_runtime_cleanup is not None:
+                    await self._record_terminal_runtime_release_for_control(
+                        workspace,
+                        release=terminal_runtime_cleanup,
+                        source="service.controls.stop",
+                        require_terminal_status=False,
+                    )
+                    await self._release_terminal_runtime_claim_for_control(
+                        workspace,
+                        release=terminal_runtime_cleanup,
+                    )
+                await _finish_version_conflict_operation(
+                    self._session,
+                    operations,
+                    operation,
+                    workspace=workspace,
+                    exc=conflict,
+                )
+                raise conflict
+            if _is_active(
+                WorkspaceStatus(workspace.status)
+            ) and WorkspaceStateMachine.can_transition(
+                WorkspaceStatus(workspace.status),
+                WorkspaceStatus.cancelled,
+            ):
+                await _transition_workspace_for_control(
+                    repo,
+                    workspace,
+                    to=WorkspaceStatus.cancelled,
+                    reason_code=_OPERATOR_STOP_REASON_CODE,
+                    payload=event_payload,
+                    allow_active_operation_id=operation.id,
+                )
+            else:
+                await repo.add_event(
+                    workspace,
+                    event_type="workspace.stack_stopped",
+                    reason_code=_OPERATOR_STOP_REASON_CODE,
+                    payload=event_payload,
+                )
+                await _release_active_resource_reservation_for_control(
+                    self._session,
+                    workspace,
+                )
+            if terminal_runtime_cleanup is not None:
+                await self._record_terminal_runtime_release_for_control(
+                    workspace,
+                    release=terminal_runtime_cleanup,
+                    source="service.controls.stop",
+                )
+                await self._release_terminal_runtime_claim_for_control(
+                    workspace,
+                    release=terminal_runtime_cleanup,
+                )
+            await operations.finish(
+                operation,
+                status=OperationStatus.succeeded,
+                result={"status": workspace.status},
             )
-        await operations.finish(
-            operation,
-            status=OperationStatus.succeeded,
-            result={"status": workspace.status},
-        )
-        await _add_control_audit_event(
-            repo,
-            workspace,
-            operation=operation,
-            action=OperationType.stop.value,
-            outcome="succeeded",
-            reason_code=_OPERATOR_STOP_REASON_CODE,
-            extra={"expected_version": expected_version},
-        )
+            await _add_control_audit_event(
+                repo,
+                workspace,
+                operation=operation,
+                action=OperationType.stop.value,
+                outcome="succeeded",
+                reason_code=_OPERATOR_STOP_REASON_CODE,
+                extra={"expected_version": expected_version},
+            )
+            await self._session.commit()
+        except asyncio.CancelledError as exc:
+            await self._finish_precommitted_cancelled_control_operation_failed(
+                operation_id=operation.id,
+                workspace_id=workspace_id,
+                exc=exc,
+                terminal_runtime_release_claim_owner_id=(
+                    terminal_runtime_cleanup.claim_owner_id
+                    if terminal_runtime_cleanup is not None
+                    else None
+                ),
+            )
+            raise
+        except VersionConflictError:
+            raise
+        except Exception as exc:
+            await _finish_precommitted_control_operation_failed(
+                self._session,
+                operation_id=operation.id,
+                workspace_id=workspace_id,
+                exc=exc,
+                terminal_runtime_release_claim_owner_id=(
+                    terminal_runtime_cleanup.claim_owner_id
+                    if terminal_runtime_cleanup is not None
+                    else None
+                ),
+            )
+            raise
         return _control_response(
             workspace=workspace,
             operation=operation,
             message="workspace stack stopped",
         )
+
+    async def _stop_external_runtime_for_control(
+        self,
+        workspace: Workspace,
+    ) -> _ControlTerminalRuntimeCleanup | None:
+        await self._project_stopper(workspace.compose_project_name)
+        return await self._cleanup_terminal_runtime_for_control(workspace)
+
+    async def _run_with_teardown_operation_heartbeat(
+        self,
+        operation_id: str,
+        work: Coroutine[Any, Any, _T],
+    ) -> _T:
+        if self._session_factory is None:
+            return await work
+
+        work_task: asyncio.Task[_T] = asyncio.create_task(
+            work,
+            name=f"awf-teardown-operation-work-{operation_id}",
+        )
+        heartbeat_task: asyncio.Task[str] = asyncio.create_task(
+            _renew_runtime_teardown_operation_lease_loop(
+                self._session_factory,
+                operation_id=operation_id,
+                interval_seconds=_RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS,
+            ),
+            name=f"awf-teardown-operation-lease-{operation_id}",
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {work_task, heartbeat_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat_task in done:
+                if work_task in done:
+                    return work_task.result()
+                heartbeat_stop_reason = heartbeat_task.result()
+                work_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await work_task
+                raise RuntimeError(
+                    f"{_TEARDOWN_OPERATION_HEARTBEAT_STOPPED_MESSAGE}: {heartbeat_stop_reason}"
+                )
+            return work_task.result()
+        finally:
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+            if not work_task.done():
+                work_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await work_task
+
+    async def _cleanup_terminal_runtime_for_control(
+        self,
+        workspace: Workspace,
+    ) -> _ControlTerminalRuntimeCleanup | None:
+        if await self._terminal_runtime_release_claim_active_for_control(workspace):
+            return None
+
+        claim_owner_id = _control_terminal_runtime_release_claim_owner(workspace)
+        cleanup_worktree_host_path: Path | None = None
+        preserved_worktree_host_path: Path | None = None
+        if self._worktrees_root is not None:
+            candidate_worktree_path = self._worktrees_root / workspace.id
+            if candidate_worktree_path.exists():
+                cleanup_worktree_host_path = candidate_worktree_path
+                preserved_worktree_host_path = candidate_worktree_path
+        cleaner = self._cleaner_factory()
+        try:
+            cleanup = await self._run_with_terminal_runtime_release_claim_heartbeat(
+                workspace.id,
+                owner_id=claim_owner_id,
+                work=cleaner.cleanup(
+                    workspace_id=workspace.id,
+                    repo_url=workspace.repo_url,
+                    compose_project_name=workspace.compose_project_name,
+                    compose_file_path=(
+                        Path(workspace.compose_file_path) if workspace.compose_file_path else None
+                    ),
+                    worktree_host_path=cleanup_worktree_host_path,
+                    remove_volumes=False,
+                    remove_worktree=False,
+                ),
+            )
+        except asyncio.CancelledError:
+            if claim_owner_id is not None:
+                await self._release_terminal_runtime_claim_for_control_now(
+                    workspace.id,
+                    owner_id=claim_owner_id,
+                )
+            raise
+        except Exception as exc:
+            cleanup_result = _terminal_runtime_release_exception_result(exc)
+        else:
+            cleanup_result = _normalize_cleanup_result(cleanup)
+        return _ControlTerminalRuntimeCleanup(
+            cleanup=cleanup_result,
+            preserved_worktree_host_path=preserved_worktree_host_path,
+            claim_owner_id=claim_owner_id,
+        )
+
+    async def _run_with_terminal_runtime_release_claim_heartbeat(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str | None,
+        work: Coroutine[Any, Any, _T],
+    ) -> _T:
+        if self._session_factory is None or owner_id is None:
+            return await work
+
+        work_task: asyncio.Task[_T] = asyncio.create_task(
+            work,
+            name=f"awf-control-terminal-runtime-cleanup-{workspace_id}",
+        )
+        heartbeat_task: asyncio.Task[None] = asyncio.create_task(
+            _refresh_terminal_runtime_release_claim_loop(
+                self._session_factory,
+                workspace_id=workspace_id,
+                owner_id=owner_id,
+            ),
+            name=f"awf-control-terminal-runtime-claim-{workspace_id}",
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {work_task, heartbeat_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat_task in done:
+                if work_task in done:
+                    return work_task.result()
+                work_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await work_task
+                raise RuntimeError(
+                    "terminal runtime release claim heartbeat stopped before cleanup completed"
+                )
+            return work_task.result()
+        finally:
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+            if not work_task.done():
+                work_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await work_task
+
+    async def _terminal_runtime_release_claim_active_for_control(
+        self,
+        workspace: Workspace,
+    ) -> bool:
+        locked_workspace = await WorkspaceRepository(self._session).get_for_update(workspace.id)
+        if locked_workspace is None:
+            raise WorkspaceNotFoundError(workspace.id)
+        active = terminal_runtime_release_claim_active(locked_workspace)
+        if not active and _control_terminal_runtime_release_claim_required(locked_workspace):
+            locked_workspace.execution_claimed_by = (
+                f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:{uuid4().hex}"
+            )
+            locked_workspace.execution_claim_expires_at = (
+                _terminal_runtime_release_claim_expires_at()
+            )
+        await self._session.commit()
+        return active
+
+    async def _release_terminal_runtime_claim_for_control_now(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> None:
+        try:
+            await WorkspaceRepository(self._session).release_execution_claim(
+                workspace_id,
+                owner_id=owner_id,
+            )
+            await self._session.commit()
+        except Exception as exc:
+            with suppress(Exception):
+                await self._session.rollback()
+            _log.warning(
+                "controls.terminal_runtime_release_claim_clear_failed",
+                workspace_id=workspace_id,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
+
+    async def _release_terminal_runtime_claim_for_control(
+        self,
+        workspace: Workspace,
+        *,
+        release: _ControlTerminalRuntimeCleanup,
+    ) -> None:
+        if release.claim_owner_id is None:
+            return
+        released = await WorkspaceRepository(self._session).release_execution_claim(
+            workspace.id,
+            owner_id=release.claim_owner_id,
+        )
+        if released:
+            workspace.execution_claimed_by = None
+            workspace.execution_claim_expires_at = None
+
+    async def _record_terminal_runtime_release_for_control(
+        self,
+        workspace: Workspace,
+        *,
+        release: _ControlTerminalRuntimeCleanup,
+        source: str,
+        require_terminal_status: bool = True,
+    ) -> None:
+        if require_terminal_status and workspace.status not in {
+            WorkspaceStatus.completed.value,
+            WorkspaceStatus.failed.value,
+            WorkspaceStatus.cancelled.value,
+            WorkspaceStatus.destroyed.value,
+        }:
+            return
+        await self._session.flush()
+        try:
+            async with self._session.begin_nested():
+                await record_terminal_runtime_release_event(
+                    self._session,
+                    workspace_id=workspace.id,
+                    cleanup=release.cleanup,
+                    source=source,
+                    worktree_host_path=release.preserved_worktree_host_path,
+                    allow_non_terminal=not require_terminal_status,
+                )
+        except Exception as exc:
+            _log.warning(
+                "controls.terminal_runtime_release_event_record_failed",
+                workspace_id=workspace.id,
+                source=source,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
+
+    async def _commit_before_external_runtime_io(self) -> None:
+        await self._session.flush()
+        await self._session.commit()
+
+    async def _preserve_precommitted_cancelled_operation(self, operation_id: str) -> None:
+        preserve = self._preserve_precommitted_cancelled_operation_unshielded
+        if self._session_factory is None:
+            await preserve(operation_id, session=self._session)
+            return
+        preserve_task = asyncio.create_task(preserve(operation_id))
+        while not preserve_task.done():
+            try:
+                await asyncio.shield(preserve_task)
+            except asyncio.CancelledError:
+                # The caller is already in a cancellation handler and will re-raise.
+                continue
+        with suppress(Exception, asyncio.CancelledError):
+            preserve_task.result()
+
+    async def _finish_precommitted_cancelled_control_operation_failed(
+        self,
+        *,
+        operation_id: str,
+        workspace_id: str,
+        exc: BaseException,
+        terminal_runtime_release_claim_owner_id: str | None = None,
+    ) -> None:
+        if self._session_factory is None:
+            await _finish_precommitted_control_operation_failed(
+                self._session,
+                operation_id=operation_id,
+                workspace_id=workspace_id,
+                exc=exc,
+                terminal_runtime_release_claim_owner_id=terminal_runtime_release_claim_owner_id,
+            )
+            return
+
+        rollback_task = asyncio.create_task(self._session.rollback())
+        while not rollback_task.done():
+            try:
+                await asyncio.shield(rollback_task)
+            except asyncio.CancelledError:
+                continue
+        with suppress(Exception, asyncio.CancelledError):
+            rollback_task.result()
+
+        async def _finish_in_recovery_session() -> None:
+            assert self._session_factory is not None
+            async with self._session_factory() as recovery_session:
+                await _finish_precommitted_control_operation_failed(
+                    recovery_session,
+                    operation_id=operation_id,
+                    workspace_id=workspace_id,
+                    exc=exc,
+                    terminal_runtime_release_claim_owner_id=(
+                        terminal_runtime_release_claim_owner_id
+                    ),
+                )
+
+        finish_task = asyncio.create_task(_finish_in_recovery_session())
+        while not finish_task.done():
+            try:
+                await asyncio.shield(finish_task)
+            except asyncio.CancelledError:
+                # Preserve the failure record even if the caller is cancelled again.
+                continue
+        with suppress(Exception, asyncio.CancelledError):
+            finish_task.result()
+
+    async def _preserve_precommitted_cancelled_operation_unshielded(
+        self,
+        operation_id: str,
+        *,
+        session: AsyncSession | None = None,
+    ) -> None:
+        with suppress(Exception):
+            if session is not None:
+                await _preserve_precommitted_running_operation(session, operation_id)
+                return
+            if self._session_factory is None:
+                return
+            async with self._session_factory() as preserve_session:
+                await _preserve_precommitted_running_operation(
+                    preserve_session,
+                    operation_id,
+                )
 
     async def remonitor_workspace(
         self,
@@ -528,6 +1092,9 @@ class WorkspaceControlService:
 
         if not workspace.pr_url:
             raise WorkspaceRemonitorMissingPrUrlError(workspace)
+
+        if terminal_runtime_release_claim_active(workspace):
+            raise WorkspaceRemonitorTerminalRuntimeReleaseInProgressError(workspace)
 
         operation = await operations.create(
             workspace_id=workspace_id,
@@ -739,7 +1306,8 @@ class WorkspaceControlService:
             reason_code=_OPERATOR_VALIDATE_REASON_CODE,
             payload=validate_event_payload,
         )
-        await repo.transition(
+        await _transition_workspace_for_control(
+            repo,
             workspace,
             to=WorkspaceStatus.ready,
             reason_code=_OPERATOR_VALIDATE_REASON_CODE,
@@ -851,7 +1419,8 @@ class WorkspaceControlService:
             reason_code=_OPERATOR_REBASE_REASON_CODE,
             payload=rebase_event_payload,
         )
-        await repo.transition(
+        await _transition_workspace_for_control(
+            repo,
             workspace,
             to=WorkspaceStatus.ready,
             reason_code=_OPERATOR_REBASE_REASON_CODE,
@@ -969,7 +1538,8 @@ class WorkspaceControlService:
         if _is_active(current) and WorkspaceStateMachine.can_transition(
             current, WorkspaceStatus.cancelled
         ):
-            await repo.transition(
+            await _transition_workspace_for_control(
+                repo,
                 workspace,
                 to=WorkspaceStatus.cancelled,
                 reason_code=_OPERATOR_DESTROY_REASON_CODE,
@@ -977,7 +1547,8 @@ class WorkspaceControlService:
             )
             current = WorkspaceStatus.cancelled
         if WorkspaceStateMachine.can_transition(current, WorkspaceStatus.destroying):
-            await repo.transition(
+            await _transition_workspace_for_control(
+                repo,
                 workspace,
                 to=WorkspaceStatus.destroying,
                 reason_code=_OPERATOR_DESTROY_REASON_CODE,
@@ -1073,7 +1644,8 @@ class WorkspaceControlService:
             if WorkspaceStateMachine.can_transition(
                 WorkspaceStatus(workspace.status), WorkspaceStatus.failed
             ):
-                await repo.transition(
+                await _transition_workspace_for_control(
+                    repo,
                     workspace,
                     to=WorkspaceStatus.failed,
                     reason_code="CLEANUP_FAILED",
@@ -1117,7 +1689,8 @@ class WorkspaceControlService:
             if WorkspaceStateMachine.can_transition(
                 WorkspaceStatus(workspace.status), WorkspaceStatus.destroyed
             ):
-                await repo.transition(
+                await _transition_workspace_for_control(
+                    repo,
                     workspace,
                     to=WorkspaceStatus.destroyed,
                     reason_code="DESTROYED",
@@ -1230,6 +1803,16 @@ class WorkspaceControlService:
                     or not payload_matches
                 ):
                     raise IdempotencyConflictError()
+                if _can_resume_expired_runtime_teardown_operation(existing):
+                    workspace = await self._require_workspace_for_update(repo, workspace_id)
+                    if conflict := _workspace_version_conflict(workspace, expected_version):
+                        raise conflict
+                    _renew_runtime_teardown_operation(existing)
+                    return _PreparedOperation(
+                        workspace=workspace,
+                        resume=existing,
+                        idempotency_key=idempotency_key,
+                    )
                 workspace = await self._require_workspace(repo, workspace_id)
                 return _PreparedOperation(
                     workspace=workspace,
@@ -1239,11 +1822,15 @@ class WorkspaceControlService:
                 )
 
         workspace = await self._require_workspace_for_update(repo, workspace_id)
-        if expected_version is not None and workspace.version != expected_version:
-            raise VersionConflictError(
-                expected_version=expected_version,
-                actual_version=workspace.version,
-            )
+        if conflict := _workspace_version_conflict(workspace, expected_version):
+            raise conflict
+        active_teardown = await _find_active_operation(
+            operations,
+            workspace_id=workspace_id,
+            operation_types={OperationType.cancel.value, OperationType.stop.value},
+        )
+        if active_teardown is not None:
+            raise WorkspaceActiveOperationConflictError(active_teardown)
         if active_payload_identity is not None:
             active = await operations.find_active_matching_payload(
                 workspace_id=workspace_id,
@@ -1260,7 +1847,29 @@ class WorkspaceControlService:
         return _PreparedOperation(workspace=workspace, idempotency_key=idempotency_key)
 
 
+async def _transition_workspace_for_control(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    *,
+    to: WorkspaceStatus,
+    reason_code: str,
+    payload: dict[str, Any] | None = None,
+    allow_active_operation_id: str | None = None,
+) -> Workspace:
+    try:
+        return await repo.transition(
+            workspace,
+            to=to,
+            reason_code=reason_code,
+            payload=payload,
+            allow_active_operation_id=allow_active_operation_id,
+        )
+    except WorkspaceTransitionBlockedByActiveOperationError as exc:
+        raise WorkspaceActiveOperationConflictError(exc.operation) from exc
+
+
 async def stop_project_containers(compose_project_name: str | None) -> None:
+    """Stop running compose containers without removing salvage evidence."""
     if not compose_project_name:
         return
     proc = await _docker_process(
@@ -1333,6 +1942,11 @@ def default_cleaner() -> WorkspaceCleaner:
         git=GitManager(work_dir / "git"),
         compose=ComposeManager(work_dir=work_dir, template_path=template),
     )
+
+
+def default_worktrees_root(settings: Settings | None = None) -> Path:
+    resolved = settings or get_settings()
+    return Path(resolved.work_dir) / "git" / "worktrees"
 
 
 async def _reset_failed_workspace_for_remonitor(
@@ -1555,6 +2169,24 @@ def _normalize_cleanup_result(result: CleanupResultLike) -> WorkspaceCleanupResu
     )
 
 
+def _terminal_runtime_release_exception_result(exc: BaseException) -> WorkspaceCleanupResult:
+    return WorkspaceCleanupResult(
+        status="partial",
+        reason_code=TERMINAL_RUNTIME_RELEASE_EXCEPTION_REASON_CODE,
+        steps=(
+            WorkspaceCleanupStepResult(
+                name="terminal_runtime_release",
+                status="failed",
+                reason_code=TERMINAL_RUNTIME_RELEASE_EXCEPTION_REASON_CODE,
+                error=redact_audit_text(
+                    f"{type(exc).__name__}: {exc}",
+                    limit=1000,
+                ),
+            ),
+        ),
+    )
+
+
 def _cleanup_result_from_mapping(result: Mapping[str, object]) -> WorkspaceCleanupResult:
     status = _cleanup_status(result.get("status"))
     reason_code = _cleanup_reason_code(result.get("reason_code"), status=status)
@@ -1645,6 +2277,105 @@ def _cleanup_failure_message(cleanup_result: WorkspaceCleanupResult) -> str:
     return cleanup_result.reason_code
 
 
+def _derive_control_session_factory(
+    session: AsyncSession,
+) -> ControlSessionFactory | None:
+    bind = getattr(session, "bind", None)
+    if bind is None:
+        return None
+    return async_sessionmaker(
+        cast(Any, bind),
+        expire_on_commit=False,
+        class_=AsyncSession,
+        info=dict(session.info),
+    )
+
+
+async def _renew_runtime_teardown_operation_lease_loop(
+    session_factory: ControlSessionFactory,
+    *,
+    operation_id: str,
+    interval_seconds: float = _RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS,
+) -> str:
+    interval = max(float(interval_seconds), 0.001)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with session_factory() as session:
+                renewed = await OperationRepository(session).renew_teardown_lease(operation_id)
+                await session.commit()
+        except Exception as exc:
+            _log.warning(
+                "controls.teardown_operation_lease_renew_failed",
+                operation_id=operation_id,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
+            safe_exception = redact_audit_text(
+                f"{type(exc).__name__}: {exc}",
+                limit=400,
+            )
+            return f"lease renewal failed: {safe_exception}"
+        if renewed is None:
+            return "operation lease is no longer active"
+
+
+async def _refresh_terminal_runtime_release_claim_loop(
+    session_factory: ControlSessionFactory,
+    *,
+    workspace_id: str,
+    owner_id: str,
+    interval_seconds: float | None = None,
+) -> None:
+    interval = (
+        _terminal_runtime_release_claim_heartbeat_interval_seconds()
+        if interval_seconds is None
+        else interval_seconds
+    )
+    interval = max(float(interval), 0.001)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with session_factory() as session:
+                refreshed = await WorkspaceRepository(session).refresh_execution_claim(
+                    workspace_id,
+                    owner_id=owner_id,
+                    lease_expires_at=_terminal_runtime_release_claim_expires_at(),
+                )
+                await session.commit()
+        except Exception as exc:
+            _log.warning(
+                "controls.terminal_runtime_release_claim_refresh_failed",
+                workspace_id=workspace_id,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
+            return
+        if not refreshed:
+            _log.warning(
+                "controls.terminal_runtime_release_claim_lost",
+                workspace_id=workspace_id,
+            )
+            return
+
+
+def _terminal_runtime_release_claim_heartbeat_interval_seconds() -> float:
+    return max(0.001, min(60.0, TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS / 3))
+
+
+def _terminal_runtime_release_claim_expires_at() -> datetime:
+    return datetime.now(UTC) + timedelta(seconds=TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS)
+
+
+async def _preserve_precommitted_running_operation(
+    session: AsyncSession,
+    operation_id: str,
+) -> None:
+    await session.rollback()
+    operation = await OperationRepository(session).renew_teardown_lease(operation_id)
+    if operation is None:
+        return
+    await session.commit()
+
+
 async def _finish_stack_stop_failed_operation(
     session: AsyncSession,
     operations: OperationRepository,
@@ -1682,8 +2413,139 @@ async def _finish_stack_stop_failed_operation(
     await session.commit()
 
 
+async def _finish_version_conflict_operation(
+    session: AsyncSession,
+    operations: OperationRepository,
+    operation: Operation,
+    *,
+    workspace: Workspace,
+    exc: VersionConflictError,
+) -> None:
+    repo = WorkspaceRepository(session)
+    operation_payload = operation.payload if isinstance(operation.payload, dict) else {}
+    await operations.finish(
+        operation,
+        status=OperationStatus.failed,
+        result={"status": workspace.status},
+        error_code=exc.error_code,
+        error_message=_bounded_operation_error_message(exc.message),
+    )
+    await _add_control_audit_event(
+        repo,
+        workspace,
+        operation=operation,
+        action=operation.type,
+        outcome="failed",
+        reason_code=exc.error_code,
+        extra={
+            "stop_stack": operation_payload.get("stop_stack"),
+            "expected_version": operation_payload.get("expected_version"),
+        },
+        evidence=exc.detail,
+    )
+    await session.commit()
+
+
+async def _finish_precommitted_control_operation_failed(
+    session: AsyncSession,
+    *,
+    operation_id: str,
+    workspace_id: str,
+    exc: BaseException,
+    terminal_runtime_release_claim_owner_id: str | None = None,
+) -> None:
+    try:
+        await session.rollback()
+        operations = OperationRepository(session)
+        repo = WorkspaceRepository(session)
+        operation = await operations.get(operation_id)
+        if operation is None or operation.status != OperationStatus.running.value:
+            return
+        workspace = await repo.get_for_update(workspace_id)
+        if (
+            workspace is not None
+            and terminal_runtime_release_claim_owner_id is not None
+            and workspace.execution_claimed_by == terminal_runtime_release_claim_owner_id
+        ):
+            workspace.execution_claimed_by = None
+            workspace.execution_claim_expires_at = None
+        operation_payload = operation.payload if isinstance(operation.payload, dict) else {}
+        error_message = _control_operation_exception_message(exc)
+        await operations.finish(
+            operation,
+            status=OperationStatus.failed,
+            result={"status": workspace.status} if workspace is not None else None,
+            error_code=_CONTROL_OPERATION_FAILED_REASON_CODE,
+            error_message=error_message,
+        )
+        if workspace is not None:
+            try:
+                async with session.begin_nested():
+                    await _add_control_audit_event(
+                        repo,
+                        workspace,
+                        operation=operation,
+                        action=operation.type,
+                        outcome="failed",
+                        reason_code=_CONTROL_OPERATION_FAILED_REASON_CODE,
+                        extra={
+                            "stop_stack": operation_payload.get("stop_stack"),
+                            "expected_version": operation_payload.get("expected_version"),
+                        },
+                        evidence={
+                            "error_type": type(exc).__name__,
+                            "error_message": error_message,
+                        },
+                    )
+            except Exception as audit_exc:
+                _log.warning(
+                    "controls.precommitted_control_operation_audit_record_failed",
+                    operation_id=operation_id,
+                    workspace_id=workspace_id,
+                    error=redact_audit_text(repr(audit_exc), limit=400),
+                )
+        await session.commit()
+    except Exception as recovery_exc:
+        with suppress(Exception):
+            await session.rollback()
+        _log.warning(
+            "controls.precommitted_control_operation_failed_record_failed",
+            operation_id=operation_id,
+            workspace_id=workspace_id,
+            error=redact_audit_text(repr(recovery_exc), limit=400),
+        )
+
+
+def _workspace_version_conflict(
+    workspace: Workspace,
+    expected_version: int | None,
+) -> VersionConflictError | None:
+    if expected_version is None or workspace.version == expected_version:
+        return None
+    return VersionConflictError(
+        expected_version=expected_version,
+        actual_version=workspace.version,
+    )
+
+
 def _bounded_operation_error_message(message: str) -> str:
     return message[:_OPERATION_ERROR_MESSAGE_MAX_LENGTH]
+
+
+def _control_operation_exception_message(exc: BaseException) -> str:
+    detail = str(exc).strip()
+    if not detail:
+        detail = (
+            "operation was cancelled"
+            if isinstance(exc, asyncio.CancelledError)
+            else "operation failed without details"
+        )
+    return _bounded_operation_error_message(
+        redact_audit_text(
+            f"{type(exc).__name__}: {detail}",
+            limit=_OPERATION_ERROR_MESSAGE_MAX_LENGTH,
+        )
+    )
 
 
 async def _add_control_audit_event(
@@ -1721,10 +2583,52 @@ def _claim_reset_snapshot(workspace: Workspace) -> dict[str, str | None]:
     }
 
 
+def _control_terminal_runtime_release_claim_required(workspace: Workspace) -> bool:
+    return workspace.status in {
+        WorkspaceStatus.completed.value,
+        WorkspaceStatus.failed.value,
+        WorkspaceStatus.cancelled.value,
+        WorkspaceStatus.destroyed.value,
+    }
+
+
+def _control_terminal_runtime_release_claim_owner(workspace: Workspace) -> str | None:
+    if not _control_terminal_runtime_release_claim_required(workspace):
+        return None
+    owner_id = workspace.execution_claimed_by
+    if owner_id is None or not owner_id.startswith(
+        f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:"
+    ):
+        return None
+    if not terminal_runtime_release_claim_active(workspace):
+        return None
+    return owner_id
+
+
 def _json_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.isoformat()
+
+
+def _can_resume_expired_runtime_teardown_operation(operation: Operation) -> bool:
+    return (
+        operation.status == OperationStatus.running.value
+        and operation.type in {OperationType.cancel.value, OperationType.stop.value}
+        and not external_runtime_teardown_operation_blocks_controls(operation)
+    )
+
+
+def _renew_runtime_teardown_operation(operation: Operation) -> None:
+    now = datetime.now(UTC)
+    operation.status = OperationStatus.running.value
+    if operation.started_at is None:
+        operation.started_at = now
+    operation.lease_renewed_at = now
+    operation.finished_at = None
+    operation.error_code = None
+    operation.error_message = None
+    operation.result = None
 
 
 async def _find_active_operation(
@@ -1733,6 +2637,7 @@ async def _find_active_operation(
     workspace_id: str,
     operation_types: frozenset[str] | set[str],
 ) -> Operation | None:
+    now = datetime.now(UTC)
     active: list[Operation] = []
     for status in (OperationStatus.pending, OperationStatus.running):
         active.extend(
@@ -1744,8 +2649,14 @@ async def _find_active_operation(
         )
     active.sort(key=lambda operation: (operation.created_at, operation.id))
     for operation in active:
-        if operation.type in operation_types:
-            return operation
+        if operation.type not in operation_types:
+            continue
+        if operation.type in {
+            OperationType.cancel.value,
+            OperationType.stop.value,
+        } and not external_runtime_teardown_operation_blocks_controls(operation, now=now):
+            continue
+        return operation
     return None
 
 
@@ -1786,3 +2697,12 @@ def _is_active(status_value: WorkspaceStatus) -> bool:
         WorkspaceStatus.pushing,
         WorkspaceStatus.monitoring_pr,
     }
+
+
+async def _release_active_resource_reservation_for_control(
+    session: AsyncSession,
+    workspace: Workspace,
+) -> None:
+    if WorkspaceStatus(workspace.status) not in _RESOURCE_RESERVATION_RELEASE_STATUSES:
+        return
+    await ResourceReservationRepository(session).release_active_for_workspace(workspace.id)

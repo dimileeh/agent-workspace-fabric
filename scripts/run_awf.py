@@ -52,6 +52,7 @@ from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.node.cleanup import WorkspaceCleaner
 from awf.node.compose_manager import (
     AuthMount,
     CompanionService,
@@ -71,6 +72,7 @@ from awf.runtime.logs import LogStore, stream_compose_service_logs
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
+from awf.service.terminal_runtime import TerminalRuntimeReleaser
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TEMPLATE = _REPO_ROOT / "docker" / "compose" / "workspace.base.yml.j2"
@@ -115,6 +117,21 @@ _AGENT_AUTH_ENV_VARS = (
 
 # Central defaults used for every AWF-spawned agent CLI.
 _DEFAULT_AGENT_DEFAULTS = DEFAULT_AGENT_DEFAULTS
+
+
+def _build_terminal_runtime_releaser(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    git: GitManager,
+    compose: ComposeManager,
+    work_dir: Path,
+) -> TerminalRuntimeReleaser:
+    runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
+    return TerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: runtime_cleaner,
+        worktrees_root=work_dir / "git" / "worktrees",
+    )
 
 
 @dataclass(frozen=True)
@@ -738,6 +755,12 @@ async def _run_task(
     git = GitManager(work_dir / "git")
     compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
+    terminal_runtime_releaser = _build_terminal_runtime_releaser(
+        session_factory=session_factory,
+        git=git,
+        compose=compose,
+        work_dir=work_dir,
+    )
     validation = ValidationRunner(
         runner=runner,
         artifacts_dir=work_dir / "artifacts",
@@ -897,6 +920,7 @@ async def _run_task(
                 ),
                 non_check_reviewer_logins=monitor_profile.monitor.non_check_reviewer_logins,
                 log_store=log_store,
+                terminal_runtime_releaser=terminal_runtime_releaser,
             )
 
         executor = WorkspaceExecutor(
@@ -912,6 +936,7 @@ async def _run_task(
             ),
             pr_monitor_factory=_monitor_factory,
             log_store=log_store,
+            terminal_runtime_releaser=terminal_runtime_releaser,
         )
         print(f"[{cfg.task_title[:40]}] executor starting ...", flush=True)
         await executor.execute(ws_id)
@@ -971,6 +996,12 @@ async def _run_sync_release_pr(
     git = GitManager(work_dir / "git")
     compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
+    terminal_runtime_releaser = _build_terminal_runtime_releaser(
+        session_factory=session_factory,
+        git=git,
+        compose=compose,
+        work_dir=work_dir,
+    )
 
     # Step 1: workspace row. For a release-sync, branch_name is the
     # source branch (not an awf/ws_X feature branch) because the
@@ -1134,6 +1165,7 @@ async def _run_sync_release_pr(
         non_check_reviewer_settle_seconds=profile.monitor.non_check_reviewer_settle_seconds,
         non_check_reviewer_logins=profile.monitor.non_check_reviewer_logins,
         log_store=log_store,
+        terminal_runtime_releaser=terminal_runtime_releaser,
     )
     print(
         f"[{cfg.task_title[:40]}] release-monitor running for PR #{cfg.pr_number} ...",
@@ -1209,6 +1241,12 @@ async def _run_sync_feature_pr(
     git = GitManager(work_dir / "git")
     compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
+    terminal_runtime_releaser = _build_terminal_runtime_releaser(
+        session_factory=session_factory,
+        git=git,
+        compose=compose,
+        work_dir=work_dir,
+    )
 
     # Step 1: workspace row.
     async with session_factory() as s:
@@ -1372,6 +1410,7 @@ async def _run_sync_feature_pr(
         non_check_reviewer_settle_seconds=profile.monitor.non_check_reviewer_settle_seconds,
         non_check_reviewer_logins=profile.monitor.non_check_reviewer_logins,
         log_store=log_store,
+        terminal_runtime_releaser=terminal_runtime_releaser,
     )
     print(
         f"[{cfg.task_title[:40]}] feature-pr-monitor running for PR "

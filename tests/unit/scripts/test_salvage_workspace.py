@@ -170,8 +170,10 @@ class TestSalvageMain:
     ) -> None:
         ws_id = await _seed_salvage_workspace(initial_status="failed")
         original_registry = dict(_adapter_base._REGISTRY)
+        executor_kwargs: list[dict[str, Any]] = []
 
         def _exec_ctor(**kwargs: Any) -> _FakeExecutor:
+            executor_kwargs.append(kwargs)
             return _FakeExecutor(session_factory=kwargs["session_factory"])
 
         # Stub the heavy collaborators so we don't need docker/git subprocesses.
@@ -184,6 +186,7 @@ class TestSalvageMain:
         try:
             rc = await salvage_workspace._main(tmp_path, ws_id)
             assert rc == 0
+            assert executor_kwargs[0]["terminal_runtime_releaser"] is not None
             assert original_registry == _adapter_base._REGISTRY
         finally:
             _adapter_base._REGISTRY.clear()

@@ -30,6 +30,7 @@ from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
 )
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
@@ -42,6 +43,7 @@ from awf.service.secret_leases import (
     PROVISIONING_FAILED_REVOKE_REASON,
     SecretLeaseService,
 )
+from awf.service.terminal_runtime import TerminalRuntimeReleaserProtocol
 
 _log = get_logger(__name__)
 
@@ -71,11 +73,13 @@ class Provisioner:
         git: GitManager,
         config: ProvisionerConfig,
         stack_launcher: WorkspaceStackLauncher | None = None,
+        terminal_runtime_releaser: TerminalRuntimeReleaserProtocol | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._git = git
         self._config = config
         self._stack_launcher = stack_launcher
+        self._terminal_runtime_releaser = terminal_runtime_releaser
 
     async def provision(self, workspace_id: str) -> None:
         """Drive a workspace from ``requested`` to ``ready`` (or ``failed``).
@@ -251,6 +255,7 @@ class Provisioner:
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
             )
+            await self._release_failed_provisioning_runtime(workspace_id)
             raise
         except Exception as exc:
             _log.exception(
@@ -322,11 +327,16 @@ class Provisioner:
                 profile=profile,
             )
 
-            await repo.transition(
+            if not await self._transition_or_record_blocked_active_operation(
+                session,
+                repo,
                 persisted,
                 to=WorkspaceStatus.ready,
                 reason_code="PROVISIONING_COMPLETE",
-            )
+                action="provision",
+                expected=WorkspaceStatus.provisioning,
+            ):
+                return
             await session.commit()
 
         _log.info(
@@ -347,12 +357,27 @@ class Provisioner:
         both commit it.
         """
         repo = WorkspaceRepository(session)
-        ws = await repo.transition_if_current(
-            workspace_id,
-            from_status=WorkspaceStatus.requested,
-            to=WorkspaceStatus.provisioning,
-            reason_code="WORKER_CLAIMED",
-        )
+        try:
+            ws = await repo.transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus.requested,
+                to=WorkspaceStatus.provisioning,
+                reason_code="WORKER_CLAIMED",
+            )
+        except WorkspaceTransitionBlockedByActiveOperationError as exc:
+            operation_id = exc.operation.id
+            await session.rollback()
+            await self._record_active_operation_blocked_callback_in_session(
+                session,
+                workspace_id=workspace_id,
+                action="provision",
+                expected=WorkspaceStatus.requested,
+                requested=WorkspaceStatus.provisioning,
+                reason_code="WORKER_CLAIMED",
+                operation_id=operation_id,
+            )
+            await session.commit()
+            return None
         if ws is not None:
             await session.commit()
             return ws
@@ -407,14 +432,107 @@ class Provisioner:
                 )
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
-                await repo.transition(
+                if not await self._transition_or_record_blocked_active_operation(
+                    session,
+                    repo,
                     ws,
                     to=WorkspaceStatus.failed,
                     reason_code=reason_code or failure_reason.value.upper(),
-                )
+                    action="mark_failed",
+                    expected=from_status,
+                ):
+                    return
                 await session.commit()
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
+
+    async def _release_failed_provisioning_runtime(self, workspace_id: str) -> None:
+        releaser = self._terminal_runtime_releaser
+        if releaser is None:
+            return
+        try:
+            result = await releaser.release(
+                workspace_id,
+                source="provisioner.stack_startup_failed",
+                expected_status=WorkspaceStatus.failed,
+            )
+        except Exception:
+            _log.exception(
+                "provisioner.terminal_runtime_release_failed",
+                workspace_id=workspace_id,
+            )
+            return
+        if not result.ok:
+            _log.warning(
+                "provisioner.terminal_runtime_release_not_ok",
+                workspace_id=workspace_id,
+                reason_code=result.reason_code,
+                status=result.status,
+            )
+
+    async def _transition_or_record_blocked_active_operation(
+        self,
+        session: AsyncSession,
+        repo: WorkspaceRepository,
+        ws: Workspace,
+        *,
+        to: WorkspaceStatus,
+        reason_code: str,
+        action: str,
+        expected: WorkspaceStatus,
+    ) -> bool:
+        workspace_id = ws.id
+        try:
+            await repo.transition(ws, to=to, reason_code=reason_code)
+        except WorkspaceTransitionBlockedByActiveOperationError as exc:
+            operation_id = exc.operation.id
+            await self._record_active_operation_blocked_callback_in_session(
+                session,
+                workspace_id=workspace_id,
+                action=action,
+                expected=expected,
+                requested=to,
+                reason_code=reason_code,
+                operation_id=operation_id,
+            )
+            await session.commit()
+            return False
+        return True
+
+    async def _record_active_operation_blocked_callback_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        action: str,
+        expected: WorkspaceStatus,
+        requested: WorkspaceStatus,
+        reason_code: str,
+        operation_id: str,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        if ws is None:  # pragma: no cover - row disappeared during teardown
+            return
+        _log.info(
+            "provisioner.transition_blocked_by_active_operation",
+            workspace_id=workspace_id,
+            action=action,
+            expected_status=expected.value,
+            actual_status=ws.status,
+            requested_status=requested.value,
+            operation_id=operation_id,
+            reason_code=reason_code,
+        )
+        await repo.record_ignored_stale_callback(
+            ws,
+            callback_source="provisioner",
+            callback_action=action,
+            expected_status=expected,
+            requested_status=requested,
+            operation_id=operation_id,
+            reason_code=reason_code,
+        )
 
     async def _record_egress_audit_if_current(
         self,
