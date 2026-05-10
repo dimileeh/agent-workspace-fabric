@@ -258,6 +258,7 @@ class TestAddWorktree:
 
         assert (layout.worktree_path, 1000, 1000) in chowned
         assert (layout.mirror_path, 1000, 1000) in chowned
+        assert (layout.mirror_path / "hooks", 1000, 1000) in chowned
         assert (layout.mirror_path / "objects", 1000, 1000) in chowned
         assert (layout.mirror_path / "refs", 1000, 1000) in chowned
         assert (layout.mirror_path / "worktrees", 1000, 1000) in chowned
@@ -272,6 +273,9 @@ class TestAddWorktree:
         ]
         assert object_files
         assert all((path, 1000, 1000) not in chowned for path in object_files)
+        hook_files = [path for path in (layout.mirror_path / "hooks").glob("*") if path.is_file()]
+        assert hook_files
+        assert any((path, 1000, 1000) in chowned for path in hook_files)
 
     @pytest.mark.unit
     async def test_agent_owner_repair_skips_unwritable_loose_object_files(
@@ -596,10 +600,12 @@ class TestAgentWorktreeWritable:
         # commits in the worktree (HEAD update, ref log, lock files).
         assert layout.worktree_path in target_paths
         assert layout.mirror_path in target_paths
+        assert layout.mirror_path / "hooks" in target_paths
         assert layout.mirror_path / "refs" in target_paths
         assert layout.mirror_path / "logs" in target_paths
         assert layout.mirror_path / "worktrees" in target_paths
         assert layout.mirror_path / "objects" in target_paths
+        assert layout.mirror_path / "hooks" in recursive_paths
 
         # Loose object files must not be chowned recursively. Docker Desktop
         # on macOS rejects the chown when host metadata is missing, which
