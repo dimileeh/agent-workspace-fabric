@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import os
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from awf.adapters.opencode import (
     OPENCODE_OLLAMA_CLOUD_MODELS,
     OpenCodeAdapter,
     _opencode_config_for_effort,
+    _opencode_launcher_script,
     _qualified_model,
     _thinking_enabled,
     _variant_for_effort,
@@ -829,6 +831,80 @@ class TestOpenCodeAdapter:
         low_config = _opencode_config_for_effort(effort=None)
         models = low_config["provider"]["ollama"]["models"]  # type: ignore[index]
         assert all("options" not in model for model in models.values())
+
+    @pytest.mark.unit
+    async def test_opencode_launcher_forwards_termination_and_cleans_temp_files(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bin_dir = tmp_path / "bin"
+        tmp_dir = tmp_path / "tmp"
+        bin_dir.mkdir()
+        tmp_dir.mkdir()
+        fake_opencode = bin_dir / "opencode"
+        fake_started = tmp_path / "started"
+        fake_signal = tmp_path / "signal"
+        fake_prompt = tmp_path / "prompt-copy"
+        fake_opencode.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "prompt_path=\n"
+            'while [ "$#" -gt 0 ]; do\n'
+            '  if [ "$1" = "--file" ]; then\n'
+            "    shift\n"
+            '    prompt_path="$1"\n'
+            "  fi\n"
+            "  shift || true\n"
+            "done\n"
+            'cat "$prompt_path" > "$AWF_FAKE_PROMPT_COPY"\n'
+            "trap 'printf TERM > \"$AWF_FAKE_SIGNAL\"; exit 143' TERM\n"
+            'printf started > "$AWF_FAKE_STARTED"\n'
+            "while :; do sleep 1; done\n"
+        )
+        fake_opencode.chmod(0o755)
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "TMPDIR": str(tmp_dir),
+                "AWF_FAKE_STARTED": str(fake_started),
+                "AWF_FAKE_SIGNAL": str(fake_signal),
+                "AWF_FAKE_PROMPT_COPY": str(fake_prompt),
+            }
+        )
+
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-lc",
+            _opencode_launcher_script(effort="xhigh"),
+            "awf-opencode",
+            "--model",
+            "ollama/kimi-k2.6:cloud",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write(b"workspace prompt")
+        await proc.stdin.drain()
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+
+        for _ in range(50):
+            if fake_started.exists():
+                break
+            await asyncio.sleep(0.02)
+        assert fake_started.exists()
+
+        proc.terminate()
+        await asyncio.wait_for(proc.wait(), timeout=5)
+
+        assert proc.returncode == 143
+        assert fake_signal.read_text() == "TERM"
+        assert fake_prompt.read_text() == "workspace prompt"
+        assert list(tmp_dir.glob("awf-opencode-prompt.*.md")) == []
+        assert list(tmp_dir.glob("awf-opencode-config.*.json")) == []
 
 
 @pytest.mark.unit
