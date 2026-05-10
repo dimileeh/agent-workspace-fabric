@@ -39,7 +39,7 @@ class OpenCodeAdapter(AgentAdapter):
             return active_model.split("/", 1)[0]
         return "ollama"
 
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+    def _cli_args(self, *, model: str | None) -> list[str]:
         selected_model = _qualified_model(model or OPENCODE_OLLAMA_CLOUD_MODELS[0])
         script = _opencode_launcher_script(effort=self._default_effort)
         args = [
@@ -53,7 +53,7 @@ class OpenCodeAdapter(AgentAdapter):
         ]
         if variant := _variant_for_effort(self._default_effort):
             args.extend(["--variant", variant, "--thinking"])
-        args.append(prompt)
+        args.append("Follow the instructions in the attached AWF prompt file exactly.")
         return args
 
 
@@ -68,15 +68,50 @@ def _opencode_launcher_script(*, effort: str | None) -> str:
     config_json = json.dumps(config, separators=(",", ":"))
     return (
         "set -eu\n"
+        "prompt_path=\n"
+        "config_path=\n"
+        "child_pid=\n"
+        "cleanup() {\n"
+        '  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then\n'
+        '    kill "$child_pid" 2>/dev/null || true\n'
+        '    wait "$child_pid" 2>/dev/null || true\n'
+        "  fi\n"
+        '  [ -n "$prompt_path" ] && rm -f "$prompt_path" 2>/dev/null || true\n'
+        '  [ -n "$config_path" ] && rm -f "$config_path" 2>/dev/null || true\n'
+        "}\n"
+        "forward_signal() {\n"
+        '  sig="$1"\n'
+        '  code="$2"\n'
+        '  if [ -n "$child_pid" ]; then\n'
+        '    kill "-$sig" "$child_pid" 2>/dev/null || true\n'
+        '    wait "$child_pid" 2>/dev/null || true\n'
+        "    child_pid=\n"
+        "  fi\n"
+        '  exit "$code"\n'
+        "}\n"
+        "trap cleanup EXIT\n"
+        "trap 'forward_signal HUP 129' HUP\n"
+        "trap 'forward_signal INT 130' INT\n"
+        "trap 'forward_signal TERM 143' TERM\n"
+        'config_path="$(mktemp "${TMPDIR:-/tmp}/awf-opencode-config.XXXXXX.json")"\n'
         "export AWF_OPENCODE_OLLAMA_BASE_URL="
         '"${AWF_OPENCODE_OLLAMA_BASE_URL:-'
         f"{DEFAULT_OLLAMA_OPENAI_BASE_URL}"
         '}"\n'
-        "cat > /tmp/awf-opencode-config.json <<'AWF_OPENCODE_CONFIG'\n"
+        "cat > \"$config_path\" <<'AWF_OPENCODE_CONFIG'\n"
         f"{config_json}\n"
         "AWF_OPENCODE_CONFIG\n"
-        'export OPENCODE_CONFIG_CONTENT="$(cat /tmp/awf-opencode-config.json)"\n'
-        'exec opencode run "$@"\n'
+        'export OPENCODE_CONFIG_CONTENT="$(cat "$config_path")"\n'
+        'prompt_path="$(mktemp "${TMPDIR:-/tmp}/awf-opencode-prompt.XXXXXX.md")"\n'
+        'cat > "$prompt_path"\n'
+        'opencode run --file "$prompt_path" "$@" &\n'
+        "child_pid=$!\n"
+        "set +e\n"
+        'wait "$child_pid"\n'
+        "status=$?\n"
+        "set -e\n"
+        "child_pid=\n"
+        'exit "$status"\n'
     )
 
 

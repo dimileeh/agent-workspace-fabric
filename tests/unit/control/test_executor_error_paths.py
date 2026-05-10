@@ -600,8 +600,8 @@ class TestUnexpectedErrorDuringAgentRun:
             def get_provider(self, model: str | None) -> str:
                 return "google"
 
-            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
-                del prompt, model
+            def _cli_args(self, *, model: str | None) -> list[str]:
+                del model
                 return ["gemini", "run"]
 
         monkeypatch.setitem(
@@ -782,8 +782,8 @@ class TestUnexpectedErrorDuringAgentRun:
             def get_provider(self, model: str | None) -> str:
                 return "google"
 
-            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
-                del prompt, model
+            def _cli_args(self, *, model: str | None) -> list[str]:
+                del model
                 return ["gemini", "run"]
 
         monkeypatch.setitem(
@@ -873,8 +873,8 @@ class TestUnexpectedErrorDuringAgentRun:
             def get_provider(self, model: str | None) -> str:
                 return "openai"
 
-            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
-                del prompt, model
+            def _cli_args(self, *, model: str | None) -> list[str]:
+                del model
                 return ["codex", "exec"]
 
         monkeypatch.setitem(
@@ -964,7 +964,7 @@ class TestUnexpectedErrorDuringAgentRun:
             def name(self) -> AgentRuntime:
                 return AgentRuntime.codex
 
-            def _cli_args(self, *, prompt: str, model: Any) -> list[str]:
+            def _cli_args(self, *, model: Any) -> list[str]:
                 return []
 
             async def run(

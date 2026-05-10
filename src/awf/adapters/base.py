@@ -43,8 +43,7 @@ DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 1800.0
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
-# agent must honour inside an AWF workspace. Kept short — most agent
-# CLIs accept prompts as command-line args and some have length caps.
+# agent must honour inside an AWF workspace.
 _AWF_PROMPT_PREAMBLE = """\
 ## AWF workspace contract (DO NOT VIOLATE)
 
@@ -145,10 +144,13 @@ class AgentAdapter(ABC):
     def get_provider(self, model: str | None) -> str: ...  # pragma: no cover
 
     @abstractmethod
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+    def _cli_args(self, *, model: str | None) -> list[str]:
         """Return the CLI-specific argv (after ``agent`` service name).
 
-        Example for Codex: ``["codex", "exec", "--model", model, prompt]``.
+        The wrapped prompt is streamed through stdin by ``run``. Implementations
+        must not place it in argv: review comments can exceed Linux's per-arg
+        length limit, and argv prompt transport leaks large prompts into process
+        listings.
         """
 
     async def run(
@@ -176,13 +178,15 @@ class AgentAdapter(ABC):
         ``control/executor.py`` form a belt-and-braces defence.
         """
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
-        cli_args = self._cli_args(prompt=wrapped_prompt, model=model or self._default_model)
+        prompt_input = wrapped_prompt.encode("utf-8")
+        cli_args = self._cli_args(model=model or self._default_model)
         invocation = build_tracked_compose_exec(
             compose_project=compose_project,
             compose_file=compose_file,
             cli_args=cli_args,
             source=log_source,
             label=self.name.value,
+            preserve_stdin=True,
         )
         args = invocation.args
         _log.info(
@@ -195,11 +199,11 @@ class AgentAdapter(ABC):
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
             source=log_source,
+            prompt_bytes=len(prompt_input),
         )
-        # Close stdin explicitly. Some CLIs (Codex in particular) read
-        # "additional input" from stdin after argv parsing; if AWF is
-        # launched from an interactive terminal, inheriting that open
-        # stream makes the agent wait forever for EOF.
+        # Stream the prompt on stdin and close it explicitly. This avoids OS
+        # argv length limits for large review comments while still preventing
+        # CLIs from waiting forever for inherited interactive input.
         sinks = None
         if self._log_store is not None and workspace_id is not None:
             sinks = await self._log_store.open_command_streams(
@@ -217,7 +221,7 @@ class AgentAdapter(ABC):
                 if run_streaming is not None:
                     result = await run_streaming(
                         args,
-                        input_bytes=b"",
+                        input_bytes=prompt_input,
                         on_stdout=sinks.write_stdout if sinks is not None else None,
                         on_stderr=sinks.write_stderr if sinks is not None else None,
                         wall_timeout_seconds=self._agent_wall_timeout_seconds,
@@ -231,7 +235,7 @@ class AgentAdapter(ABC):
                         workspace_id=workspace_id,
                         reason="runner does not support run_streaming",
                     )
-                    result = await self._runner.run(args, input_bytes=b"")
+                    result = await self._runner.run(args, input_bytes=prompt_input)
                     if sinks is not None:
                         await sinks.write_stdout(result.stdout)
                         await sinks.write_stderr(result.stderr)
