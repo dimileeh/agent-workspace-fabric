@@ -47,7 +47,9 @@ from awf.service.secret_leases import (
     secret_lease_revocation_summary,
 )
 from awf.service.terminal_runtime import (
+    TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX,
+    TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS,
     TERMINAL_RUNTIME_RELEASE_EXCEPTION_REASON_CODE,
     record_terminal_runtime_release_event,
@@ -136,6 +138,12 @@ class _ControlTerminalRuntimeCleanup:
     cleanup: WorkspaceCleanupResult
     preserved_worktree_host_path: Path | None
     claim_owner_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _ControlTerminalRuntimeReleaseClaimFailure:
+    reason_code: str
+    error: str | None = None
 
 
 class WorkspaceCleanerProtocol(Protocol):
@@ -842,13 +850,15 @@ class WorkspaceControlService:
             work,
             name=f"awf-control-terminal-runtime-cleanup-{workspace_id}",
         )
-        heartbeat_task: asyncio.Task[None] = asyncio.create_task(
-            _refresh_terminal_runtime_release_claim_loop(
-                self._session_factory,
-                workspace_id=workspace_id,
-                owner_id=owner_id,
-            ),
-            name=f"awf-control-terminal-runtime-claim-{workspace_id}",
+        heartbeat_task: asyncio.Task[_ControlTerminalRuntimeReleaseClaimFailure] = (
+            asyncio.create_task(
+                _refresh_terminal_runtime_release_claim_loop(
+                    self._session_factory,
+                    workspace_id=workspace_id,
+                    owner_id=owner_id,
+                ),
+                name=f"awf-control-terminal-runtime-claim-{workspace_id}",
+            )
         )
         try:
             done, _pending = await asyncio.wait(
@@ -858,11 +868,18 @@ class WorkspaceControlService:
             if heartbeat_task in done:
                 if work_task in done:
                     return work_task.result()
+                claim_failure = heartbeat_task.result()
+                if (
+                    claim_failure.reason_code
+                    == TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE
+                ):
+                    return await work_task
                 work_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await work_task
                 raise RuntimeError(
-                    "terminal runtime release claim heartbeat stopped before cleanup completed"
+                    "terminal runtime release claim heartbeat stopped before cleanup completed: "
+                    f"{claim_failure.reason_code}"
                 )
             return work_task.result()
         finally:
@@ -2326,7 +2343,7 @@ async def _refresh_terminal_runtime_release_claim_loop(
     workspace_id: str,
     owner_id: str,
     interval_seconds: float | None = None,
-) -> None:
+) -> _ControlTerminalRuntimeReleaseClaimFailure:
     interval = (
         _terminal_runtime_release_claim_heartbeat_interval_seconds()
         if interval_seconds is None
@@ -2344,18 +2361,27 @@ async def _refresh_terminal_runtime_release_claim_loop(
                 )
                 await session.commit()
         except Exception as exc:
+            safe_exception = redact_audit_text(
+                f"{type(exc).__name__}: {exc}",
+                limit=1000,
+            )
             _log.warning(
                 "controls.terminal_runtime_release_claim_refresh_failed",
                 workspace_id=workspace_id,
                 error=redact_audit_text(repr(exc), limit=400),
             )
-            return
+            return _ControlTerminalRuntimeReleaseClaimFailure(
+                reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
+                error=safe_exception,
+            )
         if not refreshed:
             _log.warning(
                 "controls.terminal_runtime_release_claim_lost",
                 workspace_id=workspace_id,
             )
-            return
+            return _ControlTerminalRuntimeReleaseClaimFailure(
+                reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
+            )
 
 
 def _terminal_runtime_release_claim_heartbeat_interval_seconds() -> float:

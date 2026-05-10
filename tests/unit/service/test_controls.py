@@ -18,6 +18,10 @@ from awf.db.repositories import OperationRepository, WorkspaceEventRepository, W
 from awf.db.session import make_session_factory
 from awf.service import controls
 from awf.service.controls import WorkspaceStackStopError, stop_project_containers
+from awf.service.terminal_runtime import (
+    TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
+    TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
+)
 
 
 def _mock_proc(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> AsyncMock:
@@ -629,8 +633,10 @@ async def test_terminal_runtime_release_claim_heartbeat_helper_handles_stopped_h
             session_factory=factory,
         )
 
-        async def _claim_loop_done(*_args: object, **_kwargs: object) -> None:
-            return None
+        async def _claim_loop_done(*_args: object, **_kwargs: object) -> object:
+            return controls._ControlTerminalRuntimeReleaseClaimFailure(  # noqa: SLF001
+                reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
+            )
 
         monkeypatch.setattr(
             controls,
@@ -709,6 +715,58 @@ async def test_terminal_runtime_release_claim_heartbeat_helper_cancels_pending_w
             await helper
 
     assert work_cancelled.is_set()
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_claim_heartbeat_helper_keeps_cleanup_on_refresh_error(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
+        )
+        work_started = asyncio.Event()
+        finish_work = asyncio.Event()
+        work_cancelled = asyncio.Event()
+
+        async def _claim_loop_refresh_failed(*_args: object, **_kwargs: object) -> object:
+            return controls._ControlTerminalRuntimeReleaseClaimFailure(  # noqa: SLF001
+                reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
+                error="RuntimeError: database unavailable",
+            )
+
+        async def _pending_work() -> str:
+            work_started.set()
+            try:
+                await finish_work.wait()
+            except asyncio.CancelledError:
+                work_cancelled.set()
+                raise
+            return "cleaned"
+
+        monkeypatch.setattr(
+            controls,
+            "_refresh_terminal_runtime_release_claim_loop",
+            _claim_loop_refresh_failed,
+        )
+        helper = asyncio.create_task(
+            service._run_with_terminal_runtime_release_claim_heartbeat(  # noqa: SLF001
+                "ws-refresh-error",
+                owner_id="owner",
+                work=_pending_work(),
+            )
+        )
+        await work_started.wait()
+        await asyncio.sleep(0)
+        finish_work.set()
+
+        assert await helper == "cleaned"
+        assert not work_cancelled.is_set()
 
 
 @pytest.mark.unit
@@ -1760,11 +1818,18 @@ async def test_teardown_operation_heartbeat_edges(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("mode", ["raise", "lost"])
+@pytest.mark.parametrize(
+    ("mode", "expected_reason_code"),
+    [
+        ("raise", TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE),
+        ("lost", TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE),
+    ],
+)
 async def test_terminal_runtime_release_claim_refresh_loop_stops_on_error_or_lost_claim(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
+    expected_reason_code: str,
 ) -> None:
     factory = make_session_factory(engine)
 
@@ -1791,11 +1856,12 @@ async def test_terminal_runtime_release_claim_refresh_loop_stops_on_error_or_los
         refresh_claim,
     )
 
-    await controls._refresh_terminal_runtime_release_claim_loop(  # noqa: SLF001
+    failure = await controls._refresh_terminal_runtime_release_claim_loop(  # noqa: SLF001
         factory,
         workspace_id="ws_refresh",
         owner_id="terminal_runtime_release:control:test",
     )
+    assert failure.reason_code == expected_reason_code
 
 
 async def _create_control_workspace(

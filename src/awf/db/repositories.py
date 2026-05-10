@@ -355,6 +355,7 @@ _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES: Final[tuple[str, ...]] = (
     OperationStatus.running.value,
 )
 EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TIMEOUT_SECONDS: Final = 15 * 60
+_WORKSPACE_TRANSITION_TEARDOWN_RACE_RETRY_LIMIT: Final = 10
 
 
 def external_runtime_teardown_operation_blocks_controls(
@@ -3141,7 +3142,8 @@ class WorkspaceRepository:
                 dialect_name=self._dialect_name,
             )
         row = None
-        while True:
+        retry_limit_exhausted = False
+        for _ in range(_WORKSPACE_TRANSITION_TEARDOWN_RACE_RETRY_LIMIT):
             with self._session.no_autoflush:
                 result = await self._session.execute(
                     update(Workspace)
@@ -3183,8 +3185,15 @@ class WorkspaceRepository:
             # the diagnostic read. If the workspace row is otherwise unchanged, retry.
             if not preconditions_match:
                 break
+        else:
+            retry_limit_exhausted = True
 
         if row is None:
+            if retry_limit_exhausted:
+                raise RuntimeError(
+                    f"Workspace transition did not update workspace {workspace.id}; "
+                    "teardown contention retry limit exceeded."
+                )
             raise RuntimeError(
                 f"Workspace transition did not update workspace {workspace.id}; "
                 "it may have been concurrently modified."
