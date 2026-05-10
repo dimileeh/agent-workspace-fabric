@@ -218,6 +218,17 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_rejects_coverage_threshold_without_local_command() -> None:
+    with pytest.raises(ValueError, match="validation.coverage.command is required"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "ambiguous-coverage",
+                "validation": {"coverage": {"minimum_percent": 99}},
+            }
+        )
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_parallel_coverage_workers() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -745,9 +756,11 @@ def test_awf_self_profile_uses_targeted_edit_validation_and_final_coverage_gate(
 
     assert profile.validation.strategy.baseline_coverage == "skip"
     assert profile.validation.strategy.edit_gate == "targeted"
-    assert profile.validation.strategy.final_gate == "coverage"
-    assert profile.validation.strategy.reuse_evidence is True
+    assert profile.validation.strategy.final_gate == "none"
+    assert profile.validation.strategy.reuse_evidence is False
     assert profile.validation.strategy.full_gate_concurrency == 0
+    assert profile.validation.coverage.minimum_percent == 0
+    assert profile.validation.coverage.command is None
 
 
 @pytest.mark.unit

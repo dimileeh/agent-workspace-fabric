@@ -2212,7 +2212,7 @@ class TestPullRequestUnexpectedError:
         assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
 
     @pytest.mark.unit
-    async def test_fresh_pr_workspace_defers_final_coverage_to_pr_monitor(
+    async def test_fresh_pr_workspace_without_local_coverage_records_no_coverage_command(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -2238,20 +2238,13 @@ class TestPullRequestUnexpectedError:
 
         monitor = _Monitor()
         profile = WorkspaceProfile(
-            name="defer-final-coverage",
+            name="scm-check-coverage",
             source="test",
             phases={"validate": ["pytest tests/unit/cli -q"]},
             validation={
                 "strategy": {
                     "baseline_coverage": "skip",
                     "edit_gate": "targeted",
-                    "final_gate": "coverage",
-                },
-                "coverage": {
-                    "minimum_percent": 99,
-                    "enforce": True,
-                    "provider": "python",
-                    "command": "pytest --cov=awf --cov-report=term-missing",
                 },
             },
         )
@@ -2289,9 +2282,7 @@ class TestPullRequestUnexpectedError:
         assert monitor.calls == [ws_id]
         assert len(runs) == 1
         coverage_commands = [cmd for cmd in runs[0].commands if cmd.get("phase") == "coverage"]
-        assert coverage_commands
-        assert coverage_commands[0]["evidence_status"] == "skipped_by_policy"
-        assert coverage_commands[0]["evidence_reason_code"] == "TARGETED_EDIT_GATE"
+        assert coverage_commands == []
 
     @pytest.mark.unit
     async def test_unexpected_pr_creation_error_marks_failed(

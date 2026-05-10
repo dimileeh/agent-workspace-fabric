@@ -1391,7 +1391,7 @@ def _pytest_token_index(tokens: list[str]) -> int | None:
 
 
 def _coverage_requested(coverage: ProfileCoverage) -> bool:
-    return coverage.command is not None or coverage.minimum_percent > 0
+    return coverage.command is not None
 
 
 def _coverage_output_paths(results: list[ValidationCommandResult]) -> list[Path]:

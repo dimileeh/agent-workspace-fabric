@@ -236,6 +236,16 @@ class ProfileCoverage(BaseModel):
 
     @model_validator(mode="after")
     def _validate_parallel_policy(self) -> ProfileCoverage:
+        if self.command is None:
+            if self.minimum_percent > 0:
+                raise ValueError(
+                    "validation.coverage.command is required when "
+                    "validation.coverage.minimum_percent is greater than 0"
+                )
+            if self.parallel_workers is not None or self.parallel_worker_max is not None:
+                raise ValueError(
+                    "validation.coverage.command is required when coverage parallelism is set"
+                )
         if (
             self.parallel_workers is not None
             and self.command is not None
