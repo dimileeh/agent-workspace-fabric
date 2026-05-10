@@ -119,6 +119,59 @@ async def test_record_failure_reuses_row_after_stale_create_miss(
 
 
 @pytest.mark.unit
+async def test_record_failure_errors_when_created_breaker_cannot_be_reloaded(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = ProviderModelCircuitBreakerRepository(session)
+
+    async def always_missing(
+        *,
+        provider: str,
+        model: str,
+    ):
+        return None
+
+    monkeypatch.setattr(repo, "get", always_missing)
+
+    with pytest.raises(RuntimeError, match="insert did not return a row"):
+        await repo.record_failure(
+            provider="google",
+            model="gemini-2.5-pro",
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            failure_fingerprint="capacity:fingerprint",
+            workspace_id="ws_first",
+            attempt_id="att_first",
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            failure_threshold=2,
+            cooldown_seconds=600,
+        )
+
+
+@pytest.mark.unit
+async def test_record_failure_uses_orm_create_when_insert_helper_is_unavailable(
+    session: AsyncSession,
+) -> None:
+    repo = ProviderModelCircuitBreakerRepository(session, dialect_name="sqlite")
+
+    breaker = await repo.record_failure(
+        provider="google",
+        model="gemini-2.5-pro",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        failure_fingerprint="capacity:fingerprint",
+        workspace_id="ws_first",
+        attempt_id="att_first",
+        now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        failure_threshold=1,
+        cooldown_seconds=600,
+    )
+
+    assert breaker.provider == "google"
+    assert breaker.model == "gemini-2.5-pro"
+    assert breaker.state == "open"
+
+
+@pytest.mark.unit
 async def test_provider_model_circuit_expires_deterministically(
     session: AsyncSession,
 ) -> None:
