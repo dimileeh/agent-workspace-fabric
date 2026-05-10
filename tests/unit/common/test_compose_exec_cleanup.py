@@ -105,6 +105,16 @@ def test_cleanup_command_bounds_integer_sleep_fallback_wait() -> None:
     assert "awf_cleanup_wait_limit=2" in script
 
 
+def test_preserved_stdin_setsid_path_uses_open_fd_not_path_redirection() -> None:
+    script = compose_exec._tracked_exec_wrapper_script(preserve_stdin=True)  # noqa: SLF001
+    setsid_block = script[script.index("if command -v setsid") : script.index('wait "$child_pid"')]
+
+    assert 'exec 9< "$stdin_path"' in setsid_block
+    assert 'setsid "$@" <&9 &' in setsid_block
+    assert 'setsid "$@" < "$stdin_path" &' not in setsid_block
+    assert setsid_block.index('rm -f "$stdin_path"') < setsid_block.index('setsid "$@" <&9 &')
+
+
 def test_rejects_empty_or_unsafe_invocation_inputs() -> None:
     with pytest.raises(ValueError, match="cli_args"):
         build_tracked_compose_exec(
