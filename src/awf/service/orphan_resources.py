@@ -27,6 +27,7 @@ AWF_PROJECT_PREFIXES = ("awf_", "awf-")
 LEAKED_LIVE_RUNTIME_REASONS = frozenset(
     {
         "TERMINAL_LIVE_RUNTIME_RESOURCE",
+        "WORKSPACE_TERMINAL",
     }
 )
 
