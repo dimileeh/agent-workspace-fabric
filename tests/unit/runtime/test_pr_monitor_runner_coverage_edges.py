@@ -4503,6 +4503,59 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
 
 
 @pytest.mark.unit
+async def test_stale_failed_monitor_callback_preserves_existing_failure_diagnostics(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _update_workspace(
+        factory,
+        workspace_id,
+        status=WorkspaceStatus.failed.value,
+        failure_reason=FailureReason.validation_failure.value,
+        failure_message="validation failed before monitor callback",
+    )
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="stale monitor failure",
+        reason_code="STALE_MONITOR",
+    )
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        ignored_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.failure_reason == FailureReason.validation_failure.value
+    assert workspace.failure_message == "validation failed before monitor callback"
+    assert cmd.calls == []
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "terminal_failed",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": WorkspaceStatus.failed.value,
+        "requested_status": WorkspaceStatus.failed.value,
+        "reason_code": "STALE_MONITOR",
+        "failure_reason": FailureReason.validation_failure.value,
+        "failure_message": "validation failed before monitor callback",
+    }
+
+
+@pytest.mark.unit
 async def test_load_and_persist_state_convert_monitor_timestamps(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

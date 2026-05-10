@@ -5253,6 +5253,8 @@ class PullRequestMonitorRunner:
                     ws,
                     requested_status=WorkspaceStatus.failed,
                     reason_code=rc,
+                    failure_reason=ws.failure_reason,
+                    failure_message=ws.failure_message,
                 )
                 await s.commit()
                 return
