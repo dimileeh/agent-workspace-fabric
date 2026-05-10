@@ -632,7 +632,8 @@ class ControlWorker:
         if not workspace_ids:
             return
         decided_at = datetime.now(UTC)
-        async with self._session_factory() as session:
+
+        async def _operation(session: AsyncSession) -> None:
             stmt = (
                 select(
                     Workspace.id,
@@ -682,7 +683,14 @@ class ControlWorker:
                 for candidate in candidates
             ]
             await queue_repo.create_many(decision_rows)
-            await session.commit()
+
+        await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=True,
+            on_retry=self._log_transient_db_retry,
+        )
 
     async def _filter_current_status(
         self,

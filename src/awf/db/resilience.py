@@ -131,6 +131,8 @@ async def run_db_operation_with_retry[T](
 
 
 def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """Yield ``exc`` and intentionally linked nested exceptions."""
+
     seen: set[int] = set()
     stack: list[BaseException] = [exc]
     while stack:
@@ -148,8 +150,6 @@ def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
             stack.append(orig)
         if current.__cause__ is not None:
             stack.append(current.__cause__)
-        if not current.__suppress_context__ and current.__context__ is not None:
-            stack.append(current.__context__)
 
 
 def _message_indicates_closed_connection(message: str) -> bool:

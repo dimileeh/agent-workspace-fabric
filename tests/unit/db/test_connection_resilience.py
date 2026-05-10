@@ -163,13 +163,21 @@ def test_closed_connection_classifier_ignores_suppressed_context() -> None:
 
 
 @pytest.mark.unit
-def test_closed_connection_classifier_walks_unsuppressed_context() -> None:
+def test_closed_connection_classifier_ignores_unsuppressed_context() -> None:
     wrapped = RuntimeError("operation wrapper failed")
     wrapped.__context__ = _closed_connection_error()
     wrapped.__suppress_context__ = False
 
     assert wrapped.__suppress_context__ is False
     assert wrapped.__context__ is not None
+    assert is_transient_closed_connection_error(wrapped) is False
+
+
+@pytest.mark.unit
+def test_closed_connection_classifier_walks_explicit_cause() -> None:
+    wrapped = RuntimeError("operation wrapper failed")
+    wrapped.__cause__ = _closed_connection_error()
+
     assert is_transient_closed_connection_error(wrapped) is True
 
 
@@ -225,6 +233,28 @@ async def test_db_retry_reraises_non_transient_errors_without_retrying() -> None
             await run_db_operation_with_retry(factory, _operation, attempts=2)
 
     assert calls == 1
+
+
+@pytest.mark.unit
+async def test_db_retry_does_not_retry_application_error_with_transient_context() -> None:
+    sessions: list[_RetrySession] = []
+
+    def _factory() -> _RetrySession:
+        session = _RetrySession(fail_commit=False)
+        sessions.append(session)
+        return session
+
+    async def _operation(_session: _RetrySession) -> None:
+        try:
+            raise _closed_connection_error()
+        except InterfaceError:
+            raise RuntimeError("application-level failure")  # noqa: B904
+
+    with pytest.raises(RuntimeError, match="application-level failure"):
+        await run_db_operation_with_retry(_factory, _operation, attempts=2)
+
+    assert len(sessions) == 1
+    assert sessions[0].events == ["close"]
 
 
 @pytest.mark.unit
