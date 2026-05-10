@@ -167,6 +167,42 @@ class _FakeMonitor:
             await s.commit()
 
 
+class _CrashingMonitor:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "compose_project": compose_project,
+                "compose_file": str(compose_file),
+            }
+        )
+        raise RuntimeError("synthetic monitor crash")
+
+
+class _RecordingTerminalRuntimeReleaser:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> object:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "source": source,
+                "expected_status": expected_status,
+            }
+        )
+        return object()
+
+
 class _FakeRunner:
     """Stand-in for AsyncioSubprocessRunner — the handlers pass it to
     collaborators we've already faked, so its methods are never actually
@@ -346,6 +382,74 @@ def _cfg(task_kind: str = "feature_branch_pr", **overrides: Any) -> run_awf.Task
         task_kind=task_kind,
     )
     return replace(base, **overrides) if overrides else base
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("task_kind", "overrides"),
+    [
+        (
+            "sync_release_pr",
+            {"branch_base": "main", "source_branch": "development", "pr_number": 278},
+        ),
+        (
+            "sync_feature_pr",
+            {"branch_base": "development", "source_branch": "fix/review", "pr_number": 277},
+        ),
+    ],
+)
+async def test_sync_monitor_crash_marks_failed_and_releases_runtime(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    patch_handlers: dict[str, Any],
+    tmp_path: Path,
+    task_kind: str,
+    overrides: dict[str, Any],
+) -> None:
+    del patch_handlers
+    monitor = _CrashingMonitor()
+    releaser = _RecordingTerminalRuntimeReleaser()
+
+    def _build_crashing_monitor(**_kwargs: Any) -> _CrashingMonitor:
+        return monitor
+
+    monkeypatch.setattr(run_awf, "_build_terminal_runtime_releaser", lambda **_kwargs: releaser)
+    monkeypatch.setattr(run_awf, "build_release_pr_monitor", _build_crashing_monitor)
+    monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _build_crashing_monitor)
+    monkeypatch.setattr(
+        "awf.runtime.release_pr_monitor.build_release_pr_monitor",
+        _build_crashing_monitor,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.release_pr_monitor.build_feature_pr_monitor",
+        _build_crashing_monitor,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic monitor crash"):
+        await run_awf._run_task(
+            _cfg(task_kind=task_kind, **overrides),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="t",
+            git_email="t@e.com",
+        )
+
+    workspace_id = monitor.calls[0]["workspace_id"]
+    assert releaser.calls == [
+        {
+            "workspace_id": workspace_id,
+            "source": "run_awf",
+            "expected_status": WorkspaceStatus.failed,
+        }
+    ]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+
+    assert ws.status == WorkspaceStatus.failed.value
+    assert ws.failure_reason == "infrastructure_failure"
+    assert "synthetic monitor crash" in (ws.failure_message or "")
 
 
 # ── feature_branch_pr handler ──────────────────────────────────────────────

@@ -719,6 +719,60 @@ async def _mark_orphan_workspace_failed(
         await s.commit()
 
 
+async def _mark_monitor_handoff_failed(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    message: str,
+) -> None:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        if ws is None or ws.status == WorkspaceStatus.failed.value:
+            return
+        if ws.status != WorkspaceStatus.monitoring_pr.value:
+            return
+        ws.failure_reason = "infrastructure_failure"
+        ws.failure_message = message[:2000]
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.failed,
+            reason_code="RUN_AWF_MONITOR_CRASHED",
+        )
+        await s.commit()
+
+
+async def _run_monitor_with_release_fallback(
+    monitor: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+    terminal_runtime_releaser: TerminalRuntimeReleaser,
+) -> None:
+    try:
+        await monitor.run(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+        )
+    except BaseException as exc:
+        with suppress(Exception):
+            await _mark_monitor_handoff_failed(
+                session_factory=session_factory,
+                workspace_id=workspace_id,
+                message=f"monitor handoff crashed: {exc!r}",
+            )
+        with suppress(Exception):
+            await terminal_runtime_releaser.release(
+                workspace_id,
+                source="run_awf",
+                expected_status=WorkspaceStatus.failed,
+            )
+        raise
+
+
 async def _run_task(
     cfg: TaskConfig,
     *,
@@ -1171,10 +1225,13 @@ async def _run_sync_release_pr(
         f"[{cfg.task_title[:40]}] release-monitor running for PR #{cfg.pr_number} ...",
         flush=True,
     )
-    await monitor.run(
+    await _run_monitor_with_release_fallback(
+        monitor,
         workspace_id=ws_id,
         compose_project=f"awf_{ws_id}",
         compose_file=compose_file,
+        session_factory=session_factory,
+        terminal_runtime_releaser=terminal_runtime_releaser,
     )
 
     # Step 7: final state.
@@ -1417,10 +1474,13 @@ async def _run_sync_feature_pr(
         f"#{cfg.pr_number} (auto_merge={cfg.auto_merge}) ...",
         flush=True,
     )
-    await monitor.run(
+    await _run_monitor_with_release_fallback(
+        monitor,
         workspace_id=ws_id,
         compose_project=f"awf_{ws_id}",
         compose_file=compose_file,
+        session_factory=session_factory,
+        terminal_runtime_releaser=terminal_runtime_releaser,
     )
 
     # Step 7: final state.

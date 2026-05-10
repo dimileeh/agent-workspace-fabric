@@ -3667,6 +3667,7 @@ async def test_monitor_recovery_dispatch_records_blocked_callback_when_teardown_
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+        teardown_operation = next(op for op in operations if op.id == teardown_operation_id)
         stale_events = [
             event
             for event in workspace.events
@@ -3684,6 +3685,8 @@ async def test_monitor_recovery_dispatch_records_blocked_callback_when_teardown_
 
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     assert [op.type for op in operations] == [OperationType.stop.value]
+    assert teardown_operation.id == teardown_operation_id
+    assert teardown_operation.status == OperationStatus.running.value
     assert recovery_events == []
     assert state_events == []
     assert len(stale_events) == 1

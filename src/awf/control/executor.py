@@ -1211,6 +1211,7 @@ class WorkspaceExecutor:
                     reason_code=_PR_ADOPTION_METADATA_MISSING_REASON_CODE,
                     action="sync_feature_pr_adoption",
                     expected=WorkspaceStatus.running,
+                    preserve_staged_on_blocked=True,
                     payload={
                         "failure_reason": FailureReason.infrastructure_failure.value,
                         "reason_code": _PR_ADOPTION_METADATA_MISSING_REASON_CODE,
@@ -1268,6 +1269,7 @@ class WorkspaceExecutor:
                 reason_code=_PR_ADOPTION_SKIP_AGENT_REASON_CODE,
                 action="sync_feature_pr_validate",
                 expected=WorkspaceStatus.running,
+                preserve_staged_on_blocked=True,
                 payload={"source": "existing_github_pr"},
             ):
                 return
@@ -1279,6 +1281,7 @@ class WorkspaceExecutor:
                 reason_code=_PR_MONITOR_ADOPTED_REASON_CODE,
                 action="sync_feature_pr_handoff",
                 expected=WorkspaceStatus.validating,
+                preserve_staged_on_blocked=True,
                 payload={
                     "pr_number": pr_number,
                     "pr_url": pr_url,
@@ -3210,6 +3213,7 @@ class WorkspaceExecutor:
                     reason_code=pr_reason_code,
                     action="persist_pr",
                     expected=WorkspaceStatus.pushing,
+                    preserve_staged_on_blocked=True,
                 ):
                     return
                 await session.commit()
@@ -3224,6 +3228,7 @@ class WorkspaceExecutor:
                     reason_code=pr_reason_code,
                     action="persist_pr",
                     expected=WorkspaceStatus.pushing,
+                    preserve_staged_on_blocked=True,
                 ):
                     return
                 await session.commit()
@@ -3822,6 +3827,7 @@ class WorkspaceExecutor:
                 reason_code=WORKTREE_MISSING_REASON_CODE,
                 action=action,
                 expected=expected,
+                preserve_staged_on_blocked=True,
             ):
                 return False
             await session.commit()
@@ -5151,13 +5157,19 @@ class WorkspaceExecutor:
         action: str,
         expected: WorkspaceStatus,
         payload: dict[str, Any] | None = None,
+        preserve_staged_on_blocked: bool = False,
     ) -> bool:
         workspace_id = ws.id
         try:
-            await repo.transition(ws, to=to, reason_code=reason_code, payload=payload)
+            if preserve_staged_on_blocked:
+                async with session.begin_nested():
+                    await repo.transition(ws, to=to, reason_code=reason_code, payload=payload)
+            else:
+                await repo.transition(ws, to=to, reason_code=reason_code, payload=payload)
         except WorkspaceTransitionBlockedByActiveOperationError as exc:
             operation_id = exc.operation.id
-            await session.rollback()
+            if not preserve_staged_on_blocked:
+                await session.rollback()
             await self._record_active_operation_blocked_callback_in_session(
                 session,
                 workspace_id=workspace_id,

@@ -57,6 +57,17 @@ def _column_ops(tree: ast.Module) -> set[tuple[str, str, str]]:
     return ops
 
 
+def _op_call_attrs(tree: ast.Module) -> set[str]:
+    return {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "op"
+    }
+
+
 @pytest.mark.unit
 def test_alembic_revision_graph_has_single_head() -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -105,6 +116,7 @@ def test_operation_lease_heartbeat_migration_follows_released_coverage_head() ->
 
     assert _migration_assignment(tree, "revision") == "d6e7f8a9b0c1"
     assert _migration_assignment(tree, "down_revision") == "c5d6e7f8a9b0"
+    assert _op_call_attrs(tree) == {"add_column", "drop_column"}
     assert _column_ops(tree) == {
         ("add_column", "operations", "lease_renewed_at"),
         ("drop_column", "operations", "lease_renewed_at"),
