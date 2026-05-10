@@ -106,6 +106,9 @@ from awf.runtime.pr_monitor import (
     sync_base_no_progress_signature,
 )
 from awf.runtime.pr_monitor_operations import (
+    RETRYABLE_MONITOR_OPERATION_STATUSES as _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES,
+)
+from awf.runtime.pr_monitor_operations import (
     MonitorOperationHandle,
     begin_monitor_state_operation,
     build_monitor_operation_payload,
@@ -234,6 +237,7 @@ _GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
+_RECOVERY_SNAPSHOT_ALREADY_HANDLED_REASON = "RECOVERY_SNAPSHOT_ALREADY_HANDLED"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
 _AUDIT_MERGE_RESULT_EVENT = "workspace.audit.merge_result"
@@ -258,6 +262,12 @@ _BROKEN_AWF_REF_RE = re.compile(r"refs/heads/awf/(ws_[A-Za-z0-9_-]+)")
 _BASE_FETCH_RETRY_COUNT_KEY_PREFIX = "__awf_base_fetch_retry_count:"
 _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY = "__awf_sync_base_no_progress_signature"
 _SYNC_BASE_NO_PROGRESS_COUNT_KEY = "__awf_sync_base_no_progress_count"
+_ACTIVE_RECOVERY_OPERATION_STATUSES = frozenset(
+    {
+        OperationStatus.pending.value,
+        OperationStatus.running.value,
+    }
+)
 _TERMINAL_WORKSPACE_STATUSES = {
     WorkspaceStatus.completed.value,
     WorkspaceStatus.failed.value,
@@ -301,6 +311,17 @@ def _monitor_recovery_conformance_payload(workspace: Workspace) -> dict[str, Any
                 conformance[key] = payload[key]
         return {"conformance": conformance}
     return None
+
+
+def _is_active_pr_monitor_recovery_operation(operation: Operation) -> bool:
+    """Return whether an operation is an unfinished PR monitor recovery action."""
+    return (
+        operation.status in _ACTIVE_RECOVERY_OPERATION_STATUSES
+        and operation.type == OperationType.validate.value
+        and isinstance(operation.payload, dict)
+        and operation.payload.get("source") == "pr_monitor"
+        and operation.payload.get("recovery_mode") is not None
+    )
 
 
 class BaseFetchError(Exception):
@@ -368,6 +389,14 @@ class _NonCheckReviewerSettleDecision:
     started_at: float | None = None
     elapsed_seconds: float | None = None
     state_changed: bool = False
+
+
+@dataclass(frozen=True)
+class _NonCheckReviewerSettleWaitOperationContext:
+    """Monitor-state payload and identity fields for reviewer-settle waits."""
+
+    extra_payload: dict[str, object]
+    extra_identity: tuple[object, ...]
 
 
 class ProviderRecoveryFallbackError(Exception):
@@ -1842,6 +1871,10 @@ class PullRequestMonitorRunner:
             )
             if settle_decision.wait_seconds > 0:
                 requested_action = "validate" if pending_validation_gate is not None else "merge"
+                settle_operation_context = _non_check_reviewer_settle_wait_operation_context(
+                    self._config,
+                    settle_decision,
+                )
                 await self._sleep_with_monitor_state_operation(
                     workspace_id=workspace_id,
                     action="reviewer_settle_wait",
@@ -1859,18 +1892,8 @@ class PullRequestMonitorRunner:
                     remote_branch=remote_branch,
                     wait_seconds=settle_decision.wait_seconds,
                     monitor_log=monitor_log,
-                    extra_payload={
-                        "settle_seconds": self._config.non_check_reviewer_settle_seconds,
-                        "configured_reviewers": list(settle_decision.configured_reviewers),
-                        "missing_reviewers": list(settle_decision.missing_reviewers),
-                        "visible_reviewers": list(settle_decision.visible_reviewers),
-                        "elapsed_seconds": settle_decision.elapsed_seconds,
-                    },
-                    extra_identity=(
-                        *settle_decision.configured_reviewers,
-                        *settle_decision.missing_reviewers,
-                        settle_decision.started_at,
-                    ),
+                    extra_payload=settle_operation_context.extra_payload,
+                    extra_identity=settle_operation_context.extra_identity,
                 )
                 return False
 
@@ -2359,6 +2382,12 @@ class PullRequestMonitorRunner:
                             monitor_log=monitor_log,
                         )
                         if settle_decision.wait_seconds > 0:
+                            settle_operation_context = (
+                                _non_check_reviewer_settle_wait_operation_context(
+                                    settle_config,
+                                    settle_decision,
+                                )
+                            )
                             await self._sleep_with_monitor_state_operation(
                                 workspace_id=workspace_id,
                                 action="reviewer_settle_wait",
@@ -2374,22 +2403,8 @@ class PullRequestMonitorRunner:
                                 remote_branch=remote_branch,
                                 wait_seconds=settle_decision.wait_seconds,
                                 monitor_log=monitor_log,
-                                extra_payload={
-                                    "settle_seconds": (
-                                        self._config.non_check_reviewer_settle_seconds
-                                    ),
-                                    "configured_reviewers": list(
-                                        settle_decision.configured_reviewers
-                                    ),
-                                    "missing_reviewers": list(settle_decision.missing_reviewers),
-                                    "visible_reviewers": list(settle_decision.visible_reviewers),
-                                    "elapsed_seconds": settle_decision.elapsed_seconds,
-                                },
-                                extra_identity=(
-                                    *settle_decision.configured_reviewers,
-                                    *settle_decision.missing_reviewers,
-                                    settle_decision.started_at,
-                                ),
+                                extra_payload=settle_operation_context.extra_payload,
+                                extra_identity=settle_operation_context.extra_identity,
                             )
                             return False
 
@@ -2550,6 +2565,7 @@ class PullRequestMonitorRunner:
         return _supply_chain_policy_blocked_message(blocking_codes)
 
     async def _recovery_dispatch_status_is_stale(self, workspace_id: str) -> bool:
+        """Return whether a recovery-dispatch callback no longer owns the workspace."""
         from awf.db.repositories import WorkspaceRepository
 
         async with self._deps.session_factory() as s:
@@ -2560,15 +2576,7 @@ class PullRequestMonitorRunner:
             if ws.status == WorkspaceStatus.monitoring_pr.value:
                 return False
             active_recovery = any(
-                op.status
-                in (
-                    OperationStatus.pending.value,
-                    OperationStatus.running.value,
-                )
-                and op.type != OperationType.monitor_state.value
-                and isinstance(op.payload, dict)
-                and op.payload.get("source") == "pr_monitor"
-                for op in ws.operations
+                _is_active_pr_monitor_recovery_operation(op) for op in ws.operations
             )
             if active_recovery:
                 return False
@@ -2784,6 +2792,7 @@ class PullRequestMonitorRunner:
         monitor_log: WorkspaceLogSink | None,
         skip_initial_review_grace: bool = False,
     ) -> bool | None:
+        """Handle merge-gate blocks by waiting, dispatching recovery, or notifying humans."""
         stale_reason = gate.stale_reason
         req_action = gate.req_action
         ws = gate.workspace
@@ -2954,15 +2963,7 @@ class PullRequestMonitorRunner:
                     await s.commit()
                     return True
                 active_recovery = any(
-                    op.status
-                    in (
-                        OperationStatus.pending.value,
-                        OperationStatus.running.value,
-                    )
-                    and op.type != OperationType.monitor_state.value
-                    and isinstance(op.payload, dict)
-                    and op.payload.get("source") == "pr_monitor"
-                    for op in _ws.operations
+                    _is_active_pr_monitor_recovery_operation(op) for op in _ws.operations
                 )
                 if active_recovery:
                     await s.commit()
@@ -3025,12 +3026,91 @@ class PullRequestMonitorRunner:
                     source_head_sha=status.head_sha,
                     source_base_sha=_ws.base_commit,
                 )
-                await operation_repo.create_idempotent(
-                    workspace_id=workspace_id,
-                    operation_type="validate",
-                    payload=operation_payload,
-                    idempotency_key=idempotency_key,
-                )
+                while True:
+                    await s.refresh(_ws, attribute_names=["status"])
+                    if _ws.status != WorkspaceStatus.monitoring_pr.value:
+                        await workspace_repo.record_ignored_stale_callback(
+                            _ws,
+                            callback_source="pr_monitor",
+                            callback_action="recovery_dispatch",
+                            expected_status=WorkspaceStatus.monitoring_pr,
+                            requested_status=WorkspaceStatus.ready,
+                            reason_code="STALE_CALLBACK_IGNORED",
+                        )
+                        await s.commit()
+                        return True
+                    operation, created = await operation_repo.create_idempotent(
+                        workspace_id=workspace_id,
+                        operation_type="validate",
+                        payload=operation_payload,
+                        idempotency_key=idempotency_key,
+                    )
+                    if created:
+                        break
+                    existing_operation_id = operation.id
+                    existing_operation_status = operation.status
+                    if existing_operation_status in _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES:
+                        idempotency_key = await retryable_monitor_operation_idempotency_key(
+                            operation_repo,
+                            workspace_id=workspace_id,
+                            action=recovery_mode,
+                            pr_number=pr_number,
+                            reason_code=recovery_reason_code,
+                            source_head_sha=status.head_sha,
+                            source_base_sha=_ws.base_commit,
+                        )
+                        continue
+                    wait_payload = {
+                        "recovery_mode": recovery_mode,
+                        "stale_reason": stale_reason,
+                        "operation_id": existing_operation_id,
+                        "operation_status": existing_operation_status,
+                    }
+                    wait_identity = (
+                        recovery_mode,
+                        stale_reason,
+                        existing_operation_id,
+                        existing_operation_status,
+                    )
+                    await s.commit()
+                    if existing_operation_status in _ACTIVE_RECOVERY_OPERATION_STATUSES:
+                        await self._sleep_with_monitor_state_operation(
+                            workspace_id=workspace_id,
+                            action="recovery_wait",
+                            requested_action=requested_action,
+                            reason="Waiting for an active PR monitor recovery operation to finish.",
+                            reason_code="RECOVERY_IN_PROGRESS",
+                            pr_number=pr_number,
+                            status=status,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            wait_seconds=self._config.poll_interval_seconds,
+                            monitor_log=monitor_log,
+                            stale_reason=stale_reason,
+                            extra_payload=wait_payload,
+                            extra_identity=wait_identity,
+                        )
+                    else:
+                        await self._sleep_with_monitor_state_operation(
+                            workspace_id=workspace_id,
+                            action="recovery_already_handled",
+                            requested_action=requested_action,
+                            reason=(
+                                "A prior PR monitor recovery operation already handled this "
+                                "observed PR snapshot."
+                            ),
+                            reason_code=_RECOVERY_SNAPSHOT_ALREADY_HANDLED_REASON,
+                            pr_number=pr_number,
+                            status=status,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            wait_seconds=self._config.poll_interval_seconds,
+                            monitor_log=monitor_log,
+                            stale_reason=stale_reason,
+                            extra_payload=wait_payload,
+                            extra_identity=wait_identity,
+                        )
+                    return False
                 try:
                     await workspace_repo.transition(
                         _ws,
@@ -5873,6 +5953,27 @@ def _non_check_reviewer_settle_decision(
         started_at=started_at,
         elapsed_seconds=elapsed_seconds,
         state_changed=started_now,
+    )
+
+
+def _non_check_reviewer_settle_wait_operation_context(
+    config: MonitorConfig,
+    decision: _NonCheckReviewerSettleDecision,
+) -> _NonCheckReviewerSettleWaitOperationContext:
+    """Build persisted wait-operation context for non-check reviewer settle state."""
+    return _NonCheckReviewerSettleWaitOperationContext(
+        extra_payload={
+            "settle_seconds": config.non_check_reviewer_settle_seconds,
+            "configured_reviewers": list(decision.configured_reviewers),
+            "missing_reviewers": list(decision.missing_reviewers),
+            "visible_reviewers": list(decision.visible_reviewers),
+            "elapsed_seconds": decision.elapsed_seconds,
+        },
+        extra_identity=(
+            *decision.configured_reviewers,
+            *decision.missing_reviewers,
+            decision.started_at,
+        ),
     )
 
 

@@ -510,7 +510,9 @@ def _agent_writable_git_targets(
         # lacks Docker ownership metadata and appears as unwritable root:root in
         # the control-plane container. Linux still gets writable object dirs.
         targets.append(_ChownTarget(objects, recursive=True, directories_only=True))
-    for child in ("refs", "logs"):
+    # Linked worktrees install hooks in the shared bare mirror; setup commands
+    # such as ``pre-commit install`` must be able to write there.
+    for child in ("hooks", "refs", "logs"):
         candidate = layout_mirror / child
         if candidate.exists():
             targets.append(_ChownTarget(candidate, recursive=True))
