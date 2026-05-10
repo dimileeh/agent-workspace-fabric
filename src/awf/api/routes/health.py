@@ -360,6 +360,24 @@ def _consume_task_result(task: asyncio.Task[Any]) -> None:
     task.add_done_callback(_consume)
 
 
+def reset_egress_audit_summary_counts_task() -> None:
+    """Clear any readiness egress-audit lookup leaked from a previous app."""
+    global _egress_audit_summary_counts_task
+
+    task = _egress_audit_summary_counts_task
+    _egress_audit_summary_counts_task = None
+    if task is None:
+        return
+    if task.done():
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+        return
+
+    with contextlib.suppress(RuntimeError):
+        task.cancel()
+        _consume_task_result(task)
+
+
 async def _drain_cancelled_task_result(task: asyncio.Task[Any], *, timeout: float) -> None:
     done, _pending = await asyncio.wait({task}, timeout=timeout)
     if task in done:

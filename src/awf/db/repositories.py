@@ -3834,6 +3834,10 @@ def _scheduler_cursor_order_expressions(
         .scalar_subquery(),
         literal(after.effective_score),
     ).label("effective_score")
+    # The outer scheduler query references these one-row CTE columns in WHERE.
+    # SQLAlchemy then renders scheduler_cursor_order in the FROM list as an
+    # intentional cross join, keeping cursor boundary comparisons in the same
+    # SQL scoring domain as the ORDER BY expressions.
     cursor_order_cte = select(
         cursor_class_priority,
         cursor_effective_score,

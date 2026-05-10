@@ -492,6 +492,36 @@ async def test_egress_audit_summary_timeout_gates_pending_lookup(
 
 
 @pytest.mark.unit
+async def test_create_app_resets_leaked_egress_audit_lookup_task() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _leaked_lookup() -> dict[str, int]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    leaked_task = asyncio.create_task(_leaked_lookup())
+    await started.wait()
+    health_route._track_egress_audit_summary_counts_task(leaked_task)
+
+    try:
+        create_app(use_lifespan=False)
+
+        assert health_route._pending_egress_audit_summary_counts_task() is None
+        await asyncio.gather(leaked_task, return_exceptions=True)
+        assert cancelled.is_set()
+    finally:
+        if not leaked_task.done():
+            leaked_task.cancel()
+            await asyncio.gather(leaked_task, return_exceptions=True)
+        health_route._egress_audit_summary_counts_task = None
+
+
+@pytest.mark.unit
 async def test_drain_cancelled_task_result_defers_pending_task_consumption() -> None:
     release = asyncio.Event()
 
