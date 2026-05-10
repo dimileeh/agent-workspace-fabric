@@ -845,6 +845,89 @@ class TestRunOnce:
         assert decisions[0].reason_code == "ORDERED_REQUESTED_PROVISIONING"
 
     @pytest.mark.unit
+    async def test_ordered_decision_retry_dedupes_when_newer_decision_is_latest(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "record-before-provision-ambiguous-commit-with-newer-latest",
+            create_task_attempt=True,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+        original_commit = AsyncSession.commit
+        raised_after_ordered_commit = False
+
+        async def _raise_after_ordered_commit_and_insert_newer_decision(
+            session: AsyncSession,
+        ) -> None:
+            nonlocal raised_after_ordered_commit
+            await original_commit(session)
+            if raised_after_ordered_commit:
+                return
+            raised_after_ordered_commit = True
+
+            async with session_factory() as concurrent_session:
+                attempt = await TaskAttemptRepository(concurrent_session).get_by_workspace_id(
+                    requested_id
+                )
+                assert attempt is not None
+                await QueueDecisionRepository(concurrent_session).create(
+                    workspace_id=requested_id,
+                    task_id=attempt.task_id,
+                    attempt_id=attempt.id,
+                    decision="deferred",
+                    reason_code="CONCURRENT_SCHEDULER_DECISION",
+                    class_priority=0,
+                    computed_priority=0,
+                    age_boost=0,
+                    retry_bonus=0,
+                    resource_summary={},
+                    overlap_risk_summary={},
+                    score_summary={},
+                    decided_at=datetime.now(UTC) + timedelta(days=1),
+                )
+                await original_commit(concurrent_session)
+
+            raise InterfaceError(
+                "COMMIT",
+                {},
+                RuntimeError("connection is closed"),
+                connection_invalidated=True,
+            )
+
+        monkeypatch.setattr(
+            AsyncSession,
+            "commit",
+            _raise_after_ordered_commit_and_insert_newer_decision,
+        )
+
+        await worker._record_ordered_decisions(  # noqa: SLF001
+            [requested_id],
+            reason_code="ORDERED_REQUESTED_PROVISIONING",
+        )
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
+
+        ordered_decisions = [
+            decision
+            for decision in decisions
+            if decision.reason_code == "ORDERED_REQUESTED_PROVISIONING"
+        ]
+        assert raised_after_ordered_commit is True
+        assert len(decisions) == 2
+        assert len(ordered_decisions) == 1
+        assert decisions[0].reason_code == "CONCURRENT_SCHEDULER_DECISION"
+
+    @pytest.mark.unit
     async def test_run_once_retries_scheduler_read_after_closed_connection(
         self,
         session_factory: async_sessionmaker[AsyncSession],

@@ -173,6 +173,9 @@ class _OrderedDecisionCandidate:
         return self.workspace_id
 
 
+type _OrderedDecisionKey = tuple[str, str, str]
+
+
 class WorkspaceExecutorProtocol(Protocol):
     async def execute(  # pragma: no cover - Protocol method declaration only.
         self,
@@ -673,6 +676,12 @@ class ControlWorker:
             latest_by_workspace_id = await queue_repo.latest_by_workspace_ids(
                 candidate.workspace_id for candidate in candidates
             )
+            existing_ordered_decision_keys = await _existing_ordered_queue_decision_keys(
+                session,
+                candidates,
+                reason_code=reason_code,
+                decided_at=decided_at,
+            )
             decision_rows = [
                 _ordered_queue_decision_create(
                     candidate,
@@ -687,6 +696,7 @@ class ControlWorker:
                     reason_code=reason_code,
                     decided_at=decided_at,
                 )
+                and _ordered_queue_decision_key(candidate) not in existing_ordered_decision_keys
             ]
             await queue_repo.create_many(decision_rows)
 
@@ -2003,6 +2013,43 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
         Workspace.monitor_claim_expires_at.is_(None),
         Workspace.monitor_claim_expires_at <= claim_cutoff,
     )
+
+
+async def _existing_ordered_queue_decision_keys(
+    session: AsyncSession,
+    candidates: list[_OrderedDecisionCandidate],
+    *,
+    reason_code: str,
+    decided_at: datetime,
+) -> set[_OrderedDecisionKey]:
+    candidate_keys = {_ordered_queue_decision_key(candidate) for candidate in candidates}
+    if not candidate_keys:
+        return set()
+
+    stmt = select(
+        QueueDecision.workspace_id,
+        QueueDecision.task_id,
+        QueueDecision.attempt_id,
+    ).where(
+        QueueDecision.workspace_id.in_(
+            sorted({candidate.workspace_id for candidate in candidates})
+        ),
+        QueueDecision.decision == QUEUE_DECISION_ORDERED,
+        QueueDecision.reason_code == reason_code,
+        QueueDecision.decided_at == decided_at,
+    )
+    rows = (await session.execute(stmt)).all()
+    return {
+        (workspace_id, task_id, attempt_id)
+        for workspace_id, task_id, attempt_id in rows
+        if (workspace_id, task_id, attempt_id) in candidate_keys
+    }
+
+
+def _ordered_queue_decision_key(
+    candidate: _OrderedDecisionCandidate,
+) -> _OrderedDecisionKey:
+    return (candidate.workspace_id, candidate.task_id, candidate.attempt_id)
 
 
 def _ordered_queue_decision_create(
