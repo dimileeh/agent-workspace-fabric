@@ -16,6 +16,12 @@ from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import OperationRepository
 
+RETRYABLE_MONITOR_OPERATION_STATUSES = frozenset(
+    {
+        OperationStatus.failed.value,
+        OperationStatus.cancelled.value,
+    }
+)
 _MONITOR_REDACTED_ASSIGNMENT_RE = re.compile(
     r"\b(?:[A-Za-z][A-Za-z0-9_]*_)?"
     r"(?:TOKEN|API[_-]?KEY|ACCESS[_-]?KEY|PASSWORD|PASSWD|SECRET)"
@@ -111,12 +117,13 @@ async def retryable_monitor_operation_idempotency_key(
     source_base_sha: str | None,
     extra: Sequence[object] = (),
 ) -> str:
-    """Return an idempotency key that can retry a failed monitor operation.
+    """Return an idempotency key that can retry an unhandled monitor operation.
 
     The base key is stable for a single monitor-observed PR state, which is
-    what prevents duplicate active dispatches. Once the operation has failed,
-    the same stable key would point back at the failed row forever, so retries
-    derive their identity from the failed operation that triggered them.
+    what prevents duplicate active dispatches. Once the operation has failed or
+    been cancelled, the same stable key would point back at a terminal row
+    forever, so retries derive their identity from the operation that triggered
+    them.
     """
     retry_extra = tuple(extra)
     while True:
@@ -130,11 +137,12 @@ async def retryable_monitor_operation_idempotency_key(
             extra=retry_extra,
         )
         existing = await repo.get_by_idempotency_key(idempotency_key)
-        if existing is None or existing.status != OperationStatus.failed.value:
+        if existing is None or existing.status not in RETRYABLE_MONITOR_OPERATION_STATUSES:
             return idempotency_key
+        retry_marker = f"retry_after_{existing.status}_operation"
         retry_extra = (
             *tuple(extra),
-            "retry_after_failed_operation",
+            retry_marker,
             existing.id,
         )
 

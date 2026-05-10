@@ -61,10 +61,35 @@ def _run(cmd: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[st
     )
 
 
+def _compose_exec(
+    *,
+    project_name: str,
+    compose_file: Path,
+    service: str,
+    python: str,
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            "docker",
+            "compose",
+            "-p",
+            project_name,
+            "-f",
+            str(compose_file),
+            "exec",
+            "-T",
+            service,
+            "python",
+            "-c",
+            python,
+        ]
+    )
+
+
 @pytest.mark.integration
 @pytest.mark.docker
 @pytest.mark.slow
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)
 async def test_workspace_services_are_reachable_by_service_name(tmp_path: Path) -> None:
     assert _FIXTURE.is_dir(), "workspace-services fixture is missing"
     workspace_id = f"test_ws_services_{tmp_path.name}"
@@ -80,10 +105,19 @@ async def test_workspace_services_are_reachable_by_service_name(tmp_path: Path) 
     paths = manager.render(spec)
     rendered = yaml.safe_load(paths.compose_file.read_text())
     del rendered["services"]["agent"]
+    rendered["services"]["probe"] = {
+        "image": "python:3.12-alpine",
+        "command": ["sleep", "infinity"],
+        "depends_on": {
+            "app": {"condition": "service_healthy"},
+            "redis": {"condition": "service_healthy"},
+        },
+        "networks": ["awf_net"],
+        "restart": "no",
+    }
     paths.compose_file.write_text(yaml.safe_dump(rendered), encoding="utf-8")
 
     project_name = spec.project_name()
-    network_name = f"awf-{workspace_id}-net"
 
     try:
         await manager._compose(  # noqa: SLF001 - integration smoke uses rendered file.
@@ -93,42 +127,28 @@ async def test_workspace_services_are_reachable_by_service_name(tmp_path: Path) 
             operation="up",
         )
 
-        app_probe = _run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                network_name,
-                "python:3.12-alpine",
-                "python",
-                "-c",
-                (
-                    "import urllib.request; "
-                    "print(urllib.request.urlopen('http://app:8080/healthz', timeout=5)"
-                    ".read().decode())"
-                ),
-            ]
+        app_probe = _compose_exec(
+            project_name=project_name,
+            compose_file=paths.compose_file,
+            service="probe",
+            python=(
+                "import urllib.request; "
+                "print(urllib.request.urlopen('http://app:8080/healthz', timeout=5)"
+                ".read().decode())"
+            ),
         )
         assert app_probe.stdout.strip() == "ok"
 
-        redis_probe = _run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                network_name,
-                "python:3.12-alpine",
-                "python",
-                "-c",
-                (
-                    "import socket; "
-                    "s=socket.create_connection(('redis', 6379), 5); "
-                    "s.sendall(b'*1\\r\\n$4\\r\\nPING\\r\\n'); "
-                    "print(s.recv(64).decode())"
-                ),
-            ]
+        redis_probe = _compose_exec(
+            project_name=project_name,
+            compose_file=paths.compose_file,
+            service="probe",
+            python=(
+                "import socket; "
+                "s=socket.create_connection(('redis', 6379), 5); "
+                "s.sendall(b'*1\\r\\n$4\\r\\nPING\\r\\n'); "
+                "print(s.recv(64).decode())"
+            ),
         )
         assert "+PONG" in redis_probe.stdout
 

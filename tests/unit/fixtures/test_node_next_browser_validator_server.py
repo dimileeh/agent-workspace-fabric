@@ -23,6 +23,7 @@ _FIXTURE_ROOT = (
     / "node_next_browser_app"
 )
 _VALIDATOR_SERVER = _FIXTURE_ROOT / "browser" / "validator-server.mjs"
+_HEALTHCHECK_PROCESS_TIMEOUT_SECONDS = 10
 
 pytestmark = pytest.mark.unit
 
@@ -133,8 +134,33 @@ class _TrailingWhitespaceHealthHandler(BaseHTTPRequestHandler):
         return
 
 
+class _SlowTrailingWhitespaceHealthHandler(_TrailingWhitespaceHealthHandler):
+    def do_GET(self) -> None:
+        time.sleep(2.25)
+        super().do_GET()
+
+
 class _HangingHealthServer(ThreadingHTTPServer):
     daemon_threads = True
+
+
+def _run_healthcheck(
+    *,
+    port: int,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["node", "scripts/healthcheck.mjs", "app"],
+        cwd=_FIXTURE_ROOT,
+        env={
+            **os.environ,
+            "APP_BASE_URL": f"http://127.0.0.1:{port}",
+            **(extra_env or {}),
+        },
+        capture_output=True,
+        timeout=_HEALTHCHECK_PROCESS_TIMEOUT_SECONDS,
+        check=False,
+    )
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
@@ -146,14 +172,25 @@ def test_healthcheck_accepts_trimmed_ok_response() -> None:
 
     try:
         port = server.server_address[1]
-        result = subprocess.run(
-            ["node", "scripts/healthcheck.mjs", "app"],
-            cwd=_FIXTURE_ROOT,
-            env={**os.environ, "APP_BASE_URL": f"http://127.0.0.1:{port}"},
-            capture_output=True,
-            timeout=2,
-            check=False,
-        )
+        result = _run_healthcheck(port=port)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.returncode == 0
+    assert result.stdout == b"ok\r\n  "
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_healthcheck_process_timeout_allows_script_fetch_budget() -> None:
+    """The test harness should not kill healthchecks before their own timeout."""
+    server = _HangingHealthServer(("127.0.0.1", 0), _SlowTrailingWhitespaceHealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        port = server.server_address[1]
+        result = _run_healthcheck(port=port)
     finally:
         server.shutdown()
         server.server_close()
@@ -171,25 +208,16 @@ def test_healthcheck_fetch_times_out_when_service_hangs() -> None:
 
     try:
         port = server.server_address[1]
-        result = subprocess.run(
-            ["node", "scripts/healthcheck.mjs", "app"],
-            cwd=_FIXTURE_ROOT,
-            env={
-                **os.environ,
-                "APP_BASE_URL": f"http://127.0.0.1:{port}",
-                "AWF_HEALTHCHECK_FETCH_TIMEOUT_MS": "50",
-            },
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
+        result = _run_healthcheck(
+            port=port,
+            extra_env={"AWF_HEALTHCHECK_FETCH_TIMEOUT_MS": "50"},
         )
     finally:
         server.shutdown()
         server.server_close()
 
     assert result.returncode != 0
-    assert "timed out fetching app health response after 50ms" in result.stderr
+    assert b"timed out fetching app health response after 50ms" in result.stderr
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
