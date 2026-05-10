@@ -376,12 +376,12 @@ class TaskExternalIdConflictError(ValueError):
 
 
 class WorkspaceTransitionBlockedByActiveOperationError(RuntimeError):
-    """Raised when a pending control operation owns workspace transition rights."""
+    """Raised when a teardown control operation owns workspace transition rights."""
 
     def __init__(self, operation: Operation) -> None:
         self.operation = operation
         super().__init__(
-            f"Workspace transition blocked by active {operation.type} operation {operation.id}."
+            f"Workspace transition blocked by teardown {operation.type} operation {operation.id}."
         )
 
 
@@ -3254,9 +3254,11 @@ class WorkspaceRepository:
 
         if row is None:
             if retry_limit_exhausted:
-                raise RuntimeError(
-                    f"Workspace transition did not update workspace {workspace.id}; "
-                    "teardown contention retry limit exceeded."
+                raise WorkspaceTransitionBlockedByActiveOperationError(
+                    await self._latest_external_runtime_teardown_operation(
+                        workspace.id,
+                        allow_active_operation_id=allow_active_operation_id,
+                    )
                 )
             raise RuntimeError(
                 f"Workspace transition did not update workspace {workspace.id}; "
@@ -3364,9 +3366,11 @@ class WorkspaceRepository:
             # the diagnostic read. If the workspace row is otherwise unchanged, retry.
 
         if not updated:
-            raise RuntimeError(
-                f"Workspace transition did not update workspace {workspace_id}; "
-                "teardown contention retry limit exceeded."
+            raise WorkspaceTransitionBlockedByActiveOperationError(
+                await self._latest_external_runtime_teardown_operation(
+                    workspace_id,
+                    allow_active_operation_id=allow_active_operation_id,
+                )
             )
 
         workspace = await self.get(workspace_id)
@@ -3454,6 +3458,36 @@ class WorkspaceRepository:
         if allow_active_operation_id is not None:
             stmt = stmt.where(Operation.id != allow_active_operation_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def _latest_external_runtime_teardown_operation(
+        self,
+        workspace_id: str,
+        *,
+        allow_active_operation_id: str | None,
+    ) -> Operation:
+        # Retry exhaustion means each guarded UPDATE observed a teardown row
+        # that completed before diagnostics could read it. Operation rows are
+        # durable audit evidence, so keep callers on the typed blocked path.
+        stmt = (
+            select(Operation)
+            .where(
+                Operation.workspace_id == workspace_id,
+                Operation.type.in_(_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES),
+            )
+            .order_by(Operation.created_at.desc(), Operation.id.desc())
+            .limit(1)
+        )
+        if allow_active_operation_id is not None:
+            stmt = stmt.where(Operation.id != allow_active_operation_id)
+        operation = (await self._session.execute(stmt)).scalar_one_or_none()
+        if operation is None:  # pragma: no cover - retry miss requires a teardown row
+            operation = Operation(
+                id=f"{workspace_id}:teardown-contention",
+                workspace_id=workspace_id,
+                type=OperationType.stop.value,
+                status=OperationStatus.running.value,
+            )
+        return operation
 
     async def _sync_merge_candidate_lifecycle(
         self,

@@ -10,7 +10,11 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
+)
 from tests.postgres import postgres_test_session
 
 
@@ -192,7 +196,7 @@ async def test_transition_caps_repeated_finished_teardown_races(
 
     event.listen(bind, "before_cursor_execute", finish_every_stop_before_diagnostics)
     try:
-        with pytest.raises(RuntimeError, match="teardown contention retry limit"):
+        with pytest.raises(WorkspaceTransitionBlockedByActiveOperationError) as blocked:
             await asyncio.wait_for(
                 repo.transition(
                     workspace,
@@ -209,6 +213,8 @@ async def test_transition_caps_repeated_finished_teardown_races(
         )
 
     assert inserted_operation_ids
+    assert blocked.value.operation.id in inserted_operation_ids
+    assert blocked.value.operation.status == OperationStatus.succeeded.value
     assert workspace.status == WorkspaceStatus.requested.value
     assert workspace.version == 1
 
@@ -381,7 +387,7 @@ async def test_transition_if_current_caps_repeated_finished_teardown_races(
 
     event.listen(bind, "before_cursor_execute", finish_every_stop_before_diagnostics)
     try:
-        with pytest.raises(RuntimeError, match="teardown contention retry limit"):
+        with pytest.raises(WorkspaceTransitionBlockedByActiveOperationError) as blocked:
             await asyncio.wait_for(
                 repo.transition_if_current(
                     workspace.id,
@@ -395,6 +401,8 @@ async def test_transition_if_current_caps_repeated_finished_teardown_races(
         event.remove(bind, "before_cursor_execute", finish_every_stop_before_diagnostics)
 
     assert inserted_operation_ids
+    assert blocked.value.operation.id in inserted_operation_ids
+    assert blocked.value.operation.status == OperationStatus.succeeded.value
     assert workspace.status == WorkspaceStatus.requested.value
     assert workspace.version == 1
 
