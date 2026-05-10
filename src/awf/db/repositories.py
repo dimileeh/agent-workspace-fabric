@@ -4940,11 +4940,12 @@ class OperationRepository:
             operation_type_value in _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES
             and status_value in _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES
         ):
-            await _lock_workspace_for_external_runtime_teardown_serialization(
-                self._session,
-                workspace_id,
-                dialect_name=self._dialect_name,
-            )
+            with self._session.no_autoflush:
+                await _lock_workspace_for_external_runtime_teardown_serialization(
+                    self._session,
+                    workspace_id,
+                    dialect_name=self._dialect_name,
+                )
         operation = Operation(
             id=new_operation_id(),
             workspace_id=workspace_id,
