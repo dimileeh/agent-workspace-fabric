@@ -259,9 +259,11 @@ chmod 700 "$awf_exec_dir" 2>/dev/null || true
 """.strip()
         stdin_setup = """
 stdin_path="$awf_exec_dir/stdin"
+previous_umask="$(umask)"
 umask 077
 cat > "$stdin_path"
 cat_status=$?
+umask "$previous_umask"
 if [ "$cat_status" -ne 0 ]; then
   rm -f "$stdin_path" 2>/dev/null || true
   exit "$cat_status"

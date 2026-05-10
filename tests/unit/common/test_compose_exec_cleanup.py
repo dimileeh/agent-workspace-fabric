@@ -152,6 +152,8 @@ async def test_tracked_exec_wrapper_preserves_stdin_when_requested() -> None:
 @pytest.mark.unit
 async def test_tracked_exec_wrapper_restricts_preserved_stdin_permissions() -> None:
     stdin_path = Path("/tmp/awf-exec/awf_stdin_permissions/stdin")
+    child_path = Path("/tmp/awf-exec/awf_stdin_permissions/child-created")
+    child_path.unlink(missing_ok=True)
     script = compose_exec._tracked_exec_wrapper_script(preserve_stdin=True)  # noqa: SLF001
     result = await AsyncioSubprocessRunner().run(
         [
@@ -163,16 +165,21 @@ async def test_tracked_exec_wrapper_restricts_preserved_stdin_permissions() -> N
             sys.executable,
             "-c",
             "import os, stat, sys; "
+            "open('/tmp/awf-exec/awf_stdin_permissions/child-created', 'w').close(); "
             "dir_mode = stat.S_IMODE(os.stat('/tmp/awf-exec/awf_stdin_permissions').st_mode); "
             "stdin_mode = stat.S_IMODE(os.fstat(0).st_mode); "
-            "print(f'{dir_mode:o} {stdin_mode:o} {sys.stdin.read()}', end='')",
+            "child_mode = stat.S_IMODE("
+            "os.stat('/tmp/awf-exec/awf_stdin_permissions/child-created').st_mode"
+            "); "
+            "print(f'{dir_mode:o} {stdin_mode:o} {child_mode:o} {sys.stdin.read()}', end='')",
         ],
         input_bytes=b"private-prompt",
     )
 
     assert result.returncode == 0
-    assert result.stdout == "700 600 private-prompt"
+    assert result.stdout == "700 600 664 private-prompt"
     assert not stdin_path.exists()
+    child_path.unlink(missing_ok=True)
 
 
 @pytest.mark.unit
