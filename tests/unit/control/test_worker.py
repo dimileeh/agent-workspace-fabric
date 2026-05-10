@@ -1454,7 +1454,7 @@ class TestRunOnceExecution:
             workspaces: list[Workspace],
             *,
             limit: int,
-            scoring_at: datetime | None = None,
+            scoring_at: datetime,
         ) -> list[str]:
             del session, limit, scoring_at
             return [workspace.id for workspace in workspaces]
@@ -7124,7 +7124,7 @@ async def test_scheduler_page_filter_limit_uses_remaining_dispatch_slots(
         workspaces: list[Workspace],
         *,
         limit: int,
-        scoring_at: datetime | None = None,
+        scoring_at: datetime,
     ) -> list[str]:
         del session, scoring_at
         filter_limits.append(limit)
@@ -7148,6 +7148,18 @@ async def test_scheduler_page_filter_limit_uses_remaining_dispatch_slots(
 
     assert filter_limits == [2, 1]
     assert listed == ["ws_page_0_0", "ws_page_1_0"]
+
+
+@pytest.mark.unit
+async def test_scheduler_candidate_filter_requires_scoring_timestamp(
+    worker: ControlWorker,
+) -> None:
+    with pytest.raises(TypeError, match="scoring_at"):
+        await worker._filter_scheduler_candidate_workspaces(  # noqa: SLF001
+            SimpleNamespace(info={}),  # type: ignore[arg-type]
+            [],
+            limit=1,
+        )
 
 
 @pytest.mark.unit
@@ -7293,6 +7305,7 @@ async def test_scheduler_candidate_filter_short_circuits_empty_page(
                 session,
                 [],
                 limit=10,
+                scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
             )
             == []
         )

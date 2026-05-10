@@ -531,7 +531,7 @@ class ControlWorker:
         candidate_workspaces: list[Workspace],
         *,
         limit: int,
-        scoring_at: datetime | None = None,
+        scoring_at: datetime,
     ) -> list[str]:
         if not candidate_workspaces:
             return []

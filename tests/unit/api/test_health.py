@@ -522,6 +522,33 @@ async def test_create_app_resets_leaked_egress_audit_lookup_task() -> None:
 
 
 @pytest.mark.unit
+async def test_stale_egress_audit_lookup_callback_does_not_clear_current_task() -> None:
+    release_stale = asyncio.Event()
+    release_current = asyncio.Event()
+
+    async def _lookup(release: asyncio.Event) -> dict[str, int]:
+        await release.wait()
+        return {}
+
+    stale_task = asyncio.create_task(_lookup(release_stale))
+    current_task = asyncio.create_task(_lookup(release_current))
+
+    try:
+        health_route._track_egress_audit_summary_counts_task(stale_task)
+        health_route._track_egress_audit_summary_counts_task(current_task)
+
+        release_stale.set()
+        await stale_task
+        await asyncio.sleep(0)
+
+        assert health_route._pending_egress_audit_summary_counts_task() is current_task
+    finally:
+        release_current.set()
+        await asyncio.gather(stale_task, current_task, return_exceptions=True)
+        health_route._egress_audit_summary_counts_task = None
+
+
+@pytest.mark.unit
 async def test_drain_cancelled_task_result_defers_pending_task_consumption() -> None:
     release = asyncio.Event()
 

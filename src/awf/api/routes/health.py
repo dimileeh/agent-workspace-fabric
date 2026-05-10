@@ -419,6 +419,8 @@ def _track_egress_audit_summary_counts_task(task: asyncio.Task[dict[str, int]]) 
 
     def _clear_tracked_task(completed: asyncio.Task[dict[str, int]]) -> None:
         global _egress_audit_summary_counts_task
+        # A cancelled task from a prior app can finish after a new lookup starts.
+        # Only the completed task may clear its own tracking slot.
         if _egress_audit_summary_counts_task is completed:
             _egress_audit_summary_counts_task = None
 
