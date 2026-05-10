@@ -271,7 +271,7 @@ def test_terminal_container_and_network_within_retention_are_live_leaks(tmp_path
 
 
 @pytest.mark.unit
-def test_terminal_container_and_network_outside_retention_are_counted_as_live_leaks(
+def test_terminal_container_and_network_outside_retention_are_not_live_leaks(
     tmp_path: Path,
 ) -> None:
     docker = ResourceScan(
@@ -286,7 +286,8 @@ def test_terminal_container_and_network_outside_retention_are_counted_as_live_le
                 id="c1",
                 name="awf_ws_done-agent-1",
                 service="agent",
-                state="running",
+                state="exited",
+                status_text="Exited",
             ),
             DetectedResource(
                 kind="network",
@@ -312,10 +313,10 @@ def test_terminal_container_and_network_outside_retention_are_counted_as_live_le
     payload = summary.to_dict()
 
     assert payload["orphan_count"] == 3
-    assert payload["leaked_live_count"] == 2
+    assert payload["leaked_live_count"] == 0
     assert payload["leaked_live_counts_by_kind"] == {
-        "container": 1,
-        "network": 1,
+        "container": 0,
+        "network": 0,
         "volume": 0,
         "worktree": 0,
     }
