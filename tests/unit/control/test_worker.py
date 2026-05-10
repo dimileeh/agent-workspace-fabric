@@ -4601,14 +4601,8 @@ class TestRunOnceStaleActiveExecutionRecovery:
             session: AsyncSession,
             **_kwargs: object,
         ) -> None:
-            session.add(
-                WorkspaceEvent(
-                    id="bad-terminal-runtime-release-event",
-                    workspace_id=workspace_id,
-                    event_type=None,
-                )
-            )
-            await session.flush()
+            del session
+            raise RuntimeError("synthetic terminal runtime release event failure")
 
         monkeypatch.setattr(
             "awf.control.worker.record_terminal_runtime_release_event",
