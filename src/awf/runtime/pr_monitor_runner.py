@@ -5020,6 +5020,14 @@ class PullRequestMonitorRunner:
                 workspace_id,
                 expected_status=WorkspaceStatus.completed,
             )
+            if not teardown_ok and compose_project and compose_file is not None:
+                teardown_failure_reason = "compose_teardown_failed"
+                teardown_ok = await self._teardown_compose_stack(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    remove_volumes=False,
+                )
         elif compose_project and compose_file is not None:
             teardown_ok = await self._teardown_compose_stack(
                 workspace_id=workspace_id,
@@ -5280,10 +5288,17 @@ class PullRequestMonitorRunner:
                 return
             await s.commit()
         if self._terminal_runtime_releaser is not None:
-            await self._release_terminal_runtime(
+            released = await self._release_terminal_runtime(
                 workspace_id,
                 expected_status=WorkspaceStatus.failed,
             )
+            if not released and teardown_compose_project and teardown_compose_file is not None:
+                await self._teardown_compose_stack(
+                    workspace_id=workspace_id,
+                    compose_project=teardown_compose_project,
+                    compose_file=teardown_compose_file,
+                    remove_volumes=False,
+                )
         elif teardown_compose_project and teardown_compose_file is not None:
             await self._teardown_compose_stack(
                 workspace_id=workspace_id,

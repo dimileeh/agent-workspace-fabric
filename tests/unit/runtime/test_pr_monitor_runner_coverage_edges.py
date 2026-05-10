@@ -4007,6 +4007,40 @@ async def test_failed_monitor_without_runtime_releaser_tears_down_stack_and_pres
 
 
 @pytest.mark.unit
+async def test_failed_monitor_falls_back_to_compose_when_terminal_release_raises(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._terminal_runtime_releaser = _RaisingTerminalRuntimeReleaser()  # type: ignore[attr-defined]
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="monitor abort",
+        reason_code="MONITOR_ABORT",
+    )
+
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args == _compose_down_args(
+        f"awf_{workspace_id}",
+        Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+        remove_volumes=False,
+    )
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+
+
+@pytest.mark.unit
 async def test_completed_monitor_without_runtime_releaser_tears_down_stack_and_preserves_volumes(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -4109,7 +4143,53 @@ async def test_completed_callback_releases_terminal_runtime_before_reconcile(
 
 
 @pytest.mark.unit
-async def test_completed_callback_logs_terminal_release_reason_when_gc_skipped(
+async def test_completed_callback_falls_back_to_compose_after_terminal_release_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    releaser = _NotOkTerminalRuntimeReleaser()
+    gc_calls: list[str] = []
+
+    async def _record_gc_call(workspace_id: str) -> None:
+        gc_calls.append(workspace_id)
+
+    runner._terminal_runtime_releaser = releaser  # type: ignore[attr-defined]
+    runner._gc_completed_workspace_filesystem = _record_gc_call  # type: ignore[method-assign]
+
+    await runner._terminate_completed(
+        workspace_id,
+        pr_merge_sha="merge-sha",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert releaser.calls == [
+        {
+            "workspace_id": workspace_id,
+            "source": "pr_monitor",
+            "expected_status": WorkspaceStatus.completed,
+        }
+    ]
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args == _compose_down_args(
+        "proj",
+        tmp_path / "compose.yml",
+        remove_volumes=False,
+    )
+    assert gc_calls == [workspace_id]
+
+
+@pytest.mark.unit
+async def test_completed_callback_logs_terminal_release_reason_when_gc_skipped_without_fallback(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -4146,8 +4226,6 @@ async def test_completed_callback_logs_terminal_release_reason_when_gc_skipped(
             pr_merge_sha="merge-sha",
             repo_url="git@github.com:example/repo.git",
             base_branch="development",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
         )
 
     assert releaser.calls == [
