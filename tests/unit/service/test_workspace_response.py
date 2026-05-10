@@ -1342,7 +1342,7 @@ def test_workspace_validation_summary_uses_latest_successful_rebase() -> None:
         head_sha="target-head",
     )
     run = SimpleNamespace(
-        id="vr_after_latest_rebase",
+        id="vr_between_rebases",
         workspace_id="ws_latest_rebase",
         attempt_id="att_latest_rebase",
         tier=2,
@@ -1360,8 +1360,8 @@ def test_workspace_validation_summary_uses_latest_successful_rebase() -> None:
         environment_identity_inputs=None,
         status="succeeded",
         reason_code="VALIDATION_OK",
-        started_at=now + timedelta(minutes=1),
-        finished_at=now + timedelta(minutes=2),
+        started_at=now - timedelta(minutes=2),
+        finished_at=now - timedelta(minutes=1),
         log_stream_refs={},
         retry_count=0,
     )
@@ -1373,8 +1373,11 @@ def test_workspace_validation_summary_uses_latest_successful_rebase() -> None:
     )
 
     assert summary.required_tier == 2
-    assert summary.latest_satisfied_tier == 2
-    assert summary.freshness_status == "fresh"
+    assert summary.latest_satisfied_tier is None
+    assert summary.freshness_status == "stale"
+    assert summary.reason_code == "validation_insufficient_tier"
+    assert summary.latest_validation is not None
+    assert summary.latest_validation.freshness_status == "fresh"
 
 
 @pytest.mark.unit
