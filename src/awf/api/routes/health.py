@@ -27,7 +27,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
 from awf.db.repositories import EgressAuditRepository
-from awf.db.resilience import db_connection_failure_reason, invalidate_or_rollback_session
+from awf.db.resilience import db_connection_failure_reason, run_db_operation_with_retry
 from awf.service.config import resolve_service_settings
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.orphan_resources import (
@@ -388,18 +388,10 @@ async def _drain_cancelled_task_result(task: asyncio.Task[Any], *, timeout: floa
 
 
 async def _egress_audit_summary_counts(factory: Any) -> dict[str, int]:
-    session = factory()
-    try:
+    async def _summary_counts(session: Any) -> dict[str, int]:
         return await EgressAuditRepository(session).summary_counts_by_posture()
-    except BaseException as exc:
-        with contextlib.suppress(Exception):
-            await invalidate_or_rollback_session(session, exc)
-        raise
-    finally:
-        close = getattr(session, "close", None)
-        if close is not None:
-            with contextlib.suppress(Exception):
-                await close()
+
+    return await run_db_operation_with_retry(factory, _summary_counts)
 
 
 def _pending_egress_audit_summary_counts_task() -> asyncio.Task[dict[str, int]] | None:

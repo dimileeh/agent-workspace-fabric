@@ -625,7 +625,47 @@ async def test_egress_audit_summary_invalidates_transient_connection_error(
     with pytest.raises(InterfaceError, match="connection is closed"):
         await health_route._egress_audit_summary_counts(_Session)
 
-    assert events == ["invalidate", "close"]
+    assert events == ["invalidate", "close", "invalidate", "close"]
+
+
+@pytest.mark.unit
+async def test_egress_audit_summary_retries_transient_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    attempts = 0
+
+    class _Session:
+        def __init__(self) -> None:
+            nonlocal attempts
+            attempts += 1
+            self.attempt = attempts
+            events.append(f"open-{self.attempt}")
+
+        async def invalidate(self) -> None:
+            events.append(f"invalidate-{self.attempt}")
+
+        async def rollback(self) -> None:
+            events.append(f"rollback-{self.attempt}")
+
+        async def close(self) -> None:
+            events.append(f"close-{self.attempt}")
+
+    class _RetryingEgressAuditRepository:
+        def __init__(self, session: _Session) -> None:
+            self._session = session
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            if self._session.attempt == 1:
+                raise _closed_connection_error()
+            return {"restricted": 2}
+
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _RetryingEgressAuditRepository)
+
+    result = await health_route._egress_audit_summary_counts(_Session)
+
+    assert result == {"restricted": 2}
+    assert events == ["open-1", "invalidate-1", "close-1", "open-2", "close-2"]
 
 
 @pytest.mark.unit
