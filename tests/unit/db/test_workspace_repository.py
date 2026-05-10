@@ -10,11 +10,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session as SyncSession
 
+import awf.db.repositories as repositories
 from awf.control.state_machine import InvalidWorkspaceTransitionError
+from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
@@ -29,9 +32,11 @@ from awf.db.repositories import (
     WorkspaceRepository,
     WorkspaceTransitionBlockedByActiveOperationError,
     _active_external_runtime_teardown_operation_lease_current,
+    _schedulable_workspace_ids_stmt,
     validation_command_set_hash,
 )
 from awf.db.session import make_engine, make_session_factory
+from awf.service.scheduler import SchedulerOrderCursor, scheduler_score_from_workspace
 from tests.postgres import (
     create_postgres_test_engine,
     postgres_empty_test_url,
@@ -1340,6 +1345,328 @@ class TestOwnedPathOverlapLookup:
         assert listed == [migration.id, old_refactor.id, young_refactor.id, docs.id]
 
     @pytest.mark.unit
+    async def test_scheduler_orders_integer_valued_decimal_policy_strings(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        decimal_string = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="decimal string priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": "100.0", "human_boost": "5.00"}},
+        )
+        lower_priority = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="lower priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 20}},
+        )
+        decimal_string.created_at = scoring_at
+        lower_priority.created_at = scoring_at
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=2,
+            scoring_at=scoring_at,
+        )
+
+        assert listed == [decimal_string.id, lower_priority.id]
+
+    @pytest.mark.unit
+    async def test_scheduler_clamps_oversized_policy_strings_before_postgres_integer_cast(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        oversized_high = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="oversized high priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={
+                "scheduler": {"base_priority": "999999999999999999999999999999999999999999999999"}
+            },
+        )
+        normal = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="normal priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        oversized_low = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="oversized low priority",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={
+                "scheduler": {"base_priority": "-999999999999999999999999999999999999999999999999"}
+            },
+        )
+        oversized_high.created_at = scoring_at
+        normal.created_at = scoring_at
+        oversized_low.created_at = scoring_at
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=3,
+            scoring_at=scoring_at,
+        )
+
+        assert listed == [oversized_high.id, normal.id, oversized_low.id]
+
+    @pytest.mark.unit
+    async def test_scheduler_ignores_policy_strings_above_python_int_limit(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        previous_limit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(640)
+        try:
+            oversized_high = await repo.create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="development",
+                task_title="oversized high priority",
+                task_prompt="p",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+                task_class=TaskClass.docs_task.value,
+                task_policy={"scheduler": {"base_priority": "9" * 641}},
+            )
+            normal = await repo.create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="development",
+                task_title="normal priority",
+                task_prompt="p",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+                task_class=TaskClass.docs_task.value,
+                task_policy={"scheduler": {"base_priority": 50}},
+            )
+            oversized_high.created_at = scoring_at
+            normal.created_at = scoring_at
+            await session.commit()
+
+            listed = await repo.list_schedulable_ids(
+                status=WorkspaceStatus.requested,
+                limit=1,
+                scoring_at=scoring_at,
+            )
+
+            assert listed == [normal.id]
+        finally:
+            sys.set_int_max_str_digits(previous_limit)
+
+    @pytest.mark.unit
+    def test_sqlite_scheduler_ignores_policy_strings_above_python_int_limit_before_limit(
+        self,
+    ) -> None:
+        engine = create_engine("sqlite:///:memory:", future=True)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        previous_limit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(640)
+        try:
+            Base.metadata.create_all(engine)
+            with SyncSession(engine) as session:
+                oversized_high = Workspace(
+                    id="ws_sqlite_oversized_priority",
+                    status=WorkspaceStatus.requested.value,
+                    version=1,
+                    repo_url="git@github.com:example/app.git",
+                    branch_base="development",
+                    task_title="oversized high priority",
+                    task_prompt="p",
+                    agent=AgentRuntime.codex.value,
+                    test_commands=[],
+                    task_class=TaskClass.docs_task.value,
+                    task_policy={"scheduler": {"base_priority": "9" * 641}},
+                    owned_paths=[],
+                    created_at=scoring_at,
+                    updated_at=scoring_at,
+                )
+                normal = Workspace(
+                    id="ws_sqlite_normal_priority",
+                    status=WorkspaceStatus.requested.value,
+                    version=1,
+                    repo_url="git@github.com:example/app.git",
+                    branch_base="development",
+                    task_title="normal priority",
+                    task_prompt="p",
+                    agent=AgentRuntime.codex.value,
+                    test_commands=[],
+                    task_class=TaskClass.docs_task.value,
+                    task_policy={"scheduler": {"base_priority": 50}},
+                    owned_paths=[],
+                    created_at=scoring_at,
+                    updated_at=scoring_at,
+                )
+                session.add_all([oversized_high, normal])
+                session.commit()
+
+                stmt = _schedulable_workspace_ids_stmt(
+                    status=WorkspaceStatus.requested,
+                    limit=1,
+                    scoring_at=scoring_at,
+                    dialect_name="sqlite",
+                    skip_locked=False,
+                )
+
+                listed = session.execute(stmt).scalars().all()
+
+            assert [workspace.id for workspace in listed] == ["ws_sqlite_normal_priority"]
+        finally:
+            sys.set_int_max_str_digits(previous_limit)
+            engine.dispose()
+
+    @pytest.mark.unit
+    async def test_scheduler_cursor_recomputes_database_score_for_page_boundary(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        before_cursor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="before cursor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        cursor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="cursor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        after_cursor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="after cursor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        before_cursor.created_at = scoring_at - timedelta(seconds=1)
+        cursor.created_at = scoring_at
+        after_cursor.created_at = scoring_at + timedelta(seconds=1)
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=10,
+            scoring_at=scoring_at,
+            after=SchedulerOrderCursor(
+                class_priority=0,
+                effective_score=999,
+                queued_at=cursor.created_at,
+                workspace_id=cursor.id,
+                scoring_at=scoring_at,
+            ),
+        )
+
+        assert listed == [after_cursor.id]
+
+    @pytest.mark.unit
+    async def test_scheduler_cursor_tie_breaks_equal_score_and_created_at_by_workspace_id(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ids = iter(("ws_scheduler_tie_001", "ws_scheduler_tie_002", "ws_scheduler_tie_003"))
+        monkeypatch.setattr(repositories, "new_workspace_id", lambda: next(ids))
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        shared_created_at = datetime(2026, 5, 2, 11, 55, tzinfo=UTC)
+        first = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="first tie",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        second = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="second tie",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        third = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="third tie",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        for workspace in (first, second, third):
+            workspace.created_at = shared_created_at
+        await session.commit()
+
+        page_one = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=2,
+            scoring_at=scoring_at,
+        )
+        cursor_score = scheduler_score_from_workspace(second, now=scoring_at)
+        page_two = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=10,
+            scoring_at=scoring_at,
+            after=SchedulerOrderCursor(
+                class_priority=cursor_score.class_priority,
+                effective_score=cursor_score.effective_score,
+                queued_at=second.created_at,
+                workspace_id=second.id,
+                scoring_at=scoring_at,
+            ),
+        )
+
+        assert page_one == [first.id, second.id]
+        assert page_two == [third.id]
+
+    @pytest.mark.unit
     async def test_scheduler_keeps_owned_path_overlap_advisory_only(
         self,
         session: AsyncSession,
@@ -1459,7 +1786,9 @@ class TestOwnedPathOverlapLookup:
         assert session.executed == []
 
     @pytest.mark.unit
-    async def test_postgres_scheduler_cursor_uses_keyset_without_offset(self) -> None:
+    async def test_postgres_scheduler_cursor_uses_scheduler_order_keyset_without_offset(
+        self,
+    ) -> None:
         cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
         session = _RecordingSchedulerSession(
             "postgresql",
@@ -1470,7 +1799,13 @@ class TestOwnedPathOverlapLookup:
         listed = await repo.list_schedulable_workspaces(
             status=WorkspaceStatus.ready,
             limit=1,
-            after=(cursor_created_at, "ws_cursor"),
+            after=SchedulerOrderCursor(
+                class_priority=2,
+                effective_score=42,
+                queued_at=cursor_created_at,
+                workspace_id="ws_cursor",
+                scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+            ),
         )
 
         assert [workspace.id for workspace in listed] == ["ws_after"]
@@ -1484,9 +1819,136 @@ class TestOwnedPathOverlapLookup:
         assert "FOR UPDATE" in sql
         assert "SKIP LOCKED" in sql
         assert "OFFSET" not in sql
+        assert "WITH scheduler_cursor_order AS" in sql
+        assert "scheduler_cursor_order.class_priority" in sql
+        assert "scheduler_cursor_order.effective_score" in sql
+        assert sql.count("scheduler_cursor_workspace.id = 'ws_cursor'") == 2
+        assert "scheduler_cursor_workspace" in sql
         assert "workspaces.created_at >" in sql
         assert "workspaces.created_at =" in sql
         assert "workspaces.id > 'ws_cursor'" in sql
+
+    @pytest.mark.unit
+    async def test_postgres_scheduler_cursor_age_boost_uses_timestamp_thresholds(
+        self,
+    ) -> None:
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.ready,
+            limit=1,
+            after=SchedulerOrderCursor(
+                class_priority=2,
+                effective_score=42,
+                queued_at=datetime(2026, 1, 1, tzinfo=UTC),
+                workspace_id="ws_cursor",
+                scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+            ),
+        )
+
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "EXTRACT(epoch" not in sql
+        assert "INTERVAL '900 seconds'" in sql
+
+    @pytest.mark.unit
+    async def test_postgres_scheduler_cursor_reuses_cursor_scoring_timestamp(
+        self,
+    ) -> None:
+        cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        cursor_scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.ready,
+            limit=1,
+            after=SchedulerOrderCursor(
+                class_priority=2,
+                effective_score=42,
+                queued_at=cursor_created_at,
+                workspace_id="ws_cursor",
+                scoring_at=cursor_scoring_at,
+            ),
+        )
+
+        assert [workspace.id for workspace in listed] == ["ws_after"]
+        assert len(session.executed) == 1
+        compiled = session.executed[0].compile(  # type: ignore[attr-defined]
+            dialect=postgresql.dialect()
+        )
+        assert cursor_scoring_at in compiled.params.values()
+
+    @pytest.mark.unit
+    async def test_postgres_scheduler_id_cursor_reuses_cursor_scoring_timestamp(
+        self,
+    ) -> None:
+        cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        cursor_scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.ready,
+            limit=1,
+            after=SchedulerOrderCursor(
+                class_priority=2,
+                effective_score=42,
+                queued_at=cursor_created_at,
+                workspace_id="ws_cursor",
+                scoring_at=cursor_scoring_at,
+            ),
+        )
+
+        assert listed == ["ws_after"]
+        assert len(session.executed) == 1
+        compiled = session.executed[0].compile(  # type: ignore[attr-defined]
+            dialect=postgresql.dialect()
+        )
+        assert cursor_scoring_at in compiled.params.values()
+
+    @pytest.mark.unit
+    async def test_postgres_scheduler_cursor_rejects_mismatched_scoring_timestamp(
+        self,
+    ) -> None:
+        cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        cursor_scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError, match="scoring_at must match after.scoring_at"):
+            await repo.list_schedulable_workspaces(
+                status=WorkspaceStatus.ready,
+                limit=1,
+                scoring_at=cursor_scoring_at + timedelta(seconds=1),
+                after=SchedulerOrderCursor(
+                    class_priority=2,
+                    effective_score=42,
+                    queued_at=cursor_created_at,
+                    workspace_id="ws_cursor",
+                    scoring_at=cursor_scoring_at,
+                ),
+            )
+
+        assert session.executed == []
 
     @pytest.mark.unit
     async def test_postgres_get_for_update_locks_workspace_row(self) -> None:

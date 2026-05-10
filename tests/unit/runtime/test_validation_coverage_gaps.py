@@ -17,7 +17,9 @@ from awf.runtime.validation import (
     _healthcheck_cli_args,
     _healthcheck_failure_reason,
     _missing_line_count,
+    _parse_python_coverage_percent_from_files,
     _parse_term_missing_gaps,
+    _runs_pytest_under_coverage,
 )
 
 
@@ -70,6 +72,46 @@ def test_parse_term_missing_handles_no_output(tmp_path: Path) -> None:
     empty_file.write_text("")
     gaps = _parse_term_missing_gaps([empty_file])
     assert gaps == []
+
+
+@pytest.mark.unit
+def test_python_coverage_parser_handles_deferred_fail_under_context(
+    tmp_path: Path,
+) -> None:
+    delayed_fail_under = tmp_path / "delayed_fail_under.txt"
+    delayed_fail_under.write_text(
+        "FAIL Required test coverage of 99.0% not reached.\n"
+        "coverage table footer\n"
+        "Total coverage: 98.7%\n",
+        encoding="utf-8",
+    )
+    stale_recent_total = tmp_path / "stale_recent_total.txt"
+    stale_recent_total.write_text(
+        "Total coverage: 97.1%\n"
+        "unrelated line\n"
+        "another unrelated line\n"
+        "FAIL Required test coverage of 99.0% not reached.\n",
+        encoding="utf-8",
+    )
+    combined_contexts = tmp_path / "combined_contexts.txt"
+    combined_contexts.write_text(
+        "FAIL Required test coverage of 99.0% not reached.\n"
+        "Total coverage: 97.1%\n"
+        "unrelated line\n"
+        "FAIL Required test coverage of 99.0% not reached.\n"
+        "coverage table footer\n"
+        "Total coverage: 98.7%\n",
+        encoding="utf-8",
+    )
+
+    assert _parse_python_coverage_percent_from_files([delayed_fail_under]) == 98.7
+    assert _parse_python_coverage_percent_from_files([stale_recent_total]) == 97.1
+    assert _parse_python_coverage_percent_from_files([combined_contexts]) == 98.7
+
+
+@pytest.mark.unit
+def test_pytest_under_coverage_scan_rejects_plain_coverage_report() -> None:
+    assert not _runs_pytest_under_coverage(["coverage", "report"])
 
 
 @pytest.mark.unit

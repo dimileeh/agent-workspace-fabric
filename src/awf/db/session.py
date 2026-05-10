@@ -21,8 +21,15 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from awf.common.logging import get_logger
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
+from awf.db.resilience import invalidate_or_rollback_session
 from awf.runtime.events import ensure_workspace_event_broadcasting
+
+DEFAULT_POOL_RECYCLE_SECONDS = 1800
+DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
+
+_log = get_logger(__name__)
 
 
 def make_engine(
@@ -47,6 +54,7 @@ def make_engine(
     raw_connect_attempts = query.pop("awf_connect_attempts", None)
     raw_connect_retries = query.pop("awf_connect_retries", None)
     engine_options: dict[str, object] = {}
+    use_null_pool = False
     if raw_search_path is not None:
         search_path = _single_query_value(raw_search_path)
         existing_server_settings = resolved_connect_args.get("server_settings")
@@ -58,7 +66,12 @@ def make_engine(
     if raw_null_pool is not None:
         null_pool = _single_query_value(raw_null_pool)
         if str(null_pool).lower() in {"1", "true", "yes"}:
+            use_null_pool = True
             engine_options["poolclass"] = NullPool
+    if not use_null_pool:
+        engine_options.setdefault("pool_pre_ping", True)
+        engine_options.setdefault("pool_recycle", DEFAULT_POOL_RECYCLE_SECONDS)
+        engine_options.setdefault("pool_timeout", DEFAULT_POOL_TIMEOUT_SECONDS)
     if raw_connect_timeout is not None:
         resolved_connect_args.setdefault(
             "timeout",
@@ -186,11 +199,26 @@ async def session_scope(
     ``awf.api.deps`` instead; this is for code outside the request cycle.
     """
     session = session_factory()
+    scope_exc: BaseException | None = None
     try:
         yield session
         await session.commit()
-    except Exception:
-        await session.rollback()
+    except Exception as exc:
+        scope_exc = exc
+        await invalidate_or_rollback_session(session, exc)
+        raise
+    except BaseException as exc:
+        scope_exc = exc
+        await invalidate_or_rollback_session(session, exc)
         raise
     finally:
-        await session.close()
+        try:
+            await session.close()
+        except Exception as close_exc:
+            if scope_exc is None:
+                raise
+            _log.warning(
+                "session_scope.close_failed_during_exception",
+                error_type=type(close_exc).__name__,
+                error=str(close_exc)[:240],
+            )

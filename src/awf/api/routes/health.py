@@ -26,6 +26,12 @@ from awf import __version__
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
+from awf.db.repositories import EgressAuditRepository
+from awf.db.resilience import (
+    db_connection_failure_reason,
+    invalidate_or_rollback_session,
+    run_db_operation_with_retry,
+)
 from awf.service.config import resolve_service_settings
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.orphan_resources import (
@@ -144,6 +150,12 @@ async def release_readiness(
 # behind the default uvicorn worker. 5s is generous for local docker calls; tune
 # down once we have latency telemetry.
 _CHECK_TIMEOUT_SECONDS = 5.0
+_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS = 0.1
+_EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR = "egress_audit_summary_counts_task"
+
+
+class EgressAuditSummaryInFlightError(TimeoutError):
+    """Raised when a previous egress audit summary lookup is still running."""
 
 
 def _get_command_runner_for_request(request: Request) -> AsyncCommandRunner:
@@ -187,7 +199,7 @@ async def _check_db(factory: Any) -> CheckResult:
         return CheckResult(
             ok=False,
             status="fail",
-            reason="DB_CONNECTION_FAILED",
+            reason=db_connection_failure_reason(exc),
             detail=_truncate(f"{type(exc).__name__}: {exc}"),
         )
     try:
@@ -195,7 +207,8 @@ async def _check_db(factory: Any) -> CheckResult:
             await asyncio.wait_for(
                 session.execute(text("SELECT 1")), timeout=_CHECK_TIMEOUT_SECONDS
             )
-        except TimeoutError:
+        except TimeoutError as exc:
+            await invalidate_or_rollback_session(session, exc)
             return CheckResult(
                 ok=False,
                 status="fail",
@@ -203,10 +216,11 @@ async def _check_db(factory: Any) -> CheckResult:
                 detail=f"SELECT 1 exceeded {_CHECK_TIMEOUT_SECONDS}s",
             )
         except Exception as exc:
+            await invalidate_or_rollback_session(session, exc)
             return CheckResult(
                 ok=False,
                 status="fail",
-                reason="DB_CONNECTION_FAILED",
+                reason=db_connection_failure_reason(exc),
                 detail=_truncate(f"{type(exc).__name__}: {exc}"),
             )
     finally:
@@ -348,6 +362,111 @@ async def _workspace_view_for_readyz(
                 await close()
 
 
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    def _consume(completed: asyncio.Task[Any]) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            completed.result()
+
+    task.add_done_callback(_consume)
+
+
+def reset_egress_audit_summary_counts_task(state: Any) -> None:
+    """Clear any readiness egress-audit lookup tracked for an app instance."""
+    task: asyncio.Task[dict[str, int]] | None = getattr(
+        state,
+        _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR,
+        None,
+    )
+    setattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None)
+    if task is None:
+        return
+    if task.done():
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+        return
+
+    with contextlib.suppress(RuntimeError):
+        task.cancel()
+        _consume_task_result(task)
+
+
+async def _drain_cancelled_task_result(task: asyncio.Task[Any], *, timeout: float) -> None:
+    done, _pending = await asyncio.wait({task}, timeout=timeout)
+    if task in done:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+        return
+    _consume_task_result(task)
+
+
+async def _egress_audit_summary_counts(factory: Any) -> dict[str, int]:
+    async def _summary_counts(session: Any) -> dict[str, int]:
+        return await EgressAuditRepository(session).summary_counts_by_posture()
+
+    return await run_db_operation_with_retry(factory, _summary_counts)
+
+
+def _pending_egress_audit_summary_counts_task(
+    state: Any,
+) -> asyncio.Task[dict[str, int]] | None:
+    task: asyncio.Task[dict[str, int]] | None = getattr(
+        state,
+        _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR,
+        None,
+    )
+    if task is not None and task.done():
+        setattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None)
+        return None
+    return task
+
+
+def _track_egress_audit_summary_counts_task(
+    state: Any,
+    task: asyncio.Task[dict[str, int]],
+) -> None:
+    setattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, task)
+
+    def _clear_tracked_task(completed: asyncio.Task[dict[str, int]]) -> None:
+        # A cancelled task from a prior lookup can finish after a new lookup starts.
+        # Only the completed task may clear its own tracking slot.
+        if getattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None) is completed:
+            setattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None)
+
+    task.add_done_callback(_clear_tracked_task)
+
+
+async def _egress_audit_summary_counts_with_timeout(
+    factory: Any,
+    state: Any,
+) -> dict[str, int]:
+    if _pending_egress_audit_summary_counts_task(state) is not None:
+        raise EgressAuditSummaryInFlightError(
+            "Previous egress audit summary_counts is still in flight"
+        )
+
+    task = asyncio.create_task(_egress_audit_summary_counts(factory))
+    _track_egress_audit_summary_counts_task(state, task)
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=_CHECK_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        task.cancel()
+        await _drain_cancelled_task_result(
+            task,
+            timeout=_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS,
+        )
+        raise
+
+    if task in done:
+        return task.result()
+
+    task.cancel()
+    await _drain_cancelled_task_result(
+        task,
+        timeout=_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS,
+    )
+    raise TimeoutError("egress audit summary timed out")
+
+
 async def _check_orphan_resources(
     *,
     runner: AsyncCommandRunner,
@@ -480,13 +599,10 @@ async def readyz(
                 detail="No session factory available",
             )
         try:
-            async with factory() as session:
-                from awf.db.repositories import EgressAuditRepository
-
-                repo = EgressAuditRepository(session)
-                counts = await asyncio.wait_for(
-                    repo.summary_counts_by_posture(), timeout=_CHECK_TIMEOUT_SECONDS
-                )
+            counts = await _egress_audit_summary_counts_with_timeout(
+                factory,
+                request.app.state,
+            )
             posture_counts = {str(posture): int(count) for posture, count in counts.items()}
             total = sum(posture_counts.values())
             return CheckResult(
@@ -496,6 +612,15 @@ async def readyz(
                 detail="Egress audit evidence is available",
                 resource_count=total,
                 egress_posture_counts=posture_counts,
+            )
+        except EgressAuditSummaryInFlightError:
+            return CheckResult(
+                ok=True,
+                status="unknown",
+                reason="EGRESS_AUDIT_IN_FLIGHT",
+                detail="Previous egress audit summary_counts is still in flight",
+                resource_count=0,
+                egress_posture_counts={},
             )
         except TimeoutError:
             return CheckResult(

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import floor
-from typing import Any
+from typing import Any, Final
 
 from awf.db.enums import FailureReason
 
@@ -16,6 +17,8 @@ AGE_BOOST_INTERVAL_SECONDS = 15 * 60
 AGE_BOOST_MAX = 12
 RETRY_BONUS_INFRASTRUCTURE_FAILURE = 3
 HUMAN_BOOST_MAX = 5
+POLICY_INT_TEXT_PATTERN: Final = r"^-?[0-9]+(\.0+)?$"
+_POLICY_INT_TEXT_RE: Final = re.compile(POLICY_INT_TEXT_PATTERN)
 
 TASK_CLASS_PRIORITIES = {
     "migration_task": 5,
@@ -60,6 +63,15 @@ class SchedulerScore:
     effective_score: int
     queued_at: datetime
     score_summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SchedulerOrderCursor:
+    class_priority: int
+    effective_score: int
+    queued_at: datetime
+    workspace_id: str
+    scoring_at: datetime
 
 
 def task_class_priority(task_class: str | None) -> int:
@@ -263,8 +275,13 @@ def _policy_int(
     if isinstance(value, float) and value.is_integer():
         return int(value)
     if isinstance(value, str):
+        stripped = value.strip()
+        if not _POLICY_INT_TEXT_RE.fullmatch(stripped):
+            return fallback
+        if "." in stripped:
+            stripped = stripped.split(".", maxsplit=1)[0]
         try:
-            return int(value)
+            return int(stripped)
         except ValueError:
             return fallback
     return fallback

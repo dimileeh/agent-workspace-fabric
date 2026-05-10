@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import InterfaceError
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
@@ -45,6 +46,10 @@ from awf.service.status import (
 from tests.postgres import postgres_test_url
 
 _POSTGRES_TEST_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+
+
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
 
 
 def _settings(
@@ -1759,6 +1764,38 @@ def test_default_workspace_id_lookup_returns_unavailable_for_malformed_url() -> 
     assert view.available is False
     assert view.active_ids == frozenset()
     assert view.terminal_ids == frozenset()
+
+
+@pytest.mark.unit
+async def test_database_probe_reports_closed_connection_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingConnection:
+        async def __aenter__(self) -> object:
+            raise _closed_connection_error()
+
+        async def __aexit__(
+            self,
+            exc_type: object,
+            exc: object,
+            traceback: object,
+        ) -> None:
+            return None
+
+    class _FailingEngine:
+        def connect(self) -> _FailingConnection:
+            return _FailingConnection()
+
+        async def dispose(self) -> None:
+            return None
+
+    monkeypatch.setattr(status_mod, "make_engine", lambda _database_url: _FailingEngine())
+
+    result = await check_database(_POSTGRES_TEST_URL)
+
+    assert result["ok"] is False
+    assert result["reason"] == "DB_CONNECTION_CLOSED"
+    assert "connection is closed" in str(result["detail"])
 
 
 @pytest.mark.unit

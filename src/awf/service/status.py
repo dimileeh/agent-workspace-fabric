@@ -18,6 +18,7 @@ from sqlalchemy import select, text
 from awf.common.audit import redact_audit_text
 from awf.db.models import Workspace
 from awf.db.repositories import EgressAuditRepository
+from awf.db.resilience import db_connection_failure_reason
 from awf.db.session import make_engine, make_session_factory
 from awf.service.config import ServiceSettings
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
@@ -350,7 +351,10 @@ async def check_database(database_url: str) -> CheckPayload:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
     except Exception as exc:
-        return _fail("DB_CONNECTION_FAILED", _truncate(f"{type(exc).__name__}: {exc}"))
+        return _fail(
+            db_connection_failure_reason(exc),
+            _truncate(f"{type(exc).__name__}: {exc}"),
+        )
     finally:
         if engine is not None:
             await engine.dispose()

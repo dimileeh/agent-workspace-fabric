@@ -10,11 +10,9 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.requests import Request
 
-from awf.api.routes import metrics as metrics_route
 from awf.common.config import get_settings
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.session import make_session_factory
-from awf.service.resource_capacity import LocalCapacityLimits
 from tests.unit.helpers import create_workspace, zero_status_counts
 
 
@@ -42,38 +40,6 @@ async def test_workspace_summary_returns_zero_counts_for_empty_db(
     assert body["stuck_count"] == 0
     assert body["actionable_reason_count"] == 0
     assert body["unactionable_reason_count"] == 0
-
-
-@pytest.mark.unit
-async def test_resource_saturation_local_capacity_accepts_async_provider() -> None:
-    async def _provider(_settings: object) -> LocalCapacityLimits:
-        return LocalCapacityLimits(cpu_cores=12, memory_gb=48, source="test")
-
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(local_capacity_detector=_provider))
-    )
-
-    result = await metrics_route._resource_saturation_local_capacity(  # noqa: SLF001
-        request,  # type: ignore[arg-type]
-        get_settings(),
-    )
-
-    assert result == LocalCapacityLimits(cpu_cores=12, memory_gb=48, source="test")
-
-
-@pytest.mark.unit
-async def test_resource_saturation_local_capacity_skips_detection_when_configured() -> None:
-    settings = get_settings().model_copy(
-        update={"local_capacity_cpu_cores": 8, "local_capacity_memory_gb": 32}
-    )
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
-
-    result = await metrics_route._resource_saturation_local_capacity(  # noqa: SLF001
-        request,  # type: ignore[arg-type]
-        settings,
-    )
-
-    assert result == LocalCapacityLimits()
 
 
 @pytest.mark.unit
@@ -250,6 +216,146 @@ async def test_metrics_route_functions_return_response_models_directly(
     assert reliability.active_count == 0
     assert saturation.disk.reason == "SUFFICIENT_DISK"
     assert slo.creation_total == 0
+
+
+@pytest.mark.unit
+async def test_resource_saturation_summary_degrades_egress_posture_count_failure(
+    engine: AsyncEngine,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.api.routes import metrics as metrics_route
+    from awf.common.config import Settings
+
+    async def _fail_egress_posture_counts(_session: object) -> dict[str, int]:
+        raise RuntimeError("egress posture unavailable")
+
+    monkeypatch.setattr(
+        metrics_route,
+        "_egress_posture_counts",
+        _fail_egress_posture_counts,
+    )
+    factory = make_session_factory(engine)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/metrics/resources/saturation",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace()),
+        }
+    )
+    settings = Settings(
+        _env_file=None,
+        work_dir=str(tmp_path),
+        min_free_disk_bytes=0,
+    )
+
+    async with factory() as session:
+        response = await metrics_route.get_resource_saturation_summary(
+            request=request,
+            settings=settings,
+            session=session,
+        )
+
+    assert response.egress_posture_counts == {}
+
+
+@pytest.mark.unit
+async def test_resource_saturation_local_capacity_accepts_async_provider() -> None:
+    from awf.api.routes import metrics as metrics_route
+    from awf.common.config import Settings
+    from awf.service.resource_capacity import LocalCapacityLimits
+
+    async def _provider(_settings: Settings) -> LocalCapacityLimits:
+        return LocalCapacityLimits(cpu_cores=7.0, memory_gb=15.0, source="test")
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/metrics/resources/saturation",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace(local_capacity_detector=_provider)),
+        }
+    )
+
+    result = await metrics_route._resource_saturation_local_capacity(
+        request,
+        Settings(_env_file=None),
+    )
+
+    assert result == LocalCapacityLimits(cpu_cores=7.0, memory_gb=15.0, source="test")
+
+
+@pytest.mark.unit
+async def test_resource_saturation_local_capacity_uses_provider_over_configured_limits() -> None:
+    from awf.api.routes import metrics as metrics_route
+    from awf.common.config import Settings
+    from awf.service.resource_capacity import LocalCapacityLimits
+
+    provider_called = False
+
+    async def _provider(_settings: Settings) -> LocalCapacityLimits:
+        nonlocal provider_called
+        provider_called = True
+        return LocalCapacityLimits(cpu_cores=12.0, memory_gb=32.0, source="test")
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/metrics/resources/saturation",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace(local_capacity_detector=_provider)),
+        }
+    )
+
+    result = await metrics_route._resource_saturation_local_capacity(
+        request,
+        Settings(
+            _env_file=None,
+            local_capacity_cpu_cores=4.0,
+            local_capacity_memory_gb=8.0,
+        ),
+    )
+
+    assert result == LocalCapacityLimits(cpu_cores=12.0, memory_gb=32.0, source="test")
+    assert provider_called is True
+
+
+@pytest.mark.unit
+async def test_resource_saturation_local_capacity_skips_detection_for_configured_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.api.routes import metrics as metrics_route
+    from awf.common.config import Settings
+    from awf.service.resource_capacity import LocalCapacityLimits
+
+    def _detect_should_not_run(_settings: Settings) -> LocalCapacityLimits:
+        raise AssertionError("detect_local_capacity should not run when limits are configured")
+
+    monkeypatch.setattr(metrics_route, "detect_local_capacity", _detect_should_not_run)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/metrics/resources/saturation",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace()),
+        }
+    )
+
+    result = await metrics_route._resource_saturation_local_capacity(
+        request,
+        Settings(
+            _env_file=None,
+            local_capacity_cpu_cores=4.0,
+            local_capacity_memory_gb=8.0,
+        ),
+    )
+
+    assert result == LocalCapacityLimits()
 
 
 @pytest.mark.unit
