@@ -2110,16 +2110,8 @@ class WorkspaceExecutor:
             run_local_coverage = _should_run_local_coverage(profile)
             coverage_evidence = _CoverageEvidenceResult(
                 coverage=None,
-                evidence_status=(
-                    "executed"
-                    if run_local_coverage
-                    else None
-                ),
-                reason_code=(
-                    "VALIDATION_EVIDENCE_EXECUTED"
-                    if run_local_coverage
-                    else None
-                ),
+                evidence_status=("executed" if run_local_coverage else None),
+                reason_code=("VALIDATION_EVIDENCE_EXECUTED" if run_local_coverage else None),
             )
             try:
                 await self._update_subphase(workspace_id, "validation")
