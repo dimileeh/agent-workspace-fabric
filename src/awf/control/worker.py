@@ -681,6 +681,12 @@ class ControlWorker:
                     decided_at=decided_at,
                 )
                 for candidate in candidates
+                if not _ordered_queue_decision_matches(
+                    latest_by_workspace_id.get(candidate.workspace_id),
+                    candidate,
+                    reason_code=reason_code,
+                    decided_at=decided_at,
+                )
             ]
             await queue_repo.create_many(decision_rows)
 
@@ -688,7 +694,7 @@ class ControlWorker:
             self._session_factory,
             _operation,
             commit=True,
-            retry_commit_failures=False,
+            retry_commit_failures=True,
             on_retry=self._log_transient_db_retry,
         )
 
@@ -2021,6 +2027,25 @@ def _ordered_queue_decision_create(
         overlap_risk_summary=dict(latest.overlap_risk_summary) if latest else {},
         score_summary=score.score_summary,
         decided_at=decided_at,
+    )
+
+
+def _ordered_queue_decision_matches(
+    decision: QueueDecision | None,
+    candidate: _OrderedDecisionCandidate,
+    *,
+    reason_code: str,
+    decided_at: datetime,
+) -> bool:
+    if decision is None:
+        return False
+    return (
+        decision.workspace_id == candidate.workspace_id
+        and decision.task_id == candidate.task_id
+        and decision.attempt_id == candidate.attempt_id
+        and decision.decision == QUEUE_DECISION_ORDERED
+        and decision.reason_code == reason_code
+        and _utc_datetime(decision.decided_at) == _utc_datetime(decided_at)
     )
 
 

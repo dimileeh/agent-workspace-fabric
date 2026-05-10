@@ -709,7 +709,7 @@ class TestRunOnce:
         assert provisioner.calls == []
 
     @pytest.mark.unit
-    async def test_requested_ordered_decision_transient_commit_failure_prevents_dispatch(
+    async def test_requested_ordered_decision_persistent_transient_commit_failure_prevents_dispatch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -718,7 +718,7 @@ class TestRunOnce:
         requested_id = await _create_requested(
             session_factory,
             origin_repo,
-            "record-before-provision-ambiguous-commit",
+            "record-before-provision-persistent-transient-commit",
             create_task_attempt=True,
         )
         provisioner = _TransitioningProvisioner(session_factory)
@@ -750,25 +750,22 @@ class TestRunOnce:
             return None
 
         commits = 0
-        original_commit = AsyncSession.commit
 
-        async def _fail_first_commit(session: AsyncSession) -> None:
+        async def _fail_commit(_session: AsyncSession) -> None:
             nonlocal commits
             commits += 1
-            if commits == 1:
-                raise InterfaceError(
-                    "COMMIT",
-                    {},
-                    RuntimeError("connection is closed"),
-                    connection_invalidated=True,
-                )
-            await original_commit(session)
+            raise InterfaceError(
+                "COMMIT",
+                {},
+                RuntimeError("connection is closed"),
+                connection_invalidated=True,
+            )
 
         worker._list_requested = _list_requested_without_db  # type: ignore[method-assign]
         worker._filter_current_status = _filter_current_requested_status  # type: ignore[method-assign]
         worker._claim_requested_ids = _claim_without_commit  # type: ignore[method-assign]
         worker._maybe_expire_due_secret_leases = _skip_secret_lease_scan  # type: ignore[method-assign]
-        monkeypatch.setattr(AsyncSession, "commit", _fail_first_commit)
+        monkeypatch.setattr(AsyncSession, "commit", _fail_commit)
 
         with pytest.raises(InterfaceError, match="connection is closed"):
             await worker.run_once()
@@ -777,8 +774,75 @@ class TestRunOnce:
             decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
 
         assert provisioner.calls == []
-        assert commits == 1
+        assert commits == 2
         assert decisions == []
+
+    @pytest.mark.unit
+    async def test_requested_ordered_decision_ambiguous_commit_retries_without_duplicate(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "record-before-provision-ambiguous-commit",
+            create_task_attempt=True,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        async def _list_requested_without_db() -> list[str]:
+            return [requested_id]
+
+        async def _filter_current_requested_status(
+            workspace_ids: list[str],
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+        ) -> list[str]:
+            assert workspace_ids == [requested_id]
+            assert expected == WorkspaceStatus.requested
+            assert action == "provision"
+            return workspace_ids
+
+        async def _skip_secret_lease_scan() -> None:
+            return None
+
+        commits = 0
+        original_commit = AsyncSession.commit
+
+        async def _raise_after_ordered_decision_commit(session: AsyncSession) -> None:
+            nonlocal commits
+            commits += 1
+            await original_commit(session)
+            if commits == 2:
+                raise InterfaceError(
+                    "COMMIT",
+                    {},
+                    RuntimeError("connection is closed"),
+                    connection_invalidated=True,
+                )
+
+        worker._list_requested = _list_requested_without_db  # type: ignore[method-assign]
+        worker._filter_current_status = _filter_current_requested_status  # type: ignore[method-assign]
+        worker._maybe_expire_due_secret_leases = _skip_secret_lease_scan  # type: ignore[method-assign]
+        monkeypatch.setattr(AsyncSession, "commit", _raise_after_ordered_decision_commit)
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
+
+        assert provisioner.calls == [requested_id]
+        assert commits == 4
+        assert len(decisions) == 1
+        assert decisions[0].reason_code == "ORDERED_REQUESTED_PROVISIONING"
 
     @pytest.mark.unit
     async def test_run_once_retries_scheduler_read_after_closed_connection(
