@@ -527,6 +527,7 @@ class WorkspaceControlService:
                     operation_id=operation.id,
                     workspace_id=workspace_id,
                     exc=exc,
+                    terminal_runtime_cleanup=terminal_runtime_cleanup,
                     terminal_runtime_release_claim_owner_id=(
                         terminal_runtime_cleanup.claim_owner_id
                         if terminal_runtime_cleanup is not None
@@ -543,6 +544,7 @@ class WorkspaceControlService:
                     operation_id=operation.id,
                     workspace_id=workspace_id,
                     exc=exc,
+                    terminal_runtime_cleanup=terminal_runtime_cleanup,
                     terminal_runtime_release_claim_owner_id=(
                         terminal_runtime_cleanup.claim_owner_id
                         if terminal_runtime_cleanup is not None
@@ -707,6 +709,7 @@ class WorkspaceControlService:
                 operation_id=operation.id,
                 workspace_id=workspace_id,
                 exc=exc,
+                terminal_runtime_cleanup=terminal_runtime_cleanup,
                 terminal_runtime_release_claim_owner_id=(
                     terminal_runtime_cleanup.claim_owner_id
                     if terminal_runtime_cleanup is not None
@@ -722,6 +725,7 @@ class WorkspaceControlService:
                 operation_id=operation.id,
                 workspace_id=workspace_id,
                 exc=exc,
+                terminal_runtime_cleanup=terminal_runtime_cleanup,
                 terminal_runtime_release_claim_owner_id=(
                     terminal_runtime_cleanup.claim_owner_id
                     if terminal_runtime_cleanup is not None
@@ -1006,6 +1010,7 @@ class WorkspaceControlService:
         operation_id: str,
         workspace_id: str,
         exc: BaseException,
+        terminal_runtime_cleanup: _ControlTerminalRuntimeCleanup | None = None,
         terminal_runtime_release_claim_owner_id: str | None = None,
     ) -> None:
         if self._session_factory is None:
@@ -1014,6 +1019,7 @@ class WorkspaceControlService:
                 operation_id=operation_id,
                 workspace_id=workspace_id,
                 exc=exc,
+                terminal_runtime_cleanup=terminal_runtime_cleanup,
                 terminal_runtime_release_claim_owner_id=terminal_runtime_release_claim_owner_id,
             )
             return
@@ -1035,6 +1041,7 @@ class WorkspaceControlService:
                     operation_id=operation_id,
                     workspace_id=workspace_id,
                     exc=exc,
+                    terminal_runtime_cleanup=terminal_runtime_cleanup,
                     terminal_runtime_release_claim_owner_id=(
                         terminal_runtime_release_claim_owner_id
                     ),
@@ -2479,6 +2486,7 @@ async def _finish_precommitted_control_operation_failed(
     operation_id: str,
     workspace_id: str,
     exc: BaseException,
+    terminal_runtime_cleanup: _ControlTerminalRuntimeCleanup | None = None,
     terminal_runtime_release_claim_owner_id: str | None = None,
 ) -> None:
     try:
@@ -2498,15 +2506,36 @@ async def _finish_precommitted_control_operation_failed(
             workspace.execution_claim_expires_at = None
         operation_payload = operation.payload if isinstance(operation.payload, dict) else {}
         error_message = _control_operation_exception_message(exc)
+        terminal_runtime_release = _terminal_runtime_release_evidence(terminal_runtime_cleanup)
+        operation_result: dict[str, object] = {}
+        if workspace is not None:
+            operation_result["status"] = workspace.status
+        if terminal_runtime_release is not None:
+            operation_result["terminal_runtime_release"] = terminal_runtime_release
         await operations.finish(
             operation,
             status=OperationStatus.failed,
-            result={"status": workspace.status} if workspace is not None else None,
+            result=operation_result or None,
             error_code=_CONTROL_OPERATION_FAILED_REASON_CODE,
             error_message=error_message,
         )
         if workspace is not None:
             try:
+                audit_extra: dict[str, object | None] = {
+                    "stop_stack": operation_payload.get("stop_stack"),
+                    "expected_version": operation_payload.get("expected_version"),
+                }
+                terminal_runtime_release_summary = _terminal_runtime_release_audit_summary(
+                    terminal_runtime_cleanup
+                )
+                if terminal_runtime_release_summary is not None:
+                    audit_extra["terminal_runtime_release"] = terminal_runtime_release_summary
+                audit_evidence: dict[str, object | None] = {
+                    "error_type": type(exc).__name__,
+                    "error_message": error_message,
+                }
+                if terminal_runtime_release is not None:
+                    audit_evidence["terminal_runtime_release"] = terminal_runtime_release
                 async with session.begin_nested():
                     await _add_control_audit_event(
                         repo,
@@ -2515,14 +2544,8 @@ async def _finish_precommitted_control_operation_failed(
                         action=operation.type,
                         outcome="failed",
                         reason_code=_CONTROL_OPERATION_FAILED_REASON_CODE,
-                        extra={
-                            "stop_stack": operation_payload.get("stop_stack"),
-                            "expected_version": operation_payload.get("expected_version"),
-                        },
-                        evidence={
-                            "error_type": type(exc).__name__,
-                            "error_message": error_message,
-                        },
+                        extra=audit_extra,
+                        evidence=audit_evidence,
                     )
             except Exception as audit_exc:
                 _log.warning(
@@ -2541,6 +2564,53 @@ async def _finish_precommitted_control_operation_failed(
             workspace_id=workspace_id,
             error=redact_audit_text(repr(recovery_exc), limit=400),
         )
+
+
+def _terminal_runtime_release_evidence(
+    release: _ControlTerminalRuntimeCleanup | None,
+) -> dict[str, object] | None:
+    if release is None:
+        return None
+    evidence: dict[str, object] = {
+        "cleanup": release.cleanup.to_dict(),
+        "preserved": _terminal_runtime_release_preserved_evidence(release),
+    }
+    if release.claim_owner_id is not None:
+        evidence["claim_owner_id"] = release.claim_owner_id
+    return evidence
+
+
+def _terminal_runtime_release_audit_summary(
+    release: _ControlTerminalRuntimeCleanup | None,
+) -> dict[str, object] | None:
+    if release is None:
+        return None
+    summary: dict[str, object] = {
+        "cleanup_status": release.cleanup.status,
+        "cleanup_reason_code": release.cleanup.reason_code,
+    }
+    preserved = _terminal_runtime_release_preserved_evidence(release)
+    if preserved:
+        summary["preserved"] = preserved
+    if release.claim_owner_id is not None:
+        summary["claim_owner_id"] = release.claim_owner_id
+    return summary
+
+
+def _terminal_runtime_release_preserved_evidence(
+    release: _ControlTerminalRuntimeCleanup,
+) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in {
+            "worktree_path": (
+                str(release.preserved_worktree_host_path)
+                if release.preserved_worktree_host_path is not None
+                else None
+            ),
+        }.items()
+        if value is not None
+    }
 
 
 def _workspace_version_conflict(

@@ -1778,6 +1778,88 @@ async def test_finish_precommitted_control_operation_failed_handles_audit_failur
 
 
 @pytest.mark.unit
+async def test_stop_precommitted_failure_preserves_terminal_runtime_release_evidence(
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_terminal_release_evidence",
+        )
+        worktrees_root = tmp_path / "worktrees"
+        preserved_worktree_path = worktrees_root / workspace.id
+        preserved_worktree_path.mkdir(parents=True)
+        await session.commit()
+
+        cleaner = _SequencedCleaner(
+            [
+                {
+                    "status": "succeeded",
+                    "reason_code": "CLEANUP_SUCCEEDED",
+                    "completed_steps": [
+                        {
+                            "name": "compose_down",
+                            "status": "succeeded",
+                            "reason_code": "COMPOSE_DOWN_SUCCEEDED",
+                        }
+                    ],
+                }
+            ]
+        )
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: cleaner,
+            worktrees_root=worktrees_root,
+        )
+        require_workspace_for_update = service._require_workspace_for_update  # noqa: SLF001
+        require_workspace_calls = 0
+
+        async def fail_after_terminal_runtime_cleanup(
+            repo: WorkspaceRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal require_workspace_calls
+            require_workspace_calls += 1
+            if require_workspace_calls == 1:
+                return await require_workspace_for_update(repo, workspace_id)
+            raise RuntimeError("database failed after cleanup")
+
+        monkeypatch.setattr(
+            service,
+            "_require_workspace_for_update",
+            fail_after_terminal_runtime_cleanup,
+        )
+
+        with pytest.raises(RuntimeError, match="database failed after cleanup"):
+            await service.stop_workspace(workspace.id, reason="operator requested")
+
+        operations = await OperationRepository(session).list_for_workspace(workspace.id)
+        operation = next(item for item in operations if item.type == OperationType.stop.value)
+        audit_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace.id,
+            event_type="workspace.audit.control_operation",
+        )
+
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result is not None
+    release_result = operation.result["terminal_runtime_release"]
+    assert release_result["cleanup"]["reason_code"] == "CLEANUP_SUCCEEDED"
+    assert release_result["preserved"]["worktree_path"] == str(preserved_worktree_path)
+
+    audit_payload = audit_events[0].payload
+    assert audit_payload is not None
+    assert audit_payload["terminal_runtime_release"]["cleanup_status"] == "succeeded"
+    release_evidence = audit_payload["evidence"]["terminal_runtime_release"]
+    assert release_evidence["cleanup"]["completed_steps"][0]["name"] == "compose_down"
+    assert release_evidence["preserved"]["worktree_path"] == str(preserved_worktree_path)
+
+
+@pytest.mark.unit
 async def test_teardown_operation_heartbeat_edges(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,

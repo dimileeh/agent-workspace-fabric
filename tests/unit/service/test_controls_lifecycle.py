@@ -1737,16 +1737,34 @@ async def test_cancel_and_stop_fail_precommitted_operation_when_post_teardown_db
     assert operations[0].status == OperationStatus.failed.value
     assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
     assert operations[0].error_message == "SQLAlchemyError: post teardown transition failed"
-    assert operations[0].result == {"status": WorkspaceStatus.ready.value}
+    terminal_runtime_release = {
+        "cleanup": {
+            "status": "succeeded",
+            "reason_code": "CLEANUP_SUCCEEDED",
+            "steps": [],
+            "failed_steps": [],
+            "completed_steps": [],
+        },
+        "preserved": {},
+    }
+    assert operations[0].result == {
+        "status": WorkspaceStatus.ready.value,
+        "terminal_runtime_release": terminal_runtime_release,
+    }
     assert operations[0].finished_at is not None
     assert len(audit_events) == 1
     assert audit_events[0].reason_code == "CONTROL_OPERATION_FAILED"
     assert audit_events[0].payload is not None
     assert audit_events[0].payload["action"] == action
     assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["terminal_runtime_release"] == {
+        "cleanup_status": "succeeded",
+        "cleanup_reason_code": "CLEANUP_SUCCEEDED",
+    }
     assert audit_events[0].payload["evidence"] == {
         "error_type": "SQLAlchemyError",
         "error_message": "SQLAlchemyError: post teardown transition failed",
+        "terminal_runtime_release": terminal_runtime_release,
     }
 
 
@@ -1811,16 +1829,34 @@ async def test_cancel_and_stop_fail_precommitted_operation_when_cancelled_after_
     assert operations[0].status == OperationStatus.failed.value
     assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
     assert operations[0].error_message == "CancelledError: operation was cancelled"
-    assert operations[0].result == {"status": WorkspaceStatus.ready.value}
+    terminal_runtime_release = {
+        "cleanup": {
+            "status": "succeeded",
+            "reason_code": "CLEANUP_SUCCEEDED",
+            "steps": [],
+            "failed_steps": [],
+            "completed_steps": [],
+        },
+        "preserved": {},
+    }
+    assert operations[0].result == {
+        "status": WorkspaceStatus.ready.value,
+        "terminal_runtime_release": terminal_runtime_release,
+    }
     assert operations[0].finished_at is not None
     assert len(audit_events) == 1
     assert audit_events[0].reason_code == "CONTROL_OPERATION_FAILED"
     assert audit_events[0].payload is not None
     assert audit_events[0].payload["action"] == action
     assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["terminal_runtime_release"] == {
+        "cleanup_status": "succeeded",
+        "cleanup_reason_code": "CLEANUP_SUCCEEDED",
+    }
     assert audit_events[0].payload["evidence"] == {
         "error_type": "CancelledError",
         "error_message": "CancelledError: operation was cancelled",
+        "terminal_runtime_release": terminal_runtime_release,
     }
 
 
