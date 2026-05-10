@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import structlog
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, InterfaceError, ProgrammingError
@@ -296,6 +297,58 @@ async def test_db_retry_skips_cleanup_for_non_db_operation_errors() -> None:
         await run_db_operation_with_retry(_factory, _operation)
 
     assert events == ["close"]
+
+
+@pytest.mark.unit
+async def test_db_retry_propagates_close_failure_after_successful_operation() -> None:
+    class CloseError(Exception):
+        pass
+
+    class _Session:
+        async def close(self) -> None:
+            raise CloseError("close failed")
+
+    def _factory() -> _Session:
+        return _Session()
+
+    async def _operation(_session: _Session) -> int:
+        return 1
+
+    with pytest.raises(CloseError, match="close failed"):
+        await run_db_operation_with_retry(_factory, _operation)
+
+
+@pytest.mark.unit
+async def test_db_retry_close_error_does_not_mask_original_operation_error() -> None:
+    class CloseError(Exception):
+        pass
+
+    class OriginalError(Exception):
+        pass
+
+    class _Session:
+        async def close(self) -> None:
+            raise CloseError("close failed")
+
+    def _factory() -> _Session:
+        return _Session()
+
+    async def _operation(_session: _Session) -> None:
+        raise OriginalError("operation failed")
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(OriginalError, match="operation failed"),
+    ):
+        await run_db_operation_with_retry(_factory, _operation)
+
+    assert any(
+        entry.get("event") == "run_db_operation_with_retry.close_failed_after_operation_error"
+        and entry.get("log_level") == "warning"
+        and entry.get("error_type") == "CloseError"
+        and entry.get("error") == "close failed"
+        for entry in captured
+    )
 
 
 @pytest.mark.unit

@@ -8,10 +8,14 @@ from collections.abc import Awaitable, Callable, Iterator
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.logging import get_logger
+
 DB_CONNECTION_CLOSED_REASON = "DB_CONNECTION_CLOSED"
 DB_CONNECTION_FAILED_REASON = "DB_CONNECTION_FAILED"
 DB_CONNECTION_TRANSIENT_ATTEMPT_REASON = "DB_CONNECTION_TRANSIENT_ATTEMPT"
 DB_CONNECTION_TRANSIENT_RECOVERED_REASON = "DB_CONNECTION_TRANSIENT_RECOVERED"
+
+_log = get_logger(__name__)
 
 _CLOSED_CONNECTION_ERROR_NAMES = frozenset(
     {
@@ -105,10 +109,12 @@ async def run_db_operation_with_retry[T](
 
     for attempt in range(1, attempts + 1):
         session = session_factory()
+        attempt_exc: BaseException | None = None
         try:
             try:
                 result = await operation(session)
             except Exception as exc:
+                attempt_exc = exc
                 if _needs_failed_operation_session_cleanup(exc):
                     await invalidate_or_rollback_session(session, exc)
                 if attempt >= attempts or not is_transient_closed_connection_error(exc):
@@ -116,6 +122,9 @@ async def run_db_operation_with_retry[T](
                 if on_retry is not None:
                     await on_retry(exc, attempt)
                 continue
+            except BaseException as exc:
+                attempt_exc = exc
+                raise
 
             if not commit:
                 return result
@@ -123,6 +132,7 @@ async def run_db_operation_with_retry[T](
             try:
                 await session.commit()
             except Exception as exc:
+                attempt_exc = exc
                 await invalidate_or_rollback_session(session, exc)
                 if (
                     not retry_commit_failures
@@ -133,12 +143,30 @@ async def run_db_operation_with_retry[T](
                 if on_retry is not None:
                     await on_retry(exc, attempt)
                 continue
+            except BaseException as exc:
+                attempt_exc = exc
+                raise
             return result
         finally:
-            with contextlib.suppress(Exception):
-                await session.close()
+            await _close_session_after_attempt(session, attempt_exc)
 
     raise AssertionError("unreachable DB retry state")  # pragma: no cover
+
+
+async def _close_session_after_attempt(
+    session: AsyncSession,
+    attempt_exc: BaseException | None,
+) -> None:
+    try:
+        await session.close()
+    except Exception as close_exc:
+        if attempt_exc is None:
+            raise
+        _log.warning(
+            "run_db_operation_with_retry.close_failed_after_operation_error",
+            error_type=type(close_exc).__name__,
+            error=str(close_exc)[:240],
+        )
 
 
 def _exception_chain(
