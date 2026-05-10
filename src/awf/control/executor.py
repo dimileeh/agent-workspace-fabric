@@ -4641,11 +4641,13 @@ class WorkspaceExecutor:
         head_sha = await self._git_rev_parse_head(worktree_path)
         commit_count = 0
         changed_paths: list[str] = []
+        diff_error: str | None = None
         if baseline_sha:
             commit_count = await self._git_commit_count_since(worktree_path, baseline_sha)
             try:
                 changed = await self._committed_paths_since(worktree_path, baseline_sha)
-            except RuntimeError:
+            except RuntimeError as exc:
+                diff_error = str(exc)
                 _log.exception(
                     "executor.planning_conformance_stalled_diff_failed",
                     workspace_id=workspace.id,
@@ -4659,6 +4661,7 @@ class WorkspaceExecutor:
             base_sha=baseline_sha,
             commit_count=commit_count,
             changed_paths=changed_paths,
+            diff_error=diff_error,
             recovery_action=recovery_action,
         )
         details: dict[str, Any] = {"conformance_stall": stall_evidence_payload}

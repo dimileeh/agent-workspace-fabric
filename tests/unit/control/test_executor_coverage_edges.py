@@ -4126,6 +4126,7 @@ async def test_build_conformance_stall_failure_preserves_diff_failure_evidence(
     assert evidence["salvage_hint"]["head_sha"] == "head-sha"
     assert evidence["salvage_hint"]["implementation_commit_count"] == 2
     assert evidence["salvage_hint"]["changed_paths"] == []
+    assert evidence["diff_error"] == "diff failed"
     assert repo_get_calls == ["ws_stalled"]
     assert session.commits == 0
 

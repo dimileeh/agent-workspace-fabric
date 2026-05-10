@@ -646,6 +646,7 @@ def build_conformance_stall_failure_evidence(
     base_sha: str | None,
     commit_count: int,
     changed_paths: Sequence[str] = (),
+    diff_error: str | None = None,
     recovery_action: str | None = None,
 ) -> dict[str, Any]:
     """Return bounded structured evidence for a detected conformance stall."""
@@ -675,6 +676,9 @@ def build_conformance_stall_failure_evidence(
             "changed_paths": salvage_paths,
         },
     }
+    safe_diff_error = _safe_conformance_text(diff_error)
+    if safe_diff_error:
+        payload["diff_error"] = safe_diff_error
     if recovery_action is not None:
         payload["recovery_action"] = recovery_action
     return payload
