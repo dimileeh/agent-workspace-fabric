@@ -4928,6 +4928,7 @@ class PullRequestMonitorRunner:
                     requested_status=WorkspaceStatus.completed,
                     reason_code="MONITOR_DONE",
                     operation_id=operation_id,
+                    pr_merge_sha=pr_merge_sha,
                 )
                 return
             await s.commit()
@@ -5286,6 +5287,7 @@ async def _record_blocked_monitor_terminal_callback(
     requested_status: WorkspaceStatus,
     reason_code: str,
     operation_id: str,
+    pr_merge_sha: str | None = None,
     failure_reason: str | None = None,
     failure_message: str | None = None,
 ) -> None:
@@ -5293,6 +5295,12 @@ async def _record_blocked_monitor_terminal_callback(
     workspace = await repo.get(workspace_id)
     if workspace is None:
         return
+    if (
+        requested_status == WorkspaceStatus.completed
+        and pr_merge_sha
+        and not workspace.pr_merge_sha
+    ):
+        workspace.pr_merge_sha = pr_merge_sha
     await _record_ignored_monitor_terminal_callback(
         repo,
         workspace,

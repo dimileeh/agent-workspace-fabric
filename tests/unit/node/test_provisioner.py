@@ -1010,6 +1010,71 @@ class TestFailureHandling:
         ]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("release_mode", ["raises", "not_ok"])
+    async def test_stack_startup_failure_tolerates_terminal_runtime_release_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+        release_mode: str,
+    ) -> None:
+        class _FailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                del request
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="container healthcheck failed",
+                )
+
+        class _FailingTerminalRuntimeReleaser:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def release(
+                self,
+                workspace_id: str,
+                *,
+                source: str,
+                expected_status: WorkspaceStatus | None = None,
+            ) -> TerminalRuntimeReleaseResult:
+                del expected_status
+                self.calls.append(source)
+                if release_mode == "raises":
+                    raise RuntimeError("release failed")
+                return TerminalRuntimeReleaseResult(
+                    workspace_id=workspace_id,
+                    status="failed",
+                    reason_code="TERMINAL_RUNTIME_RELEASE_FAILED",
+                )
+
+        releaser = _FailingTerminalRuntimeReleaser()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingStackLauncher(),
+            terminal_runtime_releaser=releaser,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        assert releaser.calls == ["provisioner.stack_startup_failed"]
+
+    @pytest.mark.unit
     async def test_stack_startup_failure_records_computed_egress_audit(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1390,6 +1455,80 @@ class TestFailureHandling:
             assert reloaded.failure_message is not None
             assert "unexpected provisioning failure" in reloaded.failure_message
             assert "workspace.base.yml.j2" in reloaded.failure_message
+
+    @pytest.mark.unit
+    async def test_unexpected_provisioning_failure_releases_terminal_runtime_after_failure_transition(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _ExplodingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                del request
+                raise RuntimeError("template workspace.base.yml.j2 was not found")
+
+        class _RecordingTerminalRuntimeReleaser:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def release(
+                self,
+                workspace_id: str,
+                *,
+                source: str,
+                expected_status: WorkspaceStatus | None = None,
+            ) -> TerminalRuntimeReleaseResult:
+                async with session_factory() as s:
+                    reloaded = await WorkspaceRepository(s).get(workspace_id)
+                    assert reloaded is not None
+                    self.calls.append(
+                        {
+                            "workspace_id": workspace_id,
+                            "source": source,
+                            "expected_status": expected_status,
+                            "status_seen": reloaded.status,
+                            "failure_reason_seen": reloaded.failure_reason,
+                        }
+                    )
+                return TerminalRuntimeReleaseResult(
+                    workspace_id=workspace_id,
+                    status="released",
+                    reason_code="TERMINAL_RUNTIME_RELEASED",
+                )
+
+        releaser = _RecordingTerminalRuntimeReleaser()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_ExplodingStackLauncher(),
+            terminal_runtime_releaser=releaser,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(RuntimeError, match="workspace.base.yml.j2"):
+            await provisioner.provision(ws_id)
+
+        assert releaser.calls == [
+            {
+                "workspace_id": ws_id,
+                "source": "provisioner.unexpected_failed",
+                "expected_status": WorkspaceStatus.failed,
+                "status_seen": WorkspaceStatus.failed.value,
+                "failure_reason_seen": FailureReason.infrastructure_failure.value,
+            }
+        ]
 
 
 class TestOperatorControlRaces:

@@ -944,8 +944,8 @@ class WorkspaceControlService:
             WorkspaceStatus.destroyed.value,
         }:
             return
-        await self._session.flush()
         try:
+            await self._session.flush()
             async with self._session.begin_nested():
                 await record_terminal_runtime_release_event(
                     self._session,

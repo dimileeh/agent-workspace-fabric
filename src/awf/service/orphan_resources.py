@@ -508,7 +508,10 @@ def build_orphan_resource_summary(
         record for record in records if record.classification == "retained_evidence"
     )
     leaked_live_records = tuple(
-        record for record in orphan_records if record.reason == "TERMINAL_LIVE_RUNTIME_RESOURCE"
+        record
+        for record in orphan_records
+        if record.reason in {"TERMINAL_LIVE_RUNTIME_RESOURCE", "WORKSPACE_TERMINAL"}
+        and record.resource.kind in {"container", "network"}
     )
     unknown_records = tuple(record for record in records if record.classification == "unknown")
     orphan_counts_by_kind = _kind_counts(orphan_records)

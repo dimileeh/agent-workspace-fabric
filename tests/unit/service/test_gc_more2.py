@@ -22,7 +22,7 @@ from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
     FAILED_WORKSPACE_NO_WORK,
-    TERMINAL_WORKSPACE_RETENTION_EXPIRED,
+    TERMINAL_LIVE_RUNTIME_PRESERVED,
     WorkspaceGCCandidate,
     WorkspaceGCPath,
     WorkspaceGCPreserved,
@@ -1067,7 +1067,8 @@ async def test_plan_reclassifies_old_failed_active_workspace_from_candidate_to_p
     assert plan.preserved_count >= 1
     preserved_for_ws = [p for p in plan.preserved if p.workspace_id == failed_id]
     assert len(preserved_for_ws) == 1
-    assert preserved_for_ws[0].reason_code == TERMINAL_WORKSPACE_RETENTION_EXPIRED
+    assert preserved_for_ws[0].reason_code == TERMINAL_LIVE_RUNTIME_PRESERVED
+    assert preserved_for_ws[0].retention_class == "live_runtime"
 
 
 async def test_default_worktree_remover_succeeds(

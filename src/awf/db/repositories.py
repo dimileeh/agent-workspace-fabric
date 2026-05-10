@@ -4494,14 +4494,21 @@ class OperationRepository:
         *,
         now: datetime | None = None,
     ) -> Operation | None:
+        renewed_at = now or datetime.now(UTC)
         result = await self._session.execute(
             update(Operation)
             .where(
                 Operation.id == operation_id,
                 Operation.type.in_(_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES),
                 Operation.status.in_(_EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES),
+                func.coalesce(
+                    Operation.lease_renewed_at,
+                    Operation.started_at,
+                    Operation.created_at,
+                )
+                > external_runtime_teardown_operation_cutoff(now=renewed_at),
             )
-            .values(lease_renewed_at=now or datetime.now(UTC))
+            .values(lease_renewed_at=renewed_at)
             .returning(Operation)
             .execution_options(synchronize_session=False)
         )

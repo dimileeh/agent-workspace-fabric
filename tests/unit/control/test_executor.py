@@ -424,6 +424,7 @@ class TestHappyPath:
                 for event in persisted.events
                 if event.event_type == "workspace.stale_callback_ignored"
             ]
+        assert ignored_events, "Expected workspace.stale_callback_ignored event"
         assert ignored_events[-1].payload == {
             "callback_source": "executor",
             "callback_action": "execute",

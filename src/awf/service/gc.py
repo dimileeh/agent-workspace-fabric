@@ -34,6 +34,7 @@ DEFAULT_MIN_AGE_HOURS = 168
 
 COMPLETED_PR_RETENTION_EXPIRED = "COMPLETED_PR_RETENTION_EXPIRED"
 TERMINAL_WORKSPACE_RETENTION_EXPIRED = "TERMINAL_WORKSPACE_RETENTION_EXPIRED"
+TERMINAL_LIVE_RUNTIME_PRESERVED = "TERMINAL_LIVE_RUNTIME_PRESERVED"
 WORKSPACE_WITHIN_RETENTION = "WORKSPACE_WITHIN_RETENTION"
 FAILED_WORKSPACE_TRIAGE_PRESERVED = "FAILED_WORKSPACE_TRIAGE_PRESERVED"
 FAILED_WORKSPACE_NO_WORK = "FAILED_WORKSPACE_NO_WORK"
@@ -127,6 +128,8 @@ class WorkspaceGCPreserved:
 
     @property
     def retention_class(self) -> str:
+        if self.reason_code == TERMINAL_LIVE_RUNTIME_PRESERVED:
+            return "live_runtime"
         if self.reason_code == FAILED_WORKSPACE_TRIAGE_PRESERVED:
             return "salvage_evidence"
         if self.reason_code == WORKSPACE_CLEANUP_DISABLED:
@@ -1205,15 +1208,16 @@ async def _classify_workspace_for_gc_async(
     cleanup_enabled: bool,
 ) -> WorkspaceGCCandidate | WorkspaceGCPreserved | None:
     failed_terminal_workspace_no_work: bool | None = None
+    failed_terminal_workspace_live_runtime: bool | None = None
     if _needs_failed_terminal_workspace_no_work_inspection(
         workspace,
         cutoff_at=cutoff_at,
         default_policy=default_policy,
         cleanup_enabled=cleanup_enabled,
     ):
-        failed_terminal_workspace_no_work = await _failed_terminal_workspace_has_no_work_async(
-            workspace
-        )
+        runtime_state = await _failed_terminal_workspace_runtime_state_async(workspace)
+        failed_terminal_workspace_no_work = runtime_state == "no_work"
+        failed_terminal_workspace_live_runtime = runtime_state == "live_runtime"
     return await asyncio.to_thread(
         _classify_workspace_for_gc,
         workspace,
@@ -1223,6 +1227,7 @@ async def _classify_workspace_for_gc_async(
         default_policy=default_policy,
         cleanup_enabled=cleanup_enabled,
         failed_terminal_workspace_no_work=failed_terminal_workspace_no_work,
+        failed_terminal_workspace_live_runtime=failed_terminal_workspace_live_runtime,
     )
 
 
@@ -1262,6 +1267,7 @@ def _classify_workspace_for_gc(
     default_policy: bool,
     cleanup_enabled: bool,
     failed_terminal_workspace_no_work: bool | None = None,
+    failed_terminal_workspace_live_runtime: bool | None = None,
 ) -> WorkspaceGCCandidate | WorkspaceGCPreserved | None:
     if workspace.status in PROTECTED_WORKSPACE_GC_STATUSES:
         return None
@@ -1303,7 +1309,11 @@ def _classify_workspace_for_gc(
                 status=workspace.status,
                 updated_at=updated_at,
                 age_hours=age_hours,
-                reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
+                reason_code=(
+                    TERMINAL_LIVE_RUNTIME_PRESERVED
+                    if failed_terminal_workspace_live_runtime
+                    else FAILED_WORKSPACE_TRIAGE_PRESERVED
+                ),
             )
         if workspace.status == "superseded":
             if _failed_terminal_workspace_no_work_decision(
@@ -1328,7 +1338,11 @@ def _classify_workspace_for_gc(
                 status=workspace.status,
                 updated_at=updated_at,
                 age_hours=age_hours,
-                reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
+                reason_code=(
+                    TERMINAL_LIVE_RUNTIME_PRESERVED
+                    if failed_terminal_workspace_live_runtime
+                    else FAILED_WORKSPACE_TRIAGE_PRESERVED
+                ),
             )
         if workspace.status != WorkspaceStatus.completed.value:
             return None
@@ -1383,7 +1397,11 @@ def _classify_workspace_for_gc(
             status=workspace.status,
             updated_at=updated_at,
             age_hours=age_hours,
-            reason_code=TERMINAL_WORKSPACE_RETENTION_EXPIRED,
+            reason_code=(
+                TERMINAL_LIVE_RUNTIME_PRESERVED
+                if failed_terminal_workspace_live_runtime
+                else TERMINAL_WORKSPACE_RETENTION_EXPIRED
+            ),
         )
 
     if workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES:
@@ -1407,17 +1425,27 @@ def _classify_workspace_for_gc(
     )
 
 
-async def _failed_terminal_workspace_has_no_work_async(workspace: Workspace) -> bool:
-    """Return True when a failed terminal workspace has no active agent work."""
+async def _failed_terminal_workspace_runtime_state_async(workspace: Workspace) -> str:
+    """Return a coarse terminal-runtime state for failed/superseded GC."""
 
     compose_project_name = _compose_project_name_for_workspace(workspace)
     if compose_project_name is None:
-        return False
+        return "unknown"
     try:
         snapshot = await _RUNTIME_INSPECTOR.inspect(compose_project_name)
     except Exception:
-        return False
-    return _snapshot_has_no_work(snapshot)
+        return "unknown"
+    if _snapshot_has_no_work(snapshot):
+        return "no_work"
+    if _snapshot_has_live_runtime(snapshot):
+        return "live_runtime"
+    return "unknown"
+
+
+async def _failed_terminal_workspace_has_no_work_async(workspace: Workspace) -> bool:
+    """Return True when a failed terminal workspace has no active agent work."""
+
+    return await _failed_terminal_workspace_runtime_state_async(workspace) == "no_work"
 
 
 def _failed_terminal_workspace_has_no_work(workspace: Workspace) -> bool:
@@ -1447,6 +1475,20 @@ def _snapshot_has_no_work(snapshot: RuntimeSnapshot) -> bool:
     if not agent_services:
         return False
     return _agent_service_has_no_work(agent_services[0])
+
+
+def _snapshot_has_live_runtime(snapshot: RuntimeSnapshot) -> bool:
+    if snapshot.stack_state == "unavailable":
+        return False
+    agent_services = [
+        service for service in snapshot.services if (service.name or "").lower() == "agent"
+    ]
+    if not agent_services:
+        return False
+    service = agent_services[0]
+    if (service.state or "").lower() != "running":
+        return False
+    return not _container_command_is_idle(service.command)
 
 
 def _agent_service_has_no_work(service: RuntimeService) -> bool:

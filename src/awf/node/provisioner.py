@@ -255,7 +255,10 @@ class Provisioner:
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
             )
-            await self._release_failed_provisioning_runtime(workspace_id)
+            await self._release_failed_provisioning_runtime(
+                workspace_id,
+                source="provisioner.stack_startup_failed",
+            )
             raise
         except Exception as exc:
             _log.exception(
@@ -268,6 +271,10 @@ class Provisioner:
                 failure_reason=FailureReason.infrastructure_failure,
                 message=f"unexpected provisioning failure: {exc}"[:2000],
                 from_status=WorkspaceStatus.provisioning,
+            )
+            await self._release_failed_provisioning_runtime(
+                workspace_id,
+                source="provisioner.unexpected_failed",
             )
             raise
 
@@ -446,14 +453,19 @@ class Provisioner:
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
 
-    async def _release_failed_provisioning_runtime(self, workspace_id: str) -> None:
+    async def _release_failed_provisioning_runtime(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+    ) -> None:
         releaser = self._terminal_runtime_releaser
         if releaser is None:
             return
         try:
             result = await releaser.release(
                 workspace_id,
-                source="provisioner.stack_startup_failed",
+                source=source,
                 expected_status=WorkspaceStatus.failed,
             )
         except Exception:

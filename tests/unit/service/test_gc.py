@@ -26,6 +26,7 @@ from awf.service.gc import (
     COMPLETED_PR_RETENTION_EXPIRED,
     FAILED_WORKSPACE_NO_WORK,
     FAILED_WORKSPACE_TRIAGE_PRESERVED,
+    TERMINAL_LIVE_RUNTIME_PRESERVED,
     TERMINAL_WORKSPACE_RETENTION_EXPIRED,
     WORKSPACE_WITHIN_RETENTION,
     WorkspaceGCCandidate,
@@ -978,6 +979,58 @@ async def test_default_plan_preserves_superseded_when_agent_service_missing(
 
 
 @pytest.mark.unit
+async def test_default_plan_marks_live_runtime_preserved_separately(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        compose_project_name="awf_failed_live_runtime",
+        updated_at=now - timedelta(hours=200),
+    )
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="running",
+                        command="python -m awf.agent",
+                    )
+                ],
+            )
+        ),
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert plan.candidates == []
+    assert plan.preserved_count == 1
+    assert plan.preserved[0].workspace_id == workspace_id
+    assert plan.preserved[0].reason_code == TERMINAL_LIVE_RUNTIME_PRESERVED
+    assert plan.to_dict()["preserved"][0]["retention_class"] == "live_runtime"
+
+
+@pytest.mark.unit
 async def test_cleanup_disabled_preserves_completed_pr_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1917,6 +1970,72 @@ def test_failed_terminal_workspace_has_no_work_exception(monkeypatch: pytest.Mon
     monkeypatch.setattr(gc, "_RUNTIME_INSPECTOR", _RaisingRuntimeInspector())
 
     assert _failed_terminal_workspace_has_no_work(ws) is False
+
+
+@pytest.mark.unit
+async def test_failed_terminal_workspace_runtime_state_unknown_without_compose_project() -> None:
+    workspace = Workspace(id="ws_1", compose_project_name=None)
+
+    assert await gc._failed_terminal_workspace_runtime_state_async(workspace) == "unknown"  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_failed_terminal_workspace_runtime_state_unknown_when_inspection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RaisingRuntimeInspector:
+        async def inspect(self, compose_project_name: str) -> RuntimeSnapshot:
+            assert compose_project_name == "proj"
+            raise RuntimeError("mocked err")
+
+    workspace = Workspace(id="ws_1", compose_project_name="proj")
+    monkeypatch.setattr(gc, "_RUNTIME_INSPECTOR", _RaisingRuntimeInspector())
+
+    assert await gc._failed_terminal_workspace_runtime_state_async(workspace) == "unknown"  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_snapshot_has_live_runtime_false_for_inactive_shapes() -> None:
+    assert (
+        gc._snapshot_has_live_runtime(  # noqa: SLF001
+            RuntimeSnapshot(stack_state="unavailable", services=[])
+        )
+        is False
+    )
+    assert (
+        gc._snapshot_has_live_runtime(  # noqa: SLF001
+            RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="other",
+                        container_id="other",
+                        image="awf-agent",
+                        state="running",
+                        command="python -m awf.agent",
+                    )
+                ],
+            )
+        )
+        is False
+    )
+    assert (
+        gc._snapshot_has_live_runtime(  # noqa: SLF001
+            RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="exited",
+                        command="python -m awf.agent",
+                    )
+                ],
+            )
+        )
+        is False
+    )
 
 
 def test_classify_workspace_failed_no_work_but_within_retention():

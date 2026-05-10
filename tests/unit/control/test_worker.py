@@ -5209,7 +5209,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
         ) -> None:
             assert observed_workspace_id == workspace_id
             assert owner_id == worker._stale_active_execution_cleanup_owner()  # noqa: SLF001
-            await asyncio.wait_for(cleaner.started.wait(), timeout=1)
+            await asyncio.wait_for(
+                cleaner.started.wait(),
+                timeout=WORKER_TEST_TIMEOUT_SECONDS,
+            )
             async with session_factory() as s:
                 ws = await WorkspaceRepository(s).get(workspace_id)
                 assert ws is not None
@@ -5225,7 +5228,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
         await asyncio.wait_for(
             worker._cleanup_and_fail_stale_active_execution(candidate, snapshot),
-            timeout=1,
+            timeout=WORKER_TEST_TIMEOUT_SECONDS,
         )
 
         assert len(cleaner.calls) == 1

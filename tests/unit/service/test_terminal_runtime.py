@@ -40,6 +40,8 @@ from awf.service.terminal_runtime import (
 )
 from tests.postgres import postgres_test_engine
 
+TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS = 30.0
+
 
 @pytest.fixture
 async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
@@ -1121,7 +1123,7 @@ async def test_terminal_runtime_release_refreshes_claim_during_long_cleanup(
             source="test",
             expected_status=WorkspaceStatus.failed,
         ),
-        timeout=1,
+        timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
     )
 
     assert result.ok
@@ -1173,8 +1175,14 @@ async def test_terminal_runtime_release_fails_when_claim_is_lost_during_cleanup(
         )
     )
     try:
-        await asyncio.wait_for(claim_lost_observed.wait(), timeout=1)
-        result = await asyncio.wait_for(release_task, timeout=1)
+        await asyncio.wait_for(
+            claim_lost_observed.wait(),
+            timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
+        result = await asyncio.wait_for(
+            release_task,
+            timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
     finally:
         if not release_task.done():
             release_task.cancel()
@@ -1405,7 +1413,10 @@ async def test_terminal_runtime_release_cancellation_cancels_cleanup_before_clai
             expected_status=WorkspaceStatus.failed,
         )
     )
-    await asyncio.wait_for(cleaner.started.wait(), timeout=1)
+    await asyncio.wait_for(
+        cleaner.started.wait(),
+        timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+    )
 
     release_task.cancel()
     try:

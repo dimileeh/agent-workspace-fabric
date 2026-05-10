@@ -48,6 +48,7 @@ from awf.db.repositories import (
     _wildcard_prefixes_overlap,
     _workspace_idempotency_advisory_lock_key,
     external_runtime_teardown_operation_blocks_controls,
+    external_runtime_teardown_operation_cutoff,
     owned_path_overlap_match,
     owned_paths_overlap,
     sync_candidate_readiness,
@@ -1870,6 +1871,31 @@ async def test_operation_renew_teardown_lease_updates_only_active_teardown(
     assert missing is None
     assert active_validate.lease_renewed_at is None
     assert terminal_stop.lease_renewed_at is None
+
+
+@pytest.mark.unit
+async def test_operation_renew_teardown_lease_does_not_reanimate_expired_lease(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, title="operation expired teardown lease")
+    repo = OperationRepository(session)
+    operation = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.running,
+        payload={"source": "operator_api"},
+    )
+    renewed_at = datetime(2026, 5, 9, 1, 15, tzinfo=UTC)
+    expired_at = external_runtime_teardown_operation_cutoff(now=renewed_at) - timedelta(seconds=1)
+    operation.created_at = expired_at
+    operation.started_at = expired_at
+    operation.lease_renewed_at = expired_at
+    await session.flush()
+
+    renewed = await repo.renew_teardown_lease(operation.id, now=renewed_at)
+
+    assert renewed is None
+    assert operation.lease_renewed_at == expired_at
 
 
 @pytest.mark.unit

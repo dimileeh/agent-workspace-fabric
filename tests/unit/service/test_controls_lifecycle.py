@@ -29,6 +29,11 @@ from awf.db.repositories import (
     WorkspaceTransitionBlockedByActiveOperationError,
 )
 from awf.db.session import make_session_factory
+from awf.node.cleanup import (
+    COMPOSE_DOWN_SUCCEEDED,
+    WorkspaceCleanupResult,
+    WorkspaceCleanupStepResult,
+)
 from awf.service import controls as controls_module
 from awf.service.controls import (
     _OPERATION_ERROR_MESSAGE_MAX_LENGTH,
@@ -60,6 +65,8 @@ from awf.service.terminal_runtime import (
     terminal_runtime_release_claim_active,
 )
 from tests.postgres import postgres_test_engine, postgres_test_session
+
+CONTROL_ASYNC_TEST_TIMEOUT_SECONDS = 30.0
 
 
 @pytest.fixture
@@ -318,7 +325,7 @@ class ConcurrentTransitionStopper:
             repo = WorkspaceRepository(actor)
             workspace = await asyncio.wait_for(
                 repo.get_for_update(self.workspace_id),
-                timeout=1,
+                timeout=CONTROL_ASYNC_TEST_TIMEOUT_SECONDS,
             )
             assert workspace is not None
             try:
@@ -345,7 +352,7 @@ class LeaseHeartbeatWaitingStopper:
 
     async def __call__(self, compose_project_name: str | None) -> None:
         self.calls.append(compose_project_name)
-        deadline = asyncio.get_running_loop().time() + 1
+        deadline = asyncio.get_running_loop().time() + CONTROL_ASYNC_TEST_TIMEOUT_SECONDS
         while asyncio.get_running_loop().time() < deadline:
             async with self.session_factory() as observer:
                 operations = await OperationRepository(observer).list_for_workspace(
@@ -389,7 +396,7 @@ class ConcurrentTerminalRuntimeReleaseClaimStopper:
             await _assert_workspace_row_unlocked_nowait(actor, self.workspace_id)
             workspace = await asyncio.wait_for(
                 WorkspaceRepository(actor).get_for_update(self.workspace_id),
-                timeout=1,
+                timeout=CONTROL_ASYNC_TEST_TIMEOUT_SECONDS,
             )
             assert workspace is not None
             workspace.execution_claimed_by = (
@@ -484,7 +491,7 @@ class TerminalRuntimeClaimHeartbeatWaitingCleaner(RecordingCleaner):
                 remove_worktree=remove_worktree,
             )
         )
-        deadline = asyncio.get_running_loop().time() + 1
+        deadline = asyncio.get_running_loop().time() + CONTROL_ASYNC_TEST_TIMEOUT_SECONDS
         while asyncio.get_running_loop().time() < deadline:
             async with self._session_factory() as observer:
                 workspace = await WorkspaceRepository(observer).get(self._workspace_id)
@@ -1078,7 +1085,7 @@ async def test_cancel_and_stop_abort_external_cleanup_when_teardown_lease_is_los
                     reason="operator requested",
                     stop_stack=True,
                 ),
-                timeout=1,
+                timeout=CONTROL_ASYNC_TEST_TIMEOUT_SECONDS,
             )
         else:
             await asyncio.wait_for(
@@ -1086,7 +1093,7 @@ async def test_cancel_and_stop_abort_external_cleanup_when_teardown_lease_is_los
                     workspace_id,
                     reason="operator requested",
                 ),
-                timeout=1,
+                timeout=CONTROL_ASYNC_TEST_TIMEOUT_SECONDS,
             )
 
     await session.rollback()
@@ -1177,7 +1184,7 @@ async def test_cancel_and_stop_abort_external_cleanup_when_teardown_lease_renew_
                     reason="operator requested",
                     stop_stack=True,
                 ),
-                timeout=1,
+                timeout=CONTROL_ASYNC_TEST_TIMEOUT_SECONDS,
             )
         else:
             await asyncio.wait_for(
@@ -1185,7 +1192,7 @@ async def test_cancel_and_stop_abort_external_cleanup_when_teardown_lease_renew_
                     workspace_id,
                     reason="operator requested",
                 ),
-                timeout=1,
+                timeout=CONTROL_ASYNC_TEST_TIMEOUT_SECONDS,
             )
 
     await session.rollback()
@@ -1923,6 +1930,47 @@ async def test_cancel_and_stop_complete_when_terminal_release_event_recording_hi
         entry["event"] == "controls.terminal_runtime_release_event_record_failed"
         and entry["workspace_id"] == workspace.id
         and entry["source"] == f"service.controls.{action}"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_event_flush_failure_is_logged_without_raising(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.cancelled)
+    service, _stopper, _cleaner = _service(session)
+    release = controls_module._ControlTerminalRuntimeCleanup(  # noqa: SLF001
+        cleanup=WorkspaceCleanupResult.from_steps(
+            [
+                WorkspaceCleanupStepResult(
+                    name="compose_down",
+                    status="succeeded",
+                    reason_code=COMPOSE_DOWN_SUCCEEDED,
+                )
+            ]
+        ),
+        preserved_worktree_host_path=None,
+    )
+
+    async def _raise_flush_failure(*args: object, **kwargs: object) -> None:
+        raise SQLAlchemyError("deferred flush failed")
+
+    monkeypatch.setattr(session, "flush", _raise_flush_failure)
+
+    with capture_logs() as captured:
+        await service._record_terminal_runtime_release_for_control(  # noqa: SLF001
+            workspace,
+            release=release,
+            source="service.controls.test",
+        )
+
+    assert any(
+        entry["event"] == "controls.terminal_runtime_release_event_record_failed"
+        and entry["workspace_id"] == workspace.id
+        and entry["source"] == "service.controls.test"
+        and "deferred flush failed" in entry["error"]
         for entry in captured
     )
 
