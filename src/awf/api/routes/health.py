@@ -450,7 +450,7 @@ async def _egress_audit_summary_counts_with_timeout(factory: Any) -> dict[str, i
         task,
         timeout=_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS,
     )
-    raise TimeoutError
+    raise TimeoutError("egress audit summary timed out")
 
 
 async def _check_orphan_resources(

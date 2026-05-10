@@ -14,6 +14,7 @@ from sqlalchemy import event, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import awf.db.repositories as repositories
 from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
@@ -29,7 +30,7 @@ from awf.db.repositories import (
     validation_command_set_hash,
 )
 from awf.db.session import make_engine, make_session_factory
-from awf.service.scheduler import SchedulerOrderCursor
+from awf.service.scheduler import SchedulerOrderCursor, scheduler_score_from_workspace
 from tests.postgres import (
     create_postgres_test_engine,
     postgres_empty_test_url,
@@ -1519,6 +1520,73 @@ class TestOwnedPathOverlapLookup:
         )
 
         assert listed == [after_cursor.id]
+
+    @pytest.mark.unit
+    async def test_scheduler_cursor_tie_breaks_equal_score_and_created_at_by_workspace_id(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ids = iter(("ws_scheduler_tie_001", "ws_scheduler_tie_002", "ws_scheduler_tie_003"))
+        monkeypatch.setattr(repositories, "new_workspace_id", lambda: next(ids))
+        repo = WorkspaceRepository(session)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        shared_created_at = datetime(2026, 5, 2, 11, 55, tzinfo=UTC)
+        first = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="first tie",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        second = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="second tie",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        third = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="third tie",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 50}},
+        )
+        for workspace in (first, second, third):
+            workspace.created_at = shared_created_at
+        await session.commit()
+
+        page_one = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=2,
+            scoring_at=scoring_at,
+        )
+        cursor_score = scheduler_score_from_workspace(second, now=scoring_at)
+        page_two = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=10,
+            scoring_at=scoring_at,
+            after=SchedulerOrderCursor(
+                class_priority=cursor_score.class_priority,
+                effective_score=cursor_score.effective_score,
+                queued_at=second.created_at,
+                workspace_id=second.id,
+                scoring_at=scoring_at,
+            ),
+        )
+
+        assert page_one == [first.id, second.id]
+        assert page_two == [third.id]
 
     @pytest.mark.unit
     async def test_scheduler_keeps_owned_path_overlap_advisory_only(

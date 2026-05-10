@@ -426,7 +426,7 @@ async def test_readyz_egress_audit_timeout_drains_completed_session_cleanup(
     monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
     monkeypatch.setattr(health_route, "EgressAuditRepository", _SlowEgressAuditRepository)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(TimeoutError, match="egress audit summary timed out"):
         await health_route._egress_audit_summary_counts_with_timeout(_Session)
 
     assert closed.is_set()
