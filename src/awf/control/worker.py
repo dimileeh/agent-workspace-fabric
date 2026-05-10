@@ -34,6 +34,7 @@ from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import QueueDecision, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    SCHEDULER_SQL_AGE_BOOST_DIALECTS,
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
     QueueDecisionCreate,
@@ -115,7 +116,6 @@ _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
 _MONITOR_RECOVERY_OWNER = "control_worker"
 _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL = 1
-_SCHEDULER_SQL_AGE_BOOST_DIALECTS = {"postgresql", "sqlite"}
 _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE = (
     "STALE_EXECUTION_CLAIM_CLEARED_DURING_MONITOR_RECOVERY"
 )
@@ -2185,7 +2185,7 @@ def _scheduler_candidate_cursor(
     last = workspaces[-1]
     score = scheduler_score_from_workspace(last, now=scoring_at)
     effective_score = score.effective_score
-    if dialect_name not in _SCHEDULER_SQL_AGE_BOOST_DIALECTS:
+    if dialect_name not in SCHEDULER_SQL_AGE_BOOST_DIALECTS:
         effective_score -= score.age_boost
     return SchedulerOrderCursor(
         class_priority=score.class_priority,

@@ -17,7 +17,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final, cast
+from typing import Any, Final, Protocol, cast
 
 from sqlalchemy import (
     DateTime,
@@ -113,6 +113,16 @@ from awf.service.scheduler import (
     scheduler_order_key,
     scheduler_score_from_workspace,
 )
+
+
+class _SchedulerAgeBoostExprBuilder(Protocol):
+    def __call__(
+        self,
+        *,
+        scoring_at: datetime,
+        workspace_entity: Any,
+    ) -> ColumnElement[Any]: ...
+
 
 ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.requested.value,
@@ -3991,35 +4001,63 @@ def _scheduler_age_boost_expr(
     dialect_name: str | None,
     workspace_entity: Any = Workspace,
 ) -> ColumnElement[Any]:
-    wait_seconds: ColumnElement[Any]
-    intervals: ColumnElement[Any]
-    if dialect_name == "postgresql":
-        scoring_time = sql_cast(literal(scoring_at), DateTime(timezone=True))
-        return case(
-            *(
-                (
-                    workspace_entity.created_at
-                    <= scoring_time
-                    - text(f"INTERVAL '{boost * AGE_BOOST_INTERVAL_SECONDS} seconds'"),
-                    boost,
-                )
-                for boost in range(AGE_BOOST_MAX, 0, -1)
-            ),
-            else_=0,
-        )
-    if dialect_name == "sqlite":
-        wait_seconds = sql_cast(func.strftime("%s", literal(scoring_at)), Integer) - sql_cast(
-            func.strftime("%s", workspace_entity.created_at),
-            Integer,
-        )
-        intervals = sql_cast(wait_seconds / AGE_BOOST_INTERVAL_SECONDS, Integer)
-    else:
-        intervals = cast("ColumnElement[Any]", literal(0))
+    builder = _SCHEDULER_SQL_AGE_BOOST_EXPR_BUILDERS.get(dialect_name or "")
+    if builder is None:
+        return _scheduler_zero_age_boost_expr()
+    return builder(scoring_at=scoring_at, workspace_entity=workspace_entity)
+
+
+def _postgresql_scheduler_age_boost_expr(
+    *,
+    scoring_at: datetime,
+    workspace_entity: Any,
+) -> ColumnElement[Any]:
+    scoring_time = sql_cast(literal(scoring_at), DateTime(timezone=True))
+    return case(
+        *(
+            (
+                workspace_entity.created_at
+                <= scoring_time - text(f"INTERVAL '{boost * AGE_BOOST_INTERVAL_SECONDS} seconds'"),
+                boost,
+            )
+            for boost in range(AGE_BOOST_MAX, 0, -1)
+        ),
+        else_=0,
+    )
+
+
+def _sqlite_scheduler_age_boost_expr(
+    *,
+    scoring_at: datetime,
+    workspace_entity: Any,
+) -> ColumnElement[Any]:
+    wait_seconds = sql_cast(func.strftime("%s", literal(scoring_at)), Integer) - sql_cast(
+        func.strftime("%s", workspace_entity.created_at),
+        Integer,
+    )
+    intervals = sql_cast(wait_seconds / AGE_BOOST_INTERVAL_SECONDS, Integer)
     return _bounded_scheduler_int_expr(
         func.coalesce(intervals, 0),
         lower=0,
         upper=AGE_BOOST_MAX,
     )
+
+
+def _scheduler_zero_age_boost_expr() -> ColumnElement[Any]:
+    return _bounded_scheduler_int_expr(
+        func.coalesce(cast("ColumnElement[Any]", literal(0)), 0),
+        lower=0,
+        upper=AGE_BOOST_MAX,
+    )
+
+
+_SCHEDULER_SQL_AGE_BOOST_EXPR_BUILDERS: Final[Mapping[str, _SchedulerAgeBoostExprBuilder]] = {
+    "postgresql": _postgresql_scheduler_age_boost_expr,
+    "sqlite": _sqlite_scheduler_age_boost_expr,
+}
+SCHEDULER_SQL_AGE_BOOST_DIALECTS: Final[frozenset[str]] = frozenset(
+    _SCHEDULER_SQL_AGE_BOOST_EXPR_BUILDERS
+)
 
 
 def _scheduler_after_cursor_condition(

@@ -22,6 +22,7 @@ from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.control.worker as worker_module
+import awf.db.repositories as repositories_module
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
@@ -7163,6 +7164,14 @@ def test_scheduler_candidate_cursor_uses_sql_age_boost_domain() -> None:
         queued_at=workspace.created_at,
         workspace_id=workspace.id,
         scoring_at=scoring_at,
+    )
+
+
+@pytest.mark.unit
+def test_scheduler_candidate_cursor_uses_repository_sql_age_boost_dialect_contract() -> None:
+    assert (
+        worker_module.SCHEDULER_SQL_AGE_BOOST_DIALECTS
+        is repositories_module.SCHEDULER_SQL_AGE_BOOST_DIALECTS
     )
 
 

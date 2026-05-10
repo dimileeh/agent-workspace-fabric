@@ -510,9 +510,12 @@ def _workspace_response_with_egress_audit(
 ) -> WorkspaceResponse:
     if egress_audit is None:
         return response
-    return response.model_copy(
-        update={"egress_audit": EgressAuditRecordResponse.model_validate(egress_audit)}
-    )
+    try:
+        validated = EgressAuditRecordResponse.model_validate(egress_audit)
+    except Exception:
+        _logger.warning("egress audit model validation failed", exc_info=True)
+        return response
+    return response.model_copy(update={"egress_audit": validated})
 
 
 async def _retry_optional_egress_audit_lookup(

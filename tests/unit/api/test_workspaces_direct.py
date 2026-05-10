@@ -274,6 +274,44 @@ class TestGetDirect:
         assert calls == 1
 
     @pytest.mark.unit
+    async def test_returns_materialized_response_after_invalid_egress_audit_payload(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="invalid audit payload"),
+            idempotency_key=None,
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        await session.commit()
+
+        async def _invalid_audit_lookup(
+            workspace_id: str,
+            session_factory: async_sessionmaker[AsyncSession],
+        ) -> dict[str, object] | None:
+            del session_factory
+            assert workspace_id == created.workspace_id
+            return {"id": "audit_missing_required_fields"}
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "_retry_optional_egress_audit_lookup",
+            _invalid_audit_lookup,
+        )
+        caplog.set_level("WARNING", logger=workspaces_route.__name__)
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert result.id == created.workspace_id
+        assert result.task_title == "invalid audit payload"
+        assert result.egress_audit is None
+        assert "egress audit model validation failed" in caplog.text
+
+    @pytest.mark.unit
     async def test_raises_404_for_missing(
         self,
         session_factory: async_sessionmaker[AsyncSession],
