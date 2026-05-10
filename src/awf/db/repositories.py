@@ -3321,39 +3321,53 @@ class WorkspaceRepository:
             return None
 
         now = datetime.now(UTC)
-        result = await self._session.execute(
-            update(Workspace)
-            .where(
-                Workspace.id == workspace_id,
-                Workspace.status == from_status.value,
-                Workspace.version == expected_version,
-                *extra_conditions,
-                ~_active_external_runtime_teardown_operation_exists(
-                    workspace_id,
-                    allow_active_operation_id=allow_active_operation_id,
-                ),
+        updated = False
+        for _ in range(_WORKSPACE_TRANSITION_TEARDOWN_RACE_RETRY_LIMIT):
+            result = await self._session.execute(
+                update(Workspace)
+                .where(
+                    Workspace.id == workspace_id,
+                    Workspace.status == from_status.value,
+                    Workspace.version == expected_version,
+                    *extra_conditions,
+                    ~_active_external_runtime_teardown_operation_exists(
+                        workspace_id,
+                        allow_active_operation_id=allow_active_operation_id,
+                    ),
+                )
+                .values(
+                    status=to.value,
+                    version=Workspace.version + 1,
+                    updated_at=now,
+                )
+                .returning(Workspace.id)
             )
-            .values(
-                status=to.value,
-                version=Workspace.version + 1,
-                updated_at=now,
-            )
-            .returning(Workspace.id)
-        )
-        if result.scalar_one_or_none() is None:
-            if await self._transition_if_current_preconditions_match(
+            if result.scalar_one_or_none() is not None:
+                updated = True
+                break
+
+            if not await self._transition_if_current_preconditions_match(
                 workspace_id,
                 from_status=from_status,
                 expected_version=expected_version,
                 extra_conditions=extra_conditions,
             ):
-                active_teardown = await self._active_external_runtime_teardown_operation(
-                    workspace_id,
-                    allow_active_operation_id=allow_active_operation_id,
-                )
-                if active_teardown is not None:
-                    raise WorkspaceTransitionBlockedByActiveOperationError(active_teardown)
-            return None
+                return None
+
+            active_teardown = await self._active_external_runtime_teardown_operation(
+                workspace_id,
+                allow_active_operation_id=allow_active_operation_id,
+            )
+            if active_teardown is not None:
+                raise WorkspaceTransitionBlockedByActiveOperationError(active_teardown)
+            # The teardown operation may have finished between the guarded UPDATE and
+            # the diagnostic read. If the workspace row is otherwise unchanged, retry.
+
+        if not updated:
+            raise RuntimeError(
+                f"Workspace transition did not update workspace {workspace_id}; "
+                "teardown contention retry limit exceeded."
+            )
 
         workspace = await self.get(workspace_id)
         if workspace is None:  # pragma: no cover - row was just updated in this txn

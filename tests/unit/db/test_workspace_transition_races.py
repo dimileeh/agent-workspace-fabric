@@ -214,6 +214,192 @@ async def test_transition_caps_repeated_finished_teardown_races(
 
 
 @pytest.mark.unit
+async def test_transition_if_current_retries_finished_teardown_race(
+    session: AsyncSession,
+) -> None:
+    repo = WorkspaceRepository(session)
+    workspace = await repo.create(
+        repo_url="git@github.com:example/a.git",
+        branch_base="development",
+        task_title="t",
+        task_prompt="p",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+    )
+    await session.commit()
+
+    inserted = False
+    completed = False
+    operation_id = "op_tic_teardown_toc_tou"
+    bind = session.get_bind()
+
+    def finish_stop_before_diagnostic(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        nonlocal inserted, completed
+        del cursor, parameters, context, executemany
+        normalized = " ".join(statement.lower().split())
+        if not inserted and normalized.startswith("update workspaces set "):
+            inserted = True
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO operations (
+                        id, workspace_id, type, status, created_at, started_at
+                    )
+                    VALUES (
+                        :operation_id,
+                        :workspace_id,
+                        :operation_type,
+                        :operation_status,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {
+                    "operation_id": operation_id,
+                    "workspace_id": workspace.id,
+                    "operation_type": OperationType.stop.value,
+                    "operation_status": OperationStatus.running.value,
+                },
+            )
+            return
+        if (
+            inserted
+            and not completed
+            and normalized.startswith("select operations.")
+            and " from operations " in normalized
+        ):
+            completed = True
+            conn.execute(
+                text(
+                    """
+                    UPDATE operations
+                    SET status = :operation_status
+                    WHERE id = :operation_id
+                    """
+                ),
+                {
+                    "operation_id": operation_id,
+                    "operation_status": OperationStatus.succeeded.value,
+                },
+            )
+
+    event.listen(bind, "before_cursor_execute", finish_stop_before_diagnostic)
+    try:
+        transitioned = await repo.transition_if_current(
+            workspace.id,
+            from_status=WorkspaceStatus.requested,
+            to=WorkspaceStatus.provisioning,
+            reason_code="WORKER_CLAIMED",
+        )
+    finally:
+        event.remove(bind, "before_cursor_execute", finish_stop_before_diagnostic)
+
+    assert inserted is True
+    assert completed is True
+    assert transitioned is not None
+    assert transitioned.status == WorkspaceStatus.provisioning.value
+    assert transitioned.version == 2
+
+
+@pytest.mark.unit
+async def test_transition_if_current_caps_repeated_finished_teardown_races(
+    session: AsyncSession,
+) -> None:
+    repo = WorkspaceRepository(session)
+    workspace = await repo.create(
+        repo_url="git@github.com:example/a.git",
+        branch_base="development",
+        task_title="t",
+        task_prompt="p",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+    )
+    await session.commit()
+
+    inserted_operation_ids: list[str] = []
+    bind = session.get_bind()
+
+    def finish_every_stop_before_diagnostics(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del cursor, parameters, context, executemany
+        normalized = " ".join(statement.lower().split())
+        if normalized.startswith("update workspaces set "):
+            operation_id = f"op_tic_toc_tou_cap_{len(inserted_operation_ids)}"
+            inserted_operation_ids.append(operation_id)
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO operations (
+                        id, workspace_id, type, status, created_at, started_at
+                    )
+                    VALUES (
+                        :operation_id,
+                        :workspace_id,
+                        :operation_type,
+                        :operation_status,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {
+                    "operation_id": operation_id,
+                    "workspace_id": workspace.id,
+                    "operation_type": OperationType.stop.value,
+                    "operation_status": OperationStatus.running.value,
+                },
+            )
+            return
+        if normalized.startswith("select operations.") and " from operations " in normalized:
+            conn.execute(
+                text(
+                    """
+                    UPDATE operations
+                    SET status = :operation_status
+                    WHERE workspace_id = :workspace_id
+                    """
+                ),
+                {
+                    "workspace_id": workspace.id,
+                    "operation_status": OperationStatus.succeeded.value,
+                },
+            )
+
+    event.listen(bind, "before_cursor_execute", finish_every_stop_before_diagnostics)
+    try:
+        with pytest.raises(RuntimeError, match="teardown contention retry limit"):
+            await asyncio.wait_for(
+                repo.transition_if_current(
+                    workspace.id,
+                    from_status=WorkspaceStatus.requested,
+                    to=WorkspaceStatus.provisioning,
+                    reason_code="WORKER_CLAIMED",
+                ),
+                timeout=2.0,
+            )
+    finally:
+        event.remove(bind, "before_cursor_execute", finish_every_stop_before_diagnostics)
+
+    assert inserted_operation_ids
+    assert workspace.status == WorkspaceStatus.requested.value
+    assert workspace.version == 1
+
+
+@pytest.mark.unit
 async def test_transition_locks_workspace_before_teardown_guarded_update(
     session: AsyncSession,
 ) -> None:
