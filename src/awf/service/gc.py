@@ -66,6 +66,7 @@ TERMINAL_WORKSPACE_GC_STATUSES = frozenset(
 
 _FAILED_NO_WORK_TERMINAL_STATUSES = frozenset({WorkspaceStatus.failed.value, "superseded"})
 _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS = ("sleep infinity", "tail -f /dev/null")
+_RUN_AWAITABLE_BLOCKING_TIMEOUT_SECONDS = 120.0
 
 _RUNTIME_INSPECTOR = RuntimeInspector()
 
@@ -1461,12 +1462,6 @@ async def _failed_terminal_workspace_runtime_state_async(workspace: Workspace) -
     return "unknown"
 
 
-async def _failed_terminal_workspace_has_no_work_async(workspace: Workspace) -> bool:
-    """Return True when a failed terminal workspace has no active agent work."""
-
-    return await _failed_terminal_workspace_runtime_state_async(workspace) == "no_work"
-
-
 def _failed_terminal_workspace_has_no_work(workspace: Workspace) -> bool:
     """Return True when a failed terminal workspace has no active agent work."""
 
@@ -1497,7 +1492,9 @@ def _run_awaitable_blocking(awaitable: Coroutine[Any, Any, str]) -> str:
 
     thread = threading.Thread(target=_runner, daemon=True)
     thread.start()
-    thread.join()
+    thread.join(timeout=_RUN_AWAITABLE_BLOCKING_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        return "unknown"
     if errors:
         raise errors[0]
     return results[0] if results else "unknown"

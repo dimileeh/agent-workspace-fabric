@@ -1973,6 +1973,38 @@ def test_failed_terminal_workspace_has_no_work_exception(monkeypatch: pytest.Mon
 
 
 @pytest.mark.unit
+async def test_run_awaitable_blocking_returns_unknown_when_worker_exceeds_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    join_timeouts: list[float | None] = []
+
+    class _HungThread:
+        def __init__(self, target: Callable[[], None], *, daemon: bool) -> None:
+            self.target = target
+            self.daemon = daemon
+
+        def start(self) -> None:
+            pass
+
+        def join(self, timeout: float | None = None) -> None:
+            join_timeouts.append(timeout)
+
+        def is_alive(self) -> bool:
+            return True
+
+    async def _worker_result() -> str:
+        return "no_work"
+
+    monkeypatch.setattr(gc.threading, "Thread", _HungThread)
+    awaitable = _worker_result()
+    try:
+        assert gc._run_awaitable_blocking(awaitable) == "unknown"  # noqa: SLF001
+    finally:
+        awaitable.close()
+    assert join_timeouts == [120]
+
+
+@pytest.mark.unit
 def test_sync_classifier_computes_failed_no_work_when_precompute_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
