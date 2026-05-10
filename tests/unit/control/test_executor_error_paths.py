@@ -2570,7 +2570,7 @@ class TestPullRequestUnexpectedError:
 
         await executor.execute(ws_id)
 
-        assert validation.coverage_calls == ["final_coverage"]
+        assert validation.coverage_calls == ["coverage"]
         assert validation.coverage_kwargs[0]["parallel_worker_cpu_limit"] == 3
 
     @pytest.mark.unit

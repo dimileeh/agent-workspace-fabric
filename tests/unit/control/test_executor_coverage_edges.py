@@ -1816,6 +1816,7 @@ async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
         )
 
         assert result.coverage is coverage
+        assert validation.calls == ["coverage"]
         assert validation.kwargs[0]["parallel_worker_cpu_limit"] == 3
     finally:
         await engine.dispose()

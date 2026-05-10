@@ -3829,7 +3829,7 @@ class WorkspaceExecutor:
             compose_project=compose_project,
             compose_file=compose_file,
             profile=profile,
-            phase="final_coverage",
+            phase="coverage",
             parallel_worker_cpu_limit=await self._parallel_worker_cpu_limit_for_workspace(
                 workspace_id,
                 profile=profile,
