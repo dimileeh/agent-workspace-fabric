@@ -156,6 +156,10 @@ class _TerminalRuntimeReleaseNotOk:
     ok = False
 
 
+class _TerminalRuntimeReleaseOk:
+    ok = True
+
+
 class _NotOkTerminalRuntimeReleaser:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -4042,6 +4046,66 @@ async def test_completed_monitor_without_runtime_releaser_tears_down_stack_and_p
         assert workspace is not None
         assert workspace.status == WorkspaceStatus.completed.value
         assert workspace.pr_merge_sha == "merge-sha"
+
+
+@pytest.mark.unit
+async def test_completed_callback_releases_terminal_runtime_before_reconcile(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    calls: list[str] = []
+
+    class _RecordingTerminalRuntimeReleaser:
+        async def release(
+            self,
+            workspace_id: str,
+            *,
+            source: str,
+            expected_status: WorkspaceStatus | None = None,
+        ) -> _TerminalRuntimeReleaseOk:
+            assert workspace_id
+            assert source == "pr_monitor"
+            assert expected_status == WorkspaceStatus.completed
+            calls.append("release")
+            return _TerminalRuntimeReleaseOk()
+
+    async def _record_reconcile_call(
+        *,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+    ) -> None:
+        assert workspace_id
+        assert repo_url == "git@github.com:example/repo.git"
+        assert base_branch == "development"
+        calls.append("reconcile")
+
+    async def _record_gc_call(workspace_id: str) -> None:
+        assert workspace_id
+        calls.append("gc")
+
+    runner._terminal_runtime_releaser = _RecordingTerminalRuntimeReleaser()  # type: ignore[attr-defined]
+    runner._reconcile_target_branch_after_merge = _record_reconcile_call  # type: ignore[method-assign]
+    runner._gc_completed_workspace_filesystem = _record_gc_call  # type: ignore[method-assign]
+
+    await runner._terminate_completed(
+        workspace_id,
+        pr_merge_sha="merge-sha",
+        repo_url="git@github.com:example/repo.git",
+        base_branch="development",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert calls == ["release", "reconcile", "gc"]
 
 
 @pytest.mark.unit

@@ -5012,12 +5012,6 @@ class PullRequestMonitorRunner:
                 )
                 return
             await s.commit()
-        if repo_url and base_branch:
-            await self._reconcile_target_branch_after_merge(
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                base_branch=base_branch,
-            )
         teardown_ok = True
         teardown_failure_reason = "compose_teardown_failed"
         if self._terminal_runtime_releaser is not None:
@@ -5032,6 +5026,12 @@ class PullRequestMonitorRunner:
                 compose_project=compose_project,
                 compose_file=compose_file,
                 remove_volumes=False,
+            )
+        if repo_url and base_branch:
+            await self._reconcile_target_branch_after_merge(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                base_branch=base_branch,
             )
         if teardown_ok:
             await self._gc_completed_workspace_filesystem(workspace_id)
