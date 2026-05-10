@@ -40,10 +40,12 @@ from awf.control.executor import (
     WorkspaceExecutor,
     _call_pr_monitor_factory,
     _required_metadata_str,
+    _validation_run_command_records,
 )
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -56,7 +58,13 @@ from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
-from awf.runtime.validation import ValidationResult, ValidationRunner
+from awf.runtime.validation import (
+    ValidationCommandResult,
+    ValidationCoverageResult,
+    ValidationResult,
+    ValidationRunner,
+)
+from awf.runtime.validation_identity import environment_identity_digest, resolved_profile_digest
 from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
 from tests.postgres import create_postgres_test_engine, postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -98,6 +106,7 @@ def _make_executor(
     validation: Any = None,
     pr_creator: Any = None,
     log_store: LogStore | None = None,
+    max_validation_fix_passes: int = 5,
 ) -> WorkspaceExecutor:
     compose = compose or _NoopResumeCompose()
     validation = validation or ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -111,6 +120,7 @@ def _make_executor(
         config=ExecutorConfig(
             worktrees_root=tmp_path / "work" / "worktrees",
             compose_projects_root=tmp_path / "work" / "compose",
+            max_validation_fix_passes=max_validation_fix_passes,
             default_models={
                 AgentRuntime.codex: "gpt-5",
                 AgentRuntime.claude_code: "sonnet",
@@ -135,22 +145,91 @@ class _NoopResumeCompose:
 
 
 class _RecordingValidation:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        phase_result: ValidationResult | None = None,
+        coverage_result: ValidationCoverageResult | None = None,
+    ) -> None:
+        self._phase_result = phase_result or ValidationResult()
+        self._coverage_result = coverage_result
         self.calls: list[tuple[str, ...]] = []
         self.coverage_calls: list[str | None] = []
+        self.phase_kwargs: list[dict[str, Any]] = []
+        self.coverage_kwargs: list[dict[str, Any]] = []
 
     async def run_profile_phases(
         self,
         *,
         phase_names: tuple[str, ...],
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> ValidationResult:
         self.calls.append(phase_names)
-        return ValidationResult()
+        self.phase_kwargs.append(dict(kwargs))
+        if phase_names == ("setup", "pre_agent"):
+            return ValidationResult()
+        return self._phase_result
 
-    async def run_profile_coverage(self, **_kwargs: Any) -> None:
+    async def run_profile_coverage(self, **_kwargs: Any) -> ValidationCoverageResult | None:
+        self.coverage_kwargs.append(dict(_kwargs))
         phase = _kwargs.get("phase")
         self.coverage_calls.append(phase if isinstance(phase, str) else None)
+        return self._coverage_result
+
+
+class _RecordingPrCreator:
+    async def push_and_open(self, *, branch_name: str, **_kwargs: Any) -> PullRequestResult:
+        return PullRequestResult(
+            url="https://github.com/x/y/pull/123",
+            branch=branch_name,
+            head_sha="b" * 40,
+        )
+
+
+def _validation_command_result(
+    tmp_path: Path,
+    *,
+    returncode: int,
+    reason_code: str,
+) -> ValidationCommandResult:
+    stdout_path = tmp_path / "validation.stdout"
+    stderr_path = tmp_path / "validation.stderr"
+    stdout_path.write_text("validation stdout\n", encoding="utf-8")
+    stderr_path.write_text("validation stderr\n", encoding="utf-8")
+    return ValidationCommandResult(
+        command="pytest -q",
+        returncode=returncode,
+        duration_seconds=0.1,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        phase="validate",
+        reason_code=reason_code,
+    )
+
+
+def _coverage_result(tmp_path: Path, *, percent: float = 99.5) -> ValidationCoverageResult:
+    stdout_path = tmp_path / "coverage.stdout"
+    stderr_path = tmp_path / "coverage.stderr"
+    stdout_path.write_text(f"TOTAL 10 0 {percent:.1f}%\n", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    command_result = ValidationCommandResult(
+        command="pytest --cov=awf",
+        returncode=0,
+        duration_seconds=0.1,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        phase="coverage",
+        reason_code="COVERAGE_OK",
+    )
+    return ValidationCoverageResult(
+        provider="python",
+        percent=percent,
+        minimum_percent=99.0,
+        enforce=True,
+        status="passed",
+        reason_code="COVERAGE_OK",
+        command_result=command_result,
+    )
 
 
 class _ExplodingValidation:
@@ -2283,6 +2362,216 @@ class TestPullRequestUnexpectedError:
         assert len(runs) == 1
         coverage_commands = [cmd for cmd in runs[0].commands if cmd.get("phase") == "coverage"]
         assert coverage_commands == []
+
+    @pytest.mark.unit
+    async def test_local_coverage_is_not_marked_executed_when_phase_validation_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        profile = WorkspaceProfile(
+            name="local-coverage-failure",
+            source="test",
+            phases={"validate": ["pytest -q"]},
+            validation={
+                "strategy": {"baseline_coverage": "skip"},
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                },
+            },
+        )
+        ws_id = await _seed_ready(factory, resolved_profile=profile.model_dump(mode="json"))
+        validation = _RecordingValidation(
+            phase_result=ValidationResult(
+                commands=[
+                    _validation_command_result(
+                        tmp_path,
+                        returncode=1,
+                        reason_code="COMMAND_FAILED",
+                    )
+                ]
+            ),
+            coverage_result=_coverage_result(tmp_path),
+        )
+
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="src/awf/runtime/pr_monitor_runner.py\n")
+        fake.queue_result(returncode=0)  # commit staged implementation output
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="validated-head\n")  # pre-validation HEAD
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_RecordingPrCreator(),
+            max_validation_fix_passes=0,
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+
+        assert validation.coverage_calls == []
+        assert len(runs) == 1
+        assert runs[0].status == "failed"
+        coverage_commands = [cmd for cmd in runs[0].commands if cmd.get("phase") == "coverage"]
+        assert len(coverage_commands) == 1
+        assert "evidence_status" not in coverage_commands[0]
+        assert "evidence_reason_code" not in coverage_commands[0]
+
+    @pytest.mark.unit
+    async def test_local_coverage_reuses_fresh_evidence_before_running_command(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        profile = WorkspaceProfile(
+            name="local-coverage-reuse",
+            source="test",
+            phases={"validate": ["pytest -q"]},
+            validation={
+                "strategy": {
+                    "baseline_coverage": "skip",
+                    "reuse_evidence": True,
+                    "freshness_max_age_seconds": 3600,
+                },
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                },
+            },
+        )
+        ws_id = await _seed_ready(factory, resolved_profile=profile.model_dump(mode="json"))
+        commands = _validation_run_command_records(
+            profile=profile,
+            phase_names=("post_agent", "validate"),
+            run_healthchecks=True,
+        )
+        async with factory() as s:
+            source_run = await ValidationRunRepository(s).start(
+                workspace_id=ws_id,
+                attempt_id=None,
+                tier=1,
+                commands=commands,
+                base_commit="base",
+                target_branch="development",
+                target_head_sha=None,
+                workspace_head_sha="validated-head",
+                resolved_profile_digest=resolved_profile_digest(profile),
+                environment_identity_digest=environment_identity_digest(profile),
+                log_stream_refs={},
+            )
+            await ValidationRunRepository(s).finish(
+                source_run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                coverage=_coverage_result(tmp_path).as_metadata(),
+            )
+            await s.commit()
+            source_run_id = source_run.id
+
+        validation = _RecordingValidation(coverage_result=_coverage_result(tmp_path))
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="src/awf/runtime/pr_monitor_runner.py\n")
+        fake.queue_result(returncode=0)  # commit staged implementation output
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="validated-head\n")  # pre-validation HEAD
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_RecordingPrCreator(),
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+
+        assert validation.coverage_calls == []
+        new_run = next(run for run in runs if run.id != source_run_id)
+        coverage_command = next(cmd for cmd in new_run.commands if cmd.get("phase") == "coverage")
+        assert coverage_command["evidence_status"] == "reused"
+        assert coverage_command["evidence_reason_code"] == "VALIDATION_EVIDENCE_REUSED"
+        assert coverage_command["evidence_source_run_id"] == source_run_id
+
+    @pytest.mark.unit
+    async def test_local_coverage_uses_workspace_cpu_cap_for_parallel_workers(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        profile = WorkspaceProfile(
+            name="local-coverage-parallel",
+            source="test",
+            phases={"validate": ["pytest -q"]},
+            validation={
+                "strategy": {"baseline_coverage": "skip"},
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                    "parallel_workers": 20,
+                },
+            },
+        )
+        ws_id = await _seed_ready(
+            factory,
+            resolved_profile=profile.model_dump(mode="json"),
+            create_task_attempt=True,
+        )
+        async with factory() as s:
+            attempt = await TaskAttemptRepository(s).get_by_workspace_id(ws_id)
+            assert attempt is not None
+            await ResourceReservationRepository(s).create(
+                workspace_id=ws_id,
+                attempt_id=attempt.id,
+                node_id="local",
+                steady_cpu=3.0,
+                steady_memory_gb=10.0,
+                peak_cpu=6.0,
+                peak_memory_gb=16.0,
+                disk_mb=None,
+                phase="execution",
+            )
+            await s.commit()
+
+        validation = _RecordingValidation(coverage_result=_coverage_result(tmp_path))
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="src/awf/runtime/pr_monitor_runner.py\n")
+        fake.queue_result(returncode=0)  # commit staged implementation output
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="validated-head\n")  # pre-validation HEAD
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_RecordingPrCreator(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert validation.coverage_calls == ["final_coverage"]
+        assert validation.coverage_kwargs[0]["parallel_worker_cpu_limit"] == 3
 
     @pytest.mark.unit
     async def test_unexpected_pr_creation_error_marks_failed(

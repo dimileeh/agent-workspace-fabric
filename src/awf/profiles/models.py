@@ -246,6 +246,11 @@ class ProfileCoverage(BaseModel):
                 raise ValueError(
                     "validation.coverage.command is required when coverage parallelism is set"
                 )
+        if self.parallel_worker_max is not None and self.parallel_workers is None:
+            raise ValueError(
+                "validation.coverage.parallel_worker_max requires "
+                "validation.coverage.parallel_workers"
+            )
         if (
             self.parallel_workers is not None
             and self.command is not None

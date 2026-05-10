@@ -2108,11 +2108,7 @@ class WorkspaceExecutor:
                 tier=validation_tier,
             )
             run_local_coverage = _should_run_local_coverage(profile)
-            coverage_evidence = _CoverageEvidenceResult(
-                coverage=None,
-                evidence_status=("executed" if run_local_coverage else None),
-                reason_code=("VALIDATION_EVIDENCE_EXECUTED" if run_local_coverage else None),
-            )
+            coverage_evidence = _CoverageEvidenceResult(coverage=None)
             try:
                 await self._update_subphase(workspace_id, "validation")
                 val_result = await self._validation.run_profile_phases(
@@ -2123,8 +2119,18 @@ class WorkspaceExecutor:
                     phase_names=("post_agent", "validate"),
                     run_healthchecks=True,
                     worktree_path=worktree_path,
-                    include_coverage=run_local_coverage,
+                    include_coverage=False,
                 )
+                if run_local_coverage and val_result.all_passed:
+                    coverage_evidence = await self._run_final_coverage_gate(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        profile=profile,
+                        validation_tier=validation_tier,
+                        workspace_head_sha=validation_workspace_head_sha,
+                    )
+                    val_result = replace(val_result, coverage=coverage_evidence.coverage)
             except ComposeExecCleanupError as exc:
                 message = cleanup_failure_message(exc)
                 _log.error(

@@ -23,7 +23,10 @@ from sqlalchemy.pool import NullPool
 
 from awf.common.logging import get_logger
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
-from awf.db.resilience import invalidate_or_rollback_session
+from awf.db.resilience import (
+    invalidate_or_rollback_session,
+    is_transient_closed_connection_error,
+)
 from awf.runtime.events import ensure_workspace_event_broadcasting
 
 DEFAULT_POOL_RECYCLE_SECONDS = 1800
@@ -111,7 +114,36 @@ def make_engine(
     if "async_creator" not in engine_options:
         create_kwargs["connect_args"] = resolved_connect_args
 
-    return create_async_engine(parsed_url.render_as_string(hide_password=False), **create_kwargs)
+    engine = create_async_engine(parsed_url.render_as_string(hide_password=False), **create_kwargs)
+    _patch_asyncpg_pre_ping_disconnect_detection(engine)
+    return engine
+
+
+def _patch_asyncpg_pre_ping_disconnect_detection(engine: AsyncEngine) -> None:
+    """Teach SQLAlchemy's asyncpg pre-ping about raw asyncpg protocol disconnects."""
+
+    sync_engine = getattr(engine, "sync_engine", None)
+    dialect = getattr(sync_engine, "dialect", None)
+    if dialect is None:
+        return
+    if (
+        getattr(dialect, "name", None) != "postgresql"
+        or getattr(dialect, "driver", None) != "asyncpg"
+    ):
+        return
+    do_ping = getattr(dialect, "do_ping", None)
+    if not callable(do_ping):
+        return
+
+    def _do_ping_with_awf_disconnect_detection(dbapi_connection: object) -> bool:
+        try:
+            return bool(do_ping(dbapi_connection))
+        except Exception as exc:
+            if is_transient_closed_connection_error(exc):
+                return False
+            raise
+
+    dialect.do_ping = _do_ping_with_awf_disconnect_detection
 
 
 def _single_query_value(value: object | None) -> str | None:

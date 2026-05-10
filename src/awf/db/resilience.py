@@ -34,6 +34,11 @@ _CLOSED_CONNECTION_MESSAGE_FRAGMENTS = (
     "closed connection",
     "server closed the connection",
 )
+_ASYNC_PG_TRANSIENT_PROTOCOL_STATE_FRAGMENTS = (
+    "cannot switch to state",
+    "another operation",
+    "is in progress",
+)
 _MAX_CLOSED_CONNECTION_MESSAGE_SCAN_CHARS = 512
 
 
@@ -56,9 +61,10 @@ def is_transient_closed_connection_error(
             return True
         if current.__class__.__name__ in _CLOSED_CONNECTION_ERROR_NAMES:
             return True
-        if _message_indicates_closed_connection(
-            str(current)[:_MAX_CLOSED_CONNECTION_MESSAGE_SCAN_CHARS]
-        ):
+        message = str(current)[:_MAX_CLOSED_CONNECTION_MESSAGE_SCAN_CHARS]
+        if _message_indicates_closed_connection(message):
+            return True
+        if _is_asyncpg_transient_protocol_state_error(current, message):
             return True
     return False
 
@@ -204,3 +210,12 @@ def _exception_chain(
 def _message_indicates_closed_connection(message: str) -> bool:
     normalized = message.lower()
     return any(fragment in normalized for fragment in _CLOSED_CONNECTION_MESSAGE_FRAGMENTS)
+
+
+def _is_asyncpg_transient_protocol_state_error(exc: BaseException, message: str) -> bool:
+    if exc.__class__.__name__ != "InternalClientError":
+        return False
+    if not exc.__class__.__module__.startswith("asyncpg."):
+        return False
+    normalized = message.lower()
+    return all(fragment in normalized for fragment in _ASYNC_PG_TRANSIENT_PROTOCOL_STATE_FRAGMENTS)

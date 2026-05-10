@@ -249,6 +249,26 @@ def test_profile_schema_accepts_parallel_coverage_workers() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_rejects_parallel_worker_max_without_parallel_workers() -> None:
+    with pytest.raises(
+        ValueError,
+        match="validation.coverage.parallel_worker_max requires",
+    ):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "parallel-coverage-misconfigured",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "parallel_worker_max": 4,
+                        "command": "uv run pytest --cov=awf --cov-report=term",
+                    }
+                },
+            }
+        )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "parallel_workers",
     [0, -1, "auto", 1.5],
@@ -748,7 +768,7 @@ def test_validation_strategy_defaults_preserve_legacy_behavior() -> None:
 
 
 @pytest.mark.unit
-def test_awf_self_profile_uses_targeted_edit_validation_and_final_coverage_gate() -> None:
+def test_awf_self_profile_uses_targeted_edit_validation_without_local_coverage_gate() -> None:
     profile_path = Path(__file__).resolve().parents[3] / ".awf" / "workspace.yml"
     profile = WorkspaceProfile.model_validate(
         yaml.safe_load(profile_path.read_text(encoding="utf-8"))["awf"]
