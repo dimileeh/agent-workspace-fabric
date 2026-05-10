@@ -252,15 +252,21 @@ def _tracked_exec_wrapper_script(*, preserve_stdin: bool = False) -> str:
     setsid_stdin_redirect = "</dev/null"
     setsid_stdin_cleanup = ""
     exec_stdin_setup = "exec </dev/null"
+    permissions_setup = ""
     if preserve_stdin:
+        permissions_setup = """
+chmod 700 "$awf_exec_dir" 2>/dev/null || true
+""".strip()
         stdin_setup = """
 stdin_path="$awf_exec_dir/stdin"
+umask 077
 cat > "$stdin_path"
 cat_status=$?
 if [ "$cat_status" -ne 0 ]; then
   rm -f "$stdin_path" 2>/dev/null || true
   exit "$cat_status"
 fi
+chmod 600 "$stdin_path" 2>/dev/null || true
 """.strip()
         setsid_stdin_redirect = '< "$stdin_path"'
         setsid_stdin_cleanup = 'rm -f "$stdin_path" 2>/dev/null || true'
@@ -280,6 +286,7 @@ shift
 export AWF_EXEC_INVOCATION_ID="$invocation_id"
 awf_exec_dir="/tmp/awf-exec/$invocation_id"
 mkdir -p "$awf_exec_dir" 2>/dev/null || true
+{permissions_setup}
 printf '%s\\n' "$$" > "$awf_exec_dir/wrapper_pid" 2>/dev/null || true
 {stdin_setup}
 if command -v setsid >/dev/null 2>&1; then

@@ -150,6 +150,32 @@ async def test_tracked_exec_wrapper_preserves_stdin_when_requested() -> None:
 
 
 @pytest.mark.unit
+async def test_tracked_exec_wrapper_restricts_preserved_stdin_permissions() -> None:
+    stdin_path = Path("/tmp/awf-exec/awf_stdin_permissions/stdin")
+    script = compose_exec._tracked_exec_wrapper_script(preserve_stdin=True)  # noqa: SLF001
+    result = await AsyncioSubprocessRunner().run(
+        [
+            "sh",
+            "-lc",
+            script,
+            "awf-exec",
+            "awf_stdin_permissions",
+            sys.executable,
+            "-c",
+            "import os, stat, sys; "
+            "dir_mode = stat.S_IMODE(os.stat('/tmp/awf-exec/awf_stdin_permissions').st_mode); "
+            "stdin_mode = stat.S_IMODE(os.fstat(0).st_mode); "
+            "print(f'{dir_mode:o} {stdin_mode:o} {sys.stdin.read()}', end='')",
+        ],
+        input_bytes=b"private-prompt",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "700 600 private-prompt"
+    assert not stdin_path.exists()
+
+
+@pytest.mark.unit
 async def test_tracked_exec_wrapper_fails_when_preserved_stdin_cannot_be_spooled() -> None:
     blocked_path = Path("/tmp/awf-exec/awf_stdin_spool_blocked")
     blocked_path.parent.mkdir(parents=True, exist_ok=True)
