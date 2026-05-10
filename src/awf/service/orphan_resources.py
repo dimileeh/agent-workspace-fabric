@@ -510,7 +510,7 @@ def build_orphan_resource_summary(
     leaked_live_records = tuple(
         record
         for record in orphan_records
-        if record.reason in {"TERMINAL_LIVE_RUNTIME_RESOURCE", "WORKSPACE_TERMINAL"}
+        if record.reason == "TERMINAL_LIVE_RUNTIME_RESOURCE"
         and record.resource.kind in {"container", "network"}
     )
     unknown_records = tuple(record for record in records if record.classification == "unknown")
