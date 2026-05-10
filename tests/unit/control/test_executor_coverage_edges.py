@@ -29,7 +29,6 @@ from awf.control.executor import (
     _coverage_has_failing_tests,
     _coverage_preserves_below_threshold_baseline,
     _coverage_wrapped_pytest_failure_message,
-    _defer_final_coverage_to_pr_monitor,
     _failure_reason_for_phase,
     _failure_salvage_payload,
     _format_failing_test_evidence,
@@ -46,6 +45,7 @@ from awf.control.executor import (
     _RebaseRecoveryResult,
     _recover_missing_head_from_filesystem,
     _recovery_needs_existing_pr_push,
+    _should_run_local_coverage,
     _validation_command_count,
     _validation_failure_message,
     _validation_run_command_records,
@@ -1464,11 +1464,10 @@ def test_validation_run_command_records_run_pending_healthchecks_after_refresh_w
 
 
 @pytest.mark.unit
-def test_validation_command_records_can_mark_coverage_skipped_by_policy() -> None:
+def test_validation_command_records_omit_coverage_when_no_local_command_is_declared() -> None:
     profile = WorkspaceProfile.model_validate(
         {
             "name": "records",
-            "validation": {"coverage": {"command": "pytest --cov=awf"}},
             "phases": {"validate": ["pytest tests/unit -q"]},
         }
     )
@@ -1477,25 +1476,27 @@ def test_validation_command_records_can_mark_coverage_skipped_by_policy() -> Non
         profile=profile,
         phase_names=("validate",),
         run_healthchecks=False,
-        coverage_evidence_status="skipped_by_policy",
-        coverage_evidence_reason_code="TARGETED_EDIT_GATE",
     )
 
-    assert records[-1]["phase"] == "coverage"
-    assert records[-1]["evidence_status"] == "skipped_by_policy"
-    assert records[-1]["evidence_reason_code"] == "TARGETED_EDIT_GATE"
+    assert [(record["phase"], record["command"]) for record in records] == [
+        ("validate", "pytest tests/unit -q")
+    ]
 
 
 @pytest.mark.unit
-def test_pr_monitored_targeted_profile_defers_final_coverage_to_check_rollup() -> None:
-    profile = WorkspaceProfile.model_validate(
+def test_local_coverage_runs_only_when_profile_declares_coverage_command() -> None:
+    no_local_coverage = WorkspaceProfile.model_validate(
         {
             "name": "awf-self",
+            "validation": {"strategy": {"edit_gate": "targeted"}},
+            "phases": {"validate": ["uv run pytest tests/unit/cli -q"]},
+        }
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "explicit-local-coverage",
             "validation": {
-                "strategy": {
-                    "edit_gate": "targeted",
-                    "final_gate": "coverage",
-                },
+                "strategy": {"edit_gate": "targeted"},
                 "coverage": {
                     "minimum_percent": 99,
                     "enforce": True,
@@ -1506,30 +1507,8 @@ def test_pr_monitored_targeted_profile_defers_final_coverage_to_check_rollup() -
         }
     )
 
-    assert (
-        _defer_final_coverage_to_pr_monitor(
-            recovery=None,
-            has_pr_monitor=True,
-            profile=profile,
-        )
-        is True
-    )
-    assert (
-        _defer_final_coverage_to_pr_monitor(
-            recovery=None,
-            has_pr_monitor=False,
-            profile=profile,
-        )
-        is False
-    )
-    assert (
-        _defer_final_coverage_to_pr_monitor(
-            recovery={"recovery_mode": "validate_only"},
-            has_pr_monitor=True,
-            profile=profile,
-        )
-        is False
-    )
+    assert _should_run_local_coverage(no_local_coverage) is False
+    assert _should_run_local_coverage(profile) is True
 
 
 @pytest.mark.unit
@@ -2037,6 +2016,7 @@ async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
         )
 
         assert result.coverage is coverage
+        assert validation.calls == ["coverage"]
         assert validation.kwargs[0]["parallel_worker_cpu_limit"] == 3
     finally:
         await engine.dispose()

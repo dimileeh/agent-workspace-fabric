@@ -64,7 +64,7 @@ class _NoOpAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:  # type: ignore[override]
         return self._runtime
 
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:  # type: ignore[override]
+    def _cli_args(self, *, model: str | None) -> list[str]:
         return []
 
     async def run(  # type: ignore[override]
@@ -117,7 +117,7 @@ def _make_noop_factory(runtime_value: AgentRuntime) -> type[AgentAdapter]:
         def name(self) -> AgentRuntime:
             return self._runtime
 
-        def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+        def _cli_args(self, *, model: str | None) -> list[str]:
             return []
 
         async def run(

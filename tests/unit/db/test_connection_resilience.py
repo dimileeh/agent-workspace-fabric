@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncpg
 import pytest
 import structlog
 from sqlalchemy import text
@@ -62,6 +63,47 @@ def test_make_engine_configures_asyncpg_liveness_pool_options(
         "timeout": 7.0,
         "server_settings": {"search_path": "awf_test"},
     }
+
+
+@pytest.mark.unit
+def test_make_engine_marks_asyncpg_internal_pre_ping_protocol_error_as_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Dialect:
+        name = "postgresql"
+        driver = "asyncpg"
+
+        def __init__(self) -> None:
+            self.error: BaseException = asyncpg.exceptions.InternalClientError(
+                "cannot switch to state 15; another operation (2) is in progress"
+            )
+
+        def do_ping(self, _dbapi_connection: object) -> bool:
+            raise self.error
+
+    class _SyncEngine:
+        def __init__(self) -> None:
+            self.dialect = _Dialect()
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.sync_engine = _SyncEngine()
+
+    engine = _Engine()
+
+    def _fake_create_async_engine(_url: str, **_kwargs: object) -> object:
+        return engine
+
+    monkeypatch.setattr(session_mod, "create_async_engine", _fake_create_async_engine)
+
+    returned_engine = make_engine("postgresql+asyncpg://awf:awf@example.test/awf")
+
+    assert returned_engine is engine
+    assert engine.sync_engine.dialect.do_ping(object()) is False
+
+    engine.sync_engine.dialect.error = RuntimeError("ordinary ping failure")
+    with pytest.raises(RuntimeError, match="ordinary ping failure"):
+        engine.sync_engine.dialect.do_ping(object())
 
 
 @pytest.mark.unit
@@ -138,6 +180,17 @@ def test_closed_connection_classifier_matches_asyncpg_interface_error_names() ->
     assert is_transient_closed_connection_error(cursor_interface_error) is False
     assert is_transient_closed_connection_error(unrelated) is False
     assert is_transient_closed_connection_error(ValueError("not a DB failure")) is False
+
+
+@pytest.mark.unit
+def test_closed_connection_classifier_matches_asyncpg_internal_protocol_state_error() -> None:
+    protocol_error = asyncpg.exceptions.InternalClientError(
+        "cannot switch to state 15; another operation (2) is in progress"
+    )
+    unrelated_internal_error = asyncpg.exceptions.InternalClientError("unexpected asyncpg bug")
+
+    assert is_transient_closed_connection_error(protocol_error) is True
+    assert is_transient_closed_connection_error(unrelated_internal_error) is False
 
 
 @pytest.mark.unit

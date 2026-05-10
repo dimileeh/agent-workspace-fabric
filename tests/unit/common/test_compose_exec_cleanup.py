@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 import awf.common.compose_exec as compose_exec
-from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.common.compose_exec import (
     ComposeExecCleanupError,
     build_cleanup_compose_exec,
@@ -104,6 +105,16 @@ def test_cleanup_command_bounds_integer_sleep_fallback_wait() -> None:
     assert "awf_cleanup_wait_limit=2" in script
 
 
+def test_preserved_stdin_setsid_path_uses_open_fd_not_path_redirection() -> None:
+    script = compose_exec._tracked_exec_wrapper_script(preserve_stdin=True)  # noqa: SLF001
+    setsid_block = script[script.index("if command -v setsid") : script.index('wait "$child_pid"')]
+
+    assert 'exec 9< "$stdin_path"' in setsid_block
+    assert 'setsid "$@" <&9 &' in setsid_block
+    assert 'setsid "$@" < "$stdin_path" &' not in setsid_block
+    assert setsid_block.index('rm -f "$stdin_path"') < setsid_block.index('setsid "$@" <&9 &')
+
+
 def test_rejects_empty_or_unsafe_invocation_inputs() -> None:
     with pytest.raises(ValueError, match="cli_args"):
         build_tracked_compose_exec(
@@ -123,6 +134,123 @@ def test_rejects_empty_or_unsafe_invocation_inputs() -> None:
             label="codex",
             invocation_id="bad;id",
         )
+
+
+@pytest.mark.unit
+async def test_tracked_exec_wrapper_preserves_stdin_when_requested() -> None:
+    stdin_path = Path("/tmp/awf-exec/awf_stdin_probe/stdin")
+    script = compose_exec._tracked_exec_wrapper_script(preserve_stdin=True)  # noqa: SLF001
+    result = await AsyncioSubprocessRunner().run(
+        [
+            "sh",
+            "-lc",
+            script,
+            "awf-exec",
+            "awf_stdin_probe",
+            sys.executable,
+            "-c",
+            "import sys; print(sys.stdin.read(), end='')",
+        ],
+        input_bytes=b"stdin-ok",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "stdin-ok"
+    assert not stdin_path.exists()
+
+
+@pytest.mark.unit
+async def test_tracked_exec_wrapper_restricts_preserved_stdin_permissions() -> None:
+    stdin_path = Path("/tmp/awf-exec/awf_stdin_permissions/stdin")
+    child_path = Path("/tmp/awf-exec/awf_stdin_permissions/child-created")
+    child_path.unlink(missing_ok=True)
+    script = compose_exec._tracked_exec_wrapper_script(preserve_stdin=True)  # noqa: SLF001
+    result = await AsyncioSubprocessRunner().run(
+        [
+            "sh",
+            "-lc",
+            script,
+            "awf-exec",
+            "awf_stdin_permissions",
+            sys.executable,
+            "-c",
+            "import os, stat, sys; "
+            "current_umask = os.umask(0); "
+            "os.umask(current_umask); "
+            "expected_child_mode = 0o666 & ~current_umask; "
+            "open('/tmp/awf-exec/awf_stdin_permissions/child-created', 'w').close(); "
+            "dir_mode = stat.S_IMODE(os.stat('/tmp/awf-exec/awf_stdin_permissions').st_mode); "
+            "stdin_mode = stat.S_IMODE(os.fstat(0).st_mode); "
+            "child_mode = stat.S_IMODE("
+            "os.stat('/tmp/awf-exec/awf_stdin_permissions/child-created').st_mode"
+            "); "
+            "print("
+            "f'{dir_mode:o} {stdin_mode:o} {child_mode:o} {expected_child_mode:o} "
+            "{sys.stdin.read()}', "
+            "end='',"
+            ")",
+        ],
+        input_bytes=b"private-prompt",
+    )
+
+    assert result.returncode == 0
+    dir_mode, stdin_mode, child_mode, expected_child_mode, prompt = result.stdout.split(" ", 4)
+    assert (dir_mode, stdin_mode, child_mode, prompt) == (
+        "700",
+        "600",
+        expected_child_mode,
+        "private-prompt",
+    )
+    assert not stdin_path.exists()
+    child_path.unlink(missing_ok=True)
+
+
+@pytest.mark.unit
+async def test_tracked_exec_wrapper_fails_when_preserved_stdin_cannot_be_spooled() -> None:
+    blocked_path = Path("/tmp/awf-exec/awf_stdin_spool_blocked")
+    blocked_path.parent.mkdir(parents=True, exist_ok=True)
+    blocked_path.write_text("not a directory", encoding="utf-8")
+    try:
+        script = compose_exec._tracked_exec_wrapper_script(preserve_stdin=True)  # noqa: SLF001
+        result = await AsyncioSubprocessRunner().run(
+            [
+                "sh",
+                "-lc",
+                script,
+                "awf-exec",
+                "awf_stdin_spool_blocked",
+                sys.executable,
+                "-c",
+                "print('should-not-run')",
+            ],
+            input_bytes=b"stdin-will-not-spool",
+        )
+    finally:
+        blocked_path.unlink(missing_ok=True)
+
+    assert result.returncode != 0
+    assert "should-not-run" not in result.stdout
+
+
+@pytest.mark.unit
+async def test_tracked_exec_wrapper_closes_stdin_by_default() -> None:
+    script = compose_exec._tracked_exec_wrapper_script()  # noqa: SLF001
+    result = await AsyncioSubprocessRunner().run(
+        [
+            "sh",
+            "-lc",
+            script,
+            "awf-exec",
+            "awf_stdin_closed",
+            sys.executable,
+            "-c",
+            "import sys; print(sys.stdin.read(), end='')",
+        ],
+        input_bytes=b"should-not-reach-child",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
 
 
 async def test_cleanup_success_accepts_killed_result() -> None:

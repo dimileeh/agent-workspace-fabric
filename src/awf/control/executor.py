@@ -2133,36 +2133,8 @@ class WorkspaceExecutor:
                 target_head_sha=None,
                 tier=validation_tier,
             )
-            run_coverage_during_edit_gate = not (
-                profile.validation.strategy.edit_gate == "targeted"
-                and profile.validation.strategy.final_gate == "coverage"
-            )
-            defer_final_coverage_to_pr_monitor = _defer_final_coverage_to_pr_monitor(
-                recovery=recovery,
-                has_pr_monitor=self._pr_monitor is not None or self._pr_monitor_factory is not None,
-                profile=profile,
-            )
-            coverage_evidence = _CoverageEvidenceResult(
-                coverage=None,
-                evidence_status=(
-                    "executed"
-                    if run_coverage_during_edit_gate
-                    and profile.validation.coverage.command is not None
-                    else "skipped_by_policy"
-                    if not run_coverage_during_edit_gate
-                    and profile.validation.coverage.command is not None
-                    else None
-                ),
-                reason_code=(
-                    "VALIDATION_EVIDENCE_EXECUTED"
-                    if run_coverage_during_edit_gate
-                    and profile.validation.coverage.command is not None
-                    else "TARGETED_EDIT_GATE"
-                    if not run_coverage_during_edit_gate
-                    and profile.validation.coverage.command is not None
-                    else None
-                ),
-            )
+            run_local_coverage = _should_run_local_coverage(profile)
+            coverage_evidence = _CoverageEvidenceResult(coverage=None)
             try:
                 await self._update_subphase(workspace_id, "validation")
                 val_result = await self._validation.run_profile_phases(
@@ -2173,14 +2145,9 @@ class WorkspaceExecutor:
                     phase_names=("post_agent", "validate"),
                     run_healthchecks=True,
                     worktree_path=worktree_path,
-                    include_coverage=run_coverage_during_edit_gate,
+                    include_coverage=False,
                 )
-                if (
-                    not run_coverage_during_edit_gate
-                    and val_result.all_passed
-                    and profile.validation.strategy.final_gate == "coverage"
-                    and not defer_final_coverage_to_pr_monitor
-                ):
+                if run_local_coverage and val_result.all_passed:
                     coverage_evidence = await self._run_final_coverage_gate(
                         workspace_id=workspace_id,
                         compose_project=compose_project,
@@ -3868,7 +3835,7 @@ class WorkspaceExecutor:
                 reason_code="BASELINE_COVERAGE_SKIPPED_BY_POLICY",
             )
             return None
-        if coverage.command is None and coverage.minimum_percent <= 0:
+        if coverage.command is None:
             return None
         result = await self._validation.run_profile_coverage(
             workspace_id=workspace_id,
@@ -3898,7 +3865,7 @@ class WorkspaceExecutor:
         workspace_head_sha: str | None,
     ) -> _CoverageEvidenceResult:
         coverage = profile.validation.coverage
-        if coverage.command is None and coverage.minimum_percent <= 0:
+        if coverage.command is None:
             return _CoverageEvidenceResult(coverage=None)
 
         command_records = _validation_run_command_records(
@@ -3934,7 +3901,7 @@ class WorkspaceExecutor:
             compose_project=compose_project,
             compose_file=compose_file,
             profile=profile,
-            phase="final_coverage",
+            phase="coverage",
             parallel_worker_cpu_limit=await self._parallel_worker_cpu_limit_for_workspace(
                 workspace_id,
                 profile=profile,
@@ -6707,19 +6674,8 @@ def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfi
     return max(profile_tier, task_class_tier)
 
 
-def _defer_final_coverage_to_pr_monitor(
-    *,
-    recovery: Mapping[str, Any] | None,
-    has_pr_monitor: bool,
-    profile: WorkspaceProfile,
-) -> bool:
-    return (
-        recovery is None
-        and has_pr_monitor
-        and profile.validation.strategy.edit_gate == "targeted"
-        and profile.validation.strategy.final_gate == "coverage"
-        and profile.validation.coverage.command is not None
-    )
+def _should_run_local_coverage(profile: WorkspaceProfile) -> bool:
+    return profile.validation.coverage.command is not None
 
 
 def _validation_run_log_stream_refs(
