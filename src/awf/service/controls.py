@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceControlResponse
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.config import Settings, get_settings
 from awf.common.ids import new_event_id
 from awf.common.logging import get_logger
@@ -2586,12 +2586,18 @@ def _terminal_runtime_release_evidence(
     if release is None:
         return None
     evidence: dict[str, object] = {
-        "cleanup": release.cleanup.to_dict(),
+        "cleanup": _redacted_terminal_runtime_release_cleanup(release.cleanup),
         "preserved": _terminal_runtime_release_preserved_evidence(release),
     }
     if release.claim_owner_id is not None:
         evidence["claim_owner_id"] = release.claim_owner_id
     return evidence
+
+
+def _redacted_terminal_runtime_release_cleanup(
+    cleanup: WorkspaceCleanupResult,
+) -> dict[str, object]:
+    return cast(dict[str, object], redact_audit_value(cleanup.to_dict()))
 
 
 def _terminal_runtime_release_audit_summary(

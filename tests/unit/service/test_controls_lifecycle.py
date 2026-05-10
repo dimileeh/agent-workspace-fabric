@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1766,6 +1767,69 @@ async def test_cancel_and_stop_fail_precommitted_operation_when_post_teardown_db
         "error_message": "SQLAlchemyError: post teardown transition failed",
         "terminal_runtime_release": terminal_runtime_release,
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_redact_terminal_release_cleanup_evidence_on_failure(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    credentialed_url = "https://svc-user:super-secret-token@github.com/example/private.git"
+    api_token = "ghp_1234567890abcdef"
+    cleanup_error = f"cleanup failed for {credentialed_url} with GITHUB_TOKEN={api_token}"
+    cleaner = RecordingCleaner(failures=[cleanup_error])
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    async def _raise_transition_failure(
+        self: WorkspaceRepository,
+        workspace: Workspace,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        del self, workspace, args, kwargs
+        raise SQLAlchemyError("post teardown transition failed")
+
+    monkeypatch.setattr(WorkspaceRepository, "transition", _raise_transition_failure)
+
+    with pytest.raises(SQLAlchemyError, match="post teardown transition failed"):
+        if action == "cancel":
+            await service.cancel_workspace(
+                workspace_id,
+                reason="operator requested",
+                stop_stack=True,
+            )
+        else:
+            await service.stop_workspace(
+                workspace_id,
+                reason="operator requested",
+            )
+
+    await session.rollback()
+    operations = await _operations(session, workspace_id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace_id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
+
+    assert len(operations) == 1
+    assert operations[0].result is not None
+    release_result = operations[0].result["terminal_runtime_release"]
+    result_cleanup = json.dumps(release_result["cleanup"], sort_keys=True)
+    assert "super-secret-token" not in result_cleanup
+    assert api_token not in result_cleanup
+    assert "https://[redacted]@github.com/example/private.git" in result_cleanup
+    assert "GITHUB_TOKEN=[redacted]" in result_cleanup
+
+    assert len(audit_events) == 1
+    assert audit_events[0].payload is not None
+    audit_release = audit_events[0].payload["evidence"]["terminal_runtime_release"]
+    audit_cleanup = json.dumps(audit_release["cleanup"], sort_keys=True)
+    assert audit_cleanup == result_cleanup
 
 
 @pytest.mark.unit
