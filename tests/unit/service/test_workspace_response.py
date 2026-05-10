@@ -1316,6 +1316,68 @@ def test_workspace_validation_summary_requires_post_rebase_validation() -> None:
 
 
 @pytest.mark.unit
+def test_workspace_validation_summary_uses_latest_successful_rebase() -> None:
+    now = datetime(2026, 4, 27, 15, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_latest_rebase",
+        task_class=None,
+        resolved_profile=None,
+        monitor_last_commit_sha="target-head",
+        operations=[
+            SimpleNamespace(
+                type=OperationType.rebase.value,
+                status=OperationStatus.succeeded.value,
+                created_at=now,
+            ),
+            SimpleNamespace(
+                type=OperationType.rebase.value,
+                status=OperationStatus.succeeded.value,
+                created_at=now - timedelta(minutes=5),
+            ),
+        ],
+    )
+    candidate = SimpleNamespace(
+        id="mc_latest_rebase",
+        attempt_id="att_latest_rebase",
+        head_sha="target-head",
+    )
+    run = SimpleNamespace(
+        id="vr_after_latest_rebase",
+        workspace_id="ws_latest_rebase",
+        attempt_id="att_latest_rebase",
+        tier=2,
+        command_set_hash="b" * 64,
+        base_commit="base",
+        base_sha="base",
+        workspace_head_sha="target-head",
+        target_branch="main",
+        target_head_sha="target-head",
+        profile_name=None,
+        profile_version=None,
+        profile_source=None,
+        resolved_profile_digest=None,
+        environment_identity_digest=None,
+        environment_identity_inputs=None,
+        status="succeeded",
+        reason_code="VALIDATION_OK",
+        started_at=now + timedelta(minutes=1),
+        finished_at=now + timedelta(minutes=2),
+        log_stream_refs={},
+        retry_count=0,
+    )
+
+    summary = validation_freshness_summary(
+        workspace,  # type: ignore[arg-type]
+        [run],  # type: ignore[list-item]
+        candidate=candidate,  # type: ignore[arg-type]
+    )
+
+    assert summary.required_tier == 2
+    assert summary.latest_satisfied_tier == 2
+    assert summary.freshness_status == "fresh"
+
+
+@pytest.mark.unit
 def test_latest_merge_candidate_ignores_candidates_with_missing_status() -> None:
     newer_missing_status = SimpleNamespace(
         id="mc_missing_status",

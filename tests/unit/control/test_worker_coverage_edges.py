@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import (
@@ -21,18 +22,23 @@ from awf.control.worker import (
     WorkerConfig,
     _active_execution_preservation_claim_cleanup_payload,
     _ActiveExecutionCandidate,
+    _exception_chain_has_sqlalchemy_error,
     _execution_claim_is_stale,
     _has_running_agent_runtime,
     _json_datetime,
     _monitor_claim_is_stale,
+    _record_scheduler_queue_decision,
     _stale_active_execution_failure_message,
     _utc_datetime,
 )
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
+    QueueDecisionRepository,
     SecretLeaseIssue,
     SecretLeaseRepository,
+    TaskAttemptRepository,
+    TaskRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
@@ -324,6 +330,128 @@ async def test_provider_recovery_filter_skips_stale_scheduler_ids(
         )
 
     assert filtered == [workspace_id]
+
+
+@pytest.mark.unit
+async def test_provider_recovery_filter_rejects_mixed_scheduler_inputs(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+
+    async with factory() as session:
+        filtered = await worker._filter_provider_recovery_suppressed(
+            session,
+            ["ws_ready", object()],  # type: ignore[list-item]
+        )
+
+    assert filtered == []
+
+
+@pytest.mark.unit
+async def test_record_scheduler_queue_decision_skips_workspace_without_attempt(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _seed_status(factory, WorkspaceStatus.ready, title="without attempt")
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        await _record_scheduler_queue_decision(
+            session,
+            workspace,
+            decision="deferred",
+            reason_code="NO_ATTEMPT",
+            decided_at=datetime(2026, 5, 9, 12, 0, tzinfo=UTC),
+        )
+
+        decisions = await QueueDecisionRepository(session).list_for_workspace(workspace_id)
+
+    assert decisions == []
+
+
+@pytest.mark.unit
+async def test_record_scheduler_queue_decision_carries_latest_summaries(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    decided_at = datetime(2026, 5, 9, 12, 0, tzinfo=UTC)
+    workspace_id = await _seed_status(factory, WorkspaceStatus.ready, title="with attempt")
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        task = await TaskRepository(session).create_or_get(
+            repo_url=workspace.repo_url,
+            base_branch=workspace.branch_base,
+            title=workspace.task_title,
+            prompt=workspace.task_prompt,
+            external_id=None,
+            idempotency_key=f"queue-decision:{workspace.id}",
+            task_class=workspace.task_class,
+            owned_paths=list(workspace.owned_paths),
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
+        queue_repo = QueueDecisionRepository(session)
+        await queue_repo.create(
+            workspace_id=workspace.id,
+            task_id=task.id,
+            attempt_id=attempt.id,
+            decision="ordered",
+            reason_code="PREVIOUS",
+            class_priority=1,
+            computed_priority=2.0,
+            age_boost=0.5,
+            retry_bonus=0.0,
+            resource_summary={"cpu": 1},
+            overlap_risk_summary={"paths": 2},
+            score_summary={"previous": True},
+            decided_at=decided_at - timedelta(minutes=1),
+        )
+
+        await _record_scheduler_queue_decision(
+            session,
+            workspace,
+            decision="deferred",
+            reason_code="TEST_DEFERRED",
+            decided_at=decided_at,
+        )
+
+        decisions = await queue_repo.list_for_workspace(workspace_id, limit=2)
+
+    assert decisions[0].decision == "deferred"
+    assert decisions[0].resource_summary == {"cpu": 1}
+    assert decisions[0].overlap_risk_summary == {"paths": 2}
+    assert decisions[0].reason_code == "TEST_DEFERRED"
+    assert decisions[0].score_summary["suppression"] == {"suppressed": False}
+    assert decisions[1].reason_code == "PREVIOUS"
+
+
+@pytest.mark.unit
+def test_exception_chain_sqlalchemy_detection_handles_cause_context_and_groups() -> None:
+    try:
+        raise SQLAlchemyError("db")
+    except SQLAlchemyError as cause:
+        caused = RuntimeError("outer")
+        caused.__cause__ = cause
+
+    try:
+        raise SQLAlchemyError("db")
+    except SQLAlchemyError:
+        try:
+            raise RuntimeError("outer")
+        except RuntimeError as context:
+            contextual = context
+
+    duplicate = RuntimeError("plain")
+    duplicate_group = ExceptionGroup("duplicates", [duplicate, duplicate])
+
+    assert _exception_chain_has_sqlalchemy_error(caused)
+    assert _exception_chain_has_sqlalchemy_error(contextual)
+    assert not _exception_chain_has_sqlalchemy_error(duplicate_group)
 
 
 @pytest.mark.unit
