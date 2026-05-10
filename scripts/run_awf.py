@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import awf.adapters.registry  # noqa: F401
 from awf.adapters.base import AgentAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
@@ -733,7 +734,7 @@ async def _mark_monitor_handoff_failed(
         if ws.status != WorkspaceStatus.monitoring_pr.value:
             return
         ws.failure_reason = "infrastructure_failure"
-        ws.failure_message = message[:2000]
+        ws.failure_message = redact_audit_text(message, limit=2000)
         await repo.transition(
             ws,
             to=WorkspaceStatus.failed,

@@ -36,6 +36,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.audit import REDACTION_MARKER
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -169,8 +170,9 @@ class _FakeMonitor:
 
 
 class _CrashingMonitor:
-    def __init__(self) -> None:
+    def __init__(self, message: str = "synthetic monitor crash") -> None:
         self.calls: list[dict[str, Any]] = []
+        self.message = message
 
     async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
         self.calls.append(
@@ -180,7 +182,7 @@ class _CrashingMonitor:
                 "compose_file": str(compose_file),
             }
         )
-        raise RuntimeError("synthetic monitor crash")
+        raise RuntimeError(self.message)
 
 
 class _CancellingMonitor:
@@ -466,6 +468,62 @@ async def test_sync_monitor_crash_marks_failed_and_releases_runtime(
     assert ws.status == WorkspaceStatus.failed.value
     assert ws.failure_reason == "infrastructure_failure"
     assert "synthetic monitor crash" in (ws.failure_message or "")
+
+
+@pytest.mark.unit
+async def test_monitor_handoff_failure_message_redacts_secrets(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    monitor = _CrashingMonitor(
+        "failed cloning https://oauth:ghp_secret123456@github.com/owner/repo.git "
+        "with GITHUB_TOKEN=ghp_anothersecret123"
+    )
+    releaser = _RecordingTerminalRuntimeReleaser()
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            branch_base="development",
+            task_title="redact monitor crash",
+            task_prompt="keep monitoring state safe",
+            agent="codex",
+            profile_ref=None,
+            requested_profile=None,
+            test_commands=[],
+            requires_database=False,
+        )
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+        ):
+            await repo.transition(ws, to=target, reason_code="TEST")
+        await s.commit()
+        workspace_id = ws.id
+
+    with pytest.raises(RuntimeError, match="failed cloning"):
+        await run_awf._run_monitor_with_release_fallback(
+            monitor,
+            workspace_id=workspace_id,
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            session_factory=factory,
+            terminal_runtime_releaser=releaser,
+        )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        message = ws.failure_message or ""
+
+    assert "monitor handoff crashed" in message
+    assert REDACTION_MARKER in message
+    assert "ghp_secret123456" not in message
+    assert "ghp_anothersecret123" not in message
 
 
 @pytest.mark.unit
