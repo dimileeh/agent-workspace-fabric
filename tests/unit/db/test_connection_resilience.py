@@ -174,6 +174,21 @@ def test_closed_connection_classifier_ignores_unsuppressed_context() -> None:
 
 
 @pytest.mark.unit
+def test_closed_connection_classifier_can_walk_unsuppressed_context_when_requested() -> None:
+    wrapped = RuntimeError("operation wrapper failed")
+    wrapped.__context__ = _closed_connection_error()
+    wrapped.__suppress_context__ = False
+
+    assert (
+        is_transient_closed_connection_error(
+            wrapped,
+            include_unsuppressed_context=True,
+        )
+        is True
+    )
+
+
+@pytest.mark.unit
 def test_closed_connection_classifier_walks_explicit_cause() -> None:
     wrapped = RuntimeError("operation wrapper failed")
     wrapped.__cause__ = _closed_connection_error()

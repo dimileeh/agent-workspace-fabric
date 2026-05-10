@@ -30,6 +30,7 @@ from awf.control.worker import (
     _record_scheduler_queue_decision,
     _stale_active_execution_failure_message,
     _utc_datetime,
+    _worker_exception_is_transient_db_connection,
 )
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
@@ -452,6 +453,19 @@ def test_exception_chain_sqlalchemy_detection_handles_cause_context_and_groups()
     assert _exception_chain_has_sqlalchemy_error(caused)
     assert _exception_chain_has_sqlalchemy_error(contextual)
     assert not _exception_chain_has_sqlalchemy_error(duplicate_group)
+
+
+@pytest.mark.unit
+def test_worker_transient_db_classifier_handles_implicit_context() -> None:
+    try:
+        raise SQLAlchemyError("connection is closed")
+    except SQLAlchemyError:
+        try:
+            raise RuntimeError("scan wrapper failed")
+        except RuntimeError as exc:
+            wrapped = exc
+
+    assert _worker_exception_is_transient_db_connection(wrapped)
 
 
 @pytest.mark.unit

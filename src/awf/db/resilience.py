@@ -33,10 +33,21 @@ _CLOSED_CONNECTION_MESSAGE_FRAGMENTS = (
 _MAX_CLOSED_CONNECTION_MESSAGE_SCAN_CHARS = 512
 
 
-def is_transient_closed_connection_error(exc: BaseException) -> bool:
-    """Return True when an exception represents a stale/closed DB connection."""
+def is_transient_closed_connection_error(
+    exc: BaseException,
+    *,
+    include_unsuppressed_context: bool = False,
+) -> bool:
+    """Return True when an exception represents a stale/closed DB connection.
 
-    for current in _exception_chain(exc):
+    Implicit exception context stays opt-in so application errors raised while
+    handling a DB failure do not become retryable by default.
+    """
+
+    for current in _exception_chain(
+        exc,
+        include_unsuppressed_context=include_unsuppressed_context,
+    ):
         if isinstance(current, DBAPIError) and current.connection_invalidated:
             return True
         if current.__class__.__name__ in _CLOSED_CONNECTION_ERROR_NAMES:
@@ -130,7 +141,11 @@ async def run_db_operation_with_retry[T](
     raise AssertionError("unreachable DB retry state")  # pragma: no cover
 
 
-def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+def _exception_chain(
+    exc: BaseException,
+    *,
+    include_unsuppressed_context: bool = False,
+) -> Iterator[BaseException]:
     """Yield ``exc`` and intentionally linked nested exceptions."""
 
     seen: set[int] = set()
@@ -150,6 +165,12 @@ def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
             stack.append(orig)
         if current.__cause__ is not None:
             stack.append(current.__cause__)
+        if (
+            include_unsuppressed_context
+            and not current.__suppress_context__
+            and current.__context__ is not None
+        ):
+            stack.append(current.__context__)
 
 
 def _message_indicates_closed_connection(message: str) -> bool:

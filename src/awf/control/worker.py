@@ -2162,7 +2162,10 @@ def _scheduler_items_are_workspaces(
 
 
 def _worker_exception_is_transient_db_connection(exc: BaseException) -> bool:
-    if not is_transient_closed_connection_error(exc):
+    if not is_transient_closed_connection_error(
+        exc,
+        include_unsuppressed_context=True,
+    ):
         return False
     return _exception_chain_has_sqlalchemy_error(exc)
 

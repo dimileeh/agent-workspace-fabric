@@ -146,6 +146,10 @@ _EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS = 0.1
 _egress_audit_summary_counts_task: asyncio.Task[dict[str, int]] | None = None
 
 
+class EgressAuditSummaryInFlightError(TimeoutError):
+    """Raised when a previous egress audit summary lookup is still running."""
+
+
 def _get_command_runner_for_request(request: Request) -> AsyncCommandRunner:
     """Resolve the command runner for the request.
 
@@ -405,7 +409,9 @@ def _track_egress_audit_summary_counts_task(task: asyncio.Task[dict[str, int]]) 
 
 async def _egress_audit_summary_counts_with_timeout(factory: Any) -> dict[str, int]:
     if _pending_egress_audit_summary_counts_task() is not None:
-        raise TimeoutError
+        raise EgressAuditSummaryInFlightError(
+            "Previous egress audit summary_counts is still in flight"
+        )
 
     task = asyncio.create_task(_egress_audit_summary_counts(factory))
     _track_egress_audit_summary_counts_task(task)
@@ -569,6 +575,15 @@ async def readyz(
                 detail="Egress audit evidence is available",
                 resource_count=total,
                 egress_posture_counts=posture_counts,
+            )
+        except EgressAuditSummaryInFlightError:
+            return CheckResult(
+                ok=True,
+                status="unknown",
+                reason="EGRESS_AUDIT_IN_FLIGHT",
+                detail="Previous egress audit summary_counts is still in flight",
+                resource_count=0,
+                egress_posture_counts={},
             )
         except TimeoutError:
             return CheckResult(

@@ -374,6 +374,37 @@ async def test_readyz_egress_audit_timeout_is_degraded_not_failure(
 
 
 @pytest.mark.unit
+async def test_readyz_egress_audit_in_flight_uses_dedicated_reason(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    async def _raise_in_flight(_factory: object) -> dict[str, int]:
+        raise health_route.EgressAuditSummaryInFlightError
+
+    monkeypatch.setattr(
+        health_route,
+        "_egress_audit_summary_counts_with_timeout",
+        _raise_in_flight,
+    )
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    egress_audit = body["checks"]["egress_audit"]
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unknown"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_IN_FLIGHT"
+    assert egress_audit["detail"] == "Previous egress audit summary_counts is still in flight"
+
+
+@pytest.mark.unit
 async def test_readyz_egress_audit_timeout_drains_completed_session_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -449,7 +480,7 @@ async def test_egress_audit_summary_timeout_gates_pending_lookup(
 
         assert sessions_created == 1
 
-        with pytest.raises(TimeoutError):
+        with pytest.raises(health_route.EgressAuditSummaryInFlightError):
             await health_route._egress_audit_summary_counts_with_timeout(_Session)
 
         assert sessions_created == 1
