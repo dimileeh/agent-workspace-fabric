@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -646,8 +647,9 @@ class TestGeminiAdapter:
             "--skip-trust",
             "--yolo",
         ]
-        assert args[-2] == "-p"
-        assert args[-1] == ""
+        gemini_args = args[gemini_start:]
+        assert "-p" not in gemini_args
+        assert "--prompt" not in gemini_args
         _assert_prompt_not_in_argv(args)
         _assert_prompt_sent_on_stdin(runner)
         assert "--model" in args and "gemini-2.5-pro" in args
@@ -695,8 +697,9 @@ class TestGeminiAdapter:
         assert "GEMINI_CLI_TRUST_WORKSPACE" in script
         assert "exec gemini" in script
         assert "--model" in args and "gemini-3.1-pro-preview" in args
-        assert args[-2] == "-p"
-        assert args[-1] == ""
+        gemini_args = args[sh_start:]
+        assert "-p" not in gemini_args
+        assert "--prompt" not in gemini_args
         _assert_prompt_sent_on_stdin(runner)
 
     @pytest.mark.unit
@@ -756,7 +759,10 @@ class TestOpenCodeAdapter:
         assert "OPENCODE_CONFIG_CONTENT" in script
         assert "AWF_OPENCODE_OLLAMA_BASE_URL" in script
         assert "host.docker.internal:11434/v1" in script
-        assert "exec opencode run" in script
+        assert "opencode run" in script
+        assert "mktemp" in script
+        assert "/tmp/awf-opencode-prompt.md" not in script
+        assert '--file "$prompt_path"' in script
         assert '"permission":"allow"' in script
         assert '"think":true' in script
         assert model in script
@@ -766,7 +772,7 @@ class TestOpenCodeAdapter:
         assert "--variant" in args
         assert "max" in args
         assert "--thinking" in args
-        assert "--file" in args
+        assert "--file" not in args
         assert args[-1] == "Follow the instructions in the attached AWF prompt file exactly."
         _assert_prompt_not_in_argv(args)
         _assert_prompt_sent_on_stdin(runner)
@@ -857,6 +863,12 @@ async def test_all_adapters_keep_oversized_prompts_out_of_argv(
     assert max(len(arg) for arg in args) < 10_000
     assert all(_LONG_PROMPT not in arg for arg in args)
     _assert_prompt_sent_on_stdin(runner, _LONG_PROMPT)
+
+
+@pytest.mark.unit
+def test_adapter_cli_args_contract_excludes_prompt_payload() -> None:
+    for adapter_cls in (ClaudeCodeAdapter, CodexAdapter, GeminiAdapter, OpenCodeAdapter):
+        assert "prompt" not in inspect.signature(adapter_cls._cli_args).parameters
 
 
 class TestCentralDefaults:

@@ -87,7 +87,7 @@ class TestClosureCapture:
         assert result.returncode == 0
         assert "skipping agent run" in result.stdout
         # _cli_args returns empty — this adapter never launches a CLI.
-        assert adapter._cli_args(prompt="x", model=None) == []
+        assert adapter._cli_args(model=None) == []
 
 
 # ── _main CLI ───────────────────────────────────────────────────────────────
@@ -249,7 +249,7 @@ class TestNoOpAdapterDirect:
         refactor doesn't silently remove a public API."""
         adapter = salvage_workspace._NoOpAdapter(runtime=AgentRuntime.codex)
         assert adapter.name == AgentRuntime.codex
-        assert adapter._cli_args(prompt="x", model=None) == []
+        assert adapter._cli_args(model=None) == []
         result = await adapter.run(
             compose_project="p",
             compose_file=Path("/tmp/c.yml"),

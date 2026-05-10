@@ -2435,7 +2435,7 @@ class TestHappyPath:
             def get_provider(self, model: str | None) -> str:
                 return "openai"
 
-            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+            def _cli_args(self, *, model: str | None) -> list[str]:
                 return []
 
             async def run(self, *, prompt: str, **kwargs: Any) -> AgentRunResult:
@@ -2623,7 +2623,7 @@ class TestHappyPath:
             def get_provider(self, model: str | None) -> str:
                 return "openai"
 
-            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+            def _cli_args(self, *, model: str | None) -> list[str]:
                 return []
 
             async def run(self, *, prompt: str, **kwargs: Any) -> AgentRunResult:

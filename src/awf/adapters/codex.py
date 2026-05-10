@@ -23,8 +23,7 @@ class CodexAdapter(AgentAdapter):
         del model
         return "openai"
 
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
-        del prompt
+    def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
         if model:
             args += ["--model", model]

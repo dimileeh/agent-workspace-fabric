@@ -144,7 +144,7 @@ class AgentAdapter(ABC):
     def get_provider(self, model: str | None) -> str: ...  # pragma: no cover
 
     @abstractmethod
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+    def _cli_args(self, *, model: str | None) -> list[str]:
         """Return the CLI-specific argv (after ``agent`` service name).
 
         The wrapped prompt is streamed through stdin by ``run``. Implementations
@@ -179,7 +179,7 @@ class AgentAdapter(ABC):
         """
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         prompt_input = wrapped_prompt.encode("utf-8")
-        cli_args = self._cli_args(prompt=wrapped_prompt, model=model or self._default_model)
+        cli_args = self._cli_args(model=model or self._default_model)
         invocation = build_tracked_compose_exec(
             compose_project=compose_project,
             compose_file=compose_file,

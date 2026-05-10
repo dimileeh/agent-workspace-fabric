@@ -249,13 +249,30 @@ def _tracked_exec_wrapper_script(*, preserve_stdin: bool = False) -> str:
     #   $0=awf-exec, $1=<invocation_id>, $2...=<original command argv>
     # The real command is never shell-joined; ``shift`` leaves it as "$@".
     stdin_setup = ""
-    stdin_redirect = "</dev/null"
+    setsid_stdin_redirect = "</dev/null"
+    setsid_stdin_cleanup = ""
+    exec_stdin_setup = "exec </dev/null"
     if preserve_stdin:
         stdin_setup = """
 stdin_path="$awf_exec_dir/stdin"
 cat > "$stdin_path"
+cat_status=$?
+if [ "$cat_status" -ne 0 ]; then
+  rm -f "$stdin_path" 2>/dev/null || true
+  exit "$cat_status"
+fi
 """.strip()
-        stdin_redirect = '< "$stdin_path"'
+        setsid_stdin_redirect = '< "$stdin_path"'
+        setsid_stdin_cleanup = 'rm -f "$stdin_path" 2>/dev/null || true'
+        exec_stdin_setup = """
+exec < "$stdin_path"
+exec_status=$?
+if [ "$exec_status" -ne 0 ]; then
+  rm -f "$stdin_path" 2>/dev/null || true
+  exit "$exec_status"
+fi
+rm -f "$stdin_path" 2>/dev/null || true
+""".strip()
     return f"""
 set +e
 invocation_id=$1
@@ -266,15 +283,17 @@ mkdir -p "$awf_exec_dir" 2>/dev/null || true
 printf '%s\\n' "$$" > "$awf_exec_dir/wrapper_pid" 2>/dev/null || true
 {stdin_setup}
 if command -v setsid >/dev/null 2>&1; then
-  setsid "$@" {stdin_redirect} &
+  setsid "$@" {setsid_stdin_redirect} &
   child_pid=$!
   printf '%s\\n' "$child_pid" > "$awf_exec_dir/pid" 2>/dev/null || true
   printf '%s\\n' "$child_pid" > "$awf_exec_dir/pgid" 2>/dev/null || true
+  {setsid_stdin_cleanup}
   wait "$child_pid"
   exit $?
 fi
 printf '%s\\n' "$$" > "$awf_exec_dir/pid" 2>/dev/null || true
-exec "$@" {stdin_redirect}
+{exec_stdin_setup}
+exec "$@"
 """.strip()
 
 

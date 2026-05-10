@@ -23,8 +23,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         del model
         return "anthropic"
 
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
-        del prompt
+    def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["claude", "--dangerously-skip-permissions"]
         if model:
             args += ["--model", model]

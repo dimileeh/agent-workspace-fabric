@@ -59,7 +59,7 @@ class FakeAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:  # type: ignore[override]
         return AgentRuntime.claude_code
 
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:  # type: ignore[override]
+    def _cli_args(self, *, model: str | None) -> list[str]:
         return []
 
     def queue(
