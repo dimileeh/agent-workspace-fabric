@@ -175,19 +175,32 @@ async def test_tracked_exec_wrapper_restricts_preserved_stdin_permissions() -> N
             sys.executable,
             "-c",
             "import os, stat, sys; "
+            "current_umask = os.umask(0); "
+            "os.umask(current_umask); "
+            "expected_child_mode = 0o666 & ~current_umask; "
             "open('/tmp/awf-exec/awf_stdin_permissions/child-created', 'w').close(); "
             "dir_mode = stat.S_IMODE(os.stat('/tmp/awf-exec/awf_stdin_permissions').st_mode); "
             "stdin_mode = stat.S_IMODE(os.fstat(0).st_mode); "
             "child_mode = stat.S_IMODE("
             "os.stat('/tmp/awf-exec/awf_stdin_permissions/child-created').st_mode"
             "); "
-            "print(f'{dir_mode:o} {stdin_mode:o} {child_mode:o} {sys.stdin.read()}', end='')",
+            "print("
+            "f'{dir_mode:o} {stdin_mode:o} {child_mode:o} {expected_child_mode:o} "
+            "{sys.stdin.read()}', "
+            "end='',"
+            ")",
         ],
         input_bytes=b"private-prompt",
     )
 
     assert result.returncode == 0
-    assert result.stdout == "700 600 664 private-prompt"
+    dir_mode, stdin_mode, child_mode, expected_child_mode, prompt = result.stdout.split(" ", 4)
+    assert (dir_mode, stdin_mode, child_mode, prompt) == (
+        "700",
+        "600",
+        expected_child_mode,
+        "private-prompt",
+    )
     assert not stdin_path.exists()
     child_path.unlink(missing_ok=True)
 
