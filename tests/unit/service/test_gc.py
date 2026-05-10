@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog
 from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -1998,10 +1999,16 @@ async def test_run_awaitable_blocking_returns_unknown_when_worker_exceeds_timeou
     monkeypatch.setattr(gc.threading, "Thread", _HungThread)
     awaitable = _worker_result()
     try:
-        assert gc._run_awaitable_blocking(awaitable) == "unknown"  # noqa: SLF001
+        with structlog.testing.capture_logs() as logs:
+            assert gc._run_awaitable_blocking(awaitable) == "unknown"  # noqa: SLF001
     finally:
         awaitable.close()
     assert join_timeouts == [120]
+    assert any(
+        entry.get("event") == "gc.awaitable_blocking_timeout"
+        and entry.get("timeout_seconds") == 120
+        for entry in logs
+    )
 
 
 @pytest.mark.unit

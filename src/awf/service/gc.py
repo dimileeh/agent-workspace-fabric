@@ -21,6 +21,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
+from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -68,6 +69,7 @@ _FAILED_NO_WORK_TERMINAL_STATUSES = frozenset({WorkspaceStatus.failed.value, "su
 _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS = ("sleep infinity", "tail -f /dev/null")
 _RUN_AWAITABLE_BLOCKING_TIMEOUT_SECONDS = 120.0
 
+_log = get_logger(__name__)
 _RUNTIME_INSPECTOR = RuntimeInspector()
 
 PROTECTED_WORKSPACE_GC_STATUSES = frozenset(
@@ -1494,6 +1496,10 @@ def _run_awaitable_blocking(awaitable: Coroutine[Any, Any, str]) -> str:
     thread.start()
     thread.join(timeout=_RUN_AWAITABLE_BLOCKING_TIMEOUT_SECONDS)
     if thread.is_alive():
+        _log.warning(
+            "gc.awaitable_blocking_timeout",
+            timeout_seconds=_RUN_AWAITABLE_BLOCKING_TIMEOUT_SECONDS,
+        )
         return "unknown"
     if errors:
         raise errors[0]
