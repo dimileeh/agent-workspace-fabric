@@ -250,6 +250,7 @@ class TestSuccess:
                 reason_code="PROVISIONING_COMPLETE",
                 action="provision",
                 expected=WorkspaceStatus.provisioning,
+                preserve_staged_on_blocked=True,
             )
 
         async with session_factory() as s:
@@ -1973,7 +1974,7 @@ class TestOperatorControlRaces:
         }
 
     @pytest.mark.unit
-    async def test_active_teardown_blocks_mark_failed_records_callback(
+    async def test_active_teardown_blocks_mark_failed_rolls_back_failure_fields(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         git_manager: GitManager,
@@ -2023,8 +2024,8 @@ class TestOperatorControlRaces:
             ]
 
         assert reloaded.status == WorkspaceStatus.provisioning.value
-        assert reloaded.failure_reason == FailureReason.infrastructure_failure.value
-        assert reloaded.failure_message == "late provisioning failure"
+        assert reloaded.failure_reason is None
+        assert reloaded.failure_message is None
         assert ignored_events[-1].payload == {
             "callback_source": "provisioner",
             "callback_action": "mark_failed",

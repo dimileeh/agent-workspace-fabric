@@ -342,6 +342,7 @@ class Provisioner:
                 reason_code="PROVISIONING_COMPLETE",
                 action="provision",
                 expected=WorkspaceStatus.provisioning,
+                preserve_staged_on_blocked=True,
             ):
                 return
             await session.commit()
@@ -492,12 +493,19 @@ class Provisioner:
         reason_code: str,
         action: str,
         expected: WorkspaceStatus,
+        preserve_staged_on_blocked: bool = False,
     ) -> bool:
         workspace_id = ws.id
         try:
-            await repo.transition(ws, to=to, reason_code=reason_code)
+            if preserve_staged_on_blocked:
+                async with session.begin_nested():
+                    await repo.transition(ws, to=to, reason_code=reason_code)
+            else:
+                await repo.transition(ws, to=to, reason_code=reason_code)
         except WorkspaceTransitionBlockedByActiveOperationError as exc:
             operation_id = exc.operation.id
+            if not preserve_staged_on_blocked:
+                await session.rollback()
             await self._record_active_operation_blocked_callback_in_session(
                 session,
                 workspace_id=workspace_id,
