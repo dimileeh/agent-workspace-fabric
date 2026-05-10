@@ -10,12 +10,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session as SyncSession
 
 import awf.db.repositories as repositories
 from awf.control.state_machine import InvalidWorkspaceTransitionError
+from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
@@ -27,6 +29,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
+    _schedulable_workspace_ids_stmt,
     validation_command_set_hash,
 )
 from awf.db.session import make_engine, make_session_factory
@@ -1463,6 +1466,67 @@ class TestOwnedPathOverlapLookup:
             assert listed == [normal.id]
         finally:
             sys.set_int_max_str_digits(previous_limit)
+
+    @pytest.mark.unit
+    def test_sqlite_scheduler_ignores_policy_strings_above_python_int_limit_before_limit(
+        self,
+    ) -> None:
+        engine = create_engine("sqlite:///:memory:", future=True)
+        scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        previous_limit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(640)
+        try:
+            Base.metadata.create_all(engine)
+            with SyncSession(engine) as session:
+                oversized_high = Workspace(
+                    id="ws_sqlite_oversized_priority",
+                    status=WorkspaceStatus.requested.value,
+                    version=1,
+                    repo_url="git@github.com:example/app.git",
+                    branch_base="development",
+                    task_title="oversized high priority",
+                    task_prompt="p",
+                    agent=AgentRuntime.codex.value,
+                    test_commands=[],
+                    task_class=TaskClass.docs_task.value,
+                    task_policy={"scheduler": {"base_priority": "9" * 641}},
+                    owned_paths=[],
+                    created_at=scoring_at,
+                    updated_at=scoring_at,
+                )
+                normal = Workspace(
+                    id="ws_sqlite_normal_priority",
+                    status=WorkspaceStatus.requested.value,
+                    version=1,
+                    repo_url="git@github.com:example/app.git",
+                    branch_base="development",
+                    task_title="normal priority",
+                    task_prompt="p",
+                    agent=AgentRuntime.codex.value,
+                    test_commands=[],
+                    task_class=TaskClass.docs_task.value,
+                    task_policy={"scheduler": {"base_priority": 50}},
+                    owned_paths=[],
+                    created_at=scoring_at,
+                    updated_at=scoring_at,
+                )
+                session.add_all([oversized_high, normal])
+                session.commit()
+
+                stmt = _schedulable_workspace_ids_stmt(
+                    status=WorkspaceStatus.requested,
+                    limit=1,
+                    scoring_at=scoring_at,
+                    dialect_name="sqlite",
+                    skip_locked=False,
+                )
+
+                listed = session.execute(stmt).scalars().all()
+
+            assert [workspace.id for workspace in listed] == ["ws_sqlite_normal_priority"]
+        finally:
+            sys.set_int_max_str_digits(previous_limit)
+            engine.dispose()
 
     @pytest.mark.unit
     async def test_scheduler_cursor_recomputes_database_score_for_page_boundary(

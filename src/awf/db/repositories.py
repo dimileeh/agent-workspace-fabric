@@ -3957,6 +3957,13 @@ def _scheduler_json_int_expr(
                 ),
             ),
         )
+        max_str_digits = sys.get_int_max_str_digits()
+        if max_str_digits > 0:
+            sqlite_whole_digits = func.replace(whole_text, "-", "")
+            integer_valued_text = and_(
+                integer_valued_text,
+                func.length(sqlite_whole_digits) <= max_str_digits,
+            )
         return case(
             (json_type == "integer", sql_cast(json_value, Integer)),
             (
