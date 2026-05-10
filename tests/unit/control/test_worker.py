@@ -9,6 +9,7 @@ concurrency, so end-to-end is the most useful test.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -17,20 +18,29 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import event, select, update
+from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.control.worker as worker_module
+import awf.db.repositories as repositories_module
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
+    _active_execution_preservation_claim_cleanup_payload,
     _ActiveExecutionCandidate,
     _candidate_claim_is_stale,
     _claim_recheck_conditions,
+    _execution_claim_is_stale,
+    _has_running_agent_runtime,
+    _json_datetime,
+    _monitor_claim_is_stale,
     _monitor_recovery_claim_cleanup_payload,
     _scheduler_candidate_cursor,
     _scheduler_candidate_fetch_limit,
     _scheduler_items_are_workspace_ids,
     _scheduler_items_are_workspaces,
     _stale_active_execution_failure_message,
+    _utc_datetime,
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
@@ -54,7 +64,11 @@ from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.controls import WorkspaceControlService
-from awf.service.scheduler import scheduler_score_from_workspace
+from awf.service.scheduler import (
+    SchedulerOrderCursor,
+    scheduler_order_key,
+    scheduler_score_from_workspace,
+)
 from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
 from tests.postgres import postgres_test_engine
 
@@ -66,6 +80,38 @@ WORKER_TEST_TIMEOUT_SECONDS = 300.0
 
 def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+async def _pending_execution_task() -> None:
+    await asyncio.Event().wait()
+
+
+def _scheduler_test_scoring_time(
+    *,
+    after: SchedulerOrderCursor | None,
+    scoring_at: datetime | None,
+) -> datetime:
+    if after is None:
+        assert scoring_at is not None
+        return scoring_at
+    if scoring_at is not None:
+        assert scoring_at == after.scoring_at
+    return after.scoring_at
+
+
+def _scheduler_order_cursor_for_workspace(
+    workspace: Workspace,
+    *,
+    scoring_at: datetime,
+) -> SchedulerOrderCursor:
+    score = scheduler_score_from_workspace(workspace, now=scoring_at)
+    return SchedulerOrderCursor(
+        class_priority=score.class_priority,
+        effective_score=score.effective_score,
+        queued_at=score.queued_at,
+        workspace_id=score.workspace_id,
+        scoring_at=scoring_at,
+    )
 
 
 @pytest.fixture
@@ -467,6 +513,15 @@ def _live_agent_snapshot(*, container_id: str = "agent") -> RuntimeSnapshot:
     )
 
 
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError(
+        "SELECT 1",
+        {},
+        RuntimeError("connection is closed"),
+        connection_invalidated=True,
+    )
+
+
 class _HealthyRuntimeInspector:
     def __init__(self) -> None:
         self.calls: list[str | None] = []
@@ -654,6 +709,463 @@ class TestRunOnce:
 
         assert provisioner.calls == []
 
+    @pytest.mark.unit
+    async def test_requested_ordered_decision_persistent_transient_commit_failure_prevents_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "record-before-provision-persistent-transient-commit",
+            create_task_attempt=True,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        async def _claim_without_commit(workspace_ids: list[str]) -> list[str]:
+            assert workspace_ids == [requested_id]
+            return workspace_ids
+
+        async def _list_requested_without_db() -> list[str]:
+            return [requested_id]
+
+        async def _filter_current_requested_status(
+            workspace_ids: list[str],
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+        ) -> list[str]:
+            assert workspace_ids == [requested_id]
+            assert expected == WorkspaceStatus.requested
+            assert action == "provision"
+            return workspace_ids
+
+        async def _skip_secret_lease_scan() -> None:
+            return None
+
+        commits = 0
+
+        async def _fail_commit(_session: AsyncSession) -> None:
+            nonlocal commits
+            commits += 1
+            raise InterfaceError(
+                "COMMIT",
+                {},
+                RuntimeError("connection is closed"),
+                connection_invalidated=True,
+            )
+
+        worker._list_requested = _list_requested_without_db  # type: ignore[method-assign]
+        worker._filter_current_status = _filter_current_requested_status  # type: ignore[method-assign]
+        worker._claim_requested_ids = _claim_without_commit  # type: ignore[method-assign]
+        worker._maybe_expire_due_secret_leases = _skip_secret_lease_scan  # type: ignore[method-assign]
+        monkeypatch.setattr(AsyncSession, "commit", _fail_commit)
+
+        with pytest.raises(InterfaceError, match="connection is closed"):
+            await worker.run_once()
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
+
+        assert provisioner.calls == []
+        assert commits == 2
+        assert decisions == []
+
+    @pytest.mark.unit
+    async def test_requested_ordered_decision_ambiguous_commit_retries_without_duplicate(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "record-before-provision-ambiguous-commit",
+            create_task_attempt=True,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        async def _list_requested_without_db() -> list[str]:
+            return [requested_id]
+
+        async def _filter_current_requested_status(
+            workspace_ids: list[str],
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+        ) -> list[str]:
+            assert workspace_ids == [requested_id]
+            assert expected == WorkspaceStatus.requested
+            assert action == "provision"
+            return workspace_ids
+
+        async def _skip_secret_lease_scan() -> None:
+            return None
+
+        commits = 0
+        original_commit = AsyncSession.commit
+
+        async def _raise_after_ordered_decision_commit(session: AsyncSession) -> None:
+            nonlocal commits
+            commits += 1
+            await original_commit(session)
+            if commits == 2:
+                raise InterfaceError(
+                    "COMMIT",
+                    {},
+                    RuntimeError("connection is closed"),
+                    connection_invalidated=True,
+                )
+
+        worker._list_requested = _list_requested_without_db  # type: ignore[method-assign]
+        worker._filter_current_status = _filter_current_requested_status  # type: ignore[method-assign]
+        worker._maybe_expire_due_secret_leases = _skip_secret_lease_scan  # type: ignore[method-assign]
+        monkeypatch.setattr(AsyncSession, "commit", _raise_after_ordered_decision_commit)
+
+        assert await worker.run_once() == 1
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
+
+        assert provisioner.calls == [requested_id]
+        assert commits == 4
+        assert len(decisions) == 1
+        assert decisions[0].reason_code == "ORDERED_REQUESTED_PROVISIONING"
+
+    @pytest.mark.unit
+    async def test_ordered_decision_retry_dedupes_when_newer_decision_is_latest(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "record-before-provision-ambiguous-commit-with-newer-latest",
+            create_task_attempt=True,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+        original_commit = AsyncSession.commit
+        raised_after_ordered_commit = False
+
+        async def _raise_after_ordered_commit_and_insert_newer_decision(
+            session: AsyncSession,
+        ) -> None:
+            nonlocal raised_after_ordered_commit
+            await original_commit(session)
+            if raised_after_ordered_commit:
+                return
+            raised_after_ordered_commit = True
+
+            async with session_factory() as concurrent_session:
+                attempt = await TaskAttemptRepository(concurrent_session).get_by_workspace_id(
+                    requested_id
+                )
+                assert attempt is not None
+                await QueueDecisionRepository(concurrent_session).create(
+                    workspace_id=requested_id,
+                    task_id=attempt.task_id,
+                    attempt_id=attempt.id,
+                    decision="deferred",
+                    reason_code="CONCURRENT_SCHEDULER_DECISION",
+                    class_priority=0,
+                    computed_priority=0,
+                    age_boost=0,
+                    retry_bonus=0,
+                    resource_summary={},
+                    overlap_risk_summary={},
+                    score_summary={},
+                    decided_at=datetime.now(UTC) + timedelta(days=1),
+                )
+                await original_commit(concurrent_session)
+
+            raise InterfaceError(
+                "COMMIT",
+                {},
+                RuntimeError("connection is closed"),
+                connection_invalidated=True,
+            )
+
+        monkeypatch.setattr(
+            AsyncSession,
+            "commit",
+            _raise_after_ordered_commit_and_insert_newer_decision,
+        )
+
+        await worker._record_ordered_decisions(  # noqa: SLF001
+            [requested_id],
+            reason_code="ORDERED_REQUESTED_PROVISIONING",
+        )
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
+
+        ordered_decisions = [
+            decision
+            for decision in decisions
+            if decision.reason_code == "ORDERED_REQUESTED_PROVISIONING"
+        ]
+        assert raised_after_ordered_commit is True
+        assert len(decisions) == 2
+        assert len(ordered_decisions) == 1
+        assert decisions[0].reason_code == "CONCURRENT_SCHEDULER_DECISION"
+
+    @pytest.mark.unit
+    async def test_run_once_retries_scheduler_read_after_closed_connection(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "closed-connection-requested",
+            create_task_attempt=True,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+        original = WorkspaceRepository.list_schedulable_workspaces
+        failures_remaining = 1
+        scheduler_read_sessions: list[AsyncSession] = []
+        scheduler_read_session_ids: list[int] = []
+
+        async def _flaky_list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *args: object,
+            **kwargs: object,
+        ) -> list[Workspace]:
+            nonlocal failures_remaining
+            scheduler_read_sessions.append(self._session)
+            scheduler_read_session_ids.append(id(self._session))
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _flaky_list_schedulable_workspaces,
+        )
+
+        assert await worker.run_once() == 1
+
+        assert len(scheduler_read_sessions) == 2
+        assert scheduler_read_sessions[1] is not scheduler_read_sessions[0]
+        assert len(scheduler_read_session_ids) == 2
+        assert scheduler_read_session_ids[1] != scheduler_read_session_ids[0]
+        assert provisioner.calls == [requested_id]
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(requested_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    async def test_provider_recovery_filter_retries_closed_connection(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "filter-outside-read-retry",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+        failures_remaining = 1
+        filter_attempts = 0
+        filter_sessions: list[AsyncSession] = []
+        filter_session_ids: list[int] = []
+        retry_attempts: list[int] = []
+        original_filter = worker._filter_provider_recovery_suppressed
+
+        async def _flaky_filter(
+            session: AsyncSession,
+            workspaces: list[Workspace] | list[str],
+        ) -> list[str]:
+            nonlocal failures_remaining, filter_attempts
+            filter_attempts += 1
+            filter_sessions.append(session)
+            filter_session_ids.append(id(session))
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original_filter(session, workspaces)
+
+        async def _record_retry(_exc: BaseException, attempt: int) -> None:
+            retry_attempts.append(attempt)
+
+        worker._filter_provider_recovery_suppressed = _flaky_filter  # type: ignore[method-assign]
+        worker._log_transient_db_retry = _record_retry  # type: ignore[method-assign]
+
+        assert await worker._list_ready(limit=1) == [ready_id]  # noqa: SLF001
+        assert filter_attempts == 2
+        assert len(filter_sessions) == 2
+        assert filter_sessions[1] is not filter_sessions[0]
+        assert len(filter_session_ids) == 2
+        assert filter_session_ids[1] != filter_session_ids[0]
+        assert retry_attempts == [1]
+
+    @pytest.mark.unit
+    async def test_scheduler_deferred_decisions_are_not_replayed_after_commit_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "scheduler-commit-boundary",
+            agent="gemini",
+            task_class="refactor_task",
+            task_policy={
+                "agent_model": "gemini-2.5-pro",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                },
+            },
+            create_task_attempt=True,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+        original_commit = AsyncSession.commit
+        failures_remaining = 1
+        commit_attempts = 0
+
+        async def _commit_then_closed(session: AsyncSession) -> None:
+            nonlocal failures_remaining, commit_attempts
+            commit_attempts += 1
+            await original_commit(session)
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+
+        monkeypatch.setattr(AsyncSession, "commit", _commit_then_closed)
+
+        with pytest.raises(InterfaceError, match="connection is closed"):
+            await worker._list_ready(limit=1)  # noqa: SLF001
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(ready_id)
+
+        assert commit_attempts == 1
+        assert len(decisions) == 1
+        assert decisions[0].decision == "deferred"
+        assert decisions[0].reason_code == "PROVIDER_RECOVERY_NOT_BEFORE"
+
+    @pytest.mark.unit
+    async def test_provider_recovery_filter_keeps_scheduler_locks_until_decision_commit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "filter-keeps-scheduler-locks",
+        )
+        scheduler_read_session_ids: list[int] = []
+        filter_session_ids: list[int] = []
+        original_list = WorkspaceRepository.list_schedulable_workspaces
+
+        async def _list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
+        ) -> list[Workspace]:
+            del scoring_at
+            scheduler_read_session_ids.append(id(self._session))
+            return await original_list(
+                self,
+                status=status,
+                limit=limit,
+                exclude_ids=exclude_ids,
+                after=after,
+            )
+
+        async def _filter_provider_recovery_suppressed(
+            session: AsyncSession,
+            workspaces: list[Workspace] | list[str],
+        ) -> list[str]:
+            filter_session_ids.append(id(session))
+            assert not isinstance(workspaces[0], str)
+            return [workspace.id for workspace in workspaces]
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._filter_provider_recovery_suppressed = (  # type: ignore[method-assign]
+            _filter_provider_recovery_suppressed
+        )
+
+        assert await worker._list_ready(limit=1) == [ready_id]  # noqa: SLF001
+
+        assert len(scheduler_read_session_ids) == 1
+        assert filter_session_ids == scheduler_read_session_ids
+
 
 class TestRunOnceExecution:
     @pytest.mark.unit
@@ -696,6 +1208,174 @@ class TestRunOnceExecution:
         assert low_id not in executor.calls
 
     @pytest.mark.unit
+    async def test_monitor_claim_refresh_recomputes_lease_expiry_between_retries(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitor-claim-refresh-fresh-expiry",
+        )
+        base_time = datetime(2026, 5, 8, 12, 0, tzinfo=UTC)
+
+        class _RetryClock:
+            calls = 0
+
+            @classmethod
+            def now(cls, tz: object) -> datetime:
+                assert tz is UTC
+                cls.calls += 1
+                return base_time + timedelta(seconds=cls.calls)
+
+        monkeypatch.setattr("awf.control.worker.datetime", _RetryClock)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                monitor_claim_lease_seconds=120,
+            ),
+        )
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.monitor_claimed_by = worker._worker_id
+            ws.monitor_claim_expires_at = base_time
+            await session.commit()
+
+        original = WorkspaceRepository.refresh_monitoring_pr_claim
+        failures_remaining = 1
+        lease_expiries: list[datetime] = []
+        refresh_sessions: list[AsyncSession] = []
+        refresh_session_ids: list[int] = []
+
+        async def _flaky_refresh_monitoring_pr_claim(
+            self: WorkspaceRepository,
+            workspace_id: str,
+            *,
+            owner_id: str,
+            lease_expires_at: datetime,
+        ) -> bool:
+            nonlocal failures_remaining
+            lease_expiries.append(lease_expires_at)
+            refresh_sessions.append(self._session)
+            refresh_session_ids.append(id(self._session))
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(
+                self,
+                workspace_id,
+                owner_id=owner_id,
+                lease_expires_at=lease_expires_at,
+            )
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "refresh_monitoring_pr_claim",
+            _flaky_refresh_monitoring_pr_claim,
+        )
+
+        assert await worker._refresh_monitoring_pr_claim(workspace_id) is True
+
+        assert lease_expiries == [
+            base_time + timedelta(seconds=121),
+            base_time + timedelta(seconds=122),
+        ]
+        assert len(refresh_sessions) == 2
+        assert refresh_sessions[1] is not refresh_sessions[0]
+        assert len(refresh_session_ids) == 2
+        assert refresh_session_ids[1] != refresh_session_ids[0]
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.monitor_claim_expires_at is not None
+            assert ws.monitor_claim_expires_at.replace(tzinfo=UTC) == lease_expiries[-1]
+
+    @pytest.mark.unit
+    async def test_execution_claim_refresh_retries_closed_connection_without_losing_owner(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "claim-refresh-closed-connection",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                execution_claim_lease_seconds=120,
+            ),
+        )
+        old_expiry = datetime.now(UTC) + timedelta(seconds=5)
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = worker._worker_id
+            ws.execution_claim_expires_at = old_expiry
+            await session.commit()
+
+        original = WorkspaceRepository.refresh_execution_claim
+        failures_remaining = 1
+        refresh_sessions: list[AsyncSession] = []
+        refresh_session_ids: list[int] = []
+
+        async def _flaky_refresh_execution_claim(
+            self: WorkspaceRepository,
+            workspace_id: str,
+            *,
+            owner_id: str,
+            lease_expires_at: datetime,
+        ) -> bool:
+            nonlocal failures_remaining
+            refresh_sessions.append(self._session)
+            refresh_session_ids.append(id(self._session))
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(
+                self,
+                workspace_id,
+                owner_id=owner_id,
+                lease_expires_at=lease_expires_at,
+            )
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "refresh_execution_claim",
+            _flaky_refresh_execution_claim,
+        )
+
+        assert await worker._refresh_execution_claim(workspace_id) is True
+
+        assert len(refresh_sessions) == 2
+        assert refresh_sessions[1] is not refresh_sessions[0]
+        assert len(refresh_session_ids) == 2
+        assert refresh_session_ids[1] != refresh_session_ids[0]
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.execution_claimed_by == worker._worker_id
+            assert ws.execution_claim_expires_at is not None
+            assert ws.execution_claim_expires_at > old_expiry
+
+    @pytest.mark.unit
     async def test_ready_execution_scores_beyond_fetch_window(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -736,6 +1416,266 @@ class TestRunOnceExecution:
 
         assert executor.calls == [urgent_id]
         assert not set(low_ids).intersection(executor.calls)
+
+    @pytest.mark.unit
+    async def test_ready_execution_scores_beyond_priority_refill_page(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        low_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"refill-window-low-priority-{index}",
+                task_class="docs_task",
+                task_policy={"scheduler": {"base_priority": 0}},
+            )
+            for index in range(_scheduler_candidate_fetch_limit(1) * 2)
+        ]
+        urgent_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "urgent-ready-after-refill-window",
+            task_class="migration_task",
+            task_policy={"scheduler": {"base_priority": 100, "human_boost": 5}},
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [urgent_id]
+        assert not set(low_ids).intersection(executor.calls)
+
+    @pytest.mark.unit
+    async def test_ready_refill_keeps_final_order_on_frozen_scoring_timestamp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        frozen_scoring_at = datetime(2026, 1, 1, 0, 14, 59, tzinfo=UTC)
+        drifted_scoring_at = frozen_scoring_at + timedelta(seconds=1)
+        older_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "age-boost-after-frozen-score",
+            task_class="docs_task",
+            task_policy={"scheduler": {"base_priority": 0}},
+        )
+        priority_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "priority-at-frozen-score",
+            task_class="docs_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        older_created_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        priority_created_at = older_created_at + timedelta(minutes=1)
+        async with session_factory() as session:
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == older_id)
+                .values(created_at=older_created_at, updated_at=older_created_at)
+            )
+            await session.execute(
+                update(Workspace)
+                .where(Workspace.id == priority_id)
+                .values(created_at=priority_created_at, updated_at=priority_created_at)
+            )
+            await session.commit()
+
+        class DriftedDateTime(datetime):
+            calls = 0
+
+            @classmethod
+            def now(cls, tz: object = None) -> datetime:
+                del tz
+                cls.calls += 1
+                if cls.calls == 1:
+                    return frozen_scoring_at
+                return drifted_scoring_at
+
+        async def _list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
+        ) -> list[Workspace]:
+            del exclude_ids, after
+            assert status == WorkspaceStatus.ready
+            assert scoring_at == frozen_scoring_at
+            result = await self._session.execute(
+                select(Workspace).where(Workspace.id.in_([older_id, priority_id]))
+            )
+            rows = list(result.scalars())
+            scored = sorted(
+                (
+                    (scheduler_score_from_workspace(workspace, now=scoring_at), workspace)
+                    for workspace in rows
+                ),
+                key=lambda item: scheduler_order_key(item[0]),
+            )
+            return [workspace for _score, workspace in scored][:limit]
+
+        async def _allow_all_scheduler_candidates(
+            session: AsyncSession,
+            workspaces: list[Workspace],
+            *,
+            limit: int,
+            scoring_at: datetime,
+        ) -> list[str]:
+            del session, limit, scoring_at
+            return [workspace.id for workspace in workspaces]
+
+        monkeypatch.setattr(worker_module, "datetime", DriftedDateTime)
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
+            raising=False,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker._filter_scheduler_candidate_workspaces = (  # type: ignore[method-assign]
+            _allow_all_scheduler_candidates
+        )
+
+        assert await worker._list_ready(limit=1) == [priority_id]  # noqa: SLF001
+
+    @pytest.mark.unit
+    async def test_ready_scan_stops_after_dispatch_slots_are_filled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        candidate_limit = _scheduler_candidate_fetch_limit(1)
+        low_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"bounded-scan-low-{index}",
+                task_class="docs_task",
+                task_policy={"scheduler": {"base_priority": 0}},
+            )
+            for index in range(candidate_limit)
+        ]
+        urgent_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "bounded-scan-urgent",
+            task_class="migration_task",
+            task_policy={"scheduler": {"base_priority": 100, "human_boost": 5}},
+        )
+        tail_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"bounded-scan-tail-{index}",
+                task_class="docs_task",
+                task_policy={"scheduler": {"base_priority": 0}},
+            )
+            for index in range(candidate_limit)
+        ]
+        ordered_ids = [*low_ids, urgent_id, *tail_ids]
+        base_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        created_at_by_id: dict[str, datetime] = {}
+        async with session_factory() as session:
+            for index, workspace_id in enumerate(ordered_ids):
+                created_at = base_created_at + timedelta(seconds=index)
+                created_at_by_id[workspace_id] = created_at
+                await session.execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace_id)
+                    .values(created_at=created_at, updated_at=created_at)
+                )
+            await session.commit()
+        query_cursors: list[SchedulerOrderCursor | None] = []
+        page_end_cursors: list[SchedulerOrderCursor] = []
+        original_list_schedulable_workspaces = WorkspaceRepository.list_schedulable_workspaces
+
+        async def _list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
+        ) -> list[Workspace]:
+            assert status == WorkspaceStatus.ready
+            assert limit == candidate_limit
+            query_cursors.append(after)
+            if after is not None:
+                assert page_end_cursors
+                assert after == page_end_cursors[-1]
+            scoring_time = _scheduler_test_scoring_time(after=after, scoring_at=scoring_at)
+            page = await original_list_schedulable_workspaces(
+                self,
+                status=status,
+                limit=limit,
+                exclude_ids=exclude_ids,
+                after=after,
+                scoring_at=scoring_time,
+            )
+            if page:
+                page_end_cursors.append(
+                    _scheduler_order_cursor_for_workspace(page[-1], scoring_at=scoring_time)
+                )
+            return page
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
+            raising=False,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker._list_ready(limit=1) == [urgent_id]  # noqa: SLF001
+        assert len(query_cursors) == 2
+        assert query_cursors[0] is None
+        assert query_cursors[1] is not None
+        assert query_cursors[1] == page_end_cursors[0]
+        assert query_cursors[1].queued_at == created_at_by_id[query_cursors[1].workspace_id]
+        assert all(
+            cursor is None or cursor.workspace_id not in tail_ids for cursor in query_cursors
+        )
 
     @pytest.mark.unit
     async def test_human_boosted_ready_workspace_wins_equal_priority_dispatch(
@@ -1215,7 +2155,9 @@ class TestRunOnceExecution:
                     .values(created_at=created_at, updated_at=created_at)
                 )
             await session.commit()
-        queries: list[tuple[tuple[datetime, str] | None, set[str]]] = []
+        queries: list[tuple[SchedulerOrderCursor | None, set[str]]] = []
+        page_end_cursors: list[SchedulerOrderCursor] = []
+        original_list_schedulable_workspaces = WorkspaceRepository.list_schedulable_workspaces
 
         async def _list_schedulable_workspaces(
             self: WorkspaceRepository,
@@ -1223,24 +2165,29 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
-            after: tuple[datetime, str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
         ) -> list[Workspace]:
             assert status == WorkspaceStatus.ready
             excluded = set(exclude_ids or set())
             queries.append((after, excluded))
-            visible = [workspace_id for workspace_id in ordered_ids if workspace_id not in excluded]
             if after is not None:
-                visible = [
-                    workspace_id
-                    for workspace_id in visible
-                    if (created_at_by_id[workspace_id], workspace_id) > after
-                ]
-            visible = visible[:limit]
-            if not visible:
-                return []
-            result = await self._session.execute(select(Workspace).where(Workspace.id.in_(visible)))
-            rows = {workspace.id: workspace for workspace in result.scalars()}
-            return [rows[workspace_id] for workspace_id in visible]
+                assert page_end_cursors
+                assert after == page_end_cursors[-1]
+            scoring_time = _scheduler_test_scoring_time(after=after, scoring_at=scoring_at)
+            page = await original_list_schedulable_workspaces(
+                self,
+                status=status,
+                limit=limit,
+                exclude_ids=exclude_ids,
+                after=after,
+                scoring_at=scoring_time,
+            )
+            if page:
+                page_end_cursors.append(
+                    _scheduler_order_cursor_for_workspace(page[-1], scoring_at=scoring_time)
+                )
+            return page
 
         monkeypatch.setattr(
             WorkspaceRepository,
@@ -1261,16 +2208,13 @@ class TestRunOnceExecution:
         )
 
         assert await worker._list_ready(limit=1, exclude_ids=base_exclude_ids) == [allowed_id]
-        assert queries == [
-            (None, base_exclude_ids),
-            (
-                (
-                    created_at_by_id[suppressed_ids[-1]],
-                    suppressed_ids[-1],
-                ),
-                base_exclude_ids,
-            ),
-        ]
+        assert len(queries) == 2
+        assert queries[0] == (None, base_exclude_ids)
+        assert queries[1][0] is not None
+        assert queries[1][0] == page_end_cursors[0]
+        assert queries[1][0].queued_at == created_at_by_id[suppressed_ids[-1]]
+        assert queries[1][0].workspace_id == suppressed_ids[-1]
+        assert queries[1][1] == base_exclude_ids
 
     @pytest.mark.unit
     async def test_provider_model_circuit_defer_records_decision_and_fills_limit(
@@ -1668,9 +2612,10 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
-            after: tuple[datetime, str] | None = None,
+            after: SchedulerOrderCursor | None = None,
+            scoring_at: datetime | None = None,
         ) -> list[Workspace]:
-            del self, after
+            del self, after, scoring_at
             queries.append((status, limit, set(exclude_ids or set())))
             return []
 
@@ -3174,6 +4119,184 @@ class TestRunOnceMonitorRecovery:
 
 
 class TestRunOnceStaleActiveExecutionRecovery:
+    @pytest.mark.unit
+    async def test_stale_active_scan_closed_connection_does_not_terminal_fail_workspace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-scan-closed-connection",
+            WorkspaceStatus.running,
+            node_id="node-a",
+        )
+        previous_owner = "worker-before-restart"
+        previous_expiry = datetime.now(UTC) - timedelta(seconds=5)
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = previous_owner
+            ws.execution_claim_expires_at = previous_expiry
+            await session.commit()
+
+        original = WorkspaceRepository.get
+        failures_remaining = 1
+
+        async def _flaky_get(
+            self: WorkspaceRepository,
+            workspace_id: str,
+        ) -> Workspace | None:
+            nonlocal failures_remaining
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(self, workspace_id)
+
+        monkeypatch.setattr(WorkspaceRepository, "get", _flaky_get)
+        inspector = _RecordingRuntimeInspector({f"awf_{workspace_id}": _live_agent_snapshot()})
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+                node_id="node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.execution_claimed_by == previous_owner
+            assert ws.execution_claim_expires_at == previous_expiry
+            assert ws.failure_reason is None
+            events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+
+        assert inspector.calls == []
+        assert any(event.reason_code == "DB_CONNECTION_CLOSED" for event in events)
+
+    @pytest.mark.unit
+    async def test_stale_active_cleanup_closed_connection_text_surfaces_runtime_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        class _RaisingRuntimeCleaner:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def cleanup(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                compose_project_name: str | None = None,
+                compose_file_path: Path | None = None,
+                worktree_host_path: Path | None = None,
+                remove_volumes: bool = True,
+                remove_worktree: bool = True,
+            ) -> WorkspaceCleanupResult:
+                self.calls.append(workspace_id)
+                raise RuntimeError("runtime cleanup connection is closed")
+
+        compose_project = "awf_cleanup_closed_text"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "cleanup-closed-text",
+            WorkspaceStatus.pushing,
+            compose_project_name=compose_project,
+            node_id="node-a",
+        )
+        now = datetime.now(UTC)
+        status_started_at = now - timedelta(minutes=10)
+        preserved_at = now - timedelta(minutes=5)
+        refresh_requested_at = now - timedelta(minutes=1)
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            state_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            pushing_started = next(
+                event for event in state_events if event.new_state == WorkspaceStatus.pushing.value
+            )
+            pushing_started.occurred_at = status_started_at
+            preserved = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            preserved.occurred_at = preserved_at
+            await WorkspaceControlService(
+                session,
+                project_stopper=_noop_project_stop,
+                cleaner_factory=_unexpected_cleaner_factory,
+            ).request_refresh_workspace(
+                workspace_id,
+                reason="operator recovery",
+                idempotency_key="refresh-before-cleanup-closed-text",
+            )
+            refresh_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.refresh_requested",
+            )
+            assert refresh_events
+            refresh_events[0].occurred_at = refresh_requested_at
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "compose_project_name": compose_project,
+                    "workspace_status": WorkspaceStatus.pushing.value,
+                    "runtime": {"stack_state": "running"},
+                },
+            )
+            await session.commit()
+
+        inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
+        cleaner = _RaisingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="runtime cleanup connection is closed"):
+            await worker._recover_stale_active_executions()  # noqa: SLF001
+
+        assert cleaner.calls == [workspace_id]
+        async with session_factory() as session:
+            db_events = await WorkspaceEventRepository(session).list(
+                workspace_id=workspace_id,
+                event_type="workspace.db_connection_transient",
+            )
+
+        assert db_events == []
+
     @pytest.mark.unit
     async def test_stale_running_with_missing_compose_project_fails(
         self,
@@ -5990,16 +7113,145 @@ def test_stale_execution_helper_defaults_for_non_runtime_statuses() -> None:
 
 
 @pytest.mark.unit
-def test_scheduler_candidate_cursor_handles_empty_and_orders_by_created_at_then_id() -> None:
+def test_scheduler_candidate_cursor_handles_empty_and_uses_last_page_row() -> None:
+    scoring_at = datetime(2026, 5, 2, 12, 2, tzinfo=UTC)
     first = SimpleNamespace(id="ws_b", created_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC))
     second = SimpleNamespace(id="ws_a", created_at=datetime(2026, 5, 2, 12, 1, tzinfo=UTC))
     third = SimpleNamespace(id="ws_c", created_at=datetime(2026, 5, 2, 12, 1, tzinfo=UTC))
 
-    assert _scheduler_candidate_cursor([]) is None
-    assert _scheduler_candidate_cursor([first, second, third]) == (
-        third.created_at,
-        "ws_c",
+    assert _scheduler_candidate_cursor([], scoring_at=scoring_at) is None
+    assert _scheduler_candidate_cursor([first, second, third], scoring_at=scoring_at) == (
+        SchedulerOrderCursor(
+            class_priority=0,
+            effective_score=0,
+            queued_at=third.created_at,
+            workspace_id="ws_c",
+            scoring_at=scoring_at,
+        )
     )
+
+
+@pytest.mark.unit
+def test_scheduler_candidate_cursor_uses_sql_age_boost_domain() -> None:
+    scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_aged",
+        task_class="docs_task",
+        task_policy={"scheduler": {"base_priority": 20}},
+        created_at=scoring_at - timedelta(hours=2),
+    )
+    score = scheduler_score_from_workspace(workspace, now=scoring_at)
+
+    assert score.age_boost > 0
+    assert _scheduler_candidate_cursor(
+        [workspace],
+        scoring_at=scoring_at,
+        dialect_name="postgresql",
+    ) == SchedulerOrderCursor(
+        class_priority=score.class_priority,
+        effective_score=score.effective_score,
+        queued_at=workspace.created_at,
+        workspace_id=workspace.id,
+        scoring_at=scoring_at,
+    )
+    assert _scheduler_candidate_cursor(
+        [workspace],
+        scoring_at=scoring_at,
+        dialect_name="unsupported",
+    ) == SchedulerOrderCursor(
+        class_priority=score.class_priority,
+        effective_score=score.effective_score - score.age_boost,
+        queued_at=workspace.created_at,
+        workspace_id=workspace.id,
+        scoring_at=scoring_at,
+    )
+
+
+@pytest.mark.unit
+def test_scheduler_candidate_cursor_uses_repository_sql_age_boost_dialect_contract() -> None:
+    assert (
+        worker_module.SCHEDULER_SQL_AGE_BOOST_DIALECTS
+        is repositories_module.SCHEDULER_SQL_AGE_BOOST_DIALECTS
+    )
+
+
+@pytest.mark.unit
+async def test_scheduler_page_filter_limit_uses_remaining_dispatch_slots(
+    worker: ControlWorker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_limit = _scheduler_candidate_fetch_limit(2)
+    scoring_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    pages = [
+        [
+            SimpleNamespace(
+                id=f"ws_page_{page_index}_{workspace_index}",
+                task_class="docs_task",
+                task_policy={},
+                created_at=scoring_at
+                + timedelta(seconds=(page_index * candidate_limit) + workspace_index),
+            )
+            for workspace_index in range(candidate_limit)
+        ]
+        for page_index in range(2)
+    ]
+    filter_limits: list[int] = []
+
+    async def _list_schedulable_workspaces(
+        self: WorkspaceRepository,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+        after: SchedulerOrderCursor | None = None,
+        scoring_at: datetime | None = None,
+    ) -> list[Workspace]:
+        del self, exclude_ids, after, scoring_at
+        assert status == WorkspaceStatus.ready
+        assert limit == candidate_limit
+        return pages.pop(0) if pages else []
+
+    async def _return_one_candidate(
+        session: AsyncSession,
+        workspaces: list[Workspace],
+        *,
+        limit: int,
+        scoring_at: datetime,
+    ) -> list[str]:
+        del session, scoring_at
+        filter_limits.append(limit)
+        return [workspaces[0].id]
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "list_schedulable_workspaces",
+        _list_schedulable_workspaces,
+        raising=False,
+    )
+    worker._filter_scheduler_candidate_workspaces = (  # type: ignore[method-assign]
+        _return_one_candidate
+    )
+
+    listed = await worker._list_scheduler_dispatchable_ids_from_pages(  # noqa: SLF001
+        SimpleNamespace(info={}),  # type: ignore[arg-type]
+        status=WorkspaceStatus.ready,
+        limit=2,
+    )
+
+    assert filter_limits == [2, 1]
+    assert listed == ["ws_page_0_0", "ws_page_1_0"]
+
+
+@pytest.mark.unit
+async def test_scheduler_candidate_filter_requires_scoring_timestamp(
+    worker: ControlWorker,
+) -> None:
+    with pytest.raises(TypeError, match="scoring_at"):
+        await worker._filter_scheduler_candidate_workspaces(  # noqa: SLF001
+            SimpleNamespace(info={}),  # type: ignore[arg-type]
+            [],
+            limit=1,
+        )
 
 
 @pytest.mark.unit
@@ -6039,6 +7291,36 @@ def test_monitor_recovery_claim_payload_derives_execution_cleanup_when_omitted()
 
 
 @pytest.mark.unit
+def test_worker_helper_branches_normalize_naive_datetimes() -> None:
+    cutoff = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    stale_execution = SimpleNamespace(
+        execution_claimed_by="worker",
+        execution_claim_expires_at=datetime(2026, 5, 2, 11, 59),
+    )
+    stale_monitor = SimpleNamespace(
+        monitor_claimed_by="monitor",
+        monitor_claim_expires_at=datetime(2026, 5, 2, 11, 59),
+    )
+    fresh_execution = SimpleNamespace(
+        execution_claimed_by="worker",
+        execution_claim_expires_at=cutoff + timedelta(minutes=5),
+    )
+
+    assert _execution_claim_is_stale(stale_execution, cutoff) is True
+    assert _monitor_claim_is_stale(stale_monitor, cutoff) is True
+    assert _has_running_agent_runtime(RuntimeSnapshot(stack_state="exited")) is False
+    assert _json_datetime(datetime(2026, 5, 2, 12, 0)) == "2026-05-02T12:00:00+00:00"
+    assert _utc_datetime(datetime(2026, 5, 2, 12, 0)) == cutoff
+    assert (
+        _active_execution_preservation_claim_cleanup_payload(
+            fresh_execution,
+            claim_cutoff=cutoff,
+        )["action"]
+        == "preserved_unexpired"
+    )
+
+
+@pytest.mark.unit
 async def test_list_by_status_uses_repository_alias_for_non_scheduler_statuses(
     worker: ControlWorker,
 ) -> None:
@@ -6061,6 +7343,351 @@ async def test_provider_recovery_filter_short_circuits_empty_input(
 
 
 @pytest.mark.unit
+async def test_run_forever_stops_after_idle_iteration_and_list_pending_alias(
+    worker: ControlWorker,
+) -> None:
+    assert await worker._list_pending() == []  # noqa: SLF001
+
+    run_once_calls = 0
+
+    async def _run_once() -> int:
+        nonlocal run_once_calls
+        run_once_calls += 1
+        worker.request_stop()
+        return 0
+
+    worker.run_once = _run_once  # type: ignore[method-assign]
+
+    await worker.run_forever()
+
+    assert run_once_calls == 1
+
+
+@pytest.mark.unit
+async def test_scheduler_filter_handles_string_ids_and_missing_rows(
+    worker: ControlWorker,
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    ready_id = await _create_ready(
+        session_factory,
+        origin_repo,
+        "gemini-ready-without-open-circuit",
+        agent="gemini",
+        task_policy={"agent_model": "gemini-2.5-pro"},
+    )
+
+    async with session_factory() as session:
+        allowed = await worker._filter_provider_recovery_suppressed(  # noqa: SLF001
+            session,
+            [ready_id, "missing-workspace"],
+        )
+
+    assert allowed == [ready_id]
+
+
+@pytest.mark.unit
+async def test_scheduler_candidate_filter_short_circuits_empty_page(
+    worker: ControlWorker,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        assert (
+            await worker._filter_scheduler_candidate_workspaces(  # noqa: SLF001
+                session,
+                [],
+                limit=10,
+                scoring_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+            )
+            == []
+        )
+
+
+@pytest.mark.unit
+async def test_db_connection_closed_event_skips_stale_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingSession:
+        committed = False
+        closed = False
+
+        async def commit(self) -> None:
+            self.committed = True
+
+        async def rollback(self) -> None:
+            raise AssertionError("stale event skip should not roll back")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class StaleWorkspaceRepository:
+        def __init__(self, session: RecordingSession) -> None:
+            assert session is recording_session
+
+        async def get(self, workspace_id: str) -> SimpleNamespace:
+            assert workspace_id == "ws_stale_event"
+            return SimpleNamespace(status=WorkspaceStatus.ready.value)
+
+        async def add_event(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("stale workspace should not receive an event")
+
+    recording_session = RecordingSession()
+    worker = ControlWorker(
+        session_factory=lambda: recording_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    monkeypatch.setattr(
+        "awf.control.worker.WorkspaceRepository",
+        StaleWorkspaceRepository,
+    )
+
+    await worker._record_db_connection_closed_event(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id="ws_stale_event",
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_ws_stale_event",
+        ),
+        _closed_connection_error(),
+    )
+
+    assert recording_session.committed is True
+    assert recording_session.closed is True
+
+
+@pytest.mark.unit
+async def test_dispatch_helpers_respect_limits_and_existing_tasks(
+    worker: ControlWorker,
+) -> None:
+    existing_task = asyncio.create_task(_pending_execution_task())
+    try:
+        worker._execution_tasks["existing"] = existing_task  # noqa: SLF001
+
+        assert worker._dispatchable_execution_ids(["new"], limit=0) == []  # noqa: SLF001
+        assert (
+            worker._dispatchable_execution_ids(["existing", "new"], limit=2)  # noqa: SLF001
+            == ["new"]
+        )
+        assert worker._dispatch_ready_executions(["new"], limit=0) == set()  # noqa: SLF001
+        assert (
+            worker._dispatch_ready_executions(["existing"], limit=1)  # noqa: SLF001
+            == set()
+        )
+        assert worker._dispatch_monitor_resumes(["new"], limit=0) == set()  # noqa: SLF001
+        assert (
+            worker._dispatch_monitor_resumes(["existing"], limit=1)  # noqa: SLF001
+            == set()
+        )
+    finally:
+        existing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await existing_task
+        worker._execution_tasks.clear()  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_safe_worker_paths_swallow_runtime_failures(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    class RaisingProvisioner:
+        async def provision_claimed(self, workspace_id: str) -> None:
+            assert workspace_id == "ws_provision"
+            raise RuntimeError("provision failed")
+
+    class RaisingExecutor(_RecordingExecutor):
+        async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+            assert workspace_id == "ws_execute"
+            raise RuntimeError("execute failed")
+
+    class RaisingMonitorExecutor(_RecordingExecutor):
+        async def resume_pr_monitor(self, workspace_id: str) -> None:
+            assert workspace_id == "ws_monitor"
+            raise RuntimeError("resume failed")
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=RaisingProvisioner(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    finish_calls: list[dict[str, object]] = []
+
+    async def _finish_monitor_recovery_operation(
+        workspace_id: str,
+        **kwargs: object,
+    ) -> None:
+        finish_calls.append({"workspace_id": workspace_id, **kwargs})
+
+    worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    await worker._safely_provision_claimed("ws_provision")  # noqa: SLF001
+    await worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_no_executor",
+    )
+
+    assert finish_calls == [
+        {
+            "workspace_id": "ws_monitor",
+            "operation_id": "op_no_executor",
+            "status": OperationStatus.failed,
+            "error_code": "MONITOR_RECOVERY_NO_EXECUTOR",
+            "error_message": "Worker has no executor configured.",
+        }
+    ]
+
+    execute_worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=RaisingExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    await execute_worker._safely_execute("ws_execute")  # noqa: SLF001
+
+    raising_worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        executor=RaisingMonitorExecutor(),
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    finish_calls.clear()
+    raising_worker._finish_monitor_recovery_operation = (  # type: ignore[method-assign]
+        _finish_monitor_recovery_operation
+    )
+
+    await raising_worker._safely_resume_pr_monitor(  # noqa: SLF001
+        "ws_monitor",
+        recovery_operation_id="op_resume_failed",
+    )
+
+    assert finish_calls[0]["workspace_id"] == "ws_monitor"
+    assert finish_calls[0]["operation_id"] == "op_resume_failed"
+    assert finish_calls[0]["status"] == OperationStatus.failed
+    assert finish_calls[0]["error_code"] == "MONITOR_RECOVERY_FAILED"
+    assert "resume failed" in str(finish_calls[0]["error_message"])
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_ids_respects_limit_and_existing_tasks(
+    worker: ControlWorker,
+) -> None:
+    claim_calls: list[str] = []
+
+    async def _claim_monitoring_pr(workspace_id: str) -> bool:
+        claim_calls.append(workspace_id)
+        return True
+
+    worker._claim_monitoring_pr = _claim_monitoring_pr  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert (
+        await worker._claim_monitoring_pr_ids(["first", "second"], limit=1)  # noqa: SLF001
+        == ["first"]
+    )
+    assert claim_calls == ["first"]
+
+    existing_task = asyncio.create_task(_pending_execution_task())
+    try:
+        worker._execution_tasks["existing"] = existing_task  # noqa: SLF001
+        claim_calls.clear()
+
+        assert (
+            await worker._claim_monitoring_pr_ids(["existing", "next"], limit=2)  # noqa: SLF001
+            == ["next"]
+        )
+        assert claim_calls == ["next"]
+    finally:
+        existing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await existing_task
+        worker._execution_tasks.clear()  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_finish_monitor_recovery_operation_handles_missing_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EmptyOperationSession:
+        entered = False
+        exited = False
+
+        async def __aenter__(self) -> EmptyOperationSession:
+            self.entered = True
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            self.exited = True
+
+    class EmptyOperationRepository:
+        def __init__(self, session: EmptyOperationSession) -> None:
+            assert session is empty_session
+
+        async def get(self, operation_id: str) -> None:
+            assert operation_id == "missing-op"
+            return
+
+    empty_session = EmptyOperationSession()
+    worker = ControlWorker(
+        session_factory=lambda: empty_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        "ws_monitor",
+        operation_id=None,
+        status=OperationStatus.succeeded,
+    )
+    assert empty_session.entered is False
+
+    monkeypatch.setattr(
+        "awf.control.worker.OperationRepository",
+        EmptyOperationRepository,
+    )
+    await worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        "ws_monitor",
+        operation_id="missing-op",
+        status=OperationStatus.succeeded,
+    )
+    assert empty_session.entered is True
+    assert empty_session.exited is True
+
+    class RaisingSession:
+        entered = False
+
+        async def __aenter__(self) -> None:
+            self.entered = True
+            raise RuntimeError("session failed")
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            raise AssertionError("enter failure should skip exit")
+
+    raising_session = RaisingSession()
+    failing_worker = ControlWorker(
+        session_factory=lambda: raising_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    await failing_worker._finish_monitor_recovery_operation(  # noqa: SLF001
+        "ws_monitor",
+        operation_id="op-session-failed",
+        status=OperationStatus.failed,
+    )
+    assert raising_session.entered is True
+
+
+@pytest.mark.unit
 async def test_secret_lease_expiration_scan_surfaces_expiration_failures(
     worker: ControlWorker,
 ) -> None:
@@ -6072,6 +7699,195 @@ async def test_secret_lease_expiration_scan_surfaces_expiration_failures(
 
     with pytest.raises(RuntimeError, match="lease expiration failed"):
         await worker._maybe_expire_due_secret_leases()  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_secret_lease_expiration_scan_skips_transient_closed_connection(
+    worker: ControlWorker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_time = 1_000.0
+    monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+    expiration_attempts = 0
+
+    async def _raise_expiration_failure() -> None:
+        nonlocal expiration_attempts
+        expiration_attempts += 1
+        raise _closed_connection_error()
+
+    worker._next_secret_lease_expiration_scan_at = 0.0  # noqa: SLF001
+    worker._expire_due_secret_leases = _raise_expiration_failure  # type: ignore[method-assign]
+    scan_interval = max(
+        0.0,
+        worker._config.secret_lease_expiration_scan_interval_seconds,  # noqa: SLF001
+    )
+
+    await worker._maybe_expire_due_secret_leases()  # noqa: SLF001
+
+    expected_next_scan_at = current_time + scan_interval
+    actual_next_scan_at = worker._next_secret_lease_expiration_scan_at  # noqa: SLF001
+    assert actual_next_scan_at == expected_next_scan_at
+
+    await worker._maybe_expire_due_secret_leases()  # noqa: SLF001
+
+    assert expiration_attempts == 1
+
+
+@pytest.mark.unit
+async def test_stale_active_execution_scan_skips_transient_closed_connection(
+    worker: ControlWorker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_time = 1_000.0
+    monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+    recovery_attempts = 0
+
+    async def _raise_recovery_failure() -> None:
+        nonlocal recovery_attempts
+        recovery_attempts += 1
+        raise _closed_connection_error()
+
+    worker._next_stale_active_execution_scan_at = 0.0  # noqa: SLF001
+    worker._recover_stale_active_executions = _raise_recovery_failure  # type: ignore[method-assign]
+    scan_interval = max(
+        0.0,
+        worker._config.stale_active_execution_scan_interval_seconds,  # noqa: SLF001
+    )
+
+    await worker._maybe_recover_stale_active_executions()  # noqa: SLF001
+
+    expected_next_scan_at = current_time + scan_interval
+    actual_next_scan_at = worker._next_stale_active_execution_scan_at  # noqa: SLF001
+    assert actual_next_scan_at == expected_next_scan_at
+
+    await worker._maybe_recover_stale_active_executions()  # noqa: SLF001
+
+    assert recovery_attempts == 1
+
+
+@pytest.mark.unit
+async def test_expire_due_secret_leases_preserves_commit_error_when_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CloseError(Exception):
+        pass
+
+    class FailingCommitSession:
+        invalidated = False
+        closed = False
+
+        async def __aenter__(self) -> FailingCommitSession:
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            await self.close()
+
+        async def commit(self) -> None:
+            raise commit_error
+
+        async def invalidate(self) -> None:
+            self.invalidated = True
+
+        async def rollback(self) -> None:
+            raise AssertionError("transient commit failure should invalidate session")
+
+        async def close(self) -> None:
+            self.closed = True
+            raise CloseError("close failed")
+
+    class EmptySecretLeaseService:
+        def __init__(self, session: FailingCommitSession) -> None:
+            assert session is failing_session
+
+        async def expire_due_secret_leases(self) -> list[object]:
+            return []
+
+    commit_error = _closed_connection_error()
+    failing_session = FailingCommitSession()
+    worker = ControlWorker(
+        session_factory=lambda: failing_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    monkeypatch.setattr(
+        "awf.control.worker.SecretLeaseService",
+        EmptySecretLeaseService,
+    )
+
+    with pytest.raises(InterfaceError) as exc_info:
+        await worker._expire_due_secret_leases()  # noqa: SLF001
+
+    assert exc_info.value is commit_error
+    assert failing_session.invalidated is True
+    assert failing_session.closed is True
+
+
+@pytest.mark.unit
+async def test_db_connection_closed_event_rolls_back_when_event_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingEventSession:
+        rolled_back = False
+        closed = False
+
+        async def __aenter__(self) -> FailingEventSession:
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            await self.close()
+
+        async def commit(self) -> None:
+            raise AssertionError("commit should not run after event write failure")
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FailingEventRepository:
+        def __init__(self, session: FailingEventSession) -> None:
+            assert session is failing_session
+
+        async def get(self, workspace_id: str) -> SimpleNamespace:
+            assert workspace_id == "ws_event_failure"
+            return SimpleNamespace(status=WorkspaceStatus.running.value)
+
+        async def add_event(self, *_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("event write failed")
+
+    failing_session = FailingEventSession()
+    worker = ControlWorker(
+        session_factory=lambda: failing_session,  # type: ignore[arg-type]
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    monkeypatch.setattr(
+        "awf.control.worker.WorkspaceRepository",
+        FailingEventRepository,
+    )
+
+    await worker._record_db_connection_closed_event(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id="ws_event_failure",
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_ws_event_failure",
+        ),
+        _closed_connection_error(),
+    )
+
+    assert failing_session.rolled_back is True
+    assert failing_session.closed is True
 
 
 @pytest.mark.unit

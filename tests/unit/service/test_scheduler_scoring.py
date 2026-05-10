@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -347,6 +348,50 @@ def test_scheduler_score_from_workspace_parses_policy_fallbacks_and_recovery_sta
     assert score.retry_bonus == 3
     assert score.human_boost == 4
     assert score.score_summary["suppression"] == {"suppressed": False}
+
+
+@pytest.mark.unit
+def test_scheduler_score_from_workspace_parses_integer_valued_decimal_strings() -> None:
+    queued_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_decimal_policy",
+        task_class=TaskClass.docs_task.value,
+        created_at=queued_at,
+        task_policy={
+            "scheduler": {
+                "base_priority": "100.0",
+                "human_boost": "5.00",
+                "retry_attempt_number": "2.0",
+            }
+        },
+    )
+
+    score_input = scheduler_score_input_from_workspace(workspace)
+    score = scheduler_score_from_workspace(workspace, now=queued_at)
+
+    assert score_input.base_priority == 100
+    assert score_input.human_boost == 5
+    assert score_input.retry_attempt_number == 2
+    assert score.effective_score == 105
+
+
+@pytest.mark.unit
+def test_scheduler_policy_parsing_falls_back_for_oversized_numeric_text() -> None:
+    previous_limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)
+    try:
+        oversized_digits = "9" * 641
+
+        assert (
+            scheduler._policy_int(
+                {"priority": oversized_digits},
+                "priority",
+                fallback=17,
+            )
+            == 17
+        )
+    finally:
+        sys.set_int_max_str_digits(previous_limit)
 
 
 @pytest.mark.unit

@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.health as health_route
@@ -59,6 +60,11 @@ _PROVIDER_ENV_KEYS = (
     "DOCKER_AUTH_CONFIG",
     "DOCKER_HOST",
 )
+
+
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
+
 
 # ---- /healthz ---------------------------------------------------------------
 
@@ -354,9 +360,7 @@ async def test_readyz_egress_audit_timeout_is_degraded_not_failure(
         async def summary_counts_by_posture(self) -> dict[str, int]:
             raise TimeoutError("egress audit timed out")
 
-    import awf.db.repositories as repositories
-
-    monkeypatch.setattr(repositories, "EgressAuditRepository", _TimeoutEgressAuditRepository)
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _TimeoutEgressAuditRepository)
 
     response = await client.get("/readyz")
     body = response.json()
@@ -364,6 +368,403 @@ async def test_readyz_egress_audit_timeout_is_degraded_not_failure(
     assert response.status_code == 200
     assert body["status"] == "ok"
     egress_audit = body["checks"]["egress_audit"]
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unknown"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_TIMEOUT"
+
+
+@pytest.mark.unit
+async def test_readyz_egress_audit_in_flight_uses_dedicated_reason(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    async def _raise_in_flight(_factory: object, _state: object) -> dict[str, int]:
+        raise health_route.EgressAuditSummaryInFlightError
+
+    monkeypatch.setattr(
+        health_route,
+        "_egress_audit_summary_counts_with_timeout",
+        _raise_in_flight,
+    )
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    egress_audit = body["checks"]["egress_audit"]
+    assert egress_audit["ok"] is True
+    assert egress_audit["status"] == "unknown"
+    assert egress_audit["reason"] == "EGRESS_AUDIT_IN_FLIGHT"
+    assert egress_audit["detail"] == "Previous egress audit summary_counts is still in flight"
+
+
+@pytest.mark.unit
+async def test_readyz_egress_audit_timeout_drains_completed_session_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = asyncio.Event()
+
+    class _Session:
+        async def close(self) -> None:
+            await asyncio.sleep(0)
+            closed.set()
+
+    class _SlowEgressAuditRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            await asyncio.sleep(1)
+            return {}
+
+    monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _SlowEgressAuditRepository)
+    state = SimpleNamespace()
+
+    with pytest.raises(TimeoutError, match="egress audit summary timed out"):
+        await health_route._egress_audit_summary_counts_with_timeout(_Session, state)
+
+    assert closed.is_set()
+
+
+@pytest.mark.unit
+async def test_egress_audit_summary_timeout_gates_pending_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions_created = 0
+    summary_calls = 0
+    closed_sessions = 0
+    release = asyncio.Event()
+    all_sessions_closed = asyncio.Event()
+
+    class _Session:
+        def __init__(self) -> None:
+            nonlocal sessions_created
+            sessions_created += 1
+
+        async def close(self) -> None:
+            nonlocal closed_sessions
+            closed_sessions += 1
+            if closed_sessions == sessions_created:
+                all_sessions_closed.set()
+
+    class _CancellationResistantEgressAuditRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            nonlocal summary_calls
+            summary_calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+                raise
+
+    monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(health_route, "_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(
+        health_route,
+        "EgressAuditRepository",
+        _CancellationResistantEgressAuditRepository,
+    )
+    state = SimpleNamespace()
+
+    try:
+        with pytest.raises(TimeoutError):
+            await health_route._egress_audit_summary_counts_with_timeout(_Session, state)
+
+        assert sessions_created == 1
+
+        with pytest.raises(health_route.EgressAuditSummaryInFlightError):
+            await health_route._egress_audit_summary_counts_with_timeout(_Session, state)
+
+        assert sessions_created == 1
+        assert summary_calls == 1
+    finally:
+        release.set()
+        if sessions_created:
+            await asyncio.wait_for(all_sessions_closed.wait(), timeout=1.0)
+
+
+@pytest.mark.unit
+async def test_reset_egress_audit_summary_counts_task_cancels_app_lookup() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    state = SimpleNamespace()
+
+    async def _leaked_lookup() -> dict[str, int]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    leaked_task = asyncio.create_task(_leaked_lookup())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    health_route._track_egress_audit_summary_counts_task(state, leaked_task)
+
+    try:
+        health_route.reset_egress_audit_summary_counts_task(state)
+
+        assert health_route._pending_egress_audit_summary_counts_task(state) is None
+        await asyncio.wait_for(
+            asyncio.gather(leaked_task, return_exceptions=True),
+            timeout=1.0,
+        )
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+    finally:
+        if not leaked_task.done():
+            leaked_task.cancel()
+            await asyncio.wait_for(
+                asyncio.gather(leaked_task, return_exceptions=True),
+                timeout=1.0,
+            )
+
+
+@pytest.mark.unit
+async def test_create_app_does_not_reset_other_app_egress_audit_lookup_task() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    app = create_app(use_lifespan=False)
+
+    async def _lookup() -> dict[str, int]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(_lookup())
+    await started.wait()
+    health_route._track_egress_audit_summary_counts_task(app.state, task)
+
+    try:
+        new_app = create_app(use_lifespan=False)
+
+        assert health_route._pending_egress_audit_summary_counts_task(app.state) is task
+        assert health_route._pending_egress_audit_summary_counts_task(new_app.state) is None
+        assert not cancelled.is_set()
+    finally:
+        health_route.reset_egress_audit_summary_counts_task(app.state)
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.unit
+async def test_stale_egress_audit_lookup_callback_does_not_clear_current_task() -> None:
+    release_stale = asyncio.Event()
+    release_current = asyncio.Event()
+    state = SimpleNamespace()
+
+    async def _lookup(release: asyncio.Event) -> dict[str, int]:
+        await release.wait()
+        return {}
+
+    stale_task = asyncio.create_task(_lookup(release_stale))
+    current_task = asyncio.create_task(_lookup(release_current))
+
+    try:
+        health_route._track_egress_audit_summary_counts_task(state, stale_task)
+        health_route._track_egress_audit_summary_counts_task(state, current_task)
+
+        release_stale.set()
+        await stale_task
+        await asyncio.sleep(0)
+
+        assert health_route._pending_egress_audit_summary_counts_task(state) is current_task
+    finally:
+        release_current.set()
+        await asyncio.gather(stale_task, current_task, return_exceptions=True)
+
+
+@pytest.mark.unit
+async def test_drain_cancelled_task_result_defers_pending_task_consumption() -> None:
+    release = asyncio.Event()
+
+    async def _pending() -> None:
+        await release.wait()
+
+    task = asyncio.create_task(_pending())
+    await health_route._drain_cancelled_task_result(task, timeout=0)
+
+    assert not task.done()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.unit
+async def test_egress_audit_summary_timeout_consumes_inner_task_on_outer_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    closed = asyncio.Event()
+
+    class _Session:
+        async def close(self) -> None:
+            await asyncio.sleep(0)
+            closed.set()
+
+    class _HangingEgressAuditRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _HangingEgressAuditRepository)
+    monkeypatch.setattr(health_route, "_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS", 1.0)
+    state = SimpleNamespace()
+
+    task = asyncio.create_task(
+        health_route._egress_audit_summary_counts_with_timeout(_Session, state)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    task.cancel()
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert closed.is_set()
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+    finally:
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+        await asyncio.wait_for(closed.wait(), timeout=1.0)
+
+
+@pytest.mark.unit
+async def test_egress_audit_summary_invalidates_transient_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _Session:
+        async def invalidate(self) -> None:
+            events.append("invalidate")
+
+        async def rollback(self) -> None:
+            events.append("rollback")
+
+        async def close(self) -> None:
+            events.append("close")
+
+    class _FailingEgressAuditRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            raise _closed_connection_error()
+
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _FailingEgressAuditRepository)
+
+    with pytest.raises(InterfaceError, match="connection is closed"):
+        await health_route._egress_audit_summary_counts(_Session)
+
+    assert events == ["invalidate", "close", "invalidate", "close"]
+
+
+@pytest.mark.unit
+async def test_egress_audit_summary_retries_transient_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    attempts = 0
+
+    class _Session:
+        def __init__(self) -> None:
+            nonlocal attempts
+            attempts += 1
+            self.attempt = attempts
+            events.append(f"open-{self.attempt}")
+
+        async def invalidate(self) -> None:
+            events.append(f"invalidate-{self.attempt}")
+
+        async def rollback(self) -> None:
+            events.append(f"rollback-{self.attempt}")
+
+        async def close(self) -> None:
+            events.append(f"close-{self.attempt}")
+
+    class _RetryingEgressAuditRepository:
+        def __init__(self, session: _Session) -> None:
+            self._session = session
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            if self._session.attempt == 1:
+                raise _closed_connection_error()
+            return {"restricted": 2}
+
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _RetryingEgressAuditRepository)
+
+    result = await health_route._egress_audit_summary_counts(_Session)
+
+    assert result == {"restricted": 2}
+    assert events == ["open-1", "invalidate-1", "close-1", "open-2", "close-2"]
+
+
+@pytest.mark.unit
+async def test_readyz_egress_audit_timeout_not_delayed_by_session_cleanup(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+    monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
+
+    class _Session:
+        slow_close = False
+
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            await self.close()
+
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def close(self) -> None:
+            if self.slow_close:
+                await asyncio.Event().wait()
+
+    class _TimeoutEgressAuditRepository:
+        def __init__(self, session: _Session) -> None:
+            session.slow_close = True
+
+        async def summary_counts_by_posture(self) -> dict[str, int]:
+            raise TimeoutError("egress audit timed out")
+
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _TimeoutEgressAuditRepository)
+    app.state.db_session_factory = _Session
+
+    response = await asyncio.wait_for(client.get("/readyz"), timeout=1.0)
+    body = response.json()
+
+    assert response.status_code == 200
+    assert set(body) == {"service", "version", "status", "checks", "agent_readiness"}
+    assert body["service"] == "awf"
+    assert body["version"] == __version__
+    assert body["status"] == "ok"
+    assert body["agent_readiness"]["status"] == "ok"
+    checks = body["checks"]
+    assert "egress_audit" in checks
+    egress_audit = checks["egress_audit"]
     assert egress_audit["ok"] is True
     assert egress_audit["status"] == "unknown"
     assert egress_audit["reason"] == "EGRESS_AUDIT_TIMEOUT"
@@ -391,9 +792,7 @@ async def test_readyz_egress_audit_error_is_degraded_not_failure(
                 f"{'x' * 400}"
             )
 
-    import awf.db.repositories as repositories
-
-    monkeypatch.setattr(repositories, "EgressAuditRepository", _FailingEgressAuditRepository)
+    monkeypatch.setattr(health_route, "EgressAuditRepository", _FailingEgressAuditRepository)
 
     response = await client.get("/readyz")
     body = response.json()
@@ -710,6 +1109,46 @@ async def test_readyz_db_query_failure_returns_503(
 
 
 @pytest.mark.unit
+async def test_readyz_db_closed_connection_returns_specific_diagnostic(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    select_one_session_events: list[list[str]] = []
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    class _ClosedConnectionSession:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def invalidate(self) -> None:
+            self.events.append("invalidate")
+
+        async def execute(self, *args: object, **_kwargs: object) -> None:
+            if args and str(args[0]) == "SELECT 1":
+                select_one_session_events.append(self.events)
+                raise _closed_connection_error()
+            raise RuntimeError("query failed")
+
+        async def close(self) -> None:
+            self.events.append("close")
+
+    app.state.db_session_factory = lambda: _ClosedConnectionSession()
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 503
+    assert body["status"] == "fail"
+    db_check = body["checks"]["db"]
+    assert db_check["ok"] is False
+    assert db_check["reason"] == "DB_CONNECTION_CLOSED"
+    assert "connection is closed" in (db_check["detail"] or "")
+    assert select_one_session_events == [["invalidate", "close"]]
+
+
+@pytest.mark.unit
 async def test_readyz_db_factory_raises_returns_503(
     ready_app_and_client: tuple[Any, AsyncClient],
 ) -> None:
@@ -754,12 +1193,17 @@ def test_readyz_truncates_verbose_dependency_details() -> None:
 
 @pytest.mark.unit
 async def test_readyz_db_timeout_returns_structured_failure() -> None:
+    events: list[str] = []
+
     class _SlowSession:
         async def execute(self, *_args: object, **_kwargs: object) -> None:
             await asyncio.sleep(1)
 
+        async def rollback(self) -> None:
+            events.append("rollback")
+
         async def close(self) -> None:
-            return None
+            events.append("close")
 
     previous_timeout = health_route._CHECK_TIMEOUT_SECONDS
     health_route._CHECK_TIMEOUT_SECONDS = 0.001
@@ -771,6 +1215,7 @@ async def test_readyz_db_timeout_returns_structured_failure() -> None:
     assert result.ok is False
     assert result.reason == "DB_TIMEOUT"
     assert "SELECT 1 exceeded" in (result.detail or "")
+    assert events == ["rollback", "close"]
 
 
 @pytest.mark.unit

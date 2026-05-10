@@ -1986,7 +1986,10 @@ class TestMonitorDbHelpers:
             state = runner._load_state(ws)
 
         started_monotonic = float(state.threads_addressed_ids[started_key])
-        assert time.monotonic() - started_monotonic == pytest.approx(600, abs=2)
+        expected_elapsed_before = (_dt.now(_UTC) - started_wall).total_seconds()
+        actual_elapsed = time.monotonic() - started_monotonic
+        expected_elapsed_after = (_dt.now(_UTC) - started_wall).total_seconds()
+        assert expected_elapsed_before - 2 <= actual_elapsed <= expected_elapsed_after + 2
 
     @pytest.mark.unit
     async def test_load_state_rebases_legacy_grace_marker_from_monitor_started_at(
@@ -2024,7 +2027,10 @@ class TestMonitorDbHelpers:
             state = runner._load_state(ws)
 
         started_monotonic = float(state.threads_addressed_ids[started_key])
-        assert time.monotonic() - started_monotonic == pytest.approx(600, abs=2)
+        expected_elapsed_before = (_dt.now(_UTC) - started_wall).total_seconds()
+        actual_elapsed = time.monotonic() - started_monotonic
+        expected_elapsed_after = (_dt.now(_UTC) - started_wall).total_seconds()
+        assert expected_elapsed_before - 2 <= actual_elapsed <= expected_elapsed_after + 2
 
     @pytest.mark.unit
     async def test_persist_state_writes_wall_clock_grace_marker(

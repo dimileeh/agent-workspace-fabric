@@ -26,6 +26,7 @@ from time import monotonic
 from typing import Any, Protocol, TypeGuard
 
 from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
@@ -33,6 +34,7 @@ from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import QueueDecision, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    SCHEDULER_SQL_AGE_BOOST_DIALECTS,
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
     QueueDecisionCreate,
@@ -40,6 +42,13 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
+from awf.db.resilience import (
+    DB_CONNECTION_CLOSED_REASON,
+    DB_CONNECTION_TRANSIENT_ATTEMPT_REASON,
+    is_transient_closed_connection_error,
+    run_db_operation_with_retry,
+)
+from awf.db.session import session_scope
 from awf.node.cleanup import WorkspaceCleanupResult
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
@@ -48,6 +57,7 @@ from awf.service.provider_recovery import (
     provider_for_agent_model,
 )
 from awf.service.scheduler import (
+    SchedulerOrderCursor,
     scheduler_order_key,
     scheduler_score_from_workspace,
     score_summary_with_suppression,
@@ -88,6 +98,7 @@ _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE = (
     "workspace.stale_active_execution_cleanup_failed"
 )
 _STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE = "STALE_ACTIVE_EXECUTION_CLEANUP_FAILED"
+_STALE_ACTIVE_EXECUTION_RECOVERY_FAILED_REASON_CODE = "STALE_ACTIVE_EXECUTION_RECOVERY_FAILED"
 _ACTIVE_EXECUTION_PRESERVED_SOURCE = "worker_restart"
 _ACTIVE_EXECUTION_PRESERVED_OWNER = "control_worker"
 _ACTIVE_EXECUTION_PRESERVED_SUBPHASE = "runtime_preserved_after_restart"
@@ -104,6 +115,7 @@ _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
 _MONITOR_RECOVERY_OWNER = "control_worker"
+_SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL = 1
 _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE = (
     "STALE_EXECUTION_CLAIM_CLEARED_DURING_MONITOR_RECOVERY"
 )
@@ -121,6 +133,7 @@ ORDERED_READY_EXECUTION_REASON = "ORDERED_READY_EXECUTION"
 ORDERED_MONITOR_RESUME_REASON = "ORDERED_MONITOR_RESUME"
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"
+_DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
 
 
 @dataclass(frozen=True)
@@ -158,6 +171,9 @@ class _OrderedDecisionCandidate:
     @property
     def id(self) -> str:
         return self.workspace_id
+
+
+type _OrderedDecisionKey = tuple[str, str, str]
 
 
 class WorkspaceExecutorProtocol(Protocol):
@@ -346,6 +362,16 @@ class ControlWorker:
                         timeout=self._config.poll_interval_seconds,
                     )
 
+    async def _log_transient_db_retry(self, exc: BaseException, attempt: int) -> None:
+        _log.warning(
+            "worker.db_connection_retry",
+            reason_code=DB_CONNECTION_TRANSIENT_ATTEMPT_REASON,
+            worker_id=self._worker_id,
+            attempt=attempt,
+            error_type=type(exc).__name__,
+            error=str(exc)[:240],
+        )
+
     async def _list_pending(self) -> list[str]:
         """Backward-compatible alias for the original requested query."""
         return await self._list_requested()
@@ -395,12 +421,13 @@ class ControlWorker:
         if limit <= 0:
             return []
 
-        async with self._session_factory() as session:
-            if status not in {
-                WorkspaceStatus.requested,
-                WorkspaceStatus.ready,
-                WorkspaceStatus.monitoring_pr,
-            }:
+        if status not in {
+            WorkspaceStatus.requested,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.monitoring_pr,
+        }:
+
+            async def _operation(session: AsyncSession) -> list[str]:
                 ids = await WorkspaceRepository(session).list_schedulable_ids(
                     status=status,
                     limit=limit,
@@ -408,40 +435,125 @@ class ControlWorker:
                 )
                 return ids[:limit]
 
-            eligible_workspaces_by_id: dict[str, Workspace] = {}
-            base_exclude_ids = set(exclude_ids or set())
-            candidate_limit = _scheduler_candidate_fetch_limit(limit)
-            candidate_after: tuple[datetime, str] | None = None
-            repo = WorkspaceRepository(session)
-            while True:
-                workspaces = await repo.list_schedulable_workspaces(
-                    status=status,
-                    limit=candidate_limit,
-                    exclude_ids=base_exclude_ids,
-                    after=candidate_after,
-                )
-                if not workspaces:
-                    break
-                candidate_after = _scheduler_candidate_cursor(workspaces)
-                eligible = await self._filter_provider_recovery_suppressed(
-                    session,
-                    workspaces,
-                )
-                workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
-                for workspace_id in eligible:
-                    if workspace_id in eligible_workspaces_by_id:
-                        continue
-                    workspace = workspaces_by_id.get(workspace_id)
-                    if workspace is not None:
-                        eligible_workspaces_by_id[workspace_id] = workspace
-                if len(workspaces) < candidate_limit:
-                    break
-            ordered_workspaces = _order_scheduler_workspaces(
-                list(eligible_workspaces_by_id.values())
+            return await run_db_operation_with_retry(
+                self._session_factory,
+                _operation,
+                on_retry=self._log_transient_db_retry,
             )
-            ordered_ids = [workspace.id for workspace in ordered_workspaces[:limit]]
-            await session.commit()
-            return ordered_ids
+
+        return await self._list_scheduler_dispatchable_ids(
+            status=status,
+            limit=limit,
+            exclude_ids=exclude_ids,
+        )
+
+    async def _list_scheduler_dispatchable_ids(
+        self,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+    ) -> list[str]:
+        async def _operation(session: AsyncSession) -> list[str]:
+            return await self._list_scheduler_dispatchable_ids_from_pages(
+                session,
+                status=status,
+                limit=limit,
+                exclude_ids=exclude_ids,
+            )
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=False,
+            on_retry=self._log_transient_db_retry,
+        )
+
+    async def _list_scheduler_dispatchable_ids_from_pages(
+        self,
+        session: AsyncSession,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+    ) -> list[str]:
+        dispatchable_workspaces_by_id: dict[str, Workspace] = {}
+        candidate_limit = _scheduler_candidate_fetch_limit(limit)
+        candidate_after: SchedulerOrderCursor | None = None
+        scoring_at = datetime.now(UTC)
+        priority_refill_pages_remaining: int | None = None
+        ordered_workspaces: list[Workspace] = []
+        repo = WorkspaceRepository(session)
+        while True:
+            workspaces = await repo.list_schedulable_workspaces(
+                status=status,
+                limit=candidate_limit,
+                exclude_ids=exclude_ids,
+                after=candidate_after,
+                scoring_at=scoring_at,
+            )
+            if not workspaces:
+                break
+            remaining_dispatch_slots = limit - len(dispatchable_workspaces_by_id)
+            page_dispatchable_ids = await self._filter_scheduler_candidate_workspaces(
+                session,
+                workspaces,
+                limit=remaining_dispatch_slots if remaining_dispatch_slots > 0 else limit,
+                scoring_at=scoring_at,
+            )
+            workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
+            for workspace_id in page_dispatchable_ids:
+                workspace = workspaces_by_id.get(workspace_id)
+                if workspace is not None:
+                    dispatchable_workspaces_by_id.setdefault(workspace_id, workspace)
+            ordered_workspaces = _order_scheduler_workspaces(
+                list(dispatchable_workspaces_by_id.values()),
+                now=scoring_at,
+            )
+            if len(workspaces) < candidate_limit:
+                break
+            if len(ordered_workspaces) >= limit:
+                # Preserve cross-page priority refill without scanning the tail
+                # of a large status queue after dispatch slots are filled.
+                if priority_refill_pages_remaining is None:
+                    priority_refill_pages_remaining = _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL
+                if priority_refill_pages_remaining <= 0:
+                    break
+                priority_refill_pages_remaining -= 1
+            candidate_after = _scheduler_candidate_cursor(
+                workspaces,
+                scoring_at=scoring_at,
+                dialect_name=repo.dialect_name,
+            )
+        return [workspace.id for workspace in ordered_workspaces[:limit]]
+
+    async def _filter_scheduler_candidate_workspaces(
+        self,
+        session: AsyncSession,
+        candidate_workspaces: list[Workspace],
+        *,
+        limit: int,
+        scoring_at: datetime,
+    ) -> list[str]:
+        if not candidate_workspaces:
+            return []
+
+        eligible = await self._filter_provider_recovery_suppressed(
+            session,
+            candidate_workspaces,
+        )
+        workspaces_by_id = {workspace.id: workspace for workspace in candidate_workspaces}
+        eligible_workspaces_by_id: dict[str, Workspace] = {}
+        for workspace_id in eligible:
+            workspace = workspaces_by_id.get(workspace_id)
+            if workspace is not None:
+                eligible_workspaces_by_id.setdefault(workspace_id, workspace)
+        ordered_workspaces = _order_scheduler_workspaces(
+            list(eligible_workspaces_by_id.values()),
+            now=scoring_at,
+        )
+        return [workspace.id for workspace in ordered_workspaces[:limit]]
 
     async def _filter_provider_recovery_suppressed(
         self,
@@ -523,7 +635,8 @@ class ControlWorker:
         if not workspace_ids:
             return
         decided_at = datetime.now(UTC)
-        async with self._session_factory() as session:
+
+        async def _operation(session: AsyncSession) -> None:
             stmt = (
                 select(
                     Workspace.id,
@@ -563,6 +676,12 @@ class ControlWorker:
             latest_by_workspace_id = await queue_repo.latest_by_workspace_ids(
                 candidate.workspace_id for candidate in candidates
             )
+            existing_ordered_decision_keys = await _existing_ordered_queue_decision_keys(
+                session,
+                candidates,
+                reason_code=reason_code,
+                decided_at=decided_at,
+            )
             decision_rows = [
                 _ordered_queue_decision_create(
                     candidate,
@@ -571,9 +690,23 @@ class ControlWorker:
                     decided_at=decided_at,
                 )
                 for candidate in candidates
+                if not _ordered_queue_decision_matches(
+                    latest_by_workspace_id.get(candidate.workspace_id),
+                    candidate,
+                    reason_code=reason_code,
+                    decided_at=decided_at,
+                )
+                and _ordered_queue_decision_key(candidate) not in existing_ordered_decision_keys
             ]
             await queue_repo.create_many(decision_rows)
-            await session.commit()
+
+        await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=True,
+            on_retry=self._log_transient_db_retry,
+        )
 
     async def _filter_current_status(
         self,
@@ -585,10 +718,16 @@ class ControlWorker:
         if not workspace_ids:
             return []
 
-        async with self._session_factory() as session:
+        async def _operation(session: AsyncSession) -> dict[str, str]:
             stmt = select(Workspace.id, Workspace.status).where(Workspace.id.in_(workspace_ids))
             result = await session.execute(stmt)
-            statuses: dict[str, str] = {row[0]: row[1] for row in result.all()}
+            return {row[0]: row[1] for row in result.all()}
+
+        statuses = await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
 
         current_ids: list[str] = []
         for workspace_id in workspace_ids:
@@ -611,7 +750,21 @@ class ControlWorker:
         if now < self._next_stale_active_execution_scan_at:
             return
 
-        await self._recover_stale_active_executions()
+        try:
+            await self._recover_stale_active_executions()
+        except Exception as exc:
+            if _worker_exception_is_transient_db_connection(exc):
+                interval = max(0.0, self._config.stale_active_execution_scan_interval_seconds)
+                self._next_stale_active_execution_scan_at = monotonic() + interval
+                _log.warning(
+                    "worker.stale_active_execution_scan_db_connection_closed",
+                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                )
+                return
+            raise
+
         interval = max(0.0, self._config.stale_active_execution_scan_interval_seconds)
         self._next_stale_active_execution_scan_at = monotonic() + interval
 
@@ -622,7 +775,17 @@ class ControlWorker:
 
         try:
             await self._expire_due_secret_leases()
-        except Exception:
+        except Exception as exc:
+            if _worker_exception_is_transient_db_connection(exc):
+                interval = max(0.0, self._config.secret_lease_expiration_scan_interval_seconds)
+                self._next_secret_lease_expiration_scan_at = monotonic() + interval
+                _log.warning(
+                    "worker.secret_lease_expiration_db_connection_closed",
+                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                )
+                return
             _log.exception(
                 "worker.secret_lease_expiration_failed",
                 reason_code="SECRET_LEASE_EXPIRATION_FAILED",
@@ -633,11 +796,10 @@ class ControlWorker:
         self._next_secret_lease_expiration_scan_at = monotonic() + interval
 
     async def _expire_due_secret_leases(self) -> None:
-        async with self._session_factory() as session:
+        async with session_scope(self._session_factory) as session:
             expired = await SecretLeaseService(session).expire_due_secret_leases()
             expired_count = len(expired)
             workspace_ids = sorted({lease.workspace_id for lease in expired})
-            await session.commit()
 
         if expired_count:
             _log.info(
@@ -651,8 +813,69 @@ class ControlWorker:
         candidates = await self._list_stale_active_execution_candidates(
             exclude_ids=set(self._execution_tasks)
         )
+        recovery_errors: list[Exception] = []
         for candidate in candidates:
-            await self._recover_stale_active_execution(candidate)
+            try:
+                await self._recover_stale_active_execution(candidate)
+            except Exception as exc:
+                if _worker_exception_is_transient_db_connection(exc):
+                    _log.warning(
+                        "worker.stale_active_execution_db_connection_closed",
+                        workspace_id=candidate.workspace_id,
+                        status=candidate.status.value,
+                        reason_code=DB_CONNECTION_CLOSED_REASON,
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:240],
+                    )
+                    await self._record_db_connection_closed_event(candidate, exc)
+                    continue
+                _log.exception(
+                    "worker.stale_active_execution_recovery_failed",
+                    workspace_id=candidate.workspace_id,
+                    status=candidate.status.value,
+                    reason_code=_STALE_ACTIVE_EXECUTION_RECOVERY_FAILED_REASON_CODE,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                )
+                recovery_errors.append(exc)
+        if len(recovery_errors) == 1:
+            raise recovery_errors[0]
+        if recovery_errors:
+            raise ExceptionGroup(
+                "stale active execution recovery failed",
+                recovery_errors,
+            )
+
+    async def _record_db_connection_closed_event(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        exc: BaseException,
+    ) -> None:
+        payload = {
+            "workspace_status": candidate.status.value,
+            "compose_project_name": candidate.compose_project_name,
+            "message": "Transient closed database connection interrupted worker recovery scan.",
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:240],
+        }
+        try:
+            async with session_scope(self._session_factory) as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.get(candidate.workspace_id)
+                if ws is None or ws.status != candidate.status.value:
+                    return
+                await repo.add_event(
+                    ws,
+                    event_type=_DB_CONNECTION_TRANSIENT_EVENT_TYPE,
+                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    payload=payload,
+                )
+        except Exception:
+            _log.exception(
+                "worker.db_connection_closed_event_failed",
+                workspace_id=candidate.workspace_id,
+                reason_code=DB_CONNECTION_CLOSED_REASON,
+            )
 
     async def _list_stale_active_execution_candidates(
         self,
@@ -698,9 +921,15 @@ class ControlWorker:
         if exclude_ids:
             stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
 
-        async with self._session_factory() as session:
+        async def _operation(session: AsyncSession) -> list[Any]:
             result = await session.execute(stmt)
-            rows = result.all()
+            return list(result.all())
+
+        rows = await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
 
         return [
             _ActiveExecutionCandidate(
@@ -1701,30 +1930,43 @@ class ControlWorker:
                 return
 
     async def _refresh_monitoring_pr_claim(self, workspace_id: str) -> bool:
-        lease_expires_at = datetime.now(UTC) + timedelta(
-            seconds=self._config.monitor_claim_lease_seconds
-        )
-        async with self._session_factory() as session:
-            refreshed = await WorkspaceRepository(session).refresh_monitoring_pr_claim(
+        async def _operation(session: AsyncSession) -> bool:
+            lease_expires_at = datetime.now(UTC) + timedelta(
+                seconds=self._config.monitor_claim_lease_seconds
+            )
+            return await WorkspaceRepository(session).refresh_monitoring_pr_claim(
                 workspace_id,
                 owner_id=self._worker_id,
                 lease_expires_at=lease_expires_at,
             )
-            await session.commit()
-            return refreshed
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=True,
+            on_retry=self._log_transient_db_retry,
+        )
 
     def _execution_claim_expires_at(self) -> datetime:
         return datetime.now(UTC) + timedelta(seconds=self._config.execution_claim_lease_seconds)
 
     async def _refresh_execution_claim(self, workspace_id: str) -> bool:
-        async with self._session_factory() as session:
-            refreshed = await WorkspaceRepository(session).refresh_execution_claim(
+        async def _operation(session: AsyncSession) -> bool:
+            lease_expires_at = self._execution_claim_expires_at()
+            return await WorkspaceRepository(session).refresh_execution_claim(
                 workspace_id,
                 owner_id=self._worker_id,
-                lease_expires_at=self._execution_claim_expires_at(),
+                lease_expires_at=lease_expires_at,
             )
-            await session.commit()
-            return refreshed
+
+        return await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            retry_commit_failures=True,
+            on_retry=self._log_transient_db_retry,
+        )
 
     async def _release_execution_claim(self, workspace_id: str) -> None:
         try:
@@ -1773,6 +2015,43 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
     )
 
 
+async def _existing_ordered_queue_decision_keys(
+    session: AsyncSession,
+    candidates: list[_OrderedDecisionCandidate],
+    *,
+    reason_code: str,
+    decided_at: datetime,
+) -> set[_OrderedDecisionKey]:
+    candidate_keys = {_ordered_queue_decision_key(candidate) for candidate in candidates}
+    if not candidate_keys:
+        return set()
+
+    stmt = select(
+        QueueDecision.workspace_id,
+        QueueDecision.task_id,
+        QueueDecision.attempt_id,
+    ).where(
+        QueueDecision.workspace_id.in_(
+            sorted({candidate.workspace_id for candidate in candidates})
+        ),
+        QueueDecision.decision == QUEUE_DECISION_ORDERED,
+        QueueDecision.reason_code == reason_code,
+        QueueDecision.decided_at == decided_at,
+    )
+    rows = (await session.execute(stmt)).all()
+    return {
+        (workspace_id, task_id, attempt_id)
+        for workspace_id, task_id, attempt_id in rows
+        if (workspace_id, task_id, attempt_id) in candidate_keys
+    }
+
+
+def _ordered_queue_decision_key(
+    candidate: _OrderedDecisionCandidate,
+) -> _OrderedDecisionKey:
+    return (candidate.workspace_id, candidate.task_id, candidate.attempt_id)
+
+
 def _ordered_queue_decision_create(
     candidate: _OrderedDecisionCandidate,
     *,
@@ -1795,6 +2074,25 @@ def _ordered_queue_decision_create(
         overlap_risk_summary=dict(latest.overlap_risk_summary) if latest else {},
         score_summary=score.score_summary,
         decided_at=decided_at,
+    )
+
+
+def _ordered_queue_decision_matches(
+    decision: QueueDecision | None,
+    candidate: _OrderedDecisionCandidate,
+    *,
+    reason_code: str,
+    decided_at: datetime,
+) -> bool:
+    if decision is None:
+        return False
+    return (
+        decision.workspace_id == candidate.workspace_id
+        and decision.task_id == candidate.task_id
+        and decision.attempt_id == candidate.attempt_id
+        and decision.decision == QUEUE_DECISION_ORDERED
+        and decision.reason_code == reason_code
+        and _utc_datetime(decision.decided_at) == _utc_datetime(decided_at)
     )
 
 
@@ -1840,11 +2138,15 @@ async def _record_scheduler_queue_decision(
     )
 
 
-def _order_scheduler_workspaces(workspaces: list[Workspace]) -> list[Workspace]:
-    now = datetime.now(UTC)
+def _order_scheduler_workspaces(
+    workspaces: list[Workspace],
+    *,
+    now: datetime | None = None,
+) -> list[Workspace]:
+    scoring_at = now or datetime.now(UTC)
     scored = sorted(
         (
-            (scheduler_score_from_workspace(workspace, now=now), workspace)
+            (scheduler_score_from_workspace(workspace, now=scoring_at), workspace)
             for workspace in workspaces
         ),
         key=lambda item: scheduler_order_key(item[0]),
@@ -1872,11 +2174,26 @@ def _scheduler_candidate_fetch_limit(limit: int) -> int:
     return max(limit, widened_fetch_limit)
 
 
-def _scheduler_candidate_cursor(workspaces: list[Workspace]) -> tuple[datetime, str] | None:
+def _scheduler_candidate_cursor(
+    workspaces: list[Workspace],
+    *,
+    scoring_at: datetime,
+    dialect_name: str | None = None,
+) -> SchedulerOrderCursor | None:
     if not workspaces:
         return None
-    latest = max(workspaces, key=lambda workspace: (workspace.created_at, workspace.id))
-    return latest.created_at, latest.id
+    last = workspaces[-1]
+    score = scheduler_score_from_workspace(last, now=scoring_at)
+    effective_score = score.effective_score
+    if dialect_name not in SCHEDULER_SQL_AGE_BOOST_DIALECTS:
+        effective_score -= score.age_boost
+    return SchedulerOrderCursor(
+        class_priority=score.class_priority,
+        effective_score=effective_score,
+        queued_at=score.queued_at,
+        workspace_id=last.id,
+        scoring_at=scoring_at,
+    )
 
 
 def _scheduler_items_are_workspace_ids(
@@ -1889,6 +2206,34 @@ def _scheduler_items_are_workspaces(
     workspaces: list[Workspace] | list[str],
 ) -> TypeGuard[list[Workspace]]:
     return bool(workspaces) and all(isinstance(item, Workspace) for item in workspaces)
+
+
+def _worker_exception_is_transient_db_connection(exc: BaseException) -> bool:
+    if not is_transient_closed_connection_error(
+        exc,
+        include_unsuppressed_context=True,
+    ):
+        return False
+    return _exception_chain_has_sqlalchemy_error(exc)
+
+
+def _exception_chain_has_sqlalchemy_error(exc: BaseException) -> bool:
+    stack: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, SQLAlchemyError):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            stack.extend(current.exceptions)
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if not current.__suppress_context__ and current.__context__ is not None:
+            stack.append(current.__context__)
+    return False
 
 
 def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:

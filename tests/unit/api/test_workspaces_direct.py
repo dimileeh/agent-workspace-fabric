@@ -18,31 +18,41 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import InterfaceError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.api.routes.workspaces as workspaces_route
 from awf.api.routes.workspaces import (
+    _list_workspace_responses,
     _payloads_match,
     create_workspace,
     get_workspace,
     get_workspace_secret_leases,
-    list_workspaces,
 )
 from awf.api.schemas import (
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
 )
 from awf.db.enums import AgentRuntime
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
-async def session() -> AsyncIterator[AsyncSession]:
+async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
-        factory = make_session_factory(engine)
-        async with factory() as s:
+        yield make_session_factory(engine)
+
+
+@pytest.fixture
+async def session(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncSession]:
+    async with session_factory() as s:
+        try:
             yield s
+        finally:
             await s.commit()
 
 
@@ -58,6 +68,10 @@ def _payload(**overrides: object) -> WorkspaceCreateRequest:
     }
     defaults.update(overrides)
     return WorkspaceCreateRequest(**defaults)  # type: ignore[arg-type]
+
+
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
 
 
 class TestCreateDirect:
@@ -130,21 +144,180 @@ class TestCreateDirect:
 
 class TestGetDirect:
     @pytest.mark.unit
-    async def test_returns_200_for_existing(self, session: AsyncSession) -> None:
+    async def test_returns_200_for_existing(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
         created = await create_workspace(
             payload=_payload(task_title="look-me-up"),
             idempotency_key=None,
             session=session,
         )
         assert isinstance(created, WorkspaceAcceptedResponse)
-        result = await get_workspace(created.workspace_id, session=session)
+        await session.commit()
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
         assert result.id == created.workspace_id
         assert result.task_title == "look-me-up"
 
     @pytest.mark.unit
-    async def test_raises_404_for_missing(self, session: AsyncSession) -> None:
+    async def test_route_uses_primary_workspace_response_helper(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="route helper coverage"),
+            idempotency_key=None,
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        await session.commit()
+
+        original = workspaces_route._get_workspace_response
+        calls = 0
+
+        async def _tracked_workspace_response(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            return await original(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            workspaces_route, "_get_workspace_response", _tracked_workspace_response
+        )
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert calls == 1
+        assert result.id == created.workspace_id
+        assert result.task_title == "route helper coverage"
+
+    @pytest.mark.unit
+    async def test_returns_materialized_response_after_transient_egress_retry_failure(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="transient audit cleanup"),
+            idempotency_key=None,
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        await session.commit()
+
+        calls = 0
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            assert workspace_id == created.workspace_id
+            raise _closed_connection_error()
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert result.id == created.workspace_id
+        assert result.task_title == "transient audit cleanup"
+        assert result.egress_audit is None
+        assert calls == 2
+
+    @pytest.mark.unit
+    async def test_returns_materialized_response_after_egress_error(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="non-transient audit cleanup"),
+            idempotency_key=None,
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        await session.commit()
+
+        calls = 0
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            assert workspace_id == created.workspace_id
+            raise RuntimeError("audit lookup failed")
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert result.id == created.workspace_id
+        assert result.task_title == "non-transient audit cleanup"
+        assert result.egress_audit is None
+        assert calls == 1
+
+    @pytest.mark.unit
+    async def test_returns_materialized_response_after_invalid_egress_audit_payload(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        created = await create_workspace(
+            payload=_payload(task_title="invalid audit payload"),
+            idempotency_key=None,
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        await session.commit()
+
+        async def _invalid_audit_lookup(
+            workspace_id: str,
+            session_factory: async_sessionmaker[AsyncSession],
+        ) -> dict[str, object] | None:
+            del session_factory
+            assert workspace_id == created.workspace_id
+            return {"id": "audit_missing_required_fields"}
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "_retry_optional_egress_audit_lookup",
+            _invalid_audit_lookup,
+        )
+        caplog.set_level("WARNING", logger=workspaces_route.__name__)
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert result.id == created.workspace_id
+        assert result.task_title == "invalid audit payload"
+        assert result.egress_audit is None
+        assert "egress audit model validation failed" in caplog.text
+
+    @pytest.mark.unit
+    async def test_raises_404_for_missing(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
         with pytest.raises(HTTPException) as exc:
-            await get_workspace("ws_missing_id", session=session)
+            await get_workspace("ws_missing_id", session_factory=session_factory)
         assert exc.value.status_code == 404
         assert exc.value.detail["error_code"] == "NOT_FOUND"
 
@@ -164,7 +337,7 @@ class TestListDirect:
         )
         # Flush so the query sees the inserts in the same session.
         await session.flush()
-        results = await list_workspaces(limit=10, session=session)
+        results = await _list_workspace_responses(session, limit=10)
         assert len(results) == 2
 
 

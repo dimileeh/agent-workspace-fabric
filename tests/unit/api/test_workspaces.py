@@ -19,11 +19,14 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.workspaces as workspaces_route
+import awf.db.resilience as db_resilience
 import awf.service.workspace_observability as workspace_observability
 from awf.api.app import configure_database, create_app
+from awf.api.deps import get_db_session
 from awf.api.schemas import (
     PullRequestMonitorAdoptionRequest,
     WorkspaceCreateRequest,
@@ -32,11 +35,13 @@ from awf.api.schemas import (
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
+    EgressAuditRepository,
     MergeCandidateRepository,
     SecretLeaseIssue,
     SecretLeaseRepository,
     TaskAttemptRepository,
     TaskRepository,
+    ValidationRunRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
@@ -53,6 +58,10 @@ _MINIMAL_BODY = {
     "agent": "codex",
     "test_commands": ["pytest -q"],
 }
+
+
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError("SELECT 1", {}, RuntimeError("connection is closed"))
 
 
 _V2_MINIMAL_BODY = {
@@ -2593,6 +2602,242 @@ class TestGetWorkspace:
         assert body["test_commands"] == _MINIMAL_BODY["test_commands"]
 
     @pytest.mark.unit
+    async def test_get_workspace_retries_once_after_closed_connection(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        original = ValidationRunRepository.list_for_workspace
+        failures_remaining = 1
+        calls = 0
+
+        async def _flaky_validation_runs(
+            self: ValidationRunRepository,
+            workspace_id: str,
+        ) -> list[object]:
+            nonlocal failures_remaining, calls
+            calls += 1
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(self, workspace_id)
+
+        monkeypatch.setattr(
+            ValidationRunRepository,
+            "list_for_workspace",
+            _flaky_validation_runs,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert response.json()["validation_provenance"]["reason_code"] == "validation_unavailable"
+        assert calls == 2
+
+    @pytest.mark.unit
+    async def test_get_workspace_ignores_egress_audit_lookup_failure(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        calls = 0
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError(f"egress audit unavailable for {workspace_id}")
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert response.json()["egress_audit"] is None
+        assert calls == 1
+
+    @pytest.mark.unit
+    async def test_get_workspace_ignores_transient_egress_audit_lookup_failure(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        calls = 0
+
+        async def _fail_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            raise _closed_connection_error()
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _fail_audit_lookup,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert response.json()["egress_audit"] is None
+        assert calls == 2
+
+    @pytest.mark.unit
+    async def test_get_workspace_releases_response_session_before_egress_audit_retry(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        original_retry = workspaces_route.run_db_operation_with_retry
+        original_audit_lookup = EgressAuditRepository.get_latest_for_workspace
+        audit_calls = 0
+        active_retry_operations = 0
+        max_active_retry_operations = 0
+
+        async def _flaky_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal audit_calls
+            audit_calls += 1
+            if audit_calls == 1:
+                raise _closed_connection_error()
+            return await original_audit_lookup(self, workspace_id)
+
+        async def _tracked_retry_operation(*args: Any, **kwargs: Any) -> Any:
+            nonlocal active_retry_operations, max_active_retry_operations
+            active_retry_operations += 1
+            max_active_retry_operations = max(
+                max_active_retry_operations,
+                active_retry_operations,
+            )
+            try:
+                return await original_retry(*args, **kwargs)
+            finally:
+                active_retry_operations -= 1
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "run_db_operation_with_retry",
+            _tracked_retry_operation,
+        )
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _flaky_audit_lookup,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert audit_calls == 2
+        assert max_active_retry_operations == 1
+
+    @pytest.mark.unit
+    async def test_get_workspace_isolates_transient_egress_audit_lookup_from_response_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        calls = 0
+        audit_sessions: list[object] = []
+        cleanup_sessions: list[object] = []
+        original_cleanup = db_resilience.invalidate_or_rollback_session
+
+        async def _flaky_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            audit_sessions.append(self._session)
+            if calls == 1:
+                raise _closed_connection_error()
+            return None
+
+        async def _record_retry_session_cleanup(
+            session: object,
+            exc: BaseException,
+        ) -> None:
+            cleanup_sessions.append(session)
+            await original_cleanup(session, exc)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _flaky_audit_lookup,
+        )
+        monkeypatch.setattr(
+            db_resilience,
+            "invalidate_or_rollback_session",
+            _record_retry_session_cleanup,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert calls == 2
+        assert len(cleanup_sessions) == 1
+        assert cleanup_sessions[0] is audit_sessions[0]
+
+    @pytest.mark.unit
+    async def test_get_workspace_retries_transient_egress_audit_lookup_failure(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        create = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+        ws_id = create.json()["workspace_id"]
+        original = EgressAuditRepository.get_latest_for_workspace
+        calls = 0
+
+        async def _flaky_audit_lookup(
+            self: EgressAuditRepository,
+            workspace_id: str,
+        ) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise _closed_connection_error()
+            return await original(self, workspace_id)
+
+        monkeypatch.setattr(
+            EgressAuditRepository,
+            "get_latest_for_workspace",
+            _flaky_audit_lookup,
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == ws_id
+        assert response.json()["egress_audit"] is None
+        assert calls == 2
+
+    @pytest.mark.unit
     async def test_get_workspace_exposes_validation_provenance_summary(
         self,
         client: AsyncClient,
@@ -2998,9 +3243,9 @@ class TestWorkspaceDirectRoutes:
                 include_resolved=True,
                 session=session,
             )
-            listed = await workspaces_route.list_workspaces(session=session)
-            detail = await workspaces_route.get_workspace(workspace_id, session=session)
             retry_error = await workspaces_route.retry_workspace("ws_missing", session=session)
+        listed = await workspaces_route.list_workspaces(session_factory=factory)
+        detail = await workspaces_route.get_workspace(workspace_id, session_factory=factory)
 
         assert [event.event_type for event in events.items] == ["workspace.created"]
         assert stale.items == []
@@ -3043,6 +3288,64 @@ class TestListWorkspaces:
         response = await client.get("/v1/workspaces")
         assert response.status_code == 200
         assert response.json() == []
+
+    @pytest.mark.unit
+    async def test_read_routes_do_not_open_unused_request_session(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="single read dependency")
+        app = client._transport.app  # noqa: SLF001
+        session_resolutions = 0
+
+        async def _fail_if_resolved() -> AsyncIterator[object]:
+            nonlocal session_resolutions
+            session_resolutions += 1
+            raise AssertionError("read routes should not resolve get_db_session")
+            yield object()
+
+        app.dependency_overrides[get_db_session] = _fail_if_resolved
+        try:
+            listed = await client.get("/v1/workspaces")
+            detail = await client.get(f"/v1/workspaces/{workspace_id}")
+        finally:
+            app.dependency_overrides.pop(get_db_session, None)
+
+        assert listed.status_code == 200
+        assert detail.status_code == 200
+        assert [item["id"] for item in listed.json()] == [workspace_id]
+        assert detail.json()["id"] == workspace_id
+        assert session_resolutions == 0
+
+    @pytest.mark.unit
+    async def test_list_workspaces_retries_once_after_closed_connection(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="closed connection list")
+        original = WorkspaceRepository.list
+        failures_remaining = 1
+        calls = 0
+
+        async def _flaky_list(
+            self: WorkspaceRepository,
+            **kwargs: object,
+        ) -> list[Any]:
+            nonlocal failures_remaining, calls
+            calls += 1
+            if failures_remaining:
+                failures_remaining -= 1
+                raise _closed_connection_error()
+            return await original(self, **kwargs)
+
+        monkeypatch.setattr(WorkspaceRepository, "list", _flaky_list)
+
+        response = await client.get("/v1/workspaces")
+
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()] == [workspace_id]
+        assert calls == 2
 
     @pytest.mark.unit
     async def test_returns_created_workspaces_newest_first(self, client: AsyncClient) -> None:

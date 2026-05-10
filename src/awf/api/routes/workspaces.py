@@ -14,14 +14,15 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session, require_api_token
+from awf.api.deps import get_db_session, get_db_session_factory, require_api_token
 from awf.api.schemas import (
+    EgressAuditRecordResponse,
     ErrorResponse,
     PullRequestMonitorAdoptionRequest,
     PullRequestMonitorAdoptionResponse,
@@ -47,6 +48,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
+from awf.db.resilience import run_db_operation_with_retry
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck, check_disk_space
@@ -463,7 +465,25 @@ async def retry_workspace(
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)
 async def get_workspace(
     workspace_id: str,
-    session: AsyncSession = Depends(get_db_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
+) -> WorkspaceResponse:
+    response = await run_db_operation_with_retry(
+        session_factory,
+        lambda retry_session: _get_workspace_response(
+            workspace_id,
+            retry_session,
+        ),
+    )
+    egress_audit = await _retry_optional_egress_audit_lookup(workspace_id, session_factory)
+    return _workspace_response_with_egress_audit(
+        response,
+        egress_audit,
+    )
+
+
+async def _get_workspace_response(
+    workspace_id: str,
+    session: AsyncSession,
 ) -> WorkspaceResponse:
     repo = WorkspaceRepository(session)
     ws = await repo.get_with_secret_leases(workspace_id)
@@ -478,17 +498,47 @@ async def get_workspace(
         validation_runs,
         candidate=latest_merge_candidate(ws),
     )
-    egress_audit = None
-    try:
-        audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
-        egress_audit = _egress_audit_response(audit_record) if audit_record is not None else None
-    except Exception:
-        _logger.warning("egress audit lookup failed for workspace %s", workspace_id, exc_info=True)
     return workspace_response(
         ws,
         validation_provenance=validation_provenance,
-        egress_audit=egress_audit,
     )
+
+
+def _workspace_response_with_egress_audit(
+    response: WorkspaceResponse,
+    egress_audit: dict[str, Any] | None,
+) -> WorkspaceResponse:
+    if egress_audit is None:
+        return response
+    try:
+        validated = EgressAuditRecordResponse.model_validate(egress_audit)
+    except Exception:
+        _logger.warning("egress audit model validation failed", exc_info=True)
+        return response
+    return response.model_copy(update={"egress_audit": validated})
+
+
+async def _retry_optional_egress_audit_lookup(
+    workspace_id: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, Any] | None:
+    async def _lookup(session: AsyncSession) -> dict[str, Any] | None:
+        audit_record = await EgressAuditRepository(session).get_latest_for_workspace(workspace_id)
+        return _egress_audit_response(audit_record) if audit_record is not None else None
+
+    try:
+        return await run_db_operation_with_retry(
+            session_factory,
+            _lookup,
+            attempts=2,
+        )
+    except Exception:
+        _logger.warning(
+            "egress audit retry lookup failed for workspace %s",
+            workspace_id,
+            exc_info=True,
+        )
+        return None
 
 
 @router.get("/{workspace_id}/secret-leases", response_model=WorkspaceSecretLeaseListResponse)
@@ -513,7 +563,27 @@ async def list_workspaces(
     agent: Annotated[AgentRuntime | None, Query()] = None,
     repo_url: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
-    session: AsyncSession = Depends(get_db_session),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
+) -> list[WorkspaceResponse]:
+    return await run_db_operation_with_retry(
+        session_factory,
+        lambda retry_session: _list_workspace_responses(
+            retry_session,
+            workspace_status=workspace_status,
+            agent=agent,
+            repo_url=repo_url,
+            limit=limit,
+        ),
+    )
+
+
+async def _list_workspace_responses(
+    session: AsyncSession,
+    *,
+    workspace_status: WorkspaceStatus | None = None,
+    agent: AgentRuntime | None = None,
+    repo_url: str | None = None,
+    limit: int = 50,
 ) -> list[WorkspaceResponse]:
     repo = WorkspaceRepository(session)
     rows = await repo.list(
