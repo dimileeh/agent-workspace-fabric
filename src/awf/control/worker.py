@@ -688,7 +688,7 @@ class ControlWorker:
             self._session_factory,
             _operation,
             commit=True,
-            retry_commit_failures=True,
+            retry_commit_failures=False,
             on_retry=self._log_transient_db_retry,
         )
 

@@ -709,7 +709,7 @@ class TestRunOnce:
         assert provisioner.calls == []
 
     @pytest.mark.unit
-    async def test_requested_ordered_decision_retries_transient_commit_and_dispatches(
+    async def test_requested_ordered_decision_transient_commit_failure_prevents_dispatch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -718,7 +718,7 @@ class TestRunOnce:
         requested_id = await _create_requested(
             session_factory,
             origin_repo,
-            "record-before-provision-transient-commit",
+            "record-before-provision-ambiguous-commit",
             create_task_attempt=True,
         )
         provisioner = _TransitioningProvisioner(session_factory)
@@ -770,16 +770,15 @@ class TestRunOnce:
         worker._maybe_expire_due_secret_leases = _skip_secret_lease_scan  # type: ignore[method-assign]
         monkeypatch.setattr(AsyncSession, "commit", _fail_first_commit)
 
-        assert await worker.run_once() == 1
+        with pytest.raises(InterfaceError, match="connection is closed"):
+            await worker.run_once()
 
         async with session_factory() as session:
             decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
 
-        assert provisioner.calls == [requested_id]
-        assert commits == 3
-        assert len(decisions) == 1
-        assert decisions[0].decision == "ordered"
-        assert decisions[0].reason_code == "ORDERED_REQUESTED_PROVISIONING"
+        assert provisioner.calls == []
+        assert commits == 1
+        assert decisions == []
 
     @pytest.mark.unit
     async def test_run_once_retries_scheduler_read_after_closed_connection(
