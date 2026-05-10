@@ -8,12 +8,12 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, cast
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
@@ -554,7 +554,7 @@ async def record_terminal_runtime_release_event(
     payload = {
         "source": source,
         "workspace_status": workspace.status,
-        "cleanup": cleanup.to_dict(),
+        "cleanup": _redacted_cleanup_payload(cleanup),
         "runtime": {
             key: value
             for key, value in {
@@ -595,6 +595,10 @@ async def record_terminal_runtime_release_event(
         ),
         payload=payload,
     )
+
+
+def _redacted_cleanup_payload(cleanup: WorkspaceCleanupResult) -> dict[str, object]:
+    return cast(dict[str, object], redact_audit_value(cleanup.to_dict()))
 
 
 def _snapshot_for_workspace(

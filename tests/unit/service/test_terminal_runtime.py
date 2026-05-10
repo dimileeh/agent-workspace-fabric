@@ -1490,6 +1490,65 @@ async def test_terminal_runtime_release_failure_preserves_primary_failure_cause(
 
 
 @pytest.mark.unit
+async def test_terminal_runtime_release_redacts_cleanup_result_errors_in_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    credentialed_url = "https://svc-user:super-secret-token@ghcr.io/example/private.git"
+    api_token = "ghp_1234567890abcdef"
+    raw_error = (
+        f"docker compose down failed for {credentialed_url} "
+        f"with Authorization: Bearer {api_token} and GITHUB_TOKEN={api_token}"
+    )
+    cleaner = _RecordingCleaner(
+        WorkspaceCleanupResult(
+            status="partial",
+            reason_code=CLEANUP_PARTIAL,
+            steps=(
+                WorkspaceCleanupStepResult(
+                    name="compose_down",
+                    status="failed",
+                    reason_code="DOCKER_UNAVAILABLE",
+                    error=raw_error,
+                ),
+            ),
+        )
+    )
+    releaser = TerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+    )
+
+    result = await releaser.release(
+        workspace_id,
+        source="test",
+        expected_status=WorkspaceStatus.failed,
+    )
+
+    assert not result.ok
+    assert result.cleanup is not None
+    assert result.cleanup.failed_steps[0].error == raw_error
+    async with session_factory() as session:
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.terminal_runtime_release_failed",
+        )
+    assert len(events) == 1
+    persisted_error = events[0].payload["cleanup"]["failed_steps"][0]["error"]
+    assert "super-secret-token" not in persisted_error
+    assert api_token not in persisted_error
+    assert "https://[redacted]@ghcr.io/example/private.git" in persisted_error
+    assert "Authorization: Bearer [redacted]" in persisted_error
+    assert "GITHUB_TOKEN=[redacted]" in persisted_error
+
+
+@pytest.mark.unit
 async def test_terminal_runtime_release_redacts_cleanup_exception_evidence(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

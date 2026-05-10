@@ -39,7 +39,7 @@ _TOKEN_ASSIGNMENT_RE = re.compile(
     r")\b"
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<quote>[\"']?)"
-    r"(?P<value>[^\s\"'`,;)}\]]+)"
+    r"(?P<value>\[redacted\]|[^\s\"'`,;)}\]]+)"
     r"(?P=quote)",
     re.IGNORECASE,
 )

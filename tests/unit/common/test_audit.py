@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from awf.common.audit import AUDIT_SCHEMA, build_audit_payload, redact_audit_value
+from awf.common.audit import (
+    AUDIT_SCHEMA,
+    build_audit_payload,
+    redact_audit_text,
+    redact_audit_value,
+)
 
 
 @pytest.mark.unit
@@ -102,3 +107,14 @@ def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usa
     assert github_app_jwt not in repr(redacted)
     assert "secret-secret-secret" not in repr(redacted)
     assert "db_password" not in repr(redacted)
+
+
+@pytest.mark.unit
+def test_redact_audit_text_keeps_existing_redaction_markers_stable() -> None:
+    text = (
+        "GITHUB_TOKEN=[redacted] "
+        "Authorization: Bearer [redacted] "
+        "https://[redacted]@github.com/org/repo"
+    )
+
+    assert redact_audit_text(redact_audit_text(text)) == text
