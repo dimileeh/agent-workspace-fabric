@@ -24,7 +24,10 @@ class GeminiAdapter(AgentAdapter):
         return "google"
 
     def _cli_args(self, *, model: str | None) -> list[str]:
-        args = ["--skip-trust", "--yolo"]
+        # Gemini CLI 0.41.2 documents -p/--prompt as non-interactive mode;
+        # its value is appended to stdin, so AWF keeps the real prompt on
+        # stdin and uses an empty value only as the headless-mode trigger.
+        args = ["--skip-trust", "--yolo", "-p", ""]
         if model:
             args += ["--model", model]
         if not self._default_effort:

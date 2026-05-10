@@ -650,7 +650,7 @@ class TestGeminiAdapter:
             "--yolo",
         ]
         gemini_args = args[gemini_start:]
-        assert "-p" not in gemini_args
+        assert gemini_args[3:5] == ["-p", ""]
         assert "--prompt" not in gemini_args
         _assert_prompt_not_in_argv(args)
         _assert_prompt_sent_on_stdin(runner)
@@ -674,6 +674,7 @@ class TestGeminiAdapter:
             "--skip-trust",
             "--yolo",
         ]
+        assert args[gemini_start + 3 : gemini_start + 5] == ["-p", ""]
         assert "--model" not in args
 
     @pytest.mark.unit
@@ -700,7 +701,8 @@ class TestGeminiAdapter:
         assert "exec gemini" in script
         assert "--model" in args and "gemini-3.1-pro-preview" in args
         gemini_args = args[sh_start:]
-        assert "-p" not in gemini_args
+        assert "-p" in gemini_args
+        assert gemini_args[gemini_args.index("-p") + 1] == ""
         assert "--prompt" not in gemini_args
         _assert_prompt_sent_on_stdin(runner)
 
