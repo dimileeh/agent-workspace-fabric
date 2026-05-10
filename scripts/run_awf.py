@@ -757,7 +757,7 @@ async def _run_monitor_with_release_fallback(
             compose_project=compose_project,
             compose_file=compose_file,
         )
-    except BaseException as exc:
+    except Exception as exc:
         with suppress(Exception):
             await _mark_monitor_handoff_failed(
                 session_factory=session_factory,

@@ -27,6 +27,7 @@ remote_push_branch correctness)."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -180,6 +181,21 @@ class _CrashingMonitor:
             }
         )
         raise RuntimeError("synthetic monitor crash")
+
+
+class _CancellingMonitor:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "compose_project": compose_project,
+                "compose_file": str(compose_file),
+            }
+        )
+        raise asyncio.CancelledError
 
 
 class _RecordingTerminalRuntimeReleaser:
@@ -450,6 +466,64 @@ async def test_sync_monitor_crash_marks_failed_and_releases_runtime(
     assert ws.status == WorkspaceStatus.failed.value
     assert ws.failure_reason == "infrastructure_failure"
     assert "synthetic monitor crash" in (ws.failure_message or "")
+
+
+@pytest.mark.unit
+async def test_monitor_cancellation_propagates_without_failure_or_release(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    monitor = _CancellingMonitor()
+    releaser = _RecordingTerminalRuntimeReleaser()
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            branch_base="development",
+            task_title="cancel monitor",
+            task_prompt="keep monitoring state",
+            agent="codex",
+            profile_ref=None,
+            requested_profile=None,
+            test_commands=[],
+            requires_database=False,
+        )
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+        ):
+            await repo.transition(ws, to=target, reason_code="TEST")
+        await s.commit()
+        workspace_id = ws.id
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_awf._run_monitor_with_release_fallback(
+            monitor,
+            workspace_id=workspace_id,
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            session_factory=factory,
+            terminal_runtime_releaser=releaser,
+        )
+
+    assert monitor.calls == [
+        {
+            "workspace_id": workspace_id,
+            "compose_project": f"awf_{workspace_id}",
+            "compose_file": str(tmp_path / "compose.yml"),
+        }
+    ]
+    assert releaser.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.failure_reason is None
+        assert ws.failure_message is None
 
 
 # ── feature_branch_pr handler ──────────────────────────────────────────────
