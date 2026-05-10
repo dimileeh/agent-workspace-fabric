@@ -71,6 +71,7 @@ def build_tracked_compose_exec(
     service: str = "agent",
     workdir: str = "/workspace",
     invocation_id: str | None = None,
+    preserve_stdin: bool = False,
 ) -> TrackedComposeExec:
     """Build a compose-exec argv that tags the in-container command."""
 
@@ -78,7 +79,7 @@ def build_tracked_compose_exec(
         raise ValueError("cli_args must not be empty")
     invocation_id = invocation_id or _new_invocation_id()
     _validate_invocation_id(invocation_id)
-    wrapper_script = _tracked_exec_wrapper_script()
+    wrapper_script = _tracked_exec_wrapper_script(preserve_stdin=preserve_stdin)
     cleanup_script = _cleanup_script(invocation_id)
     args = [
         *_compose_exec_prefix(
@@ -243,28 +244,37 @@ def _validate_invocation_id(invocation_id: str) -> None:
         raise ValueError("invocation_id contains unsupported shell characters")
 
 
-def _tracked_exec_wrapper_script() -> str:
+def _tracked_exec_wrapper_script(*, preserve_stdin: bool = False) -> str:
     # Positional argv after ``sh -lc <script>`` is:
     #   $0=awf-exec, $1=<invocation_id>, $2...=<original command argv>
     # The real command is never shell-joined; ``shift`` leaves it as "$@".
-    return r"""
+    stdin_setup = ""
+    stdin_redirect = "</dev/null"
+    if preserve_stdin:
+        stdin_setup = """
+stdin_path="$awf_exec_dir/stdin"
+cat > "$stdin_path"
+""".strip()
+        stdin_redirect = '< "$stdin_path"'
+    return f"""
 set +e
 invocation_id=$1
 shift
 export AWF_EXEC_INVOCATION_ID="$invocation_id"
 awf_exec_dir="/tmp/awf-exec/$invocation_id"
 mkdir -p "$awf_exec_dir" 2>/dev/null || true
-printf '%s\n' "$$" > "$awf_exec_dir/wrapper_pid" 2>/dev/null || true
+printf '%s\\n' "$$" > "$awf_exec_dir/wrapper_pid" 2>/dev/null || true
+{stdin_setup}
 if command -v setsid >/dev/null 2>&1; then
-  setsid "$@" &
+  setsid "$@" {stdin_redirect} &
   child_pid=$!
-  printf '%s\n' "$child_pid" > "$awf_exec_dir/pid" 2>/dev/null || true
-  printf '%s\n' "$child_pid" > "$awf_exec_dir/pgid" 2>/dev/null || true
+  printf '%s\\n' "$child_pid" > "$awf_exec_dir/pid" 2>/dev/null || true
+  printf '%s\\n' "$child_pid" > "$awf_exec_dir/pgid" 2>/dev/null || true
   wait "$child_pid"
   exit $?
 fi
-printf '%s\n' "$$" > "$awf_exec_dir/pid" 2>/dev/null || true
-exec "$@"
+printf '%s\\n' "$$" > "$awf_exec_dir/pid" 2>/dev/null || true
+exec "$@" {stdin_redirect}
 """.strip()
 
 

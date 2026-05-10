@@ -416,9 +416,20 @@ def _all_adapter_args(fake: FakeCommandRunner) -> list[list[str]]:
     return [c.args for c in fake.calls if "exec" in c.args and "codex" in c.args]
 
 
+def _all_adapter_prompt_values(fake: FakeCommandRunner) -> list[str]:
+    """Every prompt streamed to `docker compose exec ... codex ...` on stdin."""
+    prompts: list[str] = []
+    for call in fake.calls:
+        if "exec" not in call.args or "codex" not in call.args:
+            continue
+        if call.input_bytes is not None:
+            prompts.append(call.input_bytes.decode())
+    return prompts
+
+
 def _all_adapter_prompts(fake: FakeCommandRunner) -> str:
     """Concatenate every adapter prompt invocation into a single string for substring search."""
-    return "\n".join(" ".join(args) for args in _all_adapter_args(fake))
+    return "\n".join(_all_adapter_prompt_values(fake))
 
 
 @pytest.mark.unit
@@ -1506,7 +1517,7 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
 
     adapter_args = _all_adapter_args(fake)
     assert len(adapter_args) == 1
-    prompt = adapter_args[0][-1]
+    prompt = _all_adapter_prompt_values(fake)[0]
     assert "## Conformance phase" in prompt
     assert "## Planning phase" not in prompt
     assert "## Execution phase" not in prompt
@@ -1698,8 +1709,9 @@ async def test_validate_only_recovery_conformance_failure_fails_without_fix_loop
 
     adapter_args = _all_adapter_args(fake)
     assert len(adapter_args) == 1
-    assert "## Conformance phase" in adapter_args[0][-1]
-    assert "Validation failed after your previous pass" not in adapter_args[0][-1]
+    prompt = _all_adapter_prompt_values(fake)[0]
+    assert "## Conformance phase" in prompt
+    assert "Validation failed after your previous pass" not in prompt
     assert any(
         event.get("event") == "executor.post_validation_conformance_recovery_single_attempt"
         and event.get("workspace_id") == ws_id

@@ -24,10 +24,11 @@ class GeminiAdapter(AgentAdapter):
         return "google"
 
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+        del prompt
         args = ["--skip-trust", "--yolo"]
         if model:
             args += ["--model", model]
-        args += ["-p", prompt]
+        args += ["-p", ""]
         if not self._default_effort:
             return ["gemini", *args]
 

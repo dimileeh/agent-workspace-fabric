@@ -358,10 +358,8 @@ class TestFixCycleRecoversAfterOneFailure:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """The fix prompt — the payload handed to the CLI on the second
-        call — must carry the failing command + its tail output so the
-        CLI knows what to fix. The adapter passes the prompt as the
-        last CLI arg, so we can grep it out of the subprocess args."""
+        """The fix prompt handed to the CLI on the second call must carry
+        the failing command + its tail output so the CLI knows what to fix."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         _queue_initial_pass(fake)
@@ -376,10 +374,11 @@ class TestFixCycleRecoversAfterOneFailure:
 
         await executor.execute(ws_id)
 
-        # The 2nd adapter call's prompt arg is the fix prompt.
+        # The 2nd adapter call streams the fix prompt on stdin.
         adapter_calls = [c for c in fake.calls if "codex" in c.args and "exec" in c.args]
         assert len(adapter_calls) == 2
-        fix_prompt = " ".join(adapter_calls[1].args)
+        assert adapter_calls[1].input_bytes is not None
+        fix_prompt = adapter_calls[1].input_bytes.decode()
         assert "Validation failed" in fix_prompt
         assert "pytest -q" in fix_prompt  # the failing command
         assert "attempt 1 of 5" in fix_prompt

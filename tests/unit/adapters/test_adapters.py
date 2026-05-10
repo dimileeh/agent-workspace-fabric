@@ -22,7 +22,7 @@ import structlog
 # Importing the registry module forces adapter self-registration.
 import awf.adapters.registry  # noqa: F401
 from awf.adapters import get_adapter  # noqa: F401 - populates registry via __init__
-from awf.adapters.base import AgentRunError
+from awf.adapters.base import AgentAdapter, AgentRunError
 from awf.adapters.claude_code import ClaudeCodeAdapter, _claude_effort_for_awf_effort
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
@@ -42,6 +42,7 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
+_LONG_PROMPT = "Review this oversized PR comment.\n" + ("x" * 140_000)
 _COMPOSE_PROJECT = "awf_ws_xyz"
 _COMPOSE_FILE = Path("/fake/path/compose.yml")
 
@@ -54,6 +55,19 @@ def _assert_docker_exec_prefix(args: list[str]) -> None:
     exec_idx = args.index("exec")
     assert args[exec_idx : exec_idx + 4] == ["exec", "-T", "-w", "/workspace"]
     assert "agent" in args
+
+
+def _assert_prompt_sent_on_stdin(runner: FakeCommandRunner, prompt: str = _PROMPT) -> str:
+    input_bytes = runner.calls[0].input_bytes
+    assert input_bytes is not None
+    wrapped_prompt = input_bytes.decode()
+    assert wrapped_prompt.endswith(prompt)
+    assert "AWF workspace contract" in wrapped_prompt
+    return wrapped_prompt
+
+
+def _assert_prompt_not_in_argv(args: list[str], prompt: str = _PROMPT) -> None:
+    assert all(prompt not in arg for arg in args)
 
 
 class _TimeoutStreamingRunner:
@@ -234,15 +248,28 @@ class TestCodexAdapter:
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
         ]
-        # AWF prepends a contract preamble ("do not switch branches")
-        # before the user-supplied prompt; the last argv element is
-        # therefore the wrapped form. Check the user prompt is the
-        # trailing substring so the assertion survives preamble edits.
-        assert args[-1].endswith(_PROMPT)
-        assert "AWF workspace contract" in args[-1]
+        assert args[-1] == "-"
+        _assert_prompt_not_in_argv(args)
+        _assert_prompt_sent_on_stdin(runner)
         assert "--model" in args and "gpt-5" in args
         assert "-c" in args
         assert 'model_reasoning_effort="xhigh"' in args
+
+    @pytest.mark.unit
+    async def test_large_prompt_uses_stdin_not_argv(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner, default_model="gpt-5", default_effort="xhigh")
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_LONG_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        assert max(len(arg) for arg in args) < 10_000
+        assert all(_LONG_PROMPT not in arg for arg in args)
+        _assert_prompt_sent_on_stdin(runner, _LONG_PROMPT)
 
     @pytest.mark.unit
     async def test_no_model_omits_model_flags(self) -> None:
@@ -274,7 +301,7 @@ class TestCodexAdapter:
         assert "codex: auth required" in exc.value.result.stderr
 
     @pytest.mark.unit
-    async def test_closes_stdin_for_noninteractive_exec(self) -> None:
+    async def test_streams_prompt_on_stdin_for_noninteractive_exec(self) -> None:
         runner = FakeCommandRunner()
         adapter = CodexAdapter(runner=runner)
 
@@ -284,7 +311,7 @@ class TestCodexAdapter:
             prompt=_PROMPT,
         )
 
-        assert runner.calls[0].input_bytes == b""
+        _assert_prompt_sent_on_stdin(runner)
 
     @pytest.mark.unit
     async def test_wall_timeout_raises_structured_error_and_closes_log_streams(self) -> None:
@@ -481,7 +508,8 @@ class TestCodexAdapter:
 
         assert result.stdout == "legacy stdout"
         assert result.stderr == "legacy stderr"
-        assert runner.calls[0]["input_bytes"] == b""
+        assert runner.calls[0]["input_bytes"] is not None
+        assert _PROMPT.encode() in runner.calls[0]["input_bytes"]
         assert log_store.sinks.stdout_data == ["legacy stdout"]
         assert log_store.sinks.stderr_data == ["legacy stderr"]
         assert log_store.sinks.closed is True
@@ -510,14 +538,11 @@ class TestClaudeCodeAdapter:
             "claude",
             "--dangerously-skip-permissions",
         ]
-        # -p signals non-interactive print mode.
-        assert args[-2] == "-p"
-        # AWF prepends a contract preamble ("do not switch branches")
-        # before the user-supplied prompt; the last argv element is
-        # therefore the wrapped form. Check the user prompt is the
-        # trailing substring so the assertion survives preamble edits.
-        assert args[-1].endswith(_PROMPT)
-        assert "AWF workspace contract" in args[-1]
+        # -p signals non-interactive print mode; AWF streams the prompt
+        # on stdin so large review comments never become one argv item.
+        assert args[-1] == "-p"
+        _assert_prompt_not_in_argv(args)
+        _assert_prompt_sent_on_stdin(runner)
         assert "--model" in args and "sonnet" in args
         assert "--effort" in args and "max" in args
 
@@ -622,12 +647,9 @@ class TestGeminiAdapter:
             "--yolo",
         ]
         assert args[-2] == "-p"
-        # AWF prepends a contract preamble ("do not switch branches")
-        # before the user-supplied prompt; the last argv element is
-        # therefore the wrapped form. Check the user prompt is the
-        # trailing substring so the assertion survives preamble edits.
-        assert args[-1].endswith(_PROMPT)
-        assert "AWF workspace contract" in args[-1]
+        assert args[-1] == ""
+        _assert_prompt_not_in_argv(args)
+        _assert_prompt_sent_on_stdin(runner)
         assert "--model" in args and "gemini-2.5-pro" in args
 
     @pytest.mark.unit
@@ -673,7 +695,9 @@ class TestGeminiAdapter:
         assert "GEMINI_CLI_TRUST_WORKSPACE" in script
         assert "exec gemini" in script
         assert "--model" in args and "gemini-3.1-pro-preview" in args
-        assert args[-1].endswith(_PROMPT)
+        assert args[-2] == "-p"
+        assert args[-1] == ""
+        _assert_prompt_sent_on_stdin(runner)
 
     @pytest.mark.unit
     def test_gemini_effort_helpers_map_only_high_effort_to_high_thinking(self) -> None:
@@ -742,8 +766,10 @@ class TestOpenCodeAdapter:
         assert "--variant" in args
         assert "max" in args
         assert "--thinking" in args
-        assert args[-1].endswith(_PROMPT)
-        assert "AWF workspace contract" in args[-1]
+        assert "--file" in args
+        assert args[-1] == "Follow the instructions in the attached AWF prompt file exactly."
+        _assert_prompt_not_in_argv(args)
+        _assert_prompt_sent_on_stdin(runner)
 
     @pytest.mark.unit
     async def test_preserves_fully_qualified_model_name(self) -> None:
@@ -797,6 +823,40 @@ class TestOpenCodeAdapter:
         low_config = _opencode_config_for_effort(effort=None)
         models = low_config["provider"]["ollama"]["models"]  # type: ignore[index]
         assert all("options" not in model for model in models.values())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("adapter_cls", "runtime"),
+    [
+        (ClaudeCodeAdapter, AgentRuntime.claude_code),
+        (CodexAdapter, AgentRuntime.codex),
+        (GeminiAdapter, AgentRuntime.gemini),
+        (OpenCodeAdapter, AgentRuntime.opencode),
+    ],
+)
+async def test_all_adapters_keep_oversized_prompts_out_of_argv(
+    adapter_cls: type[AgentAdapter],
+    runtime: AgentRuntime,
+) -> None:
+    runner = FakeCommandRunner()
+    defaults = DEFAULT_AGENT_DEFAULTS[runtime]
+    adapter = adapter_cls(
+        runner=runner,
+        default_model=defaults.model,
+        default_effort=defaults.effort,
+    )
+
+    await adapter.run(
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        prompt=_LONG_PROMPT,
+    )
+
+    args = runner.calls[0].args
+    assert max(len(arg) for arg in args) < 10_000
+    assert all(_LONG_PROMPT not in arg for arg in args)
+    _assert_prompt_sent_on_stdin(runner, _LONG_PROMPT)
 
 
 class TestCentralDefaults:

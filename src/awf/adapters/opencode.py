@@ -23,6 +23,7 @@ OPENCODE_OLLAMA_CLOUD_MODELS = (
 """Ollama Cloud models AWF exposes through the OpenCode adapter."""
 
 DEFAULT_OLLAMA_OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
+OPENCODE_PROMPT_PATH = "/tmp/awf-opencode-prompt.md"
 
 
 @register_adapter
@@ -40,6 +41,7 @@ class OpenCodeAdapter(AgentAdapter):
         return "ollama"
 
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+        del prompt
         selected_model = _qualified_model(model or OPENCODE_OLLAMA_CLOUD_MODELS[0])
         script = _opencode_launcher_script(effort=self._default_effort)
         args = [
@@ -53,7 +55,13 @@ class OpenCodeAdapter(AgentAdapter):
         ]
         if variant := _variant_for_effort(self._default_effort):
             args.extend(["--variant", variant, "--thinking"])
-        args.append(prompt)
+        args.extend(
+            [
+                "--file",
+                OPENCODE_PROMPT_PATH,
+                "Follow the instructions in the attached AWF prompt file exactly.",
+            ]
+        )
         return args
 
 
@@ -76,6 +84,7 @@ def _opencode_launcher_script(*, effort: str | None) -> str:
         f"{config_json}\n"
         "AWF_OPENCODE_CONFIG\n"
         'export OPENCODE_CONFIG_CONTENT="$(cat /tmp/awf-opencode-config.json)"\n'
+        f"cat > {OPENCODE_PROMPT_PATH!r}\n"
         'exec opencode run "$@"\n'
     )
 

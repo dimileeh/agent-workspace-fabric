@@ -24,12 +24,13 @@ class ClaudeCodeAdapter(AgentAdapter):
         return "anthropic"
 
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+        del prompt
         args = ["claude", "--dangerously-skip-permissions"]
         if model:
             args += ["--model", model]
         if self._default_effort:
             args += ["--effort", _claude_effort_for_awf_effort(self._default_effort)]
-        args += ["-p", prompt]
+        args.append("-p")
         return args
 
 

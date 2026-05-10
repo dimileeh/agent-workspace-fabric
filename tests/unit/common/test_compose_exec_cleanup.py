@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 import awf.common.compose_exec as compose_exec
-from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.common.compose_exec import (
     ComposeExecCleanupError,
     build_cleanup_compose_exec,
@@ -123,6 +124,46 @@ def test_rejects_empty_or_unsafe_invocation_inputs() -> None:
             label="codex",
             invocation_id="bad;id",
         )
+
+
+async def test_tracked_exec_wrapper_preserves_stdin_when_requested() -> None:
+    script = compose_exec._tracked_exec_wrapper_script(preserve_stdin=True)  # noqa: SLF001
+    result = await AsyncioSubprocessRunner().run(
+        [
+            "sh",
+            "-lc",
+            script,
+            "awf-exec",
+            "awf_stdin_probe",
+            sys.executable,
+            "-c",
+            "import sys; print(sys.stdin.read(), end='')",
+        ],
+        input_bytes=b"stdin-ok",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "stdin-ok"
+
+
+async def test_tracked_exec_wrapper_closes_stdin_by_default() -> None:
+    script = compose_exec._tracked_exec_wrapper_script()  # noqa: SLF001
+    result = await AsyncioSubprocessRunner().run(
+        [
+            "sh",
+            "-lc",
+            script,
+            "awf-exec",
+            "awf_stdin_closed",
+            sys.executable,
+            "-c",
+            "import sys; print(sys.stdin.read(), end='')",
+        ],
+        input_bytes=b"should-not-reach-child",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
 
 
 async def test_cleanup_success_accepts_killed_result() -> None:

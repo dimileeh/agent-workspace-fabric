@@ -11,6 +11,7 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -137,6 +138,26 @@ def _created_pr_body(fake: FakeCommandRunner) -> str:
 
 def _json_value(value: object) -> object:
     return json.loads(value) if isinstance(value, str) else value
+
+
+def _adapter_prompt_from_call(call: Any) -> str:
+    input_bytes = call.input_bytes
+    assert input_bytes is not None
+    return input_bytes.decode()
+
+
+def _adapter_prompt_calls(fake: FakeCommandRunner) -> list[tuple[int, str]]:
+    return [
+        (index, _adapter_prompt_from_call(call))
+        for index, call in enumerate(fake.calls)
+        if call.args[:2] == ["docker", "compose"]
+        and "codex" in call.args
+        and call.input_bytes is not None
+    ]
+
+
+def _adapter_prompts(fake: FakeCommandRunner) -> list[str]:
+    return [prompt for _, prompt in _adapter_prompt_calls(fake)]
 
 
 async def _insert_validate_handoff_recovery_operation(
@@ -670,11 +691,7 @@ class TestHappyPath:
 
         await executor.execute(ws_id)
 
-        adapter_prompts = [
-            call.args[-1]
-            for call in fake.calls
-            if call.args[:2] == ["docker", "compose"] and call.args[-1].startswith("## ")
-        ]
+        adapter_prompts = _adapter_prompts(fake)
         assert len(adapter_prompts) == 3
         assert "Planning phase" in adapter_prompts[0]
         assert "Execution phase" in adapter_prompts[1]
@@ -764,11 +781,7 @@ class TestHappyPath:
 
         await executor.execute(ws_id)
 
-        adapter_prompt_calls = [
-            (index, call.args[-1])
-            for index, call in enumerate(fake.calls)
-            if call.args[:2] == ["docker", "compose"] and call.args[-1].startswith("## ")
-        ]
+        adapter_prompt_calls = _adapter_prompt_calls(fake)
         prompts = [prompt for _, prompt in adapter_prompt_calls]
         validation_call_index = next(
             index
@@ -1145,11 +1158,7 @@ class TestHappyPath:
 
         await executor.execute(ws_id)
 
-        adapter_prompts = [
-            call.args[-1]
-            for call in fake.calls
-            if call.args[:2] == ["docker", "compose"] and "codex" in call.args
-        ]
+        adapter_prompts = _adapter_prompts(fake)
         post_validation_conformance_prompts = [
             prompt
             for prompt in adapter_prompts
@@ -1785,11 +1794,7 @@ class TestHappyPath:
 
         await executor.execute(ws_id)
 
-        adapter_prompts = [
-            call.args[-1]
-            for call in fake.calls
-            if call.args[:2] == ["docker", "compose"] and "codex" in call.args
-        ]
+        adapter_prompts = _adapter_prompts(fake)
         fix_prompt_index = next(
             index
             for index, prompt in enumerate(adapter_prompts)
@@ -1922,11 +1927,7 @@ class TestHappyPath:
 
         await executor.execute(ws_id)
 
-        adapter_prompts = [
-            call.args[-1]
-            for call in fake.calls
-            if call.args[:2] == ["docker", "compose"] and "codex" in call.args
-        ]
+        adapter_prompts = _adapter_prompts(fake)
         fix_prompts = [
             prompt
             for prompt in adapter_prompts
@@ -2076,11 +2077,7 @@ class TestHappyPath:
 
         await executor.execute(ws_id)
 
-        adapter_prompts = [
-            call.args[-1]
-            for call in fake.calls
-            if call.args[:2] == ["docker", "compose"] and "codex" in call.args
-        ]
+        adapter_prompts = _adapter_prompts(fake)
         fix_prompts = [
             prompt
             for prompt in adapter_prompts
@@ -2170,11 +2167,7 @@ class TestHappyPath:
 
         await executor.execute(ws_id)
 
-        adapter_prompts = [
-            call.args[-1]
-            for call in fake.calls
-            if call.args[:2] == ["docker", "compose"] and call.args[-1].startswith("## ")
-        ]
+        adapter_prompts = _adapter_prompts(fake)
         assert len(adapter_prompts) == 5
         assert "Iteration 1" in adapter_prompts[3]
 
@@ -2241,11 +2234,8 @@ class TestHappyPath:
 
         await executor.execute(ws_id)
 
-        adapter_prompts = [
-            call.args[-1]
-            for call in fake.calls
-            if call.args[:2] == ["docker", "compose"] and call.args[-1].startswith("## ")
-        ]
+        adapter_prompt_calls = _adapter_prompt_calls(fake)
+        adapter_prompts = [prompt for _, prompt in adapter_prompt_calls]
         validation_call_index = next(
             index
             for index, call in enumerate(fake.calls)
@@ -2253,8 +2243,8 @@ class TestHappyPath:
         )
         iteration_prompt_index = next(
             index
-            for index, call in enumerate(fake.calls)
-            if "## Execution phase" in call.args[-1] and "Iteration 1" in call.args[-1]
+            for index, prompt in adapter_prompt_calls
+            if "## Execution phase" in prompt and "Iteration 1" in prompt
         )
 
         assert len(adapter_prompts) == 5
@@ -2400,8 +2390,6 @@ class TestHappyPath:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from typing import Any
-
         from awf.adapters import base as adapter_base
         from awf.adapters.base import AgentRunResult
         from awf.common.commands import CommandResult
@@ -2581,8 +2569,6 @@ class TestHappyPath:
         the current compare call; otherwise the iteration is treated as
         no_output by the stall classifier.
         """
-        from typing import Any
-
         from awf.adapters import base as adapter_base
         from awf.adapters.base import AgentRunResult
         from awf.common.commands import CommandResult
