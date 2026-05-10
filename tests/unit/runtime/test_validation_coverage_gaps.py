@@ -93,9 +93,20 @@ def test_python_coverage_parser_handles_deferred_fail_under_context(
         "FAIL Required test coverage of 99.0% not reached.\n",
         encoding="utf-8",
     )
+    combined_contexts = tmp_path / "combined_contexts.txt"
+    combined_contexts.write_text(
+        "FAIL Required test coverage of 99.0% not reached.\n"
+        "Total coverage: 97.1%\n"
+        "unrelated line\n"
+        "FAIL Required test coverage of 99.0% not reached.\n"
+        "coverage table footer\n"
+        "Total coverage: 98.7%\n",
+        encoding="utf-8",
+    )
 
     assert _parse_python_coverage_percent_from_files([delayed_fail_under]) == 98.7
     assert _parse_python_coverage_percent_from_files([stale_recent_total]) == 97.1
+    assert _parse_python_coverage_percent_from_files([combined_contexts]) == 98.7
 
 
 @pytest.mark.unit
