@@ -1550,6 +1550,78 @@ async def test_cancel_and_stop_retry_expired_idempotent_teardown_operation(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_expired_idempotent_teardown_retry_blocks_on_new_active_teardown(
+    session: AsyncSession,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    idempotency_key = f"{action}-expired-teardown-with-active"
+    operation_type = OperationType.cancel if action == "cancel" else OperationType.stop
+    active_operation_type = OperationType.stop if action == "cancel" else OperationType.cancel
+    payload = {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "operator requested",
+        "reason_code": "OPERATOR_CANCEL" if action == "cancel" else "OPERATOR_STOP",
+        "requested_action": action,
+    }
+    if action == "cancel":
+        payload["stop_stack"] = True
+    expired_operation = await OperationRepository(session).create(
+        workspace_id=workspace_id,
+        operation_type=operation_type,
+        status=OperationStatus.running,
+        payload=payload,
+        idempotency_key=idempotency_key,
+    )
+    stale_started_at = datetime.now(UTC) - timedelta(days=30)
+    expired_operation.started_at = stale_started_at
+    active_operation = await OperationRepository(session).create(
+        workspace_id=workspace_id,
+        operation_type=active_operation_type,
+        status=OperationStatus.running,
+        payload={"source": "operator_api", "requested_action": active_operation_type.value},
+        idempotency_key=f"{action}-new-active-teardown",
+    )
+    await session.commit()
+    service, stopper, cleaner = _service(session)
+
+    with pytest.raises(WorkspaceActiveOperationConflictError) as exc_info:
+        if action == "cancel":
+            await service.cancel_workspace(
+                workspace_id,
+                reason="operator requested",
+                stop_stack=True,
+                idempotency_key=idempotency_key,
+            )
+        else:
+            await service.stop_workspace(
+                workspace_id,
+                reason="operator requested",
+                idempotency_key=idempotency_key,
+            )
+
+    operations = await _operations(session, workspace_id)
+    expired_row = next(
+        operation for operation in operations if operation.id == expired_operation.id
+    )
+
+    assert exc_info.value.detail == {
+        "operation_id": active_operation.id,
+        "operation_type": active_operation_type.value,
+        "operation_status": OperationStatus.running.value,
+    }
+    assert stopper.calls == []
+    assert cleaner.calls == []
+    assert expired_row.status == OperationStatus.running.value
+    assert expired_row.started_at == stale_started_at
+    assert expired_row.lease_renewed_at is None
+    assert expired_row.error_code is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
 async def test_cancel_and_stop_preserve_precommitted_operation_when_cancelled_again(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

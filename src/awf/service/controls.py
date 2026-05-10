@@ -1846,6 +1846,13 @@ class WorkspaceControlService:
                     workspace = await self._require_workspace_for_update(repo, workspace_id)
                     if conflict := _workspace_version_conflict(workspace, expected_version):
                         raise conflict
+                    active_teardown = await _find_active_operation(
+                        operations,
+                        workspace_id=workspace_id,
+                        operation_types={OperationType.cancel.value, OperationType.stop.value},
+                    )
+                    if active_teardown is not None:
+                        raise WorkspaceActiveOperationConflictError(active_teardown)
                     _renew_runtime_teardown_operation(existing)
                     return _PreparedOperation(
                         workspace=workspace,
