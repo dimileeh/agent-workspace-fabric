@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+import threading
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1285,6 +1286,24 @@ def _classify_workspace_for_gc(
             reason_code=WORKSPACE_CLEANUP_DISABLED,
         )
 
+    if _needs_failed_terminal_workspace_no_work_inspection(
+        workspace,
+        cutoff_at=cutoff_at,
+        default_policy=default_policy,
+        cleanup_enabled=cleanup_enabled,
+    ):
+        if failed_terminal_workspace_no_work is None:
+            failed_terminal_workspace_no_work = _failed_terminal_workspace_no_work_decision(
+                workspace, None
+            )
+        if (
+            failed_terminal_workspace_no_work is False
+            and failed_terminal_workspace_live_runtime is None
+        ):
+            failed_terminal_workspace_live_runtime = (
+                _failed_terminal_workspace_runtime_state(workspace) == "live_runtime"
+            )
+
     if default_policy:
         if workspace.status == WorkspaceStatus.failed.value:
             if _failed_terminal_workspace_no_work_decision(
@@ -1449,14 +1468,39 @@ async def _failed_terminal_workspace_has_no_work_async(workspace: Workspace) -> 
 
 
 def _failed_terminal_workspace_has_no_work(workspace: Workspace) -> bool:
-    """Synchronous fallback that preserves failed evidence unless precomputed.
+    """Return True when a failed terminal workspace has no active agent work."""
 
-    Production GC planners await ``_failed_terminal_workspace_has_no_work_async``
-    before entering the synchronous filesystem classification step.
-    """
+    return _failed_terminal_workspace_runtime_state(workspace) == "no_work"
 
-    del workspace
-    return False
+
+def _failed_terminal_workspace_runtime_state(workspace: Workspace) -> str:
+    try:
+        return _run_awaitable_blocking(_failed_terminal_workspace_runtime_state_async(workspace))
+    except Exception:
+        return "unknown"
+
+
+def _run_awaitable_blocking(awaitable: Coroutine[Any, Any, str]) -> str:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            results.append(asyncio.run(awaitable))
+        except BaseException as exc:  # pragma: no cover - re-raised in caller thread.
+            errors.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+    if errors:
+        raise errors[0]
+    return results[0] if results else "unknown"
 
 
 def _compose_project_name_for_workspace(workspace: Workspace) -> str | None:

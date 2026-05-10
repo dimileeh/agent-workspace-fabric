@@ -27,6 +27,7 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
     AgentRuntime,
+    FailureReason,
     OperationStatus,
     OperationType,
     TaskClass,
@@ -2238,6 +2239,41 @@ async def test_run_fails_workspace_when_base_fetch_cannot_be_refreshed(
         assert workspace.failure_reason == "infrastructure_failure"
         assert workspace.failure_message is not None
         assert "could not refresh base branch" in workspace.failure_message
+
+
+@pytest.mark.unit
+async def test_terminate_failed_preserves_existing_failure_classification(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "validation command failed"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._terminate_failed(  # noqa: SLF001
+        workspace_id,
+        message="monitor abort",
+        reason_code="MONITOR_ABORT",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.failure_reason == FailureReason.validation_failure.value
+    assert workspace.failure_message == "validation command failed"
 
 
 @pytest.mark.unit

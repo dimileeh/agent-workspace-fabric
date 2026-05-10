@@ -95,6 +95,29 @@ def fake() -> FakeCommandRunner:
     return FakeCommandRunner()
 
 
+@pytest.mark.unit
+async def test_executor_constructor_requires_terminal_runtime_releaser(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(TypeError, match="terminal_runtime_releaser"):
+        WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=_NoopResumeCompose(),
+            validation=ValidationRunner(
+                runner=fake,
+                artifacts_dir=tmp_path / "artifacts",
+            ),
+            pr_creator=PullRequestCreator(fake),
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+            ),
+        )
+
+
 def _make_executor(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
@@ -110,7 +133,7 @@ def _make_executor(
     compose = compose or _NoopResumeCompose()
     validation = validation or ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
     pr = pr_creator or PullRequestCreator(fake)
-    executor = WorkspaceExecutor(
+    return WorkspaceExecutor(
         session_factory=factory,
         runner=fake,
         compose=compose,
@@ -127,10 +150,8 @@ def _make_executor(
         ),
         pr_monitor_factory=pr_monitor_factory,
         log_store=log_store,
+        terminal_runtime_releaser=terminal_releaser or _RecordingTerminalRuntimeReleaser(),
     )
-    if terminal_releaser is not None:
-        executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
-    return executor
 
 
 class _NoopResumeCompose:
@@ -665,6 +686,7 @@ class TestConstructorValidation:
                 ),
                 pr_monitor=object(),  # type: ignore[arg-type]
                 pr_monitor_factory=lambda _adapter: object(),
+                terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
             )
         await engine.dispose()
 
@@ -1513,6 +1535,7 @@ class TestAgentWatchdogConfig:
                 agent_wall_timeout_seconds=12,
                 agent_idle_timeout_seconds=3,
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
 
         await executor.execute(ws_id)
@@ -2622,6 +2645,7 @@ class TestPullRequestUnexpectedError:
                 compose_projects_root=tmp_path / "work" / "compose",
                 default_models={AgentRuntime.codex: "gpt-5"},
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
 
         await executor.execute(ws_id)

@@ -24,6 +24,12 @@ from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 CHECK_TIMEOUT_SECONDS = 5.0
 ORPHAN_EXAMPLE_LIMIT = 5
 AWF_PROJECT_PREFIXES = ("awf_", "awf-")
+LEAKED_LIVE_RUNTIME_REASONS = frozenset(
+    {
+        "TERMINAL_LIVE_RUNTIME_RESOURCE",
+        "WORKSPACE_TERMINAL",
+    }
+)
 
 ResourceKind = Literal["container", "network", "volume", "worktree"]
 Classification = Literal["expected", "retained_evidence", "terminal", "missing", "unknown"]
@@ -510,7 +516,7 @@ def build_orphan_resource_summary(
     leaked_live_records = tuple(
         record
         for record in orphan_records
-        if record.reason == "TERMINAL_LIVE_RUNTIME_RESOURCE"
+        if record.reason in LEAKED_LIVE_RUNTIME_REASONS
         and record.resource.kind in {"container", "network"}
     )
     unknown_records = tuple(record for record in records if record.classification == "unknown")

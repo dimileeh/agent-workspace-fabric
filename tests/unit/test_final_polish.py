@@ -19,6 +19,19 @@ from awf.db.session import make_session_factory
 from scripts import run_awf
 from tests.postgres import create_postgres_test_engine
 
+
+class _NoopTerminalRuntimeReleaser:
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> object:
+        del workspace_id, source, expected_status
+        return None
+
+
 # ── github_client error paths ──────────────────────────────────────────────
 
 
@@ -216,6 +229,7 @@ class TestExecutorFixPassWarnings:
                 },
                 max_validation_fix_passes=3,
             ),
+            terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
         )
         original_adapter_registry = dict(_adapter_base._REGISTRY)
         _adapter_base._REGISTRY[AgentRuntime.codex] = CodexAdapter
@@ -295,6 +309,7 @@ class TestExecutorMarkFailedStatusDiverged:
                 compose_projects_root=tmp_path / "c",
                 default_models={AgentRuntime.codex: "gpt-5"},
             ),
+            terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
         )
         # ws is still 'requested'. Ask _mark_failed to act if from_status
         # was 'running' → should no-op + keep status 'requested'.

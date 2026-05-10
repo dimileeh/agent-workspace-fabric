@@ -96,6 +96,7 @@ def executor(
                 AgentRuntime.gemini: "gemini-2.5-pro",
             },
         ),
+        terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
     )
 
 
@@ -643,6 +644,7 @@ class TestHappyPath:
                 compose_projects_root=tmp_path / "work" / "compose",
             ),
             pr_monitor_factory=monitor_factory,
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1774,6 +1776,7 @@ class TestHappyPath:
                 default_models={AgentRuntime.codex: "gpt-5"},
                 max_validation_fix_passes=1,
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1907,6 +1910,7 @@ class TestHappyPath:
                 default_models={AgentRuntime.codex: "gpt-5"},
                 max_validation_fix_passes=0,
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
         ws_id = await _seed_ready_workspace(
             factory,
@@ -2049,6 +2053,7 @@ class TestHappyPath:
                 default_models={AgentRuntime.codex: "gpt-5"},
                 max_validation_fix_passes=1,
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
         ws_id = await _seed_ready_workspace(
             factory,
@@ -2547,6 +2552,7 @@ class TestHappyPath:
                 worktrees_root=tmp_path / "work" / "worktrees",
                 compose_projects_root=tmp_path / "work" / "compose",
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
 
         # The agent commits the plan artifact during planning (allowed by the
@@ -2737,6 +2743,7 @@ class TestHappyPath:
                 worktrees_root=tmp_path / "work" / "worktrees",
                 compose_projects_root=tmp_path / "work" / "compose",
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
 
         # The stale satisfied JSON pre-exists planning, so git sees it as
@@ -2998,6 +3005,7 @@ class TestHappyPath:
                 worktrees_root=tmp_path / "work" / "worktrees",
                 compose_projects_root=tmp_path / "work" / "compose",
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
 
         identical_report = (
@@ -3094,6 +3102,7 @@ class TestHappyPath:
                 worktrees_root=tmp_path / "work" / "worktrees",
                 compose_projects_root=tmp_path / "work" / "compose",
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
 
         identical_report = (
@@ -3612,6 +3621,7 @@ class TestFailurePaths:
                 },
                 max_validation_fix_passes=0,
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
         terminal_releaser = _RecordingTerminalRuntimeReleaser()
         executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
@@ -3670,6 +3680,7 @@ class TestFailurePaths:
                 },
                 max_validation_fix_passes=0,
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
         ws_id = await _seed_ready_workspace(
             factory,
@@ -3827,6 +3838,7 @@ class TestFailurePaths:
                 default_models={AgentRuntime.codex: "gpt-5"},
                 max_validation_fix_passes=0,
             ),
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
         ws_id = await _seed_ready_workspace(
             factory,
@@ -4194,6 +4206,7 @@ class TestMonitorHandoff:
                 },
             ),
             pr_monitor=monitor,
+            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
         )
 
         stored_compose_file = tmp_path / "rendered-compose" / "ws" / "compose.yml"

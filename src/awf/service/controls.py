@@ -910,6 +910,7 @@ class WorkspaceControlService:
             _log.warning(
                 "controls.terminal_runtime_release_claim_clear_failed",
                 workspace_id=workspace_id,
+                owner_id=owner_id,
                 error=redact_audit_text(repr(exc), limit=400),
             )
 

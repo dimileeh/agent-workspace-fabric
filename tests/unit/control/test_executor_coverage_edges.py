@@ -93,6 +93,18 @@ from awf.runtime.validation_identity import (
 from tests.postgres import create_postgres_test_engine
 
 
+class _NoopTerminalRuntimeReleaser:
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> object:
+        del workspace_id, source, expected_status
+        return None
+
+
 def _command_result(tmp_path: Path, *, returncode: int = 1) -> ValidationCommandResult:
     stdout = tmp_path / "cmd.stdout"
     stderr = tmp_path / "cmd.stderr"
@@ -1251,6 +1263,7 @@ def _executor_with_runner(
             worktrees_root=tmp_path / "worktrees",
             compose_projects_root=tmp_path / "compose",
         ),
+        terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
     )
     executor._update_subphase = AsyncMock()  # type: ignore[method-assign]
     return executor
@@ -1922,6 +1935,7 @@ async def test_final_coverage_gate_reuses_exact_fresh_evidence(
             worktrees_root=tmp_path / "worktrees",
             compose_projects_root=tmp_path / "compose",
         ),
+        terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
     )
 
     result = await executor._run_final_coverage_gate(
@@ -2010,6 +2024,7 @@ async def test_final_coverage_gate_caps_parallel_workers_to_active_reservation(
                 worktrees_root=tmp_path / "worktrees",
                 compose_projects_root=tmp_path / "compose",
             ),
+            terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
         )
 
         result = await executor._run_final_coverage_gate(
@@ -2074,6 +2089,7 @@ async def test_final_coverage_gate_executes_when_reuse_has_no_successful_match(
                 worktrees_root=tmp_path / "worktrees",
                 compose_projects_root=tmp_path / "compose",
             ),
+            terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
         )
 
         result = await executor._run_final_coverage_gate(
@@ -2163,6 +2179,7 @@ async def test_final_coverage_gate_executes_when_reusable_run_has_no_coverage_me
                 worktrees_root=tmp_path / "worktrees",
                 compose_projects_root=tmp_path / "compose",
             ),
+            terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
         )
 
         result = await executor._run_final_coverage_gate(
@@ -2210,6 +2227,7 @@ async def test_parallel_worker_cpu_limit_handles_disabled_policy_and_missing_res
                 worktrees_root=tmp_path / "worktrees",
                 compose_projects_root=tmp_path / "compose",
             ),
+            terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
         )
         serial_profile = WorkspaceProfile.model_validate(
             {
@@ -2289,6 +2307,7 @@ async def test_ensure_worktree_available_records_terminal_stale_callback(
                 worktrees_root=tmp_path / "worktrees",
                 compose_projects_root=tmp_path / "compose",
             ),
+            terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
         )
 
         assert not await executor._ensure_worktree_available(  # noqa: SLF001
@@ -2338,6 +2357,7 @@ async def test_ensure_worktree_available_marks_running_workspace_failed_when_mis
                 worktrees_root=tmp_path / "worktrees",
                 compose_projects_root=tmp_path / "compose",
             ),
+            terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
         )
         executor._release_terminal_runtime = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
 
@@ -2381,6 +2401,7 @@ async def test_record_planning_validation_handoff_event_ignores_missing_workspac
                 worktrees_root=tmp_path / "worktrees",
                 compose_projects_root=tmp_path / "compose",
             ),
+            terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
         )
         handoff = _PlanningValidationHandoff(
             report=PlanConformanceReport(
@@ -3406,6 +3427,7 @@ async def test_record_git_object_recovery_event_persists_workspace_event(
             worktrees_root=tmp_path / "worktrees",
             compose_projects_root=tmp_path / "compose",
         ),
+        terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
     )
     await executor._record_git_object_recovery_event(
         workspace_id=workspace_id,

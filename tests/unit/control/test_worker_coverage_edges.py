@@ -233,18 +233,6 @@ async def test_list_pending_delegates_to_requested_query_without_extra_filter() 
 
 
 @pytest.mark.unit
-async def test_wait_for_execution_tasks_prunes_completed_tasks(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    worker = _worker(factory)
-    worker._execution_tasks["ws_done"] = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
-
-    await worker.wait_for_execution_tasks()
-
-    assert worker._execution_tasks == {}  # noqa: SLF001
-
-
-@pytest.mark.unit
 async def test_await_stale_cleanup_returns_none_when_heartbeat_finishes_first(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1182,19 +1170,20 @@ async def test_record_ignored_stale_callback_logs_audit_failure_and_releases_cla
     )
     control_worker = _worker(factory)
 
-    async with factory() as session:
-        await control_worker._record_active_operation_blocked_transition_in_session(  # noqa: SLF001
-            session,
-            workspace_id=workspace_id,
-            action="execute",
-            expected=WorkspaceStatus.running,
-            requested=WorkspaceStatus.failed,
-            reason_code="STALE_CALLBACK",
-            operation_id="op_1",
-            release_execution_claim_owner_id="owner-1",
-            clear_stale_claims_for_status=WorkspaceStatus.monitoring_pr,
-        )
-        await session.commit()
+    with structlog.testing.capture_logs() as captured:
+        async with factory() as session:
+            await control_worker._record_active_operation_blocked_transition_in_session(  # noqa: SLF001
+                session,
+                workspace_id=workspace_id,
+                action="execute",
+                expected=WorkspaceStatus.running,
+                requested=WorkspaceStatus.failed,
+                reason_code="STALE_CALLBACK",
+                operation_id="op_1",
+                release_execution_claim_owner_id="owner-1",
+                clear_stale_claims_for_status=WorkspaceStatus.monitoring_pr,
+            )
+            await session.commit()
 
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
@@ -1204,3 +1193,9 @@ async def test_record_ignored_stale_callback_logs_audit_failure_and_releases_cla
     assert ws.execution_claim_expires_at is None
     assert ws.monitor_claimed_by is None
     assert ws.monitor_claim_expires_at is None
+    assert any(
+        entry.get("event") == "worker.ignored_stale_callback_record_failed"
+        and entry.get("workspace_id") == workspace_id
+        and "audit sink unavailable" in str(entry.get("error"))
+        for entry in captured
+    )

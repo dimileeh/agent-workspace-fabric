@@ -1973,6 +1973,75 @@ def test_failed_terminal_workspace_has_no_work_exception(monkeypatch: pytest.Mon
 
 
 @pytest.mark.unit
+def test_sync_classifier_computes_failed_no_work_when_precompute_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _no_work_runtime_state(workspace: Workspace) -> str:
+        assert workspace.compose_project_name == "proj"
+        return "no_work"
+
+    monkeypatch.setattr(
+        gc,
+        "_failed_terminal_workspace_runtime_state_async",
+        _no_work_runtime_state,
+    )
+    now = datetime.now(UTC)
+    workspace = Workspace(
+        id="ws_1",
+        status=WorkspaceStatus.failed.value,
+        updated_at=now - timedelta(hours=25),
+        compose_project_name="proj",
+    )
+
+    result = _classify_workspace_for_gc(
+        workspace,
+        work_dir=Path("/tmp"),
+        now=now,
+        cutoff_at=now - timedelta(hours=24),
+        default_policy=True,
+        cleanup_enabled=True,
+    )
+
+    assert isinstance(result, WorkspaceGCCandidate)
+    assert result.reason_code == FAILED_WORKSPACE_NO_WORK
+
+
+@pytest.mark.unit
+def test_sync_classifier_computes_live_runtime_when_precompute_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _live_runtime_state(workspace: Workspace) -> str:
+        assert workspace.compose_project_name == "proj"
+        return "live_runtime"
+
+    monkeypatch.setattr(
+        gc,
+        "_failed_terminal_workspace_runtime_state_async",
+        _live_runtime_state,
+    )
+    now = datetime.now(UTC)
+    workspace = Workspace(
+        id="ws_1",
+        status=WorkspaceStatus.failed.value,
+        updated_at=now - timedelta(hours=25),
+        compose_project_name="proj",
+    )
+
+    result = _classify_workspace_for_gc(
+        workspace,
+        work_dir=Path("/tmp"),
+        now=now,
+        cutoff_at=now - timedelta(hours=24),
+        default_policy=True,
+        cleanup_enabled=True,
+    )
+
+    assert isinstance(result, WorkspaceGCPreserved)
+    assert result.reason_code == TERMINAL_LIVE_RUNTIME_PRESERVED
+    assert result.retention_class == "live_runtime"
+
+
+@pytest.mark.unit
 async def test_failed_terminal_workspace_runtime_state_unknown_without_compose_project() -> None:
     workspace = Workspace(id="ws_1", compose_project_name=None)
 

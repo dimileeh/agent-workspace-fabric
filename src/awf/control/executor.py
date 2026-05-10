@@ -793,7 +793,7 @@ class WorkspaceExecutor:
         pr_monitor: _MonitorRunnerProto | None = None,
         pr_monitor_factory: Callable[..., _MonitorRunnerProto] | None = None,
         log_store: LogStore | None = None,
-        terminal_runtime_releaser: TerminalRuntimeReleaserProtocol | None = None,
+        terminal_runtime_releaser: TerminalRuntimeReleaserProtocol,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -5362,11 +5362,8 @@ class WorkspaceExecutor:
         *,
         expected_status: WorkspaceStatus,
     ) -> None:
-        releaser = self._terminal_runtime_releaser
-        if releaser is None:
-            return
         try:
-            await releaser.release(
+            await self._terminal_runtime_releaser.release(
                 workspace_id,
                 source="executor",
                 expected_status=expected_status,

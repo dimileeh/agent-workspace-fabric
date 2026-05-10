@@ -5261,9 +5261,14 @@ class PullRequestMonitorRunner:
             teardown_compose_file = compose_file
             if teardown_compose_file is None and ws.compose_file_path:
                 teardown_compose_file = Path(ws.compose_file_path)
-            failure_reason = FailureReason.infrastructure_failure.value
-            ws.failure_reason = failure_reason
-            ws.failure_message = safe_message
+            if ws.failure_reason:
+                failure_reason = ws.failure_reason
+                failure_message = ws.failure_message
+            else:
+                failure_reason = FailureReason.infrastructure_failure.value
+                failure_message = safe_message
+                ws.failure_reason = failure_reason
+                ws.failure_message = failure_message
             if rc == EXEC_PROCESS_CLEANUP_FAILED:
                 await repo.add_event(
                     ws,
@@ -5283,7 +5288,7 @@ class PullRequestMonitorRunner:
                     reason_code=rc,
                     operation_id=operation_id,
                     failure_reason=failure_reason,
-                    failure_message=safe_message,
+                    failure_message=failure_message,
                 )
                 return
             await s.commit()

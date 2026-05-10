@@ -55,6 +55,18 @@ from .executor_paths import _test_worktree_path, _test_worktrees_root
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
+class _NoopTerminalRuntimeReleaser:
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> object:
+        del workspace_id, source, expected_status
+        return None
+
+
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
@@ -97,6 +109,7 @@ def _make_executor(
             },
             max_validation_fix_passes=max_fix_passes,
         ),
+        terminal_runtime_releaser=_NoopTerminalRuntimeReleaser(),
     )
 
 

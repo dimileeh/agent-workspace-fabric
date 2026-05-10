@@ -3134,6 +3134,12 @@ class WorkspaceRepository:
                 else_=Workspace.monitor_started_at,
             )
 
+        with self._session.no_autoflush:
+            await _lock_workspace_for_external_runtime_teardown_serialization(
+                self._session,
+                workspace.id,
+                dialect_name=self._dialect_name,
+            )
         row = None
         while True:
             with self._session.no_autoflush:
@@ -3227,6 +3233,12 @@ class WorkspaceRepository:
         """Atomically transition a row only if it is still in ``from_status``."""
         WorkspaceStateMachine.assert_transition(from_status, to)
 
+        with self._session.no_autoflush:
+            await _lock_workspace_for_external_runtime_teardown_serialization(
+                self._session,
+                workspace_id,
+                dialect_name=self._dialect_name,
+            )
         expected_version = await self._transition_if_current_expected_version(
             workspace_id,
             from_status=from_status,
@@ -3864,6 +3876,19 @@ def _active_external_runtime_teardown_operation_exists(
     return stmt.exists()
 
 
+async def _lock_workspace_for_external_runtime_teardown_serialization(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    dialect_name: str | None,
+) -> None:
+    if dialect_name != "postgresql":
+        return
+    await session.execute(
+        select(Workspace.id).where(Workspace.id == workspace_id).with_for_update(of=Workspace)
+    )
+
+
 def _active_external_runtime_teardown_operation_lease_current() -> ColumnElement[bool]:
     return func.coalesce(
         Operation.lease_renewed_at, Operation.started_at, Operation.created_at
@@ -4439,12 +4464,22 @@ class OperationRepository:
         idempotency_key: str | None = None,
     ) -> Operation:
         status_value = status.value if isinstance(status, OperationStatus) else status
+        operation_type_value = (
+            operation_type.value if isinstance(operation_type, OperationType) else operation_type
+        )
+        if (
+            operation_type_value in _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES
+            and status_value in _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES
+        ):
+            await _lock_workspace_for_external_runtime_teardown_serialization(
+                self._session,
+                workspace_id,
+                dialect_name=self._dialect_name,
+            )
         operation = Operation(
             id=new_operation_id(),
             workspace_id=workspace_id,
-            type=operation_type.value
-            if isinstance(operation_type, OperationType)
-            else operation_type,
+            type=operation_type_value,
             status=status_value,
             payload=payload,
             idempotency_key=idempotency_key,

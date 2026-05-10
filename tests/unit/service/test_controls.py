@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from awf.common.config import get_settings
@@ -211,7 +212,7 @@ async def test_stop_project_containers_stops_matching_container_ids() -> None:
         "--filter",
         "label=com.docker.compose.project=awf_ws_running",
     )
-    assert mock_exec.call_args_list[1].args[:4] == ("docker", "stop", "abc123", "def456")
+    assert mock_exec.call_args_list[1].args == ("docker", "stop", "abc123", "def456")
     all_args = [arg for call in mock_exec.call_args_list for arg in call.args]
     assert "down" not in all_args
     assert "--volumes" not in all_args
@@ -1580,10 +1581,20 @@ async def test_release_terminal_runtime_claim_for_control_now_logs_release_error
             fail_release,
         )
 
-        await service._release_terminal_runtime_claim_for_control_now(  # noqa: SLF001
-            "ws_missing",
-            owner_id="terminal_runtime_release:control:test",
-        )
+        with structlog.testing.capture_logs() as logs:
+            await service._release_terminal_runtime_claim_for_control_now(  # noqa: SLF001
+                "ws_missing",
+                owner_id="terminal_runtime_release:control:test",
+            )
+
+    assert any(
+        entry.get("event") == "controls.terminal_runtime_release_claim_clear_failed"
+        and entry.get("workspace_id") == "ws_missing"
+        and entry.get("owner_id") == "terminal_runtime_release:control:test"
+        and "release failed for ws_missing:terminal_runtime_release:control:test"
+        in str(entry.get("error"))
+        for entry in logs
+    )
 
 
 @pytest.mark.unit
