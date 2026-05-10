@@ -606,10 +606,12 @@ async def test_egress_audit_summary_timeout_consumes_inner_task_on_outer_cancel(
 ) -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
+    closed = asyncio.Event()
 
     class _Session:
         async def close(self) -> None:
-            pass
+            await asyncio.sleep(0)
+            closed.set()
 
     class _HangingEgressAuditRepository:
         def __init__(self, _session: _Session) -> None:
@@ -624,6 +626,7 @@ async def test_egress_audit_summary_timeout_consumes_inner_task_on_outer_cancel(
                 raise
 
     monkeypatch.setattr(health_route, "EgressAuditRepository", _HangingEgressAuditRepository)
+    monkeypatch.setattr(health_route, "_EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS", 1.0)
     state = SimpleNamespace()
 
     task = asyncio.create_task(
@@ -632,9 +635,14 @@ async def test_egress_audit_summary_timeout_consumes_inner_task_on_outer_cancel(
     await asyncio.wait_for(started.wait(), timeout=1.0)
     task.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-    await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert closed.is_set()
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+    finally:
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+        await asyncio.wait_for(closed.wait(), timeout=1.0)
 
 
 @pytest.mark.unit
@@ -1105,16 +1113,26 @@ async def test_readyz_db_closed_connection_returns_specific_diagnostic(
     ready_app_and_client: tuple[Any, AsyncClient],
 ) -> None:
     app, client = ready_app_and_client
+    select_one_session_events: list[list[str]] = []
     runner = FakeCommandRunner()
     _queue_all_ok(runner)
     app.state.command_runner = runner
 
     class _ClosedConnectionSession:
-        async def execute(self, *_args: object, **_kwargs: object) -> None:
-            raise _closed_connection_error()
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def invalidate(self) -> None:
+            self.events.append("invalidate")
+
+        async def execute(self, *args: object, **_kwargs: object) -> None:
+            if args and str(args[0]) == "SELECT 1":
+                select_one_session_events.append(self.events)
+                raise _closed_connection_error()
+            raise RuntimeError("query failed")
 
         async def close(self) -> None:
-            return None
+            self.events.append("close")
 
     app.state.db_session_factory = lambda: _ClosedConnectionSession()
 
@@ -1127,6 +1145,7 @@ async def test_readyz_db_closed_connection_returns_specific_diagnostic(
     assert db_check["ok"] is False
     assert db_check["reason"] == "DB_CONNECTION_CLOSED"
     assert "connection is closed" in (db_check["detail"] or "")
+    assert select_one_session_events == [["invalidate", "close"]]
 
 
 @pytest.mark.unit
