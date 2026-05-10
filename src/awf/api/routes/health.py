@@ -203,7 +203,8 @@ async def _check_db(factory: Any) -> CheckResult:
             await asyncio.wait_for(
                 session.execute(text("SELECT 1")), timeout=_CHECK_TIMEOUT_SECONDS
             )
-        except TimeoutError:
+        except TimeoutError as exc:
+            await invalidate_or_rollback_session(session, exc)
             return CheckResult(
                 ok=False,
                 status="fail",

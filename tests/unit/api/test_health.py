@@ -1193,12 +1193,17 @@ def test_readyz_truncates_verbose_dependency_details() -> None:
 
 @pytest.mark.unit
 async def test_readyz_db_timeout_returns_structured_failure() -> None:
+    events: list[str] = []
+
     class _SlowSession:
         async def execute(self, *_args: object, **_kwargs: object) -> None:
             await asyncio.sleep(1)
 
+        async def rollback(self) -> None:
+            events.append("rollback")
+
         async def close(self) -> None:
-            return None
+            events.append("close")
 
     previous_timeout = health_route._CHECK_TIMEOUT_SECONDS
     health_route._CHECK_TIMEOUT_SECONDS = 0.001
@@ -1210,6 +1215,7 @@ async def test_readyz_db_timeout_returns_structured_failure() -> None:
     assert result.ok is False
     assert result.reason == "DB_TIMEOUT"
     assert "SELECT 1 exceeded" in (result.detail or "")
+    assert events == ["rollback", "close"]
 
 
 @pytest.mark.unit
