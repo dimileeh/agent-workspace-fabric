@@ -63,7 +63,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     Tests bypass this path by constructing the app without a lifespan and calling
     ``configure_database`` directly.
     """
-    health.reset_egress_audit_summary_counts_task()
+    health.reset_egress_audit_summary_counts_task(app.state)
     settings: Settings = get_settings()
     engine = make_engine(settings.database_url)
 
@@ -85,7 +85,6 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     ``use_lifespan`` defaults to True for production. Tests pass ``use_lifespan=False``
     and call ``configure_database`` themselves so each test gets its own isolated DB.
     """
-    health.reset_egress_audit_summary_counts_task()
     app = FastAPI(
         title="Aira Agent Workspace Fabric",
         description=(
@@ -98,6 +97,7 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
         openapi_url="/openapi.json",
         lifespan=_lifespan if use_lifespan else None,
     )
+    health.reset_egress_audit_summary_counts_task(app.state)
 
     app.include_router(health.router)
     app.include_router(callbacks.router)

@@ -383,7 +383,7 @@ async def test_readyz_egress_audit_in_flight_uses_dedicated_reason(
     _queue_all_ok(runner)
     app.state.command_runner = runner
 
-    async def _raise_in_flight(_factory: object) -> dict[str, int]:
+    async def _raise_in_flight(_factory: object, _state: object) -> dict[str, int]:
         raise health_route.EgressAuditSummaryInFlightError
 
     monkeypatch.setattr(
@@ -425,9 +425,10 @@ async def test_readyz_egress_audit_timeout_drains_completed_session_cleanup(
 
     monkeypatch.setattr(health_route, "_CHECK_TIMEOUT_SECONDS", 0.001)
     monkeypatch.setattr(health_route, "EgressAuditRepository", _SlowEgressAuditRepository)
+    state = SimpleNamespace()
 
     with pytest.raises(TimeoutError, match="egress audit summary timed out"):
-        await health_route._egress_audit_summary_counts_with_timeout(_Session)
+        await health_route._egress_audit_summary_counts_with_timeout(_Session, state)
 
     assert closed.is_set()
 
@@ -473,15 +474,16 @@ async def test_egress_audit_summary_timeout_gates_pending_lookup(
         "EgressAuditRepository",
         _CancellationResistantEgressAuditRepository,
     )
+    state = SimpleNamespace()
 
     try:
         with pytest.raises(TimeoutError):
-            await health_route._egress_audit_summary_counts_with_timeout(_Session)
+            await health_route._egress_audit_summary_counts_with_timeout(_Session, state)
 
         assert sessions_created == 1
 
         with pytest.raises(health_route.EgressAuditSummaryInFlightError):
-            await health_route._egress_audit_summary_counts_with_timeout(_Session)
+            await health_route._egress_audit_summary_counts_with_timeout(_Session, state)
 
         assert sessions_created == 1
         assert summary_calls == 1
@@ -492,9 +494,10 @@ async def test_egress_audit_summary_timeout_gates_pending_lookup(
 
 
 @pytest.mark.unit
-async def test_create_app_resets_leaked_egress_audit_lookup_task() -> None:
+async def test_reset_egress_audit_summary_counts_task_cancels_app_lookup() -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
+    state = SimpleNamespace()
 
     async def _leaked_lookup() -> dict[str, int]:
         started.set()
@@ -506,25 +509,54 @@ async def test_create_app_resets_leaked_egress_audit_lookup_task() -> None:
 
     leaked_task = asyncio.create_task(_leaked_lookup())
     await started.wait()
-    health_route._track_egress_audit_summary_counts_task(leaked_task)
+    health_route._track_egress_audit_summary_counts_task(state, leaked_task)
 
     try:
-        create_app(use_lifespan=False)
+        health_route.reset_egress_audit_summary_counts_task(state)
 
-        assert health_route._pending_egress_audit_summary_counts_task() is None
+        assert health_route._pending_egress_audit_summary_counts_task(state) is None
         await asyncio.gather(leaked_task, return_exceptions=True)
         assert cancelled.is_set()
     finally:
         if not leaked_task.done():
             leaked_task.cancel()
             await asyncio.gather(leaked_task, return_exceptions=True)
-        health_route._egress_audit_summary_counts_task = None
+
+
+@pytest.mark.unit
+async def test_create_app_does_not_reset_other_app_egress_audit_lookup_task() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    app = create_app(use_lifespan=False)
+
+    async def _lookup() -> dict[str, int]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(_lookup())
+    await started.wait()
+    health_route._track_egress_audit_summary_counts_task(app.state, task)
+
+    try:
+        new_app = create_app(use_lifespan=False)
+
+        assert health_route._pending_egress_audit_summary_counts_task(app.state) is task
+        assert health_route._pending_egress_audit_summary_counts_task(new_app.state) is None
+        assert not cancelled.is_set()
+    finally:
+        health_route.reset_egress_audit_summary_counts_task(app.state)
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.unit
 async def test_stale_egress_audit_lookup_callback_does_not_clear_current_task() -> None:
     release_stale = asyncio.Event()
     release_current = asyncio.Event()
+    state = SimpleNamespace()
 
     async def _lookup(release: asyncio.Event) -> dict[str, int]:
         await release.wait()
@@ -534,18 +566,17 @@ async def test_stale_egress_audit_lookup_callback_does_not_clear_current_task() 
     current_task = asyncio.create_task(_lookup(release_current))
 
     try:
-        health_route._track_egress_audit_summary_counts_task(stale_task)
-        health_route._track_egress_audit_summary_counts_task(current_task)
+        health_route._track_egress_audit_summary_counts_task(state, stale_task)
+        health_route._track_egress_audit_summary_counts_task(state, current_task)
 
         release_stale.set()
         await stale_task
         await asyncio.sleep(0)
 
-        assert health_route._pending_egress_audit_summary_counts_task() is current_task
+        assert health_route._pending_egress_audit_summary_counts_task(state) is current_task
     finally:
         release_current.set()
         await asyncio.gather(stale_task, current_task, return_exceptions=True)
-        health_route._egress_audit_summary_counts_task = None
 
 
 @pytest.mark.unit
@@ -587,8 +618,11 @@ async def test_egress_audit_summary_timeout_consumes_inner_task_on_outer_cancel(
                 raise
 
     monkeypatch.setattr(health_route, "EgressAuditRepository", _HangingEgressAuditRepository)
+    state = SimpleNamespace()
 
-    task = asyncio.create_task(health_route._egress_audit_summary_counts_with_timeout(_Session))
+    task = asyncio.create_task(
+        health_route._egress_audit_summary_counts_with_timeout(_Session, state)
+    )
     await started.wait()
     task.cancel()
 

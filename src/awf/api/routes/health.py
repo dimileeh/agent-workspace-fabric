@@ -143,7 +143,7 @@ async def release_readiness(
 # down once we have latency telemetry.
 _CHECK_TIMEOUT_SECONDS = 5.0
 _EGRESS_AUDIT_CANCEL_DRAIN_TIMEOUT_SECONDS = 0.1
-_egress_audit_summary_counts_task: asyncio.Task[dict[str, int]] | None = None
+_EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR = "egress_audit_summary_counts_task"
 
 
 class EgressAuditSummaryInFlightError(TimeoutError):
@@ -360,12 +360,14 @@ def _consume_task_result(task: asyncio.Task[Any]) -> None:
     task.add_done_callback(_consume)
 
 
-def reset_egress_audit_summary_counts_task() -> None:
-    """Clear any readiness egress-audit lookup leaked from a previous app."""
-    global _egress_audit_summary_counts_task
-
-    task = _egress_audit_summary_counts_task
-    _egress_audit_summary_counts_task = None
+def reset_egress_audit_summary_counts_task(state: Any) -> None:
+    """Clear any readiness egress-audit lookup tracked for an app instance."""
+    task: asyncio.Task[dict[str, int]] | None = getattr(
+        state,
+        _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR,
+        None,
+    )
+    setattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None)
     if task is None:
         return
     if task.done():
@@ -394,39 +396,46 @@ async def _egress_audit_summary_counts(factory: Any) -> dict[str, int]:
     return await run_db_operation_with_retry(factory, _summary_counts)
 
 
-def _pending_egress_audit_summary_counts_task() -> asyncio.Task[dict[str, int]] | None:
-    global _egress_audit_summary_counts_task
-
-    task = _egress_audit_summary_counts_task
+def _pending_egress_audit_summary_counts_task(
+    state: Any,
+) -> asyncio.Task[dict[str, int]] | None:
+    task: asyncio.Task[dict[str, int]] | None = getattr(
+        state,
+        _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR,
+        None,
+    )
     if task is not None and task.done():
-        _egress_audit_summary_counts_task = None
+        setattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None)
         return None
     return task
 
 
-def _track_egress_audit_summary_counts_task(task: asyncio.Task[dict[str, int]]) -> None:
-    global _egress_audit_summary_counts_task
-
-    _egress_audit_summary_counts_task = task
+def _track_egress_audit_summary_counts_task(
+    state: Any,
+    task: asyncio.Task[dict[str, int]],
+) -> None:
+    setattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, task)
 
     def _clear_tracked_task(completed: asyncio.Task[dict[str, int]]) -> None:
-        global _egress_audit_summary_counts_task
-        # A cancelled task from a prior app can finish after a new lookup starts.
+        # A cancelled task from a prior lookup can finish after a new lookup starts.
         # Only the completed task may clear its own tracking slot.
-        if _egress_audit_summary_counts_task is completed:
-            _egress_audit_summary_counts_task = None
+        if getattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None) is completed:
+            setattr(state, _EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None)
 
     task.add_done_callback(_clear_tracked_task)
 
 
-async def _egress_audit_summary_counts_with_timeout(factory: Any) -> dict[str, int]:
-    if _pending_egress_audit_summary_counts_task() is not None:
+async def _egress_audit_summary_counts_with_timeout(
+    factory: Any,
+    state: Any,
+) -> dict[str, int]:
+    if _pending_egress_audit_summary_counts_task(state) is not None:
         raise EgressAuditSummaryInFlightError(
             "Previous egress audit summary_counts is still in flight"
         )
 
     task = asyncio.create_task(_egress_audit_summary_counts(factory))
-    _track_egress_audit_summary_counts_task(task)
+    _track_egress_audit_summary_counts_task(state, task)
     try:
         done, _pending = await asyncio.wait({task}, timeout=_CHECK_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
@@ -577,7 +586,10 @@ async def readyz(
                 detail="No session factory available",
             )
         try:
-            counts = await _egress_audit_summary_counts_with_timeout(factory)
+            counts = await _egress_audit_summary_counts_with_timeout(
+                factory,
+                request.app.state,
+            )
             posture_counts = {str(posture): int(count) for posture, count in counts.items()}
             total = sum(posture_counts.values())
             return CheckResult(
