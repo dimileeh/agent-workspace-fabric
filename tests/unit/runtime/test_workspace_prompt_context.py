@@ -6,6 +6,9 @@ import pytest
 
 from awf.profiles.models import (
     DockerMode,
+    EndpointVisibility,
+    ProfileAppEndpoint,
+    ProfileAppEndpointHealth,
     ProfileDocker,
     ProfileRuntime,
     ProfileService,
@@ -81,6 +84,49 @@ def test_workspace_runtime_context_keeps_generic_non_database_sidecars() -> None
     assert "redis:6379" in context
     assert "$APP_BASE_URL" in context
     assert "$CACHE_URL" in context
+
+
+@pytest.mark.unit
+def test_workspace_runtime_context_includes_generated_app_endpoint_env() -> None:
+    profile = WorkspaceProfile(
+        name="node-browser",
+        services=[
+            ProfileService(name="app", image="node:20-alpine"),
+            ProfileService(name="browser", image="mcr.microsoft.com/playwright:v1"),
+        ],
+        app_endpoints=[
+            ProfileAppEndpoint(name="app", service="app", port=3000),
+            ProfileAppEndpoint(
+                name="browser_validation",
+                service="browser",
+                port=9323,
+                path="/validate",
+                health=ProfileAppEndpointHealth(path="/healthz"),
+                visibility=EndpointVisibility.validation,
+            ),
+            ProfileAppEndpoint(
+                name="operator_notes",
+                service="app",
+                port=3000,
+                path="/operator",
+                visibility=EndpointVisibility.console,
+            ),
+        ],
+    )
+
+    context = render_workspace_runtime_context(profile)
+
+    assert "Service `app` is already started by AWF; internal endpoints: `app:3000`." in context
+    assert (
+        "Service `browser` is already started by AWF; internal endpoints: `browser:9323`."
+        in context
+    )
+    assert "$AWF_APP_ENDPOINTS_JSON" in context
+    assert "$AWF_APP_ENDPOINT_APP_URL" in context
+    assert "http://app:3000/" in context
+    assert "$AWF_APP_ENDPOINT_BROWSER_VALIDATION_URL" in context
+    assert "http://browser:9323/validate" in context
+    assert "operator_notes" not in context
 
 
 @pytest.mark.unit

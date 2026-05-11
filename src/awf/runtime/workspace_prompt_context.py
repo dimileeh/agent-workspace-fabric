@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from awf.common.audit import redact_audit_text
+from awf.profiles.compose import profile_app_endpoint_environment
 from awf.profiles.models import DockerMode, ProfileService, WorkspaceProfile
 
 _CONNECTION_ENV_KEY_PARTS = (
@@ -45,8 +47,9 @@ def render_workspace_runtime_context(profile: WorkspaceProfile) -> str:
     """
 
     services = tuple(profile.services)
-    env_endpoints = _env_endpoints(profile, services)
-    env_lines = _environment_lines(profile, env_endpoints)
+    environment, generated_endpoint_keys = _prompt_environment(profile)
+    env_endpoints = _env_endpoints(environment, services)
+    env_lines = _environment_lines(environment, env_endpoints, generated_endpoint_keys)
     if not services and not env_lines:
         return ""
 
@@ -112,13 +115,18 @@ def _service_endpoints(
 
 
 def _environment_lines(
-    profile: WorkspaceProfile,
+    environment: Mapping[str, str],
     env_endpoints: tuple[_EnvEndpoint, ...],
+    generated_endpoint_keys: frozenset[str],
 ) -> list[str]:
     endpoint_keys = {endpoint.key for endpoint in env_endpoints}
     lines: list[str] = []
-    for key, value in sorted(profile.runtime.environment.items()):
-        if key not in endpoint_keys and not _is_connection_env_key(key):
+    for key, value in sorted(environment.items()):
+        if (
+            key not in endpoint_keys
+            and key not in generated_endpoint_keys
+            and not _is_connection_env_key(key)
+        ):
             continue
         if _is_sensitive_env_key(key):
             lines.append(f"- `${key}` is set.")
@@ -128,16 +136,23 @@ def _environment_lines(
 
 
 def _env_endpoints(
-    profile: WorkspaceProfile,
+    environment: Mapping[str, str],
     services: tuple[ProfileService, ...],
 ) -> tuple[_EnvEndpoint, ...]:
     service_names = {service.name for service in services}
     endpoints: list[_EnvEndpoint] = []
-    for key, value in sorted(profile.runtime.environment.items()):
+    for key, value in sorted(environment.items()):
         endpoint = _env_endpoint(key=key, value=value)
         if endpoint is not None and endpoint.host in service_names:
             endpoints.append(endpoint)
     return tuple(endpoints)
+
+
+def _prompt_environment(profile: WorkspaceProfile) -> tuple[dict[str, str], frozenset[str]]:
+    generated_endpoint_env = profile_app_endpoint_environment(profile)
+    environment = dict(profile.runtime.environment)
+    environment.update(generated_endpoint_env)
+    return environment, frozenset(key for key, _value in generated_endpoint_env)
 
 
 def _env_endpoint(*, key: str, value: str) -> _EnvEndpoint | None:
