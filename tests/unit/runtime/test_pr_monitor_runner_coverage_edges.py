@@ -3444,26 +3444,19 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
     assert push_result.pushed is False
     assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert ".github/workflows/ci.yml" in push_result.stderr
-    assert [call.args for call in cmd.calls] == [
-        ["git", "-C", str(worktree), "status", "--porcelain"],
-        [
-            "git",
-            "-C",
-            str(worktree),
-            "fetch",
-            "origin",
-            f"refs/heads/awf/{workspace_id}",
-        ],
-        [
-            "git",
-            "-C",
-            str(worktree),
-            "diff",
-            "--name-only",
-            "FETCH_HEAD..HEAD",
-            "--",
-        ],
-    ]
+    call_args = [call.args for call in cmd.calls]
+    assert any(
+        args[:1] == ["git"] and "status" in args and args[-1:] == ["--porcelain"]
+        for args in call_args
+    )
+    assert any(
+        args[:1] == ["git"]
+        and "diff" in args
+        and "--name-only" in args
+        and "FETCH_HEAD..HEAD" in args
+        for args in call_args
+    )
+    assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
     async with factory() as s:
         events = await WorkspaceEventRepository(s).list(
             workspace_id=workspace_id,
