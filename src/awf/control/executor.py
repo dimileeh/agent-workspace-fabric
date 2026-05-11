@@ -130,6 +130,7 @@ from awf.runtime.validation import (
     DATABASE_GENERATED_SETUP_TIMEOUT,
     DATABASE_REFRESH_TIMEOUT,
     DB_GENERATED_SETUP_PHASE,
+    PROFILE_VALIDATION_TOOL_UNAVAILABLE,
     PYTEST_TEST_FAILURE,
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -1415,6 +1416,36 @@ class WorkspaceExecutor:
                         f"profile setup failed: {first_fail.command}"
                         if first_fail is not None
                         else "profile setup failed"
+                    )[:2000],
+                )
+                return
+            profile_preflight = getattr(self._validation, "run_profile_tool_preflight", None)
+            profile_preflight_result = (
+                await profile_preflight(workspace_id=workspace_id, profile=profile)
+                if callable(profile_preflight)
+                else ValidationResult()
+            )
+            if not profile_preflight_result.all_passed:
+                first_fail = profile_preflight_result.first_failure
+                if recovery is not None:
+                    await self._finish_active_recovery_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        reason_code="MONITOR_RECOVERY_PROFILE_PREFLIGHT_FAILED",
+                        error_message=(
+                            f"profile preflight failed: {first_fail.command}"
+                            if first_fail is not None
+                            else "profile preflight failed"
+                        )[:2000],
+                    )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=_failure_reason_for_phase(first_fail),
+                    message=(
+                        f"profile preflight failed: {first_fail.command}"
+                        if first_fail is not None
+                        else "profile preflight failed"
                     )[:2000],
                 )
                 return
@@ -6344,6 +6375,8 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
         DATABASE_REFRESH_TIMEOUT,
     }:
         return FailureReason.phase_timeout
+    if reason_code == PROFILE_VALIDATION_TOOL_UNAVAILABLE:
+        return FailureReason.profile_resolution_failure
     if phase in {"setup", "pre_agent", DB_GENERATED_SETUP_PHASE}:
         return FailureReason.service_startup_failure
     return FailureReason.validation_failure

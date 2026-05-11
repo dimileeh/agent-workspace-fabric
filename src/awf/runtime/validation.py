@@ -79,12 +79,51 @@ HEALTHCHECK_COMMAND_FAILED = "HEALTHCHECK_COMMAND_FAILED"
 HEALTHCHECK_HTTP_STATUS_MISMATCH = "HEALTHCHECK_HTTP_STATUS_MISMATCH"
 HEALTHCHECK_INVALID_CONFIGURATION = "HEALTHCHECK_INVALID_CONFIGURATION"
 PYTEST_TEST_FAILURE = "PYTEST_TEST_FAILURE"
+PROFILE_PREFLIGHT_PHASE = "profile_preflight"
+PROFILE_VALIDATION_TOOL_UNAVAILABLE = "PROFILE_VALIDATION_TOOL_UNAVAILABLE"
 DATABASE_GENERATED_SETUP_FAILED = "DATABASE_GENERATED_SETUP_FAILED"
 DATABASE_GENERATED_SETUP_TIMEOUT = "DATABASE_GENERATED_SETUP_TIMEOUT"
 DATABASE_REFRESH_FAILED = "DATABASE_REFRESH_FAILED"
 DATABASE_REFRESH_TIMEOUT = "DATABASE_REFRESH_TIMEOUT"
 DB_GENERATED_SETUP_PHASE = "db_generated_setup"
 DB_REFRESH_PHASE = "db_refresh"
+_UV_DEV_VALIDATION_TOOLS = frozenset({"mypy", "pre-commit", "pytest", "ruff"})
+_UV_OPTION_VALUE_FLAGS = frozenset(
+    {
+        "--config-setting",
+        "--config-settings-package",
+        "--default-index",
+        "--directory",
+        "--env-file",
+        "--exclude-newer",
+        "--extra",
+        "--extra-index-url",
+        "--find-links",
+        "--from",
+        "--group",
+        "--index",
+        "--index-strategy",
+        "--keyring-provider",
+        "--link-mode",
+        "--no-binary",
+        "--no-build",
+        "--no-build-package",
+        "--no-extra",
+        "--only-binary",
+        "--only-group",
+        "--project",
+        "--python",
+        "--python-platform",
+        "--refresh-package",
+        "--resolution",
+        "--upgrade-package",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "-C",
+        "-p",
+    }
+)
 _PROFILE_PHASE_EXECUTION_ORDER = {
     "setup": 0,
     "pre_agent": 1,
@@ -121,6 +160,24 @@ class ProfileExecutionCommand:
     command: ProfileCommand
     database_hook: bool = False
     hook_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class ProfileValidationToolPreflightFinding:
+    """A profile validation command that can lose its setup-time tooling."""
+
+    command: str
+    tool: str
+    reason_code: str
+    message: str
+
+    def as_metadata(self) -> dict[str, str]:
+        return {
+            "command": self.command,
+            "tool": self.tool,
+            "reason_code": self.reason_code,
+            "message": self.message,
+        }
 
 
 @dataclass(frozen=True)
@@ -298,6 +355,114 @@ def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecut
     ]
 
 
+def profile_validation_tool_preflight_findings(
+    profile: WorkspaceProfile,
+) -> list[ProfileValidationToolPreflightFinding]:
+    """Return validation commands that may drop setup-installed dev tools.
+
+    ``uv sync --extra dev`` installs tools such as ruff/mypy/pytest into the
+    project environment. A later bare ``uv run ruff`` can re-resolve without
+    that extra and remove the tool before spawning it. Catch that profile bug
+    before the agent spends time on a task.
+    """
+    if not _setup_syncs_uv_dev_dependencies(profile):
+        return []
+    findings: list[ProfileValidationToolPreflightFinding] = []
+    for command in profile.phases.validate_commands:
+        metadata = _uv_run_metadata(command.command)
+        if metadata is None or metadata["tool"] not in _UV_DEV_VALIDATION_TOOLS:
+            continue
+        if metadata["has_dev_scope"]:
+            continue
+        tool = str(metadata["tool"])
+        findings.append(
+            ProfileValidationToolPreflightFinding(
+                command=command.command,
+                tool=tool,
+                reason_code=PROFILE_VALIDATION_TOOL_UNAVAILABLE,
+                message=(
+                    f"validation command runs dev tool '{tool}' through `uv run` "
+                    "without `--extra dev`, `--group dev`, or `--all-extras` "
+                    "after setup installed dev dependencies"
+                ),
+            )
+        )
+    return findings
+
+
+def _setup_syncs_uv_dev_dependencies(profile: WorkspaceProfile) -> bool:
+    return any(_uv_command_has_dev_scope(command.command) for command in profile.phases.setup)
+
+
+def _uv_command_has_dev_scope(command: str) -> bool:
+    tokens = _shell_tokens(command)
+    if tokens is None or len(tokens) < 2:
+        return False
+    if tokens[0:2] not in (["uv", "sync"], ["uv", "run"]):
+        return False
+    metadata = _uv_run_metadata(command) if tokens[1] == "run" else None
+    if metadata is not None:
+        return bool(metadata["has_dev_scope"])
+    return _uv_tokens_include_dev_scope(tokens[2:])
+
+
+def _uv_run_metadata(command: str) -> dict[str, object] | None:
+    tokens = _shell_tokens(command)
+    if tokens is None or len(tokens) < 3 or tokens[0:2] != ["uv", "run"]:
+        return None
+    has_dev_scope = False
+    index = 2
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            break
+        if token in {"--all-extras", "--dev"}:
+            has_dev_scope = True
+            index += 1
+            continue
+        if token in {"--extra", "--group"}:
+            value = tokens[index + 1] if index + 1 < len(tokens) else ""
+            has_dev_scope = has_dev_scope or value == "dev"
+            index += 2
+            continue
+        if token.startswith("--extra=") or token.startswith("--group="):
+            has_dev_scope = has_dev_scope or token.split("=", 1)[1] == "dev"
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 2 if token in _UV_OPTION_VALUE_FLAGS else 1
+            continue
+        break
+    if index >= len(tokens):
+        return None
+    return {"tool": tokens[index], "has_dev_scope": has_dev_scope}
+
+
+def _uv_tokens_include_dev_scope(tokens: list[str]) -> bool:
+    for index, token in enumerate(tokens):
+        if token in {"--all-extras", "--dev"}:
+            return True
+        if (
+            token in {"--extra", "--group"}
+            and index + 1 < len(tokens)
+            and tokens[index + 1] == "dev"
+        ):
+            return True
+        if (token.startswith("--extra=") or token.startswith("--group=")) and token.split("=", 1)[
+            1
+        ] == "dev":
+            return True
+    return False
+
+
+def _shell_tokens(command: str) -> list[str] | None:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return None
+
+
 class ValidationRunner:
     """Runs profile phases inside the per-workspace agent container."""
 
@@ -348,6 +513,65 @@ class ValidationRunner:
             legacy_command_labels=True,
             coverage=None,
         )
+
+    async def run_profile_tool_preflight(
+        self,
+        *,
+        workspace_id: str,
+        profile: WorkspaceProfile,
+    ) -> ValidationResult:
+        """Fail fast when profile validation commands cannot keep setup tools visible."""
+        findings = profile_validation_tool_preflight_findings(profile)
+        if not findings:
+            return ValidationResult()
+
+        started = time.monotonic()
+        workspace_artifacts = self._artifacts_dir / workspace_id
+        workspace_artifacts.mkdir(parents=True, exist_ok=True)
+        label = "01_profile_preflight"
+        base_stream_id = f"validation.{label}"
+        stdout_path = workspace_artifacts / f"{label}.stdout"
+        stderr_path = workspace_artifacts / f"{label}.stderr"
+        metadata: dict[str, object] = {"findings": [finding.as_metadata() for finding in findings]}
+        stderr = json.dumps(metadata, sort_keys=True, indent=2) + "\n"
+        await asyncio.to_thread(stdout_path.write_text, "", encoding="utf-8")
+        await asyncio.to_thread(stderr_path.write_text, stderr, encoding="utf-8")
+
+        stream_ids: dict[str, str | None] = {
+            "stdout": f"{base_stream_id}.stdout",
+            "stderr": f"{base_stream_id}.stderr",
+        }
+        if self._log_store is not None:
+            sinks = await self._log_store.open_command_streams(
+                workspace_id=workspace_id,
+                base_stream_id=base_stream_id,
+                source="validation",
+                name=f"{PROFILE_PREFLIGHT_PHASE} {label}",
+            )
+            try:
+                await sinks.write_stderr(stderr)
+            finally:
+                await sinks.close()
+
+        _log.info(
+            "validation.profile_tool_preflight_failed",
+            workspace_id=workspace_id,
+            reason_code=PROFILE_VALIDATION_TOOL_UNAVAILABLE,
+            finding_count=len(findings),
+        )
+        result = ValidationCommandResult(
+            command="profile validation tool preflight",
+            returncode=1,
+            duration_seconds=time.monotonic() - started,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            phase=PROFILE_PREFLIGHT_PHASE,
+            reason_code=PROFILE_VALIDATION_TOOL_UNAVAILABLE,
+            stream_ids=stream_ids,
+            policy_failed=True,
+            metadata=metadata,
+        )
+        return ValidationResult(commands=[result])
 
     async def run_profile_phases(
         self,

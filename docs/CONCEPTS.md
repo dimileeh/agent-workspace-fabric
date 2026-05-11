@@ -122,11 +122,11 @@ awf:
       - command: uv sync --extra dev
         timeout_seconds: 900
     validate:
-      - command: uv run ruff check src/awf/cli tests/unit/cli
+      - command: uv run --python 3.12 --extra dev ruff check src/awf/cli tests/unit/cli
         timeout_seconds: 300
-      - command: uv run mypy src/awf/cli
+      - command: uv run --python 3.12 --extra dev mypy src/awf/cli
         timeout_seconds: 300
-      - command: uv run pytest tests/unit/cli -q
+      - command: uv run --python 3.12 --extra dev pytest tests/unit/cli -q
         timeout_seconds: 300
 ```
 

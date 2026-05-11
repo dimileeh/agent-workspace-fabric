@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
@@ -18,6 +19,7 @@ from awf.runtime.logs import CommandLogSinks, LogStore
 from awf.runtime.validation import (
     HEALTHCHECK_HTTP_STATUS_MISMATCH,
     HEALTHCHECK_INVALID_CONFIGURATION,
+    PROFILE_VALIDATION_TOOL_UNAVAILABLE,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
@@ -31,6 +33,7 @@ from awf.runtime.validation import (
     _parse_python_coverage_percent_from_files,
     _runs_pytest_under_coverage,
     profile_phase_command_plan,
+    profile_validation_tool_preflight_findings,
 )
 from awf.runtime.validation_identity import (
     environment_identity_digest,
@@ -401,6 +404,68 @@ async def test_run_profile_phases_can_skip_coverage_for_targeted_edit_gate(
         "[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; "
         "python -m pytest tests/unit/test_fast.py -q"
     ]
+
+
+@pytest.mark.unit
+def test_profile_tool_preflight_flags_uv_run_dev_tool_without_dev_extra() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-dev-tool-profile",
+            "phases": {
+                "setup": ["uv sync --extra dev"],
+                "validate": [
+                    "uv run ruff check src tests",
+                    "uv run --python 3.12 --extra dev pytest tests/unit -q",
+                ],
+            },
+        }
+    )
+
+    findings = profile_validation_tool_preflight_findings(profile)
+
+    assert len(findings) == 1
+    assert findings[0].command == "uv run ruff check src tests"
+    assert findings[0].tool == "ruff"
+    assert findings[0].reason_code == PROFILE_VALIDATION_TOOL_UNAVAILABLE
+
+
+@pytest.mark.unit
+async def test_profile_tool_preflight_blocks_before_agent_for_missing_dev_scope(
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-dev-tool-profile",
+            "phases": {
+                "setup": ["uv sync --extra dev"],
+                "validate": ["uv run mypy src/awf"],
+            },
+        }
+    )
+    runner = FakeCommandRunner()
+    validation = ValidationRunner(runner=runner, artifacts_dir=tmp_path / "artifacts")
+
+    result = await validation.run_profile_tool_preflight(
+        workspace_id="ws_bad_profile",
+        profile=profile,
+    )
+
+    assert not result.all_passed
+    assert result.first_failure is not None
+    assert result.first_failure.phase == "profile_preflight"
+    assert result.first_failure.reason_code == PROFILE_VALIDATION_TOOL_UNAVAILABLE
+    assert "uv run mypy src/awf" in result.first_failure.stderr_path.read_text(encoding="utf-8")
+    assert runner.calls == []
+
+
+@pytest.mark.unit
+def test_awf_self_profile_validation_commands_preserve_dev_dependency_scope() -> None:
+    profile_path = Path(__file__).resolve().parents[3] / ".awf" / "workspace.yml"
+    profile = WorkspaceProfile.model_validate(
+        yaml.safe_load(profile_path.read_text(encoding="utf-8"))["awf"]
+    )
+
+    assert profile_validation_tool_preflight_findings(profile) == []
 
 
 @pytest.mark.unit

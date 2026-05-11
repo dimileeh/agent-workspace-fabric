@@ -1125,6 +1125,15 @@ def test_failure_reason_for_phase_maps_setup_timeout_and_healthcheck() -> None:
         _failure_reason_for_phase(SimpleNamespace(phase="pre_agent", reason_code="COMMAND_FAILED"))
         == FailureReason.service_startup_failure
     )
+    assert (
+        _failure_reason_for_phase(
+            SimpleNamespace(
+                phase="profile_preflight",
+                reason_code="PROFILE_VALIDATION_TOOL_UNAVAILABLE",
+            )
+        )
+        == FailureReason.profile_resolution_failure
+    )
     assert _failure_reason_for_phase(None) == FailureReason.validation_failure
 
 
