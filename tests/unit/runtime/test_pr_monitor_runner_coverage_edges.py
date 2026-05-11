@@ -3658,7 +3658,7 @@ async def test_sync_base_allows_base_owned_protected_changes_when_base_advances_
 
 
 @pytest.mark.unit
-async def test_ci_fix_records_agent_failure_but_commits_and_pushes_changes(
+async def test_ci_fix_commits_and_pushes_even_if_agent_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
