@@ -142,6 +142,14 @@ class _ControlTerminalRuntimeCleanup:
 
 
 @dataclass(frozen=True)
+class _ControlTerminalRuntimeWorkspaceSnapshot:
+    workspace_id: str
+    repo_url: str
+    compose_project_name: str | None
+    compose_file_path: str | None
+
+
+@dataclass(frozen=True)
 class _ControlTerminalRuntimeReleaseClaimFailure:
     reason_code: str
     error: str | None = None
@@ -414,17 +422,24 @@ class WorkspaceControlService:
                 payload=operation_payload,
                 idempotency_key=prepared.idempotency_key,
             )
+        operation_id = operation.id
+        terminal_runtime_snapshot = (
+            _snapshot_terminal_runtime_workspace_for_control(workspace) if stop_stack else None
+        )
         committed_before_external_io = False
         terminal_runtime_cleanup: _ControlTerminalRuntimeCleanup | None = None
         if stop_stack:
+            assert terminal_runtime_snapshot is not None
             await self._commit_before_external_runtime_io()
             committed_before_external_io = True
             try:
                 terminal_runtime_cleanup = await self._run_with_teardown_operation_heartbeat(
-                    operation.id,
-                    self._stop_external_runtime_for_control(workspace),
+                    operation_id,
+                    self._stop_external_runtime_for_control(terminal_runtime_snapshot),
                 )
             except WorkspaceStackStopError as exc:
+                operation = await _require_control_operation(operations, operation_id)
+                workspace = await self._require_workspace(repo, workspace_id)
                 await _finish_stack_stop_failed_operation(
                     self._session,
                     operations,
@@ -434,17 +449,19 @@ class WorkspaceControlService:
                 )
                 raise
             except asyncio.CancelledError:
-                await self._preserve_precommitted_cancelled_operation(operation.id)
+                await self._preserve_precommitted_cancelled_operation(operation_id)
                 raise
             except Exception as exc:
                 await _finish_precommitted_control_operation_failed(
                     self._session,
-                    operation_id=operation.id,
-                    workspace_id=workspace.id,
+                    operation_id=operation_id,
+                    workspace_id=workspace_id,
                     exc=exc,
                 )
                 raise
+        response: WorkspaceControlResponse | None = None
         try:
+            operation = await _require_control_operation(operations, operation_id)
             if stop_stack:
                 workspace = await self._require_workspace_for_update(repo, workspace_id)
                 if conflict := _workspace_version_conflict(workspace, expected_version):
@@ -480,7 +497,7 @@ class WorkspaceControlService:
                     to=WorkspaceStatus.cancelled,
                     reason_code=_OPERATOR_CANCEL_REASON_CODE,
                     payload=event_payload,
-                    allow_active_operation_id=operation.id,
+                    allow_active_operation_id=operation_id,
                 )
             else:
                 await repo.add_event(
@@ -520,12 +537,17 @@ class WorkspaceControlService:
                     "expected_version": expected_version,
                 },
             )
+            response = _control_response(
+                workspace=workspace,
+                operation=operation,
+                message="workspace cancellation requested",
+            )
             if committed_before_external_io:
                 await self._session.commit()
         except asyncio.CancelledError as exc:
             if committed_before_external_io:
                 await self._finish_precommitted_cancelled_control_operation_failed(
-                    operation_id=operation.id,
+                    operation_id=operation_id,
                     workspace_id=workspace_id,
                     exc=exc,
                     terminal_runtime_cleanup=terminal_runtime_cleanup,
@@ -542,7 +564,7 @@ class WorkspaceControlService:
             if committed_before_external_io:
                 await _finish_precommitted_control_operation_failed(
                     self._session,
-                    operation_id=operation.id,
+                    operation_id=operation_id,
                     workspace_id=workspace_id,
                     exc=exc,
                     terminal_runtime_cleanup=terminal_runtime_cleanup,
@@ -553,11 +575,8 @@ class WorkspaceControlService:
                     ),
                 )
             raise
-        return _control_response(
-            workspace=workspace,
-            operation=operation,
-            message="workspace cancellation requested",
-        )
+        assert response is not None
+        return response
 
     async def stop_workspace(
         self,
@@ -606,14 +625,18 @@ class WorkspaceControlService:
                 payload=operation_payload,
                 idempotency_key=prepared.idempotency_key,
             )
+        operation_id = operation.id
+        terminal_runtime_snapshot = _snapshot_terminal_runtime_workspace_for_control(workspace)
         await self._commit_before_external_runtime_io()
         terminal_runtime_cleanup: _ControlTerminalRuntimeCleanup | None = None
         try:
             terminal_runtime_cleanup = await self._run_with_teardown_operation_heartbeat(
-                operation.id,
-                self._stop_external_runtime_for_control(workspace),
+                operation_id,
+                self._stop_external_runtime_for_control(terminal_runtime_snapshot),
             )
         except WorkspaceStackStopError as exc:
+            operation = await _require_control_operation(operations, operation_id)
+            workspace = await self._require_workspace(repo, workspace_id)
             await _finish_stack_stop_failed_operation(
                 self._session,
                 operations,
@@ -623,17 +646,19 @@ class WorkspaceControlService:
             )
             raise
         except asyncio.CancelledError:
-            await self._preserve_precommitted_cancelled_operation(operation.id)
+            await self._preserve_precommitted_cancelled_operation(operation_id)
             raise
         except Exception as exc:
             await _finish_precommitted_control_operation_failed(
                 self._session,
-                operation_id=operation.id,
-                workspace_id=workspace.id,
+                operation_id=operation_id,
+                workspace_id=workspace_id,
                 exc=exc,
             )
             raise
+        response: WorkspaceControlResponse | None = None
         try:
+            operation = await _require_control_operation(operations, operation_id)
             workspace = await self._require_workspace_for_update(repo, workspace_id)
             if conflict := _workspace_version_conflict(workspace, expected_version):
                 if terminal_runtime_cleanup is not None:
@@ -667,7 +692,7 @@ class WorkspaceControlService:
                     to=WorkspaceStatus.cancelled,
                     reason_code=_OPERATOR_STOP_REASON_CODE,
                     payload=event_payload,
-                    allow_active_operation_id=operation.id,
+                    allow_active_operation_id=operation_id,
                 )
             else:
                 await repo.add_event(
@@ -704,10 +729,15 @@ class WorkspaceControlService:
                 reason_code=_OPERATOR_STOP_REASON_CODE,
                 extra={"expected_version": expected_version},
             )
+            response = _control_response(
+                workspace=workspace,
+                operation=operation,
+                message="workspace stack stopped",
+            )
             await self._session.commit()
         except asyncio.CancelledError as exc:
             await self._finish_precommitted_cancelled_control_operation_failed(
-                operation_id=operation.id,
+                operation_id=operation_id,
                 workspace_id=workspace_id,
                 exc=exc,
                 terminal_runtime_cleanup=terminal_runtime_cleanup,
@@ -723,7 +753,7 @@ class WorkspaceControlService:
         except Exception as exc:
             await _finish_precommitted_control_operation_failed(
                 self._session,
-                operation_id=operation.id,
+                operation_id=operation_id,
                 workspace_id=workspace_id,
                 exc=exc,
                 terminal_runtime_cleanup=terminal_runtime_cleanup,
@@ -734,15 +764,12 @@ class WorkspaceControlService:
                 ),
             )
             raise
-        return _control_response(
-            workspace=workspace,
-            operation=operation,
-            message="workspace stack stopped",
-        )
+        assert response is not None
+        return response
 
     async def _stop_external_runtime_for_control(
         self,
-        workspace: Workspace,
+        workspace: _ControlTerminalRuntimeWorkspaceSnapshot,
     ) -> _ControlTerminalRuntimeCleanup | None:
         await self._project_stopper(workspace.compose_project_name)
         return await self._cleanup_terminal_runtime_for_control(workspace)
@@ -797,29 +824,29 @@ class WorkspaceControlService:
 
     async def _cleanup_terminal_runtime_for_control(
         self,
-        workspace: Workspace,
+        workspace: _ControlTerminalRuntimeWorkspaceSnapshot,
     ) -> _ControlTerminalRuntimeCleanup | None:
         (
             claim_active,
             claim_owner_id,
-        ) = await self._terminal_runtime_release_claim_active_for_control(workspace)
+        ) = await self._terminal_runtime_release_claim_active_for_control(workspace.workspace_id)
         if claim_active:
             return None
 
         cleanup_worktree_host_path: Path | None = None
         preserved_worktree_host_path: Path | None = None
         if self._worktrees_root is not None:
-            candidate_worktree_path = self._worktrees_root / workspace.id
+            candidate_worktree_path = self._worktrees_root / workspace.workspace_id
             if await asyncio.to_thread(candidate_worktree_path.exists):
                 cleanup_worktree_host_path = candidate_worktree_path
                 preserved_worktree_host_path = candidate_worktree_path
         cleaner = self._cleaner_factory()
         try:
             cleanup = await self._run_with_terminal_runtime_release_claim_heartbeat(
-                workspace.id,
+                workspace.workspace_id,
                 owner_id=claim_owner_id,
                 work=cleaner.cleanup(
-                    workspace_id=workspace.id,
+                    workspace_id=workspace.workspace_id,
                     repo_url=workspace.repo_url,
                     compose_project_name=workspace.compose_project_name,
                     compose_file_path=(
@@ -833,7 +860,7 @@ class WorkspaceControlService:
         except asyncio.CancelledError:
             if claim_owner_id is not None:
                 await self._release_terminal_runtime_claim_for_control_now(
-                    workspace.id,
+                    workspace.workspace_id,
                     owner_id=claim_owner_id,
                 )
             raise
@@ -905,11 +932,11 @@ class WorkspaceControlService:
 
     async def _terminal_runtime_release_claim_active_for_control(
         self,
-        workspace: Workspace,
+        workspace_id: str,
     ) -> tuple[bool, str | None]:
-        locked_workspace = await WorkspaceRepository(self._session).get_for_update(workspace.id)
+        locked_workspace = await WorkspaceRepository(self._session).get_for_update(workspace_id)
         if locked_workspace is None:
-            raise WorkspaceNotFoundError(workspace.id)
+            raise WorkspaceNotFoundError(workspace_id)
         now = datetime.now(UTC)
         claim_owner_id: str | None = None
         claim_required = _control_terminal_runtime_release_claim_required(locked_workspace)
@@ -2139,6 +2166,27 @@ def _control_response(
     )
 
 
+async def _require_control_operation(
+    operations: OperationRepository,
+    operation_id: str,
+) -> Operation:
+    operation = await operations.get(operation_id)
+    if operation is None:
+        raise RuntimeError(f"Control operation {operation_id} disappeared")
+    return operation
+
+
+def _snapshot_terminal_runtime_workspace_for_control(
+    workspace: Workspace,
+) -> _ControlTerminalRuntimeWorkspaceSnapshot:
+    return _ControlTerminalRuntimeWorkspaceSnapshot(
+        workspace_id=workspace.id,
+        repo_url=workspace.repo_url,
+        compose_project_name=workspace.compose_project_name,
+        compose_file_path=workspace.compose_file_path,
+    )
+
+
 def _operator_operation_payload(
     *,
     reason: str | None,
@@ -2414,6 +2462,10 @@ async def _refresh_terminal_runtime_release_claim_loop(
         else interval_seconds
     )
     interval = max(float(interval), 0.001)
+    claim_timeout_seconds = max(float(TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS), 0.001)
+    loop = asyncio.get_running_loop()
+    last_claim_renewed_at = loop.time()
+    last_safe_exception: str | None = None
     while True:
         await asyncio.sleep(interval)
         try:
@@ -2425,19 +2477,32 @@ async def _refresh_terminal_runtime_release_claim_loop(
                 )
                 await session.commit()
         except Exception as exc:
-            safe_exception = redact_audit_text(
+            last_safe_exception = redact_audit_text(
                 f"{type(exc).__name__}: {exc}",
                 limit=1000,
             )
+            elapsed_since_claim_renewal = loop.time() - last_claim_renewed_at
             _log.warning(
                 "controls.terminal_runtime_release_claim_refresh_failed",
                 workspace_id=workspace_id,
                 error=redact_audit_text(repr(exc), limit=400),
+                elapsed_since_claim_renewal_seconds=round(elapsed_since_claim_renewal, 3),
             )
-            return _ControlTerminalRuntimeReleaseClaimFailure(
-                reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
-                error=safe_exception,
-            )
+            if elapsed_since_claim_renewal >= claim_timeout_seconds:
+                _log.warning(
+                    "controls.terminal_runtime_release_claim_refresh_abandoned",
+                    workspace_id=workspace_id,
+                    elapsed_since_claim_renewal_seconds=round(
+                        elapsed_since_claim_renewal,
+                        3,
+                    ),
+                    claim_timeout_seconds=round(claim_timeout_seconds, 3),
+                )
+                return _ControlTerminalRuntimeReleaseClaimFailure(
+                    reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
+                    error=last_safe_exception,
+                )
+            continue
         if not refreshed:
             _log.warning(
                 "controls.terminal_runtime_release_claim_lost",
@@ -2446,6 +2511,7 @@ async def _refresh_terminal_runtime_release_claim_loop(
             return _ControlTerminalRuntimeReleaseClaimFailure(
                 reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
             )
+        last_claim_renewed_at = loop.time()
 
 
 def _terminal_runtime_release_claim_heartbeat_interval_seconds() -> float:

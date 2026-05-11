@@ -516,6 +516,47 @@ class TerminalRuntimeClaimHeartbeatWaitingCleaner(RecordingCleaner):
         raise AssertionError("terminal runtime release claim heartbeat was not renewed")
 
 
+class TerminalRuntimeClaimRetryWaitingCleaner(RecordingCleaner):
+    def __init__(self, *, refresh_after_failure: asyncio.Event) -> None:
+        super().__init__()
+        self._refresh_after_failure = refresh_after_failure
+        self.completed = False
+        self.cancelled = False
+
+    async def cleanup(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> list[str]:
+        self.calls.append(
+            CleanupCall(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                compose_project_name=compose_project_name,
+                compose_file_path=compose_file_path,
+                worktree_host_path=worktree_host_path,
+                remove_volumes=remove_volumes,
+                remove_worktree=remove_worktree,
+            )
+        )
+        try:
+            await asyncio.wait_for(
+                self._refresh_after_failure.wait(),
+                timeout=CONTROL_ASYNC_TEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        self.completed = True
+        return list(self.failures)
+
+
 async def _workspace(
     session: AsyncSession,
     *,
@@ -797,6 +838,62 @@ async def test_cancel_and_stop_release_workspace_lock_before_terminal_runtime_cl
 
 @pytest.mark.unit
 @pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_snapshot_runtime_fields_before_pre_io_commit(
+    action: str,
+) -> None:
+    async with postgres_test_engine() as engine:
+        session_factory = async_sessionmaker(
+            engine,
+            expire_on_commit=True,
+            class_=AsyncSession,
+        )
+        async with session_factory() as session:
+            workspace = await _workspace(session, status=WorkspaceStatus.ready)
+            workspace_id = workspace.id
+            repo_url = workspace.repo_url
+            compose_project_name = workspace.compose_project_name
+            compose_file_path = Path(cast(str, workspace.compose_file_path))
+            await session.commit()
+
+        async with session_factory() as session:
+            service, stopper, cleaner = _service(
+                session,
+                session_factory=session_factory,
+            )
+            if action == "cancel":
+                response = await service.cancel_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    stop_stack=True,
+                )
+            else:
+                response = await service.stop_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                )
+
+        async with session_factory() as session:
+            persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert stopper.calls == [compose_project_name]
+    assert cleaner.calls == [
+        CleanupCall(
+            workspace_id=workspace_id,
+            repo_url=repo_url,
+            compose_project_name=compose_project_name,
+            compose_file_path=compose_file_path,
+            worktree_host_path=None,
+            remove_volumes=False,
+            remove_worktree=False,
+        )
+    ]
+    assert persisted is not None
+    assert persisted.status == WorkspaceStatus.cancelled.value
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
 async def test_cancel_and_stop_skip_cleanup_when_terminal_release_claim_is_active(
     action: str,
 ) -> None:
@@ -954,6 +1051,88 @@ async def test_cancel_and_stop_refresh_terminal_release_claim_during_cleanup(
     assert cleaner.initial_claim_expires_at is not None
     assert cleaner.heartbeat_seen_at is not None
     assert cleaner.heartbeat_seen_at > cleaner.initial_claim_expires_at
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("action", "status"),
+    [
+        ("cancel", WorkspaceStatus.cancelled),
+        ("stop", WorkspaceStatus.completed),
+    ],
+)
+async def test_cancel_and_stop_retry_terminal_release_claim_refresh_after_transient_db_error(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    status: WorkspaceStatus,
+) -> None:
+    monkeypatch.setattr(
+        controls_module,
+        "_terminal_runtime_release_claim_heartbeat_interval_seconds",
+        lambda: 0.001,
+    )
+    workspace = await _workspace(session, status=status)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    refresh_after_failure = asyncio.Event()
+    refresh_attempts = 0
+    original_refresh_execution_claim = WorkspaceRepository.refresh_execution_claim
+
+    async def _fail_first_claim_refresh(
+        repo: WorkspaceRepository,
+        requested_workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        nonlocal refresh_attempts
+        if requested_workspace_id == workspace_id:
+            refresh_attempts += 1
+            if refresh_attempts == 1:
+                raise SQLAlchemyError("database unavailable")
+        refreshed = await original_refresh_execution_claim(
+            repo,
+            requested_workspace_id,
+            owner_id=owner_id,
+            lease_expires_at=lease_expires_at,
+        )
+        if requested_workspace_id == workspace_id and refreshed:
+            refresh_after_failure.set()
+        return refreshed
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "refresh_execution_claim",
+        _fail_first_claim_refresh,
+    )
+    cleaner = TerminalRuntimeClaimRetryWaitingCleaner(
+        refresh_after_failure=refresh_after_failure,
+    )
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    with capture_logs() as logs:
+        if action == "cancel":
+            response = await service.cancel_workspace(
+                workspace_id,
+                reason="repeat cancel",
+                stop_stack=True,
+            )
+        else:
+            response = await service.stop_workspace(
+                workspace_id,
+                reason="repeat stop",
+            )
+
+    assert any(
+        log["event"] == "controls.terminal_runtime_release_claim_refresh_failed" for log in logs
+    )
+    assert response.status == status
+    assert refresh_attempts >= 2
+    assert stopper.calls == [compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert cleaner.completed is True
+    assert cleaner.cancelled is False
 
 
 @pytest.mark.unit

@@ -1737,7 +1737,7 @@ async def test_terminal_runtime_claim_active_for_control_handles_missing_workspa
 
         with pytest.raises(controls.WorkspaceNotFoundError):
             await service._terminal_runtime_release_claim_active_for_control(  # noqa: SLF001
-                SimpleNamespace(id="ws_missing"),
+                "ws_missing",
             )
 
 
@@ -1755,7 +1755,7 @@ async def test_terminal_runtime_claim_active_for_control_returns_owner_with_expi
         )
 
         active, claim_owner_id = await service._terminal_runtime_release_claim_active_for_control(  # noqa: SLF001
-            workspace,
+            workspace.id,
         )
 
     assert active is False
@@ -1779,7 +1779,7 @@ async def test_terminal_runtime_claim_active_for_control_preserves_active_stale_
         )
 
         active, claim_owner_id = await service._terminal_runtime_release_claim_active_for_control(  # noqa: SLF001
-            workspace,
+            workspace.id,
         )
 
     assert active
@@ -2022,13 +2022,14 @@ async def test_teardown_operation_heartbeat_edges(
         ("lost", TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE),
     ],
 )
-async def test_terminal_runtime_release_claim_refresh_loop_stops_on_error_or_lost_claim(
+async def test_terminal_runtime_release_claim_refresh_loop_stops_after_error_grace_or_lost_claim(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
     expected_reason_code: str,
 ) -> None:
     factory = make_session_factory(engine)
+    refresh_attempts = 0
 
     async def refresh_claim(
         self: WorkspaceRepository,
@@ -2037,7 +2038,9 @@ async def test_terminal_runtime_release_claim_refresh_loop_stops_on_error_or_los
         owner_id: str,
         lease_expires_at: datetime,
     ) -> bool:
+        nonlocal refresh_attempts
         del self, workspace_id, owner_id, lease_expires_at
+        refresh_attempts += 1
         if mode == "raise":
             raise RuntimeError("database unavailable")
         return False
@@ -2047,6 +2050,7 @@ async def test_terminal_runtime_release_claim_refresh_loop_stops_on_error_or_los
         "_terminal_runtime_release_claim_heartbeat_interval_seconds",
         lambda: 0.001,
     )
+    monkeypatch.setattr(controls, "TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS", 0.003)
     monkeypatch.setattr(
         WorkspaceRepository,
         "refresh_execution_claim",
@@ -2059,6 +2063,12 @@ async def test_terminal_runtime_release_claim_refresh_loop_stops_on_error_or_los
         owner_id="terminal_runtime_release:control:test",
     )
     assert failure.reason_code == expected_reason_code
+    if mode == "raise":
+        assert refresh_attempts >= 2
+        assert failure.error == "RuntimeError: database unavailable"
+    else:
+        assert refresh_attempts == 1
+        assert failure.error is None
 
 
 async def _create_control_workspace(
