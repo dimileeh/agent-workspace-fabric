@@ -1427,14 +1427,20 @@ class ControlWorker:
                 ):
                     raise
                 return
-        finally:
-            if cleanup_task is not None and not cleanup_task.done():
-                cleanup_task.cancel()
+            finally:
+                if cleanup_task is not None and not cleanup_task.done():
+                    cleanup_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await cleanup_task
+                heartbeat.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    await cleanup_task
-            heartbeat.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await heartbeat
+                    await heartbeat
+        except asyncio.CancelledError:
+            await self._release_stale_active_execution_claim_after_cleanup_cancellation(
+                candidate.workspace_id,
+                owner_id=claim_owner,
+            )
+            raise
 
         if not cleanup.ok:
             await self._record_stale_active_execution_cleanup_failed(
@@ -1446,6 +1452,24 @@ class ControlWorker:
             return
 
         await self._fail_stale_active_execution(candidate, snapshot, cleanup=cleanup)
+
+    async def _release_stale_active_execution_claim_after_cleanup_cancellation(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> None:
+        release_task = asyncio.create_task(
+            self._release_execution_claim(workspace_id, owner_id=owner_id),
+            name=f"awf-stale-cleanup-claim-release-{workspace_id}",
+        )
+        while not release_task.done():
+            try:
+                await asyncio.shield(release_task)
+            except asyncio.CancelledError:
+                continue
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            release_task.result()
 
     async def _await_stale_cleanup_or_claim_loss(
         self,
