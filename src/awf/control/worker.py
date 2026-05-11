@@ -937,8 +937,19 @@ class ControlWorker:
             # The cleaner derives ``awf_<workspace_id>`` and falls back to
             # label-based removal, so legacy rows that predate persistence of
             # either field can still have a leaked default Compose project torn
-            # down. ``~released_event_exists`` keeps each row to a single sweep.
-            .where(Workspace.node_id == self._config.node_id)
+            # down. Also include rows with NULL ``node_id``: the provisioner
+            # only stamps placement on the success path, so a stack-launch
+            # failure (e.g. service startup) that already created Docker
+            # resources transitions to ``failed`` without persisting
+            # ``node_id``. Excluding those would strand the leaked
+            # ``awf_<workspace_id>`` project and keep orphan readiness blocked.
+            # ``~released_event_exists`` keeps each row to a single sweep.
+            .where(
+                or_(
+                    Workspace.node_id == self._config.node_id,
+                    Workspace.node_id.is_(None),
+                )
+            )
             .where(~released_event_exists)
             .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
         )
