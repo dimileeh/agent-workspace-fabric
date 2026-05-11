@@ -410,6 +410,67 @@ async def test_rerun_transient_ci_action_records_failed_rerun_request(
 
 
 @pytest.mark.unit
+async def test_rerun_transient_ci_without_run_ids_dispatches_agent_repair(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    failure = CheckFailure(
+        name="python-full-coverage",
+        conclusion="FAILURE",
+        log_excerpt="HTTP status server error (502 Bad Gateway)",
+    )
+    status = _status(
+        check_state=CheckState.FAILURE,
+        ci_failures=(failure,),
+        head_sha="abc1234567890def",
+    )
+    state = MonitorState()
+    state_key = _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+    ci_fix_calls: list[dict[str, object]] = []
+
+    async def _record_ci_fix(**kwargs: object) -> _GitPushResult:
+        ci_fix_calls.append(kwargs)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    mocker.patch.object(runner, "_run_ci_fix", _record_ci_fix)
+
+    terminal = await runner._execute(
+        action=RerunTransientCI(failures=(failure,)),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert cmd.calls == []
+    assert ci_fix_calls[0]["failures"] == (failure,)
+    assert state_key not in state.threads_addressed_ids
+    async with factory() as session:
+        operations = list((await session.execute(select(Operation))).scalars())
+    assert [op.payload["action"] for op in operations] == ["ci_repair"]
+    assert operations[0].status == OperationStatus.succeeded.value
+
+
+@pytest.mark.unit
 def test_ci_transient_rerun_attempt_treats_corrupt_count_as_zero() -> None:
     failure = CheckFailure(
         name="python-full-coverage",

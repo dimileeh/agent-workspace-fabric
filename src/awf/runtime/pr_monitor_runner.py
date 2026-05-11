@@ -1504,6 +1504,22 @@ class PullRequestMonitorRunner:
             run_ids = tuple(
                 dict.fromkeys(failure.run_id for failure in action.failures if failure.run_id)
             )
+            if not run_ids:
+                return await self._execute(
+                    action=ReportCiFailure(failures=action.failures),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                    remote_push_url=remote_push_url,
+                )
             failures_payload = [_ci_failure_payload(failure) for failure in action.failures]
             operation = await self._begin_monitor_operation(
                 workspace_id=workspace_id,
