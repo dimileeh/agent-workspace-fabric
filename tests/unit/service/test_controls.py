@@ -403,7 +403,8 @@ async def test_stop_and_cancel_record_terminal_cleanup_before_version_conflict(
         await seed_session.commit()
 
     class _VersionBumpingStopper:
-        calls: list[str | None] = []
+        def __init__(self) -> None:
+            self.calls: list[str | None] = []
 
         async def __call__(self, compose_project_name: str | None) -> None:
             self.calls.append(compose_project_name)
