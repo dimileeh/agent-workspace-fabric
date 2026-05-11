@@ -910,17 +910,22 @@ class ControlWorker:
 
         candidates: list[_TerminalRuntimeCandidate] = []
         for row in rows:
-            compose_project_name = row[3]
-            repo_url = row[2]
+            (
+                workspace_id,
+                status_val,
+                repo_url,
+                compose_project_name,
+                compose_file_path,
+            ) = row
             if not compose_project_name or not repo_url:
                 continue
             candidates.append(
                 _TerminalRuntimeCandidate(
-                    workspace_id=row[0],
-                    status=WorkspaceStatus(row[1]),
+                    workspace_id=workspace_id,
+                    status=WorkspaceStatus(status_val),
                     repo_url=repo_url,
                     compose_project_name=compose_project_name,
-                    compose_file_path=row[4],
+                    compose_file_path=compose_file_path,
                 )
             )
         return candidates
