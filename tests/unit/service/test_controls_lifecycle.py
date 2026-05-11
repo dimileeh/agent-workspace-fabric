@@ -2577,6 +2577,83 @@ async def test_cancel_and_stop_complete_when_terminal_release_event_recording_hi
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_complete_when_terminal_release_claim_release_raises(
+    session: AsyncSession,
+    action: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.completed)
+    workspace.execution_claimed_by = "worker:expired-execution"
+    workspace.execution_claim_expires_at = datetime.now(UTC) - timedelta(minutes=5)
+    service, stopper, cleaner = _service(session)
+    release_attempts = 0
+    original_release_execution_claim = WorkspaceRepository.release_execution_claim
+
+    async def _raise_claim_release_failure(
+        repo: WorkspaceRepository,
+        requested_workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> bool:
+        nonlocal release_attempts
+        if requested_workspace_id == workspace.id:
+            release_attempts += 1
+            await session.execute(text("SELECT 1 / 0"))
+            return False
+        return await original_release_execution_claim(
+            repo,
+            requested_workspace_id,
+            owner_id=owner_id,
+        )
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "release_execution_claim",
+        _raise_claim_release_failure,
+    )
+
+    with capture_logs() as captured:
+        if action == "cancel":
+            response = await service.cancel_workspace(
+                workspace.id,
+                reason="repeat cancel",
+                stop_stack=True,
+            )
+        else:
+            response = await service.stop_workspace(
+                workspace.id,
+                reason="repeat stop",
+            )
+
+    operations = await _operations(session, workspace.id)
+    release_events = [
+        event
+        for event in await _events(session, workspace.id)
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+    await session.refresh(workspace)
+
+    assert response.status == WorkspaceStatus.completed
+    assert stopper.calls == [workspace.compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert release_attempts == 1
+    assert operations[0].status == OperationStatus.succeeded.value
+    assert operations[0].result == {"status": WorkspaceStatus.completed.value}
+    assert [event.event_type for event in release_events] == ["workspace.terminal_runtime_released"]
+    assert workspace.execution_claimed_by is not None
+    assert workspace.execution_claimed_by.startswith(
+        f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:"
+    )
+    assert workspace.execution_claim_expires_at is not None
+    assert any(
+        entry["event"] == "controls.terminal_runtime_release_claim_clear_failed"
+        and entry["workspace_id"] == workspace.id
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
 async def test_terminal_runtime_release_event_flush_failure_is_logged_without_raising(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

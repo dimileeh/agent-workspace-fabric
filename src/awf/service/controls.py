@@ -1051,10 +1051,22 @@ class WorkspaceControlService:
     ) -> None:
         if release.claim_owner_id is None:
             return
-        released = await WorkspaceRepository(self._session).release_execution_claim(
-            workspace.id,
-            owner_id=release.claim_owner_id,
-        )
+        if _session_has_pending_state(self._session):
+            await self._session.flush()
+        try:
+            async with self._session.begin_nested():
+                released = await WorkspaceRepository(self._session).release_execution_claim(
+                    workspace.id,
+                    owner_id=release.claim_owner_id,
+                )
+        except Exception as exc:
+            _log.warning(
+                "controls.terminal_runtime_release_claim_clear_failed",
+                workspace_id=workspace.id,
+                owner_id=release.claim_owner_id,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
+            return
         if released:
             workspace.execution_claimed_by = None
             workspace.execution_claim_expires_at = None
