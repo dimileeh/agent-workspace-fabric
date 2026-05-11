@@ -1728,18 +1728,44 @@ class ControlWorker:
                 allow_non_terminal=allow_non_terminal,
             )
             await session.commit()
-        except Exception as exc:
-            with contextlib.suppress(Exception):
-                await session.rollback()
-            _log.warning(
-                "worker.stale_active_execution_release_commit_failed",
+        except asyncio.CancelledError as exc:
+            await self._release_stale_active_execution_claim_after_commit_failure(
+                session,
                 workspace_id=workspace_id,
                 source=source,
-                owner_id=cleanup_owner,
-                error=redact_audit_text(repr(exc), limit=400),
+                cleanup_owner=cleanup_owner,
+                exc=exc,
             )
-            await self._release_execution_claim(workspace_id, owner_id=cleanup_owner)
+            raise
+        except Exception as exc:
+            await self._release_stale_active_execution_claim_after_commit_failure(
+                session,
+                workspace_id=workspace_id,
+                source=source,
+                cleanup_owner=cleanup_owner,
+                exc=exc,
+            )
             raise _StaleActiveExecutionReleaseCommitError(str(exc)) from exc
+
+    async def _release_stale_active_execution_claim_after_commit_failure(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        source: str,
+        cleanup_owner: str,
+        exc: BaseException,
+    ) -> None:
+        with contextlib.suppress(Exception):
+            await session.rollback()
+        _log.warning(
+            "worker.stale_active_execution_release_commit_failed",
+            workspace_id=workspace_id,
+            source=source,
+            owner_id=cleanup_owner,
+            error=redact_audit_text(repr(exc), limit=400),
+        )
+        await self._release_execution_claim(workspace_id, owner_id=cleanup_owner)
 
     async def _record_terminal_runtime_release_event_in_session(
         self,

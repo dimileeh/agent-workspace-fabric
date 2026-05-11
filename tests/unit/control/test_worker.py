@@ -5858,6 +5858,76 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
 
     @pytest.mark.unit
+    async def test_stale_active_execution_flush_cancellation_releases_cleanup_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-running-flush-cancelled",
+            WorkspaceStatus.running,
+            compose_project_name="awf_stale_flush_cancelled",
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_stale_flush_cancelled",
+            repo_url=str(origin_repo),
+        )
+        snapshot = RuntimeSnapshot(stack_state="running", reason="lost worker task")
+        assert await worker._record_stale_active_execution_detected(candidate, snapshot)
+
+        original_flush = AsyncSession.flush
+
+        async def _cancel_release_commit_flush(
+            self: AsyncSession,
+            objects: Sequence[Any] | None = None,
+        ) -> None:
+            frame = inspect.currentframe()
+            caller = frame.f_back if frame is not None else None
+            if (
+                caller is not None
+                and caller.f_code.co_name == "_record_stale_active_execution_release_and_commit"
+            ):
+                raise asyncio.CancelledError("synthetic stale cleanup cancellation")
+            await original_flush(self, objects)
+
+        monkeypatch.setattr(AsyncSession, "flush", _cancel_release_commit_flush)
+
+        with pytest.raises(
+            asyncio.CancelledError,
+            match="synthetic stale cleanup cancellation",
+        ):
+            await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)
+
+        assert len(cleaner.calls) == 1
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+        assert ws.failure_reason is None
+        assert not any(
+            event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+            for event in events
+        )
+
+    @pytest.mark.unit
     async def test_stale_active_scan_continues_when_release_commit_fails(
         self,
         session_factory: async_sessionmaker[AsyncSession],
