@@ -198,6 +198,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#port_config_invalid](#port_config_invalid)
 
+### PROTECTED_SCOPE_DIFF_UNAVAILABLE
+**Problem:** The PR monitor could not verify protected-scope changes against the remote PR branch before push.
+**Likely Cause:** The PR branch diff baseline could not be fetched because of a GitHub/network failure, a missing remote ref, or delayed ref replication.
+**Operator Fix:** Verify GitHub/network access and the PR branch ref, then remonitor the workspace once the remote branch is reachable.
+**Related Command:** `awf workspace remonitor <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#protected_scope_diff_unavailable](#protected_scope_diff_unavailable)
+
 ### PR_ADOPTION_INPUT_REQUIRED
 **Problem:** A PR monitor adoption request omitted required input.
 **Likely Cause:** The request did not include enough repository or PR information to identify the PR.

@@ -240,6 +240,7 @@ _CI_TRANSIENT_RERUN_REASON = "CI_TRANSIENT_RERUN"
 _CI_TRANSIENT_RERUN_FAILED_REASON = "CI_TRANSIENT_RERUN_FAILED"
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
+_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 _RECOVERY_SNAPSHOT_ALREADY_HANDLED_REASON = "RECOVERY_SNAPSHOT_ALREADY_HANDLED"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
@@ -379,7 +380,14 @@ class _GitPushResult:
 
     @property
     def protected_scope_blocked(self) -> bool:
-        return self.failed and self.reason_code == _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
+        return self.failed and self.reason_code in {
+            _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+            _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+        }
+
+    @property
+    def protected_scope_diff_unavailable(self) -> bool:
+        return self.failed and self.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
 
     def failure_evidence(self) -> dict[str, object]:
         evidence: dict[str, object] = {
@@ -391,6 +399,20 @@ class _GitPushResult:
         if self.recovered_by_resync:
             evidence["recovered_by_resync"] = True
         return evidence
+
+
+@dataclass(frozen=True)
+class _ProtectedScopePushBlock:
+    message: str
+    reason_code: str
+
+
+def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
+    if push_result.protected_scope_diff_unavailable:
+        return "protected_scope_diff_unavailable"
+    if push_result.protected_scope_blocked:
+        return "protected_scope_push_blocked"
+    return "git_push_failed"
 
 
 @dataclass(frozen=True)
@@ -1733,11 +1755,7 @@ class PullRequestMonitorRunner:
                 return True
             if push_result.failed:
                 reason_code = push_result.reason_code
-                outcome = (
-                    "protected_scope_push_blocked"
-                    if push_result.protected_scope_blocked
-                    else "git_push_failed"
-                )
+                outcome = _git_push_failure_outcome(push_result)
                 await self._finish_monitor_operation(
                     operation,
                     status=OperationStatus.failed,
@@ -1769,8 +1787,8 @@ class PullRequestMonitorRunner:
                 if push_result.protected_scope_blocked:
                     await self._terminate_failed(
                         workspace_id,
-                        message=push_result.error_message or _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
-                        reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
                     )
                     return True
                 state.iter_count += 1
@@ -1893,11 +1911,7 @@ class PullRequestMonitorRunner:
                 return True
             if push_result.failed:
                 reason_code = push_result.reason_code
-                outcome = (
-                    "protected_scope_push_blocked"
-                    if push_result.protected_scope_blocked
-                    else "git_push_failed"
-                )
+                outcome = _git_push_failure_outcome(push_result)
                 await self._finish_monitor_operation(
                     operation,
                     status=OperationStatus.failed,
@@ -1915,8 +1929,8 @@ class PullRequestMonitorRunner:
                 if push_result.protected_scope_blocked:
                     await self._terminate_failed(
                         workspace_id,
-                        message=push_result.error_message or _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
-                        reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
                     )
                     return True
                 state.iter_count += 1
@@ -3679,7 +3693,7 @@ class PullRequestMonitorRunner:
 
         # 3) Push everything we committed.
         worktree_path = self._worktrees_root / workspace_id
-        protected_scope_message = await self._protected_scope_push_block_message(
+        protected_scope_block = await self._protected_scope_push_block(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             remote_branch=remote_branch,
@@ -3690,10 +3704,10 @@ class PullRequestMonitorRunner:
                 pushed=False,
                 failed=True,
                 returncode=1,
-                stderr=protected_scope_message,
-                reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+                stderr=protected_scope_block.message,
+                reason_code=protected_scope_block.reason_code,
             )
-            if protected_scope_message is not None
+            if protected_scope_block is not None
             else await self._git_push_result(
                 worktree_path=worktree_path,
                 remote_branch=remote_branch,
@@ -4106,19 +4120,19 @@ class PullRequestMonitorRunner:
                 )
 
         # Whether or not we hit conflicts, push what we have.
-        protected_scope_message = await self._protected_scope_push_block_message(
+        protected_scope_block = await self._protected_scope_push_block(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
         )
-        if protected_scope_message is not None:
+        if protected_scope_block is not None:
             return _GitPushResult(
                 pushed=False,
                 failed=True,
                 returncode=1,
-                stderr=protected_scope_message,
-                reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+                stderr=protected_scope_block.message,
+                reason_code=protected_scope_block.reason_code,
             )
         return await self._git_push_result(
             worktree_path=worktree_path,
@@ -4192,19 +4206,19 @@ class PullRequestMonitorRunner:
                 workspace_id=workspace_id,
                 stderr=agent_run_err.result.stderr[:400],
             )
-        protected_scope_message = await self._protected_scope_push_block_message(
+        protected_scope_block = await self._protected_scope_push_block(
             workspace_id=workspace_id,
             worktree_path=self._worktrees_root / workspace_id,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
         )
-        if protected_scope_message is not None:
+        if protected_scope_block is not None:
             return _GitPushResult(
                 pushed=False,
                 failed=True,
                 returncode=1,
-                stderr=protected_scope_message,
-                reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+                stderr=protected_scope_block.message,
+                reason_code=protected_scope_block.reason_code,
             )
         return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
@@ -4481,14 +4495,14 @@ class PullRequestMonitorRunner:
             )
         return tuple(line.strip() for line in diff_result.stdout.splitlines() if line.strip())
 
-    async def _protected_scope_push_block_message(
+    async def _protected_scope_push_block(
         self,
         *,
         workspace_id: str,
         worktree_path: Path,
         remote_branch: str,
         remote_push_url: str | None = None,
-    ) -> str | None:
+    ) -> _ProtectedScopePushBlock | None:
         if not worktree_path.exists():
             return None
         try:
@@ -4510,7 +4524,7 @@ class PullRequestMonitorRunner:
                 events=[
                     WorkspaceEventCreate(
                         event_type="workspace.monitor_protected_scope_push_blocked",
-                        reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+                        reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
                         payload={
                             "reason": "diff_baseline_unavailable",
                             "remote_branch": remote_branch,
@@ -4519,7 +4533,10 @@ class PullRequestMonitorRunner:
                     )
                 ],
             )
-            return message
+            return _ProtectedScopePushBlock(
+                message=message,
+                reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+            )
         if not violations:
             return None
         message = quality_gate_violation_message(violations)
@@ -4539,7 +4556,10 @@ class PullRequestMonitorRunner:
                 )
             ],
         )
-        return message
+        return _ProtectedScopePushBlock(
+            message=message,
+            reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+        )
 
     async def _protected_scope_repair_prompt(
         self,
