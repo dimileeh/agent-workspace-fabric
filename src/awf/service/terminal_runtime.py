@@ -515,10 +515,7 @@ def _terminal_runtime_release_post_cleanup_claim_failure_result(
     *,
     cleanup: WorkspaceCleanupResult,
 ) -> TerminalRuntimeReleaseResult:
-    if cleanup.ok and claim_failure.reason_code in {
-        TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
-        TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
-    }:
+    if cleanup.ok and claim_failure.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE:
         return TerminalRuntimeReleaseResult(
             workspace_id=workspace_id,
             status="released",

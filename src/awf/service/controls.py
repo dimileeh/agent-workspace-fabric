@@ -873,11 +873,6 @@ class WorkspaceControlService:
                 if work_task in done:
                     return work_task.result()
                 claim_failure = heartbeat_task.result()
-                if (
-                    claim_failure.reason_code
-                    == TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE
-                ):
-                    return await work_task
                 work_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await work_task

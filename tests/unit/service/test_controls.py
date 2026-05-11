@@ -718,7 +718,7 @@ async def test_terminal_runtime_release_claim_heartbeat_helper_cancels_pending_w
 
 
 @pytest.mark.unit
-async def test_terminal_runtime_release_claim_heartbeat_helper_keeps_cleanup_on_refresh_error(
+async def test_terminal_runtime_release_claim_heartbeat_helper_cancels_cleanup_on_refresh_error(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -731,7 +731,6 @@ async def test_terminal_runtime_release_claim_heartbeat_helper_keeps_cleanup_on_
             session_factory=factory,
         )
         work_started = asyncio.Event()
-        finish_work = asyncio.Event()
         work_cancelled = asyncio.Event()
 
         async def _claim_loop_refresh_failed(*_args: object, **_kwargs: object) -> object:
@@ -743,7 +742,7 @@ async def test_terminal_runtime_release_claim_heartbeat_helper_keeps_cleanup_on_
         async def _pending_work() -> str:
             work_started.set()
             try:
-                await finish_work.wait()
+                await asyncio.Event().wait()
             except asyncio.CancelledError:
                 work_cancelled.set()
                 raise
@@ -763,10 +762,13 @@ async def test_terminal_runtime_release_claim_heartbeat_helper_keeps_cleanup_on_
         )
         await work_started.wait()
         await asyncio.sleep(0)
-        finish_work.set()
 
-        assert await helper == "cleaned"
-        assert not work_cancelled.is_set()
+        with pytest.raises(
+            RuntimeError,
+            match="terminal runtime release claim heartbeat stopped before cleanup completed",
+        ):
+            await helper
+        assert work_cancelled.is_set()
 
 
 @pytest.mark.unit

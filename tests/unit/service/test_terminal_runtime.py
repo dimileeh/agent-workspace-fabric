@@ -737,6 +737,34 @@ def test_post_cleanup_claim_failure_preserves_failed_cleanup_status() -> None:
 
 
 @pytest.mark.unit
+def test_post_cleanup_claim_refresh_failure_after_successful_cleanup_is_conservative() -> None:
+    cleanup = WorkspaceCleanupResult.from_steps(
+        [
+            WorkspaceCleanupStepResult(
+                name="compose_down",
+                status="succeeded",
+                reason_code=COMPOSE_DOWN_SUCCEEDED,
+            )
+        ]
+    )
+
+    result = _terminal_runtime_release_post_cleanup_claim_failure_result(
+        "ws_claim_refresh_failed",
+        _TerminalRuntimeReleaseClaimFailure(
+            reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
+        ),
+        cleanup=cleanup,
+    )
+
+    assert not result.ok
+    assert result.status == "failed"
+    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE
+    assert result.cleanup is not None
+    assert result.cleanup.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE
+    assert result.cleanup.steps[-1].name == "terminal_runtime_release_claim"
+
+
+@pytest.mark.unit
 async def test_terminal_runtime_release_stops_compose_without_destroying_salvage(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1263,7 +1291,7 @@ async def test_terminal_runtime_release_fails_when_claim_refresh_fails_during_cl
 
 
 @pytest.mark.unit
-async def test_terminal_runtime_release_succeeds_when_final_claim_refresh_fails_after_cleanup(
+async def test_terminal_runtime_release_fails_when_final_claim_refresh_fails_after_cleanup(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1285,11 +1313,12 @@ async def test_terminal_runtime_release_succeeds_when_final_claim_refresh_fails_
         expected_status=WorkspaceStatus.failed,
     )
 
-    assert result.ok
-    assert result.status == "released"
+    assert not result.ok
+    assert result.status == "failed"
     assert result.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE
     assert result.cleanup is not None
-    assert result.cleanup.ok
+    assert result.cleanup.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE
+    assert result.cleanup.steps[-1].name == "terminal_runtime_release_claim"
     assert cleaner.calls == [
         {
             "workspace_id": workspace_id,
