@@ -1161,6 +1161,13 @@ class TestFailureHandling:
             await provisioner.provision(ws_id)
 
         assert releaser.calls == ["provisioner.stack_startup_failed"]
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == FailureReason.service_startup_failure.value
+            assert reloaded.failure_message is not None
+            assert "container healthcheck failed" in reloaded.failure_message
 
     @pytest.mark.unit
     async def test_stack_startup_failure_records_computed_egress_audit(
