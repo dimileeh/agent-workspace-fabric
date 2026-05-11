@@ -1027,7 +1027,7 @@ class TestRender:
         assert process.wait_called is True
 
     @pytest.mark.unit
-    async def test_wait_for_quiescence_drains_active_processes_after_cancellation(
+    async def test_wait_for_quiescence_drains_active_processes_before_reraising_cancellation(
         self,
         manager: ComposeManager,
     ) -> None:
@@ -1044,6 +1044,36 @@ class TestRender:
 
         process.returncode = 0
         process.allow_exit.set()
-        await asyncio.wait_for(task, timeout=1)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
 
+        assert process not in manager._active_processes  # noqa: SLF001
+
+    @pytest.mark.unit
+    async def test_wait_for_quiescence_reraises_cancellation_after_wait_already_done(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        process = _QuiescenceProcess()
+        process.returncode = 0
+        process.allow_exit.set()
+        manager._active_processes.add(process)  # noqa: SLF001
+        real_shield = compose_module.asyncio.shield
+        cancellation_injected = False
+
+        async def _shield_after_completion(awaitable: object) -> object:
+            nonlocal cancellation_injected
+            result = await real_shield(awaitable)
+            if not cancellation_injected:
+                cancellation_injected = True
+                raise asyncio.CancelledError
+            return result
+
+        monkeypatch.setattr(compose_module.asyncio, "shield", _shield_after_completion)
+
+        with pytest.raises(asyncio.CancelledError):
+            await manager.wait_for_quiescence()
+
+        assert cancellation_injected is True
         assert process not in manager._active_processes  # noqa: SLF001

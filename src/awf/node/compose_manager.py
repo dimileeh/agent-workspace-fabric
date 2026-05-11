@@ -403,6 +403,7 @@ class ComposeManager:
 
     async def wait_for_quiescence(self) -> None:
         """Wait until all subprocess handles this manager spawned have exited."""
+        cancellation: asyncio.CancelledError | None = None
         while self._active_processes:
             processes = tuple(self._active_processes)
             wait_for_exit = asyncio.gather(
@@ -413,11 +414,14 @@ class ComposeManager:
                 try:
                     await asyncio.shield(wait_for_exit)
                     break
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
                     if wait_for_exit.done():
                         break
             for process in processes:
                 self._active_processes.discard(process)
+        if cancellation is not None:
+            raise cancellation
 
     # ── Internals ──────────────────────────────────────────────────────────
 
