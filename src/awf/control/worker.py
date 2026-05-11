@@ -1492,8 +1492,16 @@ class ControlWorker:
             ):
                 return False
 
-            ws.execution_claimed_by = self._stale_active_execution_cleanup_owner()
-            ws.execution_claim_expires_at = self._execution_claim_expires_at()
+            claimed = await repo.claim_execution_if_available(
+                candidate.workspace_id,
+                owner_id=self._stale_active_execution_cleanup_owner(),
+                lease_expires_at=self._execution_claim_expires_at(),
+                statuses=(candidate.status,),
+                claim_cutoff=now,
+                block_active_teardown_operation=True,
+            )
+            if claimed is None:
+                return False
             await session.commit()
             return True
 

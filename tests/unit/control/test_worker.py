@@ -6110,6 +6110,61 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    async def test_stale_active_execution_cleanup_skips_active_teardown_before_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-cleanup-active-teardown-before-claim",
+            WorkspaceStatus.running,
+            compose_project_name="awf_stale_cleanup_active_teardown_before_claim",
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_stale_cleanup_active_teardown_before_claim",
+            repo_url=str(origin_repo),
+        )
+        snapshot = RuntimeSnapshot(stack_state="running", reason="lost worker task")
+        assert await worker._record_stale_active_execution_detected(candidate, snapshot)
+
+        async with session_factory() as s:
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.stop,
+                status=OperationStatus.running,
+                payload={"requested_action": OperationType.stop.value},
+            )
+            await s.commit()
+
+        await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)
+
+        assert cleaner.calls == []
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            assert ws.failure_reason is None
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+
+        assert not any(
+            event.event_type == "workspace.terminal_runtime_released" for event in events
+        )
+
+    @pytest.mark.unit
     async def test_stale_active_execution_cleanup_rechecks_refresh_after_claim(
         self,
         session_factory: async_sessionmaker[AsyncSession],
