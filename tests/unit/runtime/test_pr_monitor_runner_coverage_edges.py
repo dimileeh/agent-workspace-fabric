@@ -12,7 +12,7 @@ import structlog
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
@@ -2347,6 +2347,9 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     workspace_id = await seed_monitoring_workspace(factory)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout="")  # committed diff has no protected paths
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
     runner = make_runner(
         factory=factory,
@@ -2418,6 +2421,7 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout="")  # committed diff has no protected paths
     cmd.queue_result(
         returncode=128,
@@ -2976,6 +2980,7 @@ async def test_execute_sync_base_protected_scope_block_is_terminal(
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
@@ -3285,6 +3290,9 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
         (0, "", ""),
         (1, "", ""),
         (0, "", ""),
+        (0, "", ""),  # fetch remote branch for committed diff
+        (0, "merge-base-sha\n", ""),
+        (0, "src/conflict.py\n", ""),
         (0, "", ""),
     ]:
         cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
@@ -3396,6 +3404,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
@@ -3469,6 +3478,7 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\n")
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout="")  # diff against refreshed base excludes base changes
@@ -3529,6 +3539,7 @@ async def test_ci_fix_records_agent_failure_but_commits_and_pushes_changes(
         (1, "", ""),
         (0, "", ""),
         (0, "", ""),  # fetch remote branch for committed diff
+        (0, "merge-base-sha\n", ""),
         (0, "tests/test_app.py\n", ""),  # committed diff is inside ordinary test files
         (0, "", ""),
     ]:
@@ -3710,6 +3721,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
@@ -3746,7 +3758,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
         args[:1] == ["git"]
         and "diff" in args
         and "--name-only" in args
-        and "FETCH_HEAD..HEAD" in args
+        and "merge-base-sha..HEAD" in args
         for args in call_args
     )
     assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
@@ -3777,6 +3789,7 @@ async def test_execute_ci_fix_protected_scope_block_is_terminal(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
@@ -3965,6 +3978,7 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
 ) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout="src/fix.py\n\n tests/test_fix.py \n")
     runner = make_runner(
         factory=factory,
@@ -3989,7 +4003,79 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
         "https://github.com/org/fork.git",
         "refs/heads/awf/ws_remote_missing",
     ]
-    assert cmd.calls[1].args[3:6] == ["diff", "--name-only", "FETCH_HEAD..HEAD"]
+    assert cmd.calls[1].args == [
+        "git",
+        "-C",
+        str(tmp_path / "worktree"),
+        "merge-base",
+        "FETCH_HEAD",
+        "HEAD",
+    ]
+    assert cmd.calls[2].args[3:6] == ["diff", "--name-only", "merge-base-sha..HEAD"]
+
+
+@pytest.mark.unit
+async def test_changed_paths_since_remote_branch_reports_only_local_paths_when_remote_diverged(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    command_runner = AsyncioSubprocessRunner()
+
+    async def run(*args: str, cwd: Path | None = None) -> None:
+        result = await command_runner.run(list(args), cwd=str(cwd) if cwd else None)
+        assert result.ok, result.stderr
+
+    remote = tmp_path / "remote.git"
+    seed = tmp_path / "seed"
+    local = tmp_path / "local"
+    remote_writer = tmp_path / "remote-writer"
+    remote_branch = "awf/ws_remote_diverged"
+
+    await run("git", "init", "--bare", str(remote))
+    await run("git", "clone", str(remote), str(seed))
+    await run("git", "config", "user.email", "awf@example.com", cwd=seed)
+    await run("git", "config", "user.name", "AWF Test", cwd=seed)
+    (seed / "README.md").write_text("base\n")
+    await run("git", "add", "README.md", cwd=seed)
+    await run("git", "commit", "-m", "base", cwd=seed)
+    await run("git", "branch", "-M", "main", cwd=seed)
+    await run("git", "push", "origin", "main", cwd=seed)
+    await run("git", "checkout", "-b", remote_branch, cwd=seed)
+    await run("git", "push", "origin", remote_branch, cwd=seed)
+
+    await run("git", "clone", str(remote), str(local))
+    await run("git", "checkout", remote_branch, cwd=local)
+    await run("git", "config", "user.email", "awf@example.com", cwd=local)
+    await run("git", "config", "user.name", "AWF Test", cwd=local)
+    (local / "src").mkdir()
+    (local / "src" / "fix.py").write_text("print('local fix')\n")
+    await run("git", "add", "src/fix.py", cwd=local)
+    await run("git", "commit", "-m", "local fix", cwd=local)
+
+    await run("git", "clone", str(remote), str(remote_writer))
+    await run("git", "checkout", remote_branch, cwd=remote_writer)
+    await run("git", "config", "user.email", "awf@example.com", cwd=remote_writer)
+    await run("git", "config", "user.name", "AWF Test", cwd=remote_writer)
+    (remote_writer / ".github" / "workflows").mkdir(parents=True)
+    (remote_writer / ".github" / "workflows" / "ci.yml").write_text("name: ci\n")
+    await run("git", "add", ".github/workflows/ci.yml", cwd=remote_writer)
+    await run("git", "commit", "-m", "remote ci", cwd=remote_writer)
+    await run("git", "push", "origin", remote_branch, cwd=remote_writer)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=command_runner,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    paths = await runner._changed_paths_since_remote_branch(
+        worktree_path=local,
+        remote_branch=remote_branch,
+    )
+
+    assert paths == ("src/fix.py",)
 
 
 @pytest.mark.unit
@@ -4019,13 +4105,13 @@ async def test_changed_paths_since_remote_branch_fails_closed_when_refs_are_unav
 
 
 @pytest.mark.unit
-async def test_changed_paths_since_remote_branch_fails_closed_when_diff_fails(
+async def test_changed_paths_since_remote_branch_fails_closed_when_merge_base_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=128, stderr="bad revision FETCH_HEAD")
+    cmd.queue_result(returncode=1, stderr="no merge base")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -4041,8 +4127,36 @@ async def test_changed_paths_since_remote_branch_fails_closed_when_diff_fails(
         )
 
     message = str(exc_info.value)
-    assert "diff FETCH_HEAD..HEAD" in message
-    assert "bad revision FETCH_HEAD" in message
+    assert "merge-base FETCH_HEAD HEAD" in message
+    assert "no merge base" in message
+
+
+@pytest.mark.unit
+async def test_changed_paths_since_remote_branch_fails_closed_when_diff_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=128, stderr="bad revision merge-base-sha")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(ProtectedScopeDiffError) as exc_info:
+        await runner._changed_paths_since_remote_branch(
+            worktree_path=tmp_path / "worktree",
+            remote_branch="awf/ws_remote_missing",
+        )
+
+    message = str(exc_info.value)
+    assert "diff merge-base-sha..HEAD" in message
+    assert "bad revision merge-base-sha" in message
 
 
 @pytest.mark.unit
@@ -4053,6 +4167,7 @@ async def test_sync_base_protected_scope_refreshes_base_before_base_diff(
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # diff against remote PR branch
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch
     cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # diff against refreshed base
@@ -4081,7 +4196,15 @@ async def test_sync_base_protected_scope_refreshes_base_before_base_diff(
             "origin",
             f"refs/heads/awf/{workspace_id}",
         ],
-        ["git", "-C", str(worktree), "diff", "--name-only", "FETCH_HEAD..HEAD", "--"],
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "merge-base",
+            "FETCH_HEAD",
+            "HEAD",
+        ],
+        ["git", "-C", str(worktree), "diff", "--name-only", "merge-base-sha..HEAD", "--"],
         [
             "git",
             "-C",

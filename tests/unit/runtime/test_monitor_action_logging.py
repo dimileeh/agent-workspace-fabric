@@ -967,6 +967,7 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0)  # git commit
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # fetch remote branch for committed diff
+        cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
         cmd.queue_result(returncode=0, stdout="src/foo.py\n")  # pre-push protected-scope diff
         cmd.queue_result(returncode=0)  # push
         cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
@@ -1053,6 +1054,7 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0)  # git commit
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # fetch remote branch for committed diff
+        cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
         cmd.queue_result(
             returncode=0,
             stdout="tests/integration/test_workspace_agent_git_in_workspace.py\n",

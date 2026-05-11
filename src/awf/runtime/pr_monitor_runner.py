@@ -4484,11 +4484,37 @@ class PullRequestMonitorRunner:
                 f"stdout={fetch_result.stdout.strip() or '<empty>'} "
                 f"stderr={fetch_result.stderr.strip() or '<empty>'}"
             )
-        return await self._changed_paths_between_ref_and_head(
+        local_base = await self._merge_base_with_head(
             worktree_path=worktree_path,
             ref="FETCH_HEAD",
             error_context="against the remote PR branch",
         )
+        return await self._changed_paths_between_ref_and_head(
+            worktree_path=worktree_path,
+            ref=local_base,
+            error_context="against the remote PR branch",
+        )
+
+    async def _merge_base_with_head(
+        self,
+        *,
+        worktree_path: Path,
+        ref: str,
+        error_context: str,
+    ) -> str:
+        merge_base_result = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "merge-base", ref, "HEAD"]
+        )
+        merge_base = merge_base_result.stdout.strip()
+        if not merge_base_result.ok or not merge_base:
+            raise ProtectedScopeDiffError(
+                f"Could not resolve committed diff {error_context} "
+                "for protected-scope validation: "
+                f"merge-base {ref} HEAD exit={merge_base_result.returncode} "
+                f"stdout={merge_base or '<empty>'} "
+                f"stderr={merge_base_result.stderr.strip() or '<empty>'}"
+            )
+        return merge_base
 
     async def _changed_paths_between_ref_and_head(
         self,
