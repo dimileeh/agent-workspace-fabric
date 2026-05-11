@@ -2078,6 +2078,30 @@ def test_failed_terminal_workspace_has_no_work_exception(monkeypatch: pytest.Mon
 
 
 @pytest.mark.unit
+def test_failed_terminal_workspace_has_no_work_treats_blocking_bridge_failure_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _runtime_state() -> str:
+        return "no_work"
+
+    def _raise_bridge_failure(_awaitable: object) -> str:
+        raise RuntimeError("bridge failed")
+
+    ws = Workspace(id="ws_bridge", compose_project_name="proj")
+    monkeypatch.setattr(gc, "_run_awaitable_blocking", _raise_bridge_failure)
+    awaitable = _runtime_state()
+    monkeypatch.setattr(
+        gc,
+        "_failed_terminal_workspace_runtime_state_async",
+        lambda _workspace: awaitable,
+    )
+    try:
+        assert _failed_terminal_workspace_has_no_work(ws) is False
+    finally:
+        awaitable.close()
+
+
+@pytest.mark.unit
 async def test_run_awaitable_blocking_logs_error_without_thread_in_running_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

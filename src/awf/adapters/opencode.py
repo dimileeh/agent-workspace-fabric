@@ -44,7 +44,7 @@ class OpenCodeAdapter(AgentAdapter):
         script = _opencode_launcher_script(effort=self._default_effort)
         args = [
             "sh",
-            "-lc",
+            "-c",
             script,
             "awf-opencode",
             "--dangerously-skip-permissions",

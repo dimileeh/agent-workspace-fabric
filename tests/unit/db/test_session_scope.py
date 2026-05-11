@@ -14,10 +14,16 @@ import pytest
 import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
 
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory, session_scope
+from awf.db.session import (
+    _patch_asyncpg_pre_ping_disconnect_detection,
+    make_engine,
+    make_session_factory,
+    session_scope,
+)
 from tests.postgres import postgres_test_engine, postgres_test_url
 
 
@@ -215,6 +221,31 @@ async def test_make_engine_strips_test_connect_retry_query_params() -> None:
         assert "awf_connect_retries" not in str(engine.url)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_make_engine_enables_null_pool_from_url_option() -> None:
+    engine = make_engine("postgresql+asyncpg://u:p@example/awf?awf_null_pool=yes")
+    try:
+        assert isinstance(engine.pool, NullPool)
+        assert "awf_null_pool" not in str(engine.url)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.unit
+def test_pre_ping_patch_ignores_non_asyncpg_dialects() -> None:
+    class _Dialect:
+        name = "sqlite"
+        driver = "pysqlite"
+
+    class _SyncEngine:
+        dialect = _Dialect()
+
+    class _Engine:
+        sync_engine = _SyncEngine()
+
+    _patch_asyncpg_pre_ping_disconnect_detection(_Engine())  # type: ignore[arg-type]
 
 
 @pytest.mark.unit

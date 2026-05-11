@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.controls as controls
+import awf.api.schemas as schemas
 from awf.api.schemas import WorkspaceControlRequest
 from awf.db.session import make_session_factory
 from awf.service.controls import (
@@ -82,6 +83,22 @@ def test_http_error_explicitly_handles_runtime_teardown_conflicts(
     error_type: type[WorkspaceControlError],
 ) -> None:
     assert error_type in controls._CONFLICT_CONTROL_ERRORS
+
+
+@pytest.mark.unit
+def test_legacy_reason_compatibility_validator_leaves_unconfigured_payloads_unchanged() -> None:
+    payload = {"reason": "operator requested"}
+
+    assert (
+        schemas._WorkspaceReasonCompatibilityRequest._drop_ignored_legacy_body_fields(payload)  # noqa: SLF001
+        is payload
+    )
+    assert (
+        schemas.WorkspaceReasonWithLegacyStopStackRequest._drop_ignored_legacy_body_fields(  # noqa: SLF001
+            "not-a-dict"
+        )
+        == "not-a-dict"
+    )
 
 
 @pytest.mark.unit

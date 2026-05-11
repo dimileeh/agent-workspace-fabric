@@ -405,6 +405,36 @@ async def test_readyz_egress_audit_in_flight_uses_dedicated_reason(
 
 
 @pytest.mark.unit
+async def test_readyz_pending_egress_audit_task_forgets_completed_task() -> None:
+    async def _completed() -> dict[str, int]:
+        return {"open": 1}
+
+    state = SimpleNamespace()
+    task = asyncio.create_task(_completed())
+    await task
+    setattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, task)  # noqa: SLF001
+
+    assert health_route._pending_egress_audit_summary_counts_task(state) is None  # noqa: SLF001
+    assert getattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR) is None
+
+
+@pytest.mark.unit
+async def test_readyz_reset_egress_audit_task_consumes_done_task_exception() -> None:
+    async def _failed() -> dict[str, int]:
+        raise RuntimeError("completed lookup failed")
+
+    state = SimpleNamespace()
+    task = asyncio.create_task(_failed())
+    with pytest.raises(RuntimeError, match="completed lookup failed"):
+        await task
+    setattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, task)  # noqa: SLF001
+
+    health_route.reset_egress_audit_summary_counts_task(state)
+
+    assert getattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR) is None
+
+
+@pytest.mark.unit
 async def test_readyz_egress_audit_timeout_drains_completed_session_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

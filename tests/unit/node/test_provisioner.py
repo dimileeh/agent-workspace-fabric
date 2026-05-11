@@ -44,6 +44,8 @@ from awf.node.provisioner import (
     _positive_int,
     _provision_checkout_base_branch,
     _provision_remote_push_branch,
+    _terminal_runtime_release_status_or_none,
+    _workspace_status_or_none,
 )
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import EgressMode, ProfileSecret, WorkspaceProfile
@@ -166,6 +168,19 @@ def test_egress_plan_decision_maps_profile_modes(
 )
 def test_positive_int_accepts_only_positive_int_values(value: object, expected: int | None) -> None:
     assert _positive_int(value) == expected
+
+
+@pytest.mark.unit
+def test_workspace_status_helpers_reject_unknown_and_active_release_statuses() -> None:
+    assert _workspace_status_or_none(WorkspaceStatus.failed.value) is WorkspaceStatus.failed
+    assert _workspace_status_or_none("not-a-workspace-status") is None
+
+    assert (
+        _terminal_runtime_release_status_or_none(WorkspaceStatus.destroyed.value)
+        is WorkspaceStatus.destroyed
+    )
+    assert _terminal_runtime_release_status_or_none(WorkspaceStatus.running.value) is None
+    assert _terminal_runtime_release_status_or_none("not-a-workspace-status") is None
 
 
 class TestSuccess:

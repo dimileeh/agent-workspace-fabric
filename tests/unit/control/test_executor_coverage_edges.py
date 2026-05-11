@@ -2083,7 +2083,7 @@ async def test_final_coverage_gate_executes_when_reuse_has_no_successful_match(
 
         assert result.coverage is coverage
         assert result.evidence_status == "executed"
-        assert validation.calls == ["final_coverage"]
+        assert validation.calls == ["coverage"]
     finally:
         await engine.dispose()
 
@@ -2173,7 +2173,7 @@ async def test_final_coverage_gate_executes_when_reusable_run_has_no_coverage_me
 
         assert result.coverage is coverage
         assert result.evidence_status == "executed"
-        assert validation.calls == ["final_coverage"]
+        assert validation.calls == ["coverage"]
     finally:
         await engine.dispose()
 
@@ -2359,6 +2359,7 @@ async def test_ensure_worktree_available_marks_running_workspace_failed_when_mis
         executor._release_terminal_runtime.assert_awaited_once_with(  # type: ignore[attr-defined]
             workspace_id,
             expected_status=WorkspaceStatus.failed,
+            execution_claim_owner_id=None,
         )
     finally:
         await engine.dispose()

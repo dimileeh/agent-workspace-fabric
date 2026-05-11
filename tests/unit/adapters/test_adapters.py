@@ -758,7 +758,7 @@ class TestOpenCodeAdapter:
         args = runner.calls[0].args
         _assert_docker_exec_prefix(args)
         sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
-        assert args[sh_start : sh_start + 3] == ["sh", "-lc", args[sh_start + 2]]
+        assert args[sh_start : sh_start + 3] == ["sh", "-c", args[sh_start + 2]]
         script = args[sh_start + 2]
         assert "OPENCODE_CONFIG_CONTENT" in script
         assert "AWF_OPENCODE_OLLAMA_BASE_URL" in script
@@ -877,7 +877,7 @@ class TestOpenCodeAdapter:
 
         proc = await asyncio.create_subprocess_exec(
             "sh",
-            "-lc",
+            "-c",
             _opencode_launcher_script(effort="xhigh"),
             "awf-opencode",
             "--model",
@@ -893,11 +893,21 @@ class TestOpenCodeAdapter:
         proc.stdin.close()
         await proc.stdin.wait_closed()
 
-        for _ in range(50):
+        for _ in range(100):
             if fake_started.exists():
                 break
-            await asyncio.sleep(0.02)
-        assert fake_started.exists()
+            await asyncio.sleep(0.05)
+        if not fake_started.exists():
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.terminate()
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+            pytest.fail(
+                "fake opencode did not start "
+                f"(returncode={proc.returncode}, "
+                f"stdout={stdout.decode(errors='replace')!r}, "
+                f"stderr={stderr.decode(errors='replace')!r})"
+            )
 
         proc.terminate()
         await asyncio.wait_for(proc.wait(), timeout=5)

@@ -8,6 +8,7 @@ import pytest
 
 from awf.node import auth_mounts as auth_mounts_mod
 from awf.node.auth_mounts import ServiceAuthMountResolver, resolve_service_auth_mounts
+from awf.node.compose_manager import AuthMount
 
 
 @pytest.mark.unit
@@ -433,6 +434,30 @@ def test_service_auth_mounts_skip_readonly_mounts_for_chown(
     )
 
     assert [mount.target for mount in mounts] == ["/home/agent/.gitconfig"]
+    assert chowned == []
+
+
+@pytest.mark.unit
+def test_chown_workspace_auth_sources_ignores_readonly_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "readonly"
+    source.mkdir()
+    chowned: list[Path] = []
+
+    def _record_chown(path: str | bytes, uid: int, gid: int) -> None:
+        del uid, gid
+        chowned.append(Path(path))
+
+    monkeypatch.setattr("awf.node.auth_mounts.os.chown", _record_chown)
+
+    auth_mounts_mod._chown_workspace_auth_sources(  # noqa: SLF001
+        (AuthMount(source=str(source), target="/home/agent/.config/ro", mode="ro"),),
+        uid=1000,
+        gid=1000,
+    )
+
     assert chowned == []
 
 

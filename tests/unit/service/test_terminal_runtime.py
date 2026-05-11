@@ -34,6 +34,9 @@ from awf.service.terminal_runtime import (
     TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE,
     TerminalRuntimeCleaner,
     TerminalRuntimeReleaser,
+    _allows_non_terminal_release,
+    _matches_release_status,
+    _release_status_values,
     _terminal_runtime_release_post_cleanup_claim_failure_result,
     _TerminalRuntimeReleaseClaimFailure,
     record_terminal_runtime_release_event,
@@ -94,6 +97,30 @@ def test_terminal_runtime_cleaner_protocol_defaults_preserve_salvage() -> None:
 
     assert cleanup_parameters["remove_volumes"].default is False
     assert cleanup_parameters["remove_worktree"].default is False
+
+
+@pytest.mark.unit
+def test_terminal_runtime_release_status_helpers_cover_terminal_and_explicit_edges() -> None:
+    assert _matches_release_status(WorkspaceStatus.failed.value, None)
+    assert not _matches_release_status(WorkspaceStatus.running.value, None)
+    assert not _matches_release_status(
+        WorkspaceStatus.running.value,
+        WorkspaceStatus.ready,
+    )
+    assert _matches_release_status(
+        WorkspaceStatus.provisioning.value,
+        WorkspaceStatus.provisioning,
+    )
+
+    assert WorkspaceStatus.failed.value in _release_status_values(None)
+    assert _release_status_values(WorkspaceStatus.ready) == ()
+    assert _release_status_values(WorkspaceStatus.provisioning) == (
+        WorkspaceStatus.provisioning.value,
+    )
+
+    assert not _allows_non_terminal_release(None)
+    assert not _allows_non_terminal_release(WorkspaceStatus.ready)
+    assert _allows_non_terminal_release(WorkspaceStatus.provisioning)
 
 
 class _FailingCleaner:
