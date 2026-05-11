@@ -3115,7 +3115,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="partial conflict resolution")
-    workspace_id = "ws_sync_conflict"
+    workspace_id = await seed_monitoring_workspace(factory)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
     for result in [
         (0, "", ""),
@@ -3142,7 +3142,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
         base_branch="development",
-        remote_branch="awf/ws_sync_conflict",
+        remote_branch=f"awf/{workspace_id}",
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
     )
@@ -3153,7 +3153,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
         ["merge", "--abort"],
         ["origin", "+refs/heads/development:refs/remotes/origin/development"],
     ]
-    assert cmd.calls[-1].args[-2:] == ["origin", "HEAD:refs/heads/awf/ws_sync_conflict"]
+    assert cmd.calls[-1].args[-2:] == ["origin", f"HEAD:refs/heads/awf/{workspace_id}"]
 
 
 @pytest.mark.unit
@@ -3218,6 +3218,70 @@ async def test_sync_base_conflict_supply_chain_command_evidence_blocks_before_co
     assert [finding.reason_code for finding in findings] == ["SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION"]
     assert not any(call.args[:1] == ["git"] and "commit" in call.args for call in cmd.calls)
     assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    push_result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url="https://github.com/org/fork.git",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert ".github/workflows/ci.yml" in push_result.stderr
+    call_args = [call.args for call in cmd.calls]
+    assert any(
+        args[:1] == ["git"]
+        and "fetch" in args
+        and "https://github.com/org/fork.git" in args
+        and f"refs/heads/awf/{workspace_id}" in args
+        for args in call_args
+    )
+    assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.monitor_protected_scope_push_blocked",
+            limit=10,
+        )
+    assert len(events) == 1
+    assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert events[0].payload is not None
+    assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
 
 
 @pytest.mark.unit

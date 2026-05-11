@@ -4106,6 +4106,20 @@ class PullRequestMonitorRunner:
                 )
 
         # Whether or not we hit conflicts, push what we have.
+        protected_scope_message = await self._protected_scope_push_block_message(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+        if protected_scope_message is not None:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=protected_scope_message,
+                reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+            )
         return await self._git_push_result(
             worktree_path=worktree_path,
             remote_branch=remote_branch,
