@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -256,6 +257,12 @@ class Provisioner:
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
             )
+            await self._record_failed_launch_runtime_metadata_if_current(
+                workspace_id,
+                compose_project_name=exc.compose_project_name,
+                compose_file_path=exc.compose_file_path,
+                expected_status=release_expected_status,
+            )
             await self._release_provisioning_runtime(
                 workspace_id,
                 source="provisioner.stack_startup_failed",
@@ -486,6 +493,38 @@ class Provisioner:
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
             return None
+
+    async def _record_failed_launch_runtime_metadata_if_current(
+        self,
+        workspace_id: str,
+        *,
+        compose_project_name: str | None,
+        compose_file_path: Path | None,
+        expected_status: WorkspaceStatus | None,
+    ) -> None:
+        if expected_status is None:
+            return
+        project_name = compose_project_name
+        if project_name is None and compose_file_path is not None:
+            project_name = f"awf_{workspace_id}"
+        if project_name is None and compose_file_path is None:
+            return
+        try:
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.get(workspace_id)
+                if ws is None or ws.status != expected_status.value:
+                    return
+                if project_name is not None:
+                    ws.compose_project_name = project_name
+                if compose_file_path is not None:
+                    ws.compose_file_path = str(compose_file_path)
+                await session.commit()
+        except Exception:  # pragma: no cover - best-effort cleanup metadata.
+            _log.exception(
+                "provisioner.failed_launch_runtime_metadata_record_failed",
+                workspace_id=workspace_id,
+            )
 
     async def _release_provisioning_runtime(
         self,

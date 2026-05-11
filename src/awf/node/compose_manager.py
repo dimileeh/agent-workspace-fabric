@@ -60,12 +60,16 @@ class ComposeOperationError(Exception):
         stdout: str,
         stderr: str,
         reason_code: str = "COMPOSE_COMMAND_FAILED",
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
     ) -> None:
         self.operation = operation
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.reason_code = reason_code
+        self.compose_project_name = compose_project_name
+        self.compose_file_path = compose_file_path
         super().__init__(
             f"docker compose {operation} failed "
             f"(exit={returncode}, reason={reason_code}): "
@@ -444,6 +448,8 @@ class ComposeManager:
                 stdout="",
                 stderr=str(e),
                 reason_code="DOCKER_UNAVAILABLE",
+                compose_project_name=project_name,
+                compose_file_path=compose_file,
             ) from e
 
         try:
@@ -463,6 +469,8 @@ class ComposeManager:
                         f"{COMPOSE_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
                     ),
                     reason_code="DOCKER_COMMAND_TIMEOUT",
+                    compose_project_name=project_name,
+                    compose_file_path=compose_file,
                 ) from e
             except asyncio.CancelledError:
                 await _kill_and_wait_process(proc)
@@ -490,6 +498,8 @@ class ComposeManager:
                 stdout=stdout,
                 stderr=stderr,
                 reason_code=reason_code,
+                compose_project_name=project_name,
+                compose_file_path=compose_file,
             )
 
     async def _docker_resource_ids(self, args: list[str], *, operation: str) -> list[str]:

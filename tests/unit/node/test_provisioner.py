@@ -1030,16 +1030,19 @@ class TestFailureHandling:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         git_manager: GitManager,
+        tmp_path: Path,
         origin_repo: Path,
     ) -> None:
         class _FailingStackLauncher:
             async def launch(self, request: Any) -> object:
-                del request
+                compose_file = tmp_path / "compose" / request.workspace_id / "compose.yml"
                 raise ComposeOperationError(
                     operation="up",
                     returncode=17,
                     stdout="",
                     stderr="container healthcheck failed",
+                    compose_project_name=f"awf_{request.workspace_id}",
+                    compose_file_path=compose_file,
                 )
 
         class _RecordingTerminalRuntimeReleaser:
@@ -1063,6 +1066,8 @@ class TestFailureHandling:
                             "expected_status": expected_status,
                             "status_seen": reloaded.status,
                             "failure_reason_seen": reloaded.failure_reason,
+                            "compose_project_name_seen": reloaded.compose_project_name,
+                            "compose_file_path_seen": reloaded.compose_file_path,
                         }
                     )
                 return TerminalRuntimeReleaseResult(
@@ -1094,6 +1099,7 @@ class TestFailureHandling:
         with pytest.raises(ComposeOperationError):
             await provisioner.provision(ws_id)
 
+        compose_file = str(tmp_path / "compose" / ws_id / "compose.yml")
         assert releaser.calls == [
             {
                 "workspace_id": ws_id,
@@ -1101,6 +1107,8 @@ class TestFailureHandling:
                 "expected_status": WorkspaceStatus.failed,
                 "status_seen": WorkspaceStatus.failed.value,
                 "failure_reason_seen": FailureReason.service_startup_failure.value,
+                "compose_project_name_seen": f"awf_{ws_id}",
+                "compose_file_path_seen": compose_file,
             }
         ]
         async with session_factory() as s:
@@ -1108,6 +1116,8 @@ class TestFailureHandling:
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.failed.value
             assert reloaded.failure_reason == FailureReason.service_startup_failure.value
+            assert reloaded.compose_project_name == f"awf_{ws_id}"
+            assert reloaded.compose_file_path == compose_file
             assert reloaded.failure_message is not None
             assert "docker compose up failed" in reloaded.failure_message
             assert "container healthcheck failed" in reloaded.failure_message

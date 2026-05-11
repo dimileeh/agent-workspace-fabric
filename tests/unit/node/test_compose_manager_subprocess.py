@@ -96,6 +96,11 @@ class TestUp:
         assert exc.value.returncode == 1
         assert "daemon unreachable" in exc.value.stderr
         assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
+        assert exc.value.compose_project_name == spec.project_name()
+        assert (
+            exc.value.compose_file_path
+            == tmp_path / "work" / "compose" / spec.workspace_id / "compose.yml"
+        )
 
     @pytest.mark.unit
     async def test_up_renders_compose_file_before_running(
@@ -231,3 +236,8 @@ class TestDown:
 
         assert exc.value.operation == "down"
         assert exc.value.returncode == 17
+        assert exc.value.compose_project_name == spec.project_name()
+        assert (
+            exc.value.compose_file_path
+            == tmp_path / "work" / "compose" / spec.workspace_id / "compose.yml"
+        )
