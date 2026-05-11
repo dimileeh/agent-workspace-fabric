@@ -511,6 +511,8 @@ def _sync_base_no_progress_exhausted(
 
 _CI_TRANSIENT_RERUN_KEY_PREFIX = "__awf_ci_rerun:"
 
+_CI_FAILED_JOB_RERUN_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT"})
+
 _CI_CODE_FAILURE_MARKERS = (
     "failed tests/",
     "failed test",
@@ -614,6 +616,10 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     return any(marker in text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
 
 
+def _supports_failed_job_rerun(failure: CheckFailure) -> bool:
+    return failure.conclusion.upper() in _CI_FAILED_JOB_RERUN_CONCLUSIONS
+
+
 def _should_rerun_transient_ci(
     status: PRStatus,
     state: MonitorState,
@@ -624,6 +630,8 @@ def _should_rerun_transient_ci(
     if not status.ci_failures:
         return False
     if any(not failure.run_id for failure in status.ci_failures):
+        return False
+    if any(not _supports_failed_job_rerun(failure) for failure in status.ci_failures):
         return False
     if not all(_looks_like_transient_ci_failure(failure) for failure in status.ci_failures):
         return False

@@ -443,6 +443,28 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])
+    def test_transient_non_failed_job_conclusions_dispatch_agent_repair(
+        self,
+        conclusion: str,
+    ) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion=conclusion,
+            log_excerpt="runner has received a shutdown signal",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_tool_diagnostics_still_dispatch_agent_repair(self) -> None:
         failure = CheckFailure(
             name="lint-and-type",
