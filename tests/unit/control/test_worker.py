@@ -40,6 +40,7 @@ from awf.control.worker import (
     _scheduler_items_are_workspace_ids,
     _scheduler_items_are_workspaces,
     _stale_active_execution_failure_message,
+    _TerminalRuntimeCandidate,
     _utc_datetime,
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
@@ -8269,6 +8270,83 @@ class TestTerminalRuntimeRelease:
         assert release_failure_events[0].payload is not None
         assert release_failure_events[0].payload["cleanup"]["reason_code"] == CLEANUP_PARTIAL
         assert release_events == []
+
+    @pytest.mark.unit
+    async def test_release_does_not_record_failure_event_when_success_event_already_exists(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-success-then-failure",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.add_event(
+                ws,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+                payload={
+                    "compose_project_name": ws.compose_project_name,
+                    "workspace_status": ws.status,
+                    "cleanup": {"status": "succeeded"},
+                },
+            )
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._record_terminal_runtime_release_failed(  # noqa: SLF001
+            _TerminalRuntimeCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.failed,
+                repo_url=str(origin_repo),
+                compose_project_name=f"awf_{workspace_id}",
+                compose_file_path=f"/tmp/awf/{workspace_id}/compose.yml",
+            ),
+            cleanup=cleaner.result,
+            message="should not be recorded",
+        )
+
+        async with session_factory() as s:
+            release_failure_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_release_failed",
+            )
+            release_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert release_failure_events == []
+        assert len(release_events) == 1
 
     @pytest.mark.unit
     async def test_release_skips_workspaces_without_compose_project_name(

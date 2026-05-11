@@ -1032,6 +1032,8 @@ class ControlWorker:
                 return
             if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
                 return
+            if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
+                return
             await repo.add_event(
                 ws,
                 event_type=_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
