@@ -113,6 +113,16 @@ def test_preserved_stdin_setsid_path_uses_open_fd_not_path_redirection() -> None
     assert 'setsid "$@" <&9 &' in setsid_block
     assert 'setsid "$@" < "$stdin_path" &' not in setsid_block
     assert setsid_block.index('rm -f "$stdin_path"') < setsid_block.index('setsid "$@" <&9 &')
+    assert "exec 9<&-" in setsid_block
+
+
+def test_default_stdin_setsid_path_does_not_touch_fd_9() -> None:
+    script = compose_exec._tracked_exec_wrapper_script()  # noqa: SLF001
+    setsid_block = script[script.index("if command -v setsid") : script.index('wait "$child_pid"')]
+
+    assert 'exec 9< "$stdin_path"' not in setsid_block
+    assert "exec 9<&-" not in setsid_block
+    assert 'setsid "$@" </dev/null &' in setsid_block
 
 
 def test_rejects_empty_or_unsafe_invocation_inputs() -> None:
