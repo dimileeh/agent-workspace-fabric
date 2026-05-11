@@ -37,6 +37,20 @@ COMPOSE_CAPTURE_TIMEOUT_SECONDS = 360.0
 _DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
 
 
+async def _kill_and_wait_process(
+    proc: asyncio.subprocess.Process,
+    *,
+    wait_timeout: float | None,
+) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    if wait_timeout is None:
+        await proc.wait()
+        return
+    with contextlib.suppress(ProcessLookupError, TimeoutError):
+        await asyncio.wait_for(proc.wait(), timeout=wait_timeout)
+
+
 class ComposeOperationError(Exception):
     """Raised when a ``docker compose`` command exits non-zero.
 
@@ -417,10 +431,6 @@ class ComposeManager:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=COMPOSE_CAPTURE_TIMEOUT_SECONDS,
-            )
         except FileNotFoundError as e:
             raise ComposeOperationError(
                 operation=operation,
@@ -429,14 +439,17 @@ class ComposeManager:
                 stderr=str(e),
                 reason_code="DOCKER_UNAVAILABLE",
             ) from e
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=COMPOSE_CAPTURE_TIMEOUT_SECONDS,
+            )
         except TimeoutError as e:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            with contextlib.suppress(ProcessLookupError, TimeoutError):
-                await asyncio.wait_for(
-                    proc.wait(),
-                    timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
-                )
+            await _kill_and_wait_process(
+                proc,
+                wait_timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
+            )
             raise ComposeOperationError(
                 operation=operation,
                 returncode=124,
@@ -447,6 +460,9 @@ class ComposeManager:
                 ),
                 reason_code="DOCKER_COMMAND_TIMEOUT",
             ) from e
+        except asyncio.CancelledError:
+            await _kill_and_wait_process(proc, wait_timeout=None)
+            raise
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -486,10 +502,6 @@ class ComposeManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=DOCKER_CAPTURE_TIMEOUT_SECONDS,
-            )
         except FileNotFoundError as e:
             raise ComposeOperationError(
                 operation=operation,
@@ -498,14 +510,17 @@ class ComposeManager:
                 stderr=str(e),
                 reason_code="DOCKER_UNAVAILABLE",
             ) from e
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=DOCKER_CAPTURE_TIMEOUT_SECONDS,
+            )
         except TimeoutError as e:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            with contextlib.suppress(ProcessLookupError, TimeoutError):
-                await asyncio.wait_for(
-                    proc.wait(),
-                    timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
-                )
+            await _kill_and_wait_process(
+                proc,
+                wait_timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
+            )
             raise ComposeOperationError(
                 operation=operation,
                 returncode=124,
@@ -513,6 +528,9 @@ class ComposeManager:
                 stderr=(f"docker {operation} exceeded {DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"),
                 reason_code="DOCKER_COMMAND_TIMEOUT",
             ) from e
+        except asyncio.CancelledError:
+            await _kill_and_wait_process(proc, wait_timeout=None)
+            raise
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")

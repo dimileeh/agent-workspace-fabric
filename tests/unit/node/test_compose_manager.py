@@ -76,6 +76,22 @@ class _HangingProcess:
         return self.returncode
 
 
+class _CancellationHangingProcess(_HangingProcess):
+    def __init__(self) -> None:
+        super().__init__()
+        self.communicate_started = asyncio.Event()
+        self.wait_called = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        self.communicate_started.set()
+        await asyncio.Event().wait()
+        return b"", b""
+
+    async def wait(self) -> int | None:
+        self.wait_called = True
+        return await super().wait()
+
+
 @pytest.mark.unit
 def test_compose_project_paths_secret_metadata_cannot_be_mutated() -> None:
     paths = ComposeProjectPaths(
@@ -782,6 +798,36 @@ class TestRender:
         assert "docker compose up exceeded" in exc.value.stderr
 
     @pytest.mark.unit
+    async def test_compose_command_cancellation_kills_and_waits_for_subprocess(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        process = _CancellationHangingProcess()
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _CancellationHangingProcess:
+            return process
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+        task = asyncio.create_task(
+            manager._compose(  # noqa: SLF001
+                "awf_ws_cancelled_compose",
+                tmp_path / "compose.yml",
+                ["down", "--remove-orphans"],
+                operation="down",
+            )
+        )
+        await asyncio.wait_for(process.communicate_started.wait(), timeout=1)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        assert process.kill_called is True
+        assert process.wait_called is True
+
+    @pytest.mark.unit
     async def test_docker_capture_returns_stdout_on_success(
         self,
         manager: ComposeManager,
@@ -882,3 +928,27 @@ class TestRender:
         assert exc.value.returncode == 124
         assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
         assert "exceeded" in exc.value.stderr
+
+    @pytest.mark.unit
+    async def test_docker_capture_cancellation_kills_and_waits_for_subprocess(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        process = _CancellationHangingProcess()
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _CancellationHangingProcess:
+            return process
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+        task = asyncio.create_task(
+            manager._docker_capture(["ps", "-aq"], operation="ps")  # noqa: SLF001
+        )
+        await asyncio.wait_for(process.communicate_started.wait(), timeout=1)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        assert process.kill_called is True
+        assert process.wait_called is True
