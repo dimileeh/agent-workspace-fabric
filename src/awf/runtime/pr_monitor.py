@@ -614,8 +614,7 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
         return False
     if any(pattern.search(log_text) for pattern in _CI_CODE_FAILURE_PATTERNS):
         return False
-    transient_text = f"{failure.conclusion}\n{failure.log_excerpt}".lower()
-    return any(marker in transient_text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
+    return any(marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
 
 
 def _supports_failed_job_rerun(failure: CheckFailure) -> bool:

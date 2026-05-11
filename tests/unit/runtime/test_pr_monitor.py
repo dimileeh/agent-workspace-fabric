@@ -461,7 +461,7 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_timed_out_failure_without_logs_dispatches_rerun(self) -> None:
+    def test_timed_out_failure_without_log_marker_dispatches_agent_repair(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",
             conclusion="TIMED_OUT",
@@ -475,7 +475,7 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, RerunTransientCI)
+        assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
 
     @pytest.mark.unit
