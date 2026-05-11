@@ -4125,6 +4125,7 @@ class PullRequestMonitorRunner:
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
+            base_branch=base_branch,
         )
         if protected_scope_block is not None:
             return _GitPushResult(
@@ -4474,26 +4475,77 @@ class PullRequestMonitorRunner:
                 f"stdout={fetch_result.stdout.strip() or '<empty>'} "
                 f"stderr={fetch_result.stderr.strip() or '<empty>'}"
             )
+        return await self._changed_paths_between_ref_and_head(
+            worktree_path=worktree_path,
+            ref="FETCH_HEAD",
+            error_context="against the remote PR branch",
+        )
+
+    async def _changed_paths_between_ref_and_head(
+        self,
+        *,
+        worktree_path: Path,
+        ref: str,
+        error_context: str,
+    ) -> tuple[str, ...]:
+        diff_spec = f"{ref}..HEAD"
         diff_result = await self._deps.runner.run(
-            [
-                "git",
-                "-C",
-                str(worktree_path),
-                "diff",
-                "--name-only",
-                "FETCH_HEAD..HEAD",
-                "--",
-            ]
+            ["git", "-C", str(worktree_path), "diff", "--name-only", diff_spec, "--"]
         )
         if not diff_result.ok:
             raise ProtectedScopeDiffError(
-                "Could not resolve committed diff against the remote PR branch "
+                f"Could not resolve committed diff {error_context} "
                 "for protected-scope validation: "
-                f"diff FETCH_HEAD..HEAD exit={diff_result.returncode} "
+                f"diff {diff_spec} exit={diff_result.returncode} "
                 f"stdout={diff_result.stdout.strip() or '<empty>'} "
                 f"stderr={diff_result.stderr.strip() or '<empty>'}"
             )
         return tuple(line.strip() for line in diff_result.stdout.splitlines() if line.strip())
+
+    async def _protected_scope_violations_for_sync_base_push(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        remote_branch: str,
+        base_branch: str,
+        remote_push_url: str | None = None,
+    ) -> list[QualityGateViolation]:
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None:
+                raise ProtectedScopeDiffError(
+                    f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
+                    "for protected-scope validation."
+                )
+            owned_paths = list(workspace.owned_paths)
+
+        changed_from_remote = await self._changed_paths_since_remote_branch(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+        if not changed_from_remote:
+            return []
+
+        changed_from_base = await self._changed_paths_between_ref_and_head(
+            worktree_path=worktree_path,
+            ref=f"origin/{base_branch}",
+            error_context="against the refreshed base branch",
+        )
+        if not changed_from_base:
+            return []
+
+        changed_from_base_set = set(changed_from_base)
+        sync_base_authored_paths = tuple(
+            path for path in changed_from_remote if path in changed_from_base_set
+        )
+        if not sync_base_authored_paths:
+            return []
+        return find_protected_quality_gate_changes(
+            changed_paths=sync_base_authored_paths,
+            owned_paths=owned_paths,
+        )
 
     async def _protected_scope_push_block(
         self,
@@ -4502,16 +4554,26 @@ class PullRequestMonitorRunner:
         worktree_path: Path,
         remote_branch: str,
         remote_push_url: str | None = None,
+        base_branch: str | None = None,
     ) -> _ProtectedScopePushBlock | None:
         if not worktree_path.exists():
             return None
         try:
-            violations = await self._protected_scope_violations_for_unpushed_commits(
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                remote_branch=remote_branch,
-                remote_push_url=remote_push_url,
-            )
+            if base_branch is None:
+                violations = await self._protected_scope_violations_for_unpushed_commits(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                )
+            else:
+                violations = await self._protected_scope_violations_for_sync_base_push(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    remote_branch=remote_branch,
+                    base_branch=base_branch,
+                    remote_push_url=remote_push_url,
+                )
         except ProtectedScopeDiffError as exc:
             redacted_error = redact_audit_text(str(exc), limit=1000)
             message = (

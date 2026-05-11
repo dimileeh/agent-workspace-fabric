@@ -3323,6 +3323,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -3356,6 +3357,13 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
         and f"refs/heads/awf/{workspace_id}" in args
         for args in call_args
     )
+    assert any(
+        args[:1] == ["git"]
+        and "diff" in args
+        and "--name-only" in args
+        and "origin/development..HEAD" in args
+        for args in call_args
+    )
     assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
     async with factory() as s:
         events = await WorkspaceEventRepository(s).list(
@@ -3367,6 +3375,66 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+
+
+@pytest.mark.unit
+async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\n")
+    cmd.queue_result(returncode=0, stdout="")  # diff against refreshed base excludes base changes
+    cmd.queue_result(returncode=0, stdout="", stderr="pushed")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    push_result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert push_result.failed is False
+    assert push_result.pushed is True
+    call_args = [call.args for call in cmd.calls]
+    assert any(
+        args[:1] == ["git"]
+        and "diff" in args
+        and "--name-only" in args
+        and "origin/development..HEAD" in args
+        for args in call_args
+    )
+    assert any(args[:1] == ["git"] and "push" in args for args in call_args)
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.monitor_protected_scope_push_blocked",
+            limit=10,
+        )
+    assert events == []
 
 
 @pytest.mark.unit
