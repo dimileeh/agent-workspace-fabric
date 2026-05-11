@@ -406,9 +406,15 @@ class TerminalRuntimeReleaser:
             )
             if workspace is None:
                 return None
+            locked_worktree_host_path = worktree_host_path
+            if locked_worktree_host_path is None:
+                locked_worktree_host_path = await _resolve_worktree_host_path(
+                    workspace.id,
+                    worktrees_root=self._worktrees_root,
+                )
             snapshot = _snapshot_for_workspace(
                 workspace,
-                worktree_host_path=worktree_host_path,
+                worktree_host_path=locked_worktree_host_path,
             )
             await session.commit()
             return _TerminalRuntimeReleaseClaim(snapshot=snapshot, owner_id=owner_id)

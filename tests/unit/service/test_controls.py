@@ -261,6 +261,24 @@ async def test_stop_project_containers_raises_when_stop_fails() -> None:
 
 
 @pytest.mark.unit
+async def test_stop_project_containers_ignores_racy_missing_container_on_stop() -> None:
+    with patch(
+        "awf.service.controls.asyncio.create_subprocess_exec",
+        side_effect=[
+            _mock_proc(stdout=b"abc123\n"),
+            _mock_proc(
+                returncode=1,
+                stderr=b"Error response from daemon: No such container: abc123\n",
+            ),
+        ],
+    ) as mock_exec:
+        await stop_project_containers("awf_ws_racy_stop")
+
+    assert mock_exec.call_count == 2
+    assert mock_exec.call_args_list[1].args == ("docker", "stop", "abc123")
+
+
+@pytest.mark.unit
 async def test_cancel_workspace_stops_stack_transitions_and_replays_operation(
     engine: AsyncEngine,
 ) -> None:

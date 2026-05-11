@@ -884,6 +884,44 @@ async def test_default_plan_preserves_recent_superseded_no_work_within_retention
 
 
 @pytest.mark.unit
+async def test_default_plan_preserves_recent_failed_empty_stopped_stack_within_retention(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+    )
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        compose_project_name="awf_recent_empty_stopped_stack",
+        updated_at=now - timedelta(hours=1),
+    )
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(RuntimeSnapshot(stack_state="stopped", services=[])),
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert plan.candidates == []
+    assert plan.preserved_count == 1
+    assert plan.preserved[0].workspace_id == workspace_id
+    assert plan.preserved[0].reason_code == WORKSPACE_WITHIN_RETENTION
+
+
+@pytest.mark.unit
 async def test_single_workspace_filesystem_gc_keeps_superseded_no_work_on_dry_run(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2122,6 +2160,28 @@ async def test_run_awaitable_blocking_logs_error_without_thread_in_running_loop(
     assert any(
         entry.get("event") == "gc.awaitable_blocking_running_loop_unexpected"
         and entry.get("hint") == "Use _classify_workspace_for_gc_async instead of the sync path"
+        and entry.get("log_level") == "error"
+        for entry in logs
+    )
+
+
+@pytest.mark.unit
+async def test_run_awaitable_blocking_logs_before_closing_racy_awaitable() -> None:
+    class _RacyAwaitable:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            raise GeneratorExit("coroutine finalizer failed")
+
+    awaitable = _RacyAwaitable()
+
+    with structlog.testing.capture_logs() as logs, pytest.raises(GeneratorExit):
+        gc._run_awaitable_blocking(awaitable)  # type: ignore[arg-type] # noqa: SLF001
+
+    assert awaitable.closed
+    assert any(
+        entry.get("event") == "gc.awaitable_blocking_running_loop_unexpected"
         and entry.get("log_level") == "error"
         for entry in logs
     )

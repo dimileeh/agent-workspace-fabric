@@ -1505,11 +1505,11 @@ def _run_awaitable_blocking(awaitable: Coroutine[Any, Any, str]) -> str:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(awaitable)
-    awaitable.close()
     _log.error(
         "gc.awaitable_blocking_running_loop_unexpected",
         hint="Use _classify_workspace_for_gc_async instead of the sync path",
     )
+    awaitable.close()
     return "unknown"
 
 

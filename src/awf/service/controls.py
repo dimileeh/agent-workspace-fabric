@@ -1964,7 +1964,12 @@ async def stop_project_containers(compose_project_name: str | None) -> None:
         *ids,
         operation="stop",
     )
-    await _communicate(stop, operation="stop")
+    try:
+        await _communicate(stop, operation="stop")
+    except WorkspaceStackStopError as exc:
+        if _docker_stop_failed_only_for_missing_containers(exc.stderr):
+            return
+        raise
 
 
 async def _docker_process(*args: str, operation: str) -> asyncio.subprocess.Process:
@@ -2008,6 +2013,11 @@ async def _communicate(
             stderr=stderr,
         )
     return stdout, stderr
+
+
+def _docker_stop_failed_only_for_missing_containers(stderr: str) -> bool:
+    lines = [line.strip().lower() for line in stderr.splitlines() if line.strip()]
+    return bool(lines) and all("no such container" in line for line in lines)
 
 
 def default_cleaner() -> WorkspaceCleaner:

@@ -525,6 +525,24 @@ class _UnexpectedStatusRecheckTerminalRuntimeReleaser(TerminalRuntimeReleaser):
         raise AssertionError("release should not perform a redundant status-only recheck")
 
 
+class _WorktreeAppearingTerminalRuntimeReleaser(TerminalRuntimeReleaser):
+    def __init__(self, *, appearing_worktree: Path, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._appearing_worktree = appearing_worktree
+
+    async def _snapshot(
+        self,
+        workspace_id: str,
+        *,
+        expected_status: WorkspaceStatus | None,
+    ) -> Any | None:
+        snapshot = await super()._snapshot(workspace_id, expected_status=expected_status)
+        if snapshot is not None:
+            assert snapshot.worktree_host_path is None
+            self._appearing_worktree.mkdir(parents=True, exist_ok=True)
+        return snapshot
+
+
 class _RefreshFailingTerminalRuntimeReleaser(TerminalRuntimeReleaser):
     async def _refresh_terminal_runtime_claim(
         self,
@@ -1054,6 +1072,42 @@ async def test_terminal_runtime_release_omits_absent_preserved_worktree_path(
         "failure_reason": FailureReason.agent_failure.value,
         "failure_message": "primary conformance failure",
     }
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_reresolves_worktree_path_created_before_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    actual_worktree = worktrees_root / workspace_id
+    cleaner = _RecordingCleaner()
+    releaser = _WorktreeAppearingTerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+        appearing_worktree=actual_worktree,
+    )
+
+    result = await releaser.release(
+        workspace_id,
+        source="test",
+        expected_status=WorkspaceStatus.failed,
+    )
+
+    assert result.ok
+    assert cleaner.calls[0]["worktree_host_path"] == actual_worktree
+    async with session_factory() as session:
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.terminal_runtime_released",
+        )
+    assert len(events) == 1
+    assert events[0].payload["preserved"]["worktree_path"] == str(actual_worktree)
 
 
 @pytest.mark.unit
