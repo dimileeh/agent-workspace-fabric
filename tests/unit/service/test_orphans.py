@@ -169,6 +169,20 @@ def test_no_orphans_reports_zero_counts(tmp_path: Path) -> None:
     assert summary["examples"] == []
 
 
+def test_no_orphans_preserves_zero_leaked_live_kind_counts(tmp_path: Path) -> None:
+    summary = detect_orphan_resources(
+        work_dir=tmp_path,
+        docker_host="unix:///var/run/docker.sock",
+        workspace_view=_view(),
+        run_subprocess=_run_with(),
+        now=datetime(2026, 4, 28, tzinfo=UTC),
+    )
+
+    for kind in orphans._RESOURCE_KINDS:
+        assert summary.leaked_live_counts_by_kind[kind] == 0
+    assert summary.to_check_payload()["leaked_live_counts_by_kind"] == {}
+
+
 def test_orphan_container_missing_workspace_is_structured(tmp_path: Path) -> None:
     summary = detect_orphan_resources(
         work_dir=tmp_path,

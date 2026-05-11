@@ -274,7 +274,7 @@ def detect_orphan_resources(
     resource_counts = _kind_counts(resources)
     expected: Counter[str] = Counter()
     retained: Counter[str] = Counter()
-    leaked_live: Counter[str] = Counter()
+    leaked_live: Counter[str] = Counter(dict.fromkeys(_RESOURCE_KINDS, 0))
     orphan_counts: Counter[str] = Counter()
     examples: list[ResourceFinding] = []
     unknown_examples: list[ResourceFinding] = []
