@@ -385,6 +385,34 @@ class WorkspaceTransitionBlockedByActiveOperationError(RuntimeError):
         )
 
 
+class WorkspaceTransitionStaleError(RuntimeError):
+    """Raised when a loaded workspace changed before ``transition()`` updated it."""
+
+    def __init__(
+        self,
+        workspace_id: str,
+        *,
+        expected_status: str,
+        expected_version: int,
+        actual_status: str | None,
+        actual_version: int | None,
+    ) -> None:
+        self.workspace_id = workspace_id
+        self.expected_status = expected_status
+        self.expected_version = expected_version
+        self.actual_status = actual_status
+        self.actual_version = actual_version
+        actual = (
+            "missing"
+            if actual_status is None or actual_version is None
+            else f"{actual_status}@{actual_version}"
+        )
+        super().__init__(
+            f"Workspace transition for {workspace_id} was stale; expected "
+            f"{expected_status}@{expected_version}, found {actual}."
+        )
+
+
 _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES: Final[tuple[str, ...]] = (
     OperationType.cancel.value,
     OperationType.stop.value,
@@ -3260,9 +3288,13 @@ class WorkspaceRepository:
                         allow_active_operation_id=allow_active_operation_id,
                     )
                 )
-            raise RuntimeError(
-                f"Workspace transition did not update workspace {workspace.id}; "
-                "it may have been concurrently modified."
+            latest_status, latest_version = await self._transition_latest_state(workspace.id)
+            raise WorkspaceTransitionStaleError(
+                workspace.id,
+                expected_status=old_state,
+                expected_version=expected_version,
+                actual_status=latest_status,
+                actual_version=latest_version,
             )
 
         version, updated_at, monitor_started_at = row
@@ -3437,6 +3469,19 @@ class WorkspaceRepository:
             )
         )
         return result.scalar_one_or_none() is not None
+
+    async def _transition_latest_state(
+        self,
+        workspace_id: str,
+    ) -> tuple[str | None, int | None]:
+        result = await self._session.execute(
+            select(Workspace.status, Workspace.version).where(Workspace.id == workspace_id)
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None, None
+        status, version = row
+        return status, version
 
     async def _active_external_runtime_teardown_operation(
         self,

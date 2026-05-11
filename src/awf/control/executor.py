@@ -83,6 +83,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
     WorkspaceTransitionBlockedByActiveOperationError,
+    WorkspaceTransitionStaleError,
     sync_candidate_readiness,
 )
 from awf.db.validation_runs import validation_run_coverage_payload
@@ -5148,6 +5149,28 @@ class WorkspaceExecutor:
                 reason_code=reason_code,
                 operation_id=operation_id,
             )
+            await session.commit()
+            return False
+        except WorkspaceTransitionStaleError:
+            await session.rollback()
+            current = await repo.get(workspace_id)
+            if current is not None:
+                await self._record_stale_action_skip(
+                    repo,
+                    current,
+                    action=action,
+                    expected=expected,
+                    reason_code="EXECUTOR_STALE_STATUS",
+                )
+                if _is_callback_terminal_status(current.status):
+                    await self._finish_ignored_stale_callback_operations_in_session(
+                        session,
+                        workspace_id=workspace_id,
+                        callback_source="executor",
+                        callback_action=action,
+                        expected_status=expected,
+                        actual_status=current.status,
+                    )
             await session.commit()
             return False
         return True

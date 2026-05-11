@@ -30,6 +30,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
     WorkspaceTransitionBlockedByActiveOperationError,
+    WorkspaceTransitionStaleError,
     external_runtime_teardown_operation_blocks_controls,
 )
 from awf.node.cleanup import (
@@ -1907,6 +1908,13 @@ async def _transition_workspace_for_control(
         )
     except WorkspaceTransitionBlockedByActiveOperationError as exc:
         raise WorkspaceActiveOperationConflictError(exc.operation) from exc
+    except WorkspaceTransitionStaleError as exc:
+        if exc.actual_version is None:
+            raise
+        raise VersionConflictError(
+            expected_version=exc.expected_version,
+            actual_version=exc.actual_version,
+        ) from exc
 
 
 async def stop_project_containers(compose_project_name: str | None) -> None:

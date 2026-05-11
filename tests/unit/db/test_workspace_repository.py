@@ -31,6 +31,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
     WorkspaceTransitionBlockedByActiveOperationError,
+    WorkspaceTransitionStaleError,
     _active_external_runtime_teardown_operation_lease_current,
     _schedulable_workspace_ids_stmt,
     validation_command_set_hash,
@@ -2215,13 +2216,18 @@ class TestTransition:
             },
         )
 
-        with pytest.raises(RuntimeError, match="concurrently modified"):
+        with pytest.raises(WorkspaceTransitionStaleError) as stale:
             await repo.transition(
                 ws,
                 to=WorkspaceStatus.provisioning,
                 reason_code="WORKER_CLAIMED",
             )
 
+        assert stale.value.workspace_id == ws.id
+        assert stale.value.expected_status == WorkspaceStatus.requested.value
+        assert stale.value.expected_version == 1
+        assert stale.value.actual_status == WorkspaceStatus.cancelled.value
+        assert stale.value.actual_version == 2
         row = (
             await session.execute(
                 text("SELECT status, version FROM workspaces WHERE id = :workspace_id"),

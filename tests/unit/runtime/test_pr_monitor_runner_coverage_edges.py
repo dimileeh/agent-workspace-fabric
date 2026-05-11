@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import pytest_mock
 import structlog
+from sqlalchemy import event, text
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -4498,6 +4499,128 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
         "requested_status": "completed" if callback == "completed" else "failed",
         "reason_code": "MONITOR_DONE" if callback == "completed" else "STALE_MONITOR",
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("callback", ["completed", "failed"])
+async def test_monitor_terminal_callbacks_record_stale_transition_races(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    callback: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    operator_status = (
+        WorkspaceStatus.completed if callback == "completed" else WorkspaceStatus.failed
+    )
+    raced = False
+    async with factory() as s:
+        bind = s.get_bind()
+
+    def finish_workspace_before_guarded_transition(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        nonlocal raced
+        del conn, cursor, parameters, context, executemany
+        normalized = " ".join(statement.lower().split())
+        if raced or " from workspaces " not in normalized or " for update" not in normalized:
+            return
+        raced = True
+        with bind.connect() as external:
+            external.execute(
+                text(
+                    """
+                    UPDATE workspaces
+                    SET status = :status, version = version + 1
+                    WHERE id = :workspace_id
+                    """
+                ),
+                {"workspace_id": workspace_id, "status": operator_status.value},
+            )
+            external.commit()
+
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    reconcile_calls: list[tuple[str, str, str]] = []
+    gc_calls: list[str] = []
+
+    async def _record_reconcile_call(
+        *,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+    ) -> None:
+        reconcile_calls.append((workspace_id, repo_url, base_branch))
+
+    async def _record_gc_call(workspace_id: str) -> None:
+        gc_calls.append(workspace_id)
+
+    runner._reconcile_target_branch_after_merge = _record_reconcile_call  # type: ignore[method-assign]
+    runner._gc_completed_workspace_filesystem = _record_gc_call  # type: ignore[method-assign]
+
+    event.listen(bind, "before_cursor_execute", finish_workspace_before_guarded_transition)
+    try:
+        if callback == "completed":
+            await runner._terminate_completed(
+                workspace_id,
+                pr_merge_sha="raced-merge-sha",
+                repo_url="git@github.com:example/repo.git",
+                base_branch="development",
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+            requested_status = WorkspaceStatus.completed
+            reason_code = "MONITOR_DONE"
+        else:
+            await runner._terminate_failed(
+                workspace_id,
+                message="raced monitor failure",
+                reason_code="RACED_MONITOR",
+            )
+            requested_status = WorkspaceStatus.failed
+            reason_code = "RACED_MONITOR"
+    finally:
+        event.remove(bind, "before_cursor_execute", finish_workspace_before_guarded_transition)
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        ignored_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert raced is True
+    assert workspace.status == operator_status.value
+    assert workspace.pr_merge_sha == ("raced-merge-sha" if callback == "completed" else None)
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+    assert cmd.calls == []
+    assert reconcile_calls == []
+    assert gc_calls == []
+    expected_payload = {
+        "callback_source": "pr_monitor",
+        "callback_action": "terminal_completed" if callback == "completed" else "terminal_failed",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": operator_status.value,
+        "requested_status": requested_status.value,
+        "reason_code": reason_code,
+    }
+    if callback == "failed":
+        expected_payload["failure_reason"] = FailureReason.infrastructure_failure.value
+        expected_payload["failure_message"] = "raced monitor failure"
+    assert ignored_events[-1].payload == expected_payload
 
 
 @pytest.mark.unit

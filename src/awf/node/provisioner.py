@@ -31,6 +31,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
     WorkspaceTransitionBlockedByActiveOperationError,
+    WorkspaceTransitionStaleError,
 )
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
@@ -515,6 +516,19 @@ class Provisioner:
                 reason_code=reason_code,
                 operation_id=operation_id,
             )
+            await session.commit()
+            return False
+        except WorkspaceTransitionStaleError:
+            await session.rollback()
+            current = await repo.get(workspace_id)
+            if current is not None:
+                await self._record_stale_action_skip(
+                    repo,
+                    current,
+                    action=action,
+                    expected=expected,
+                    reason_code="PROVISIONER_STALE_STATUS",
+                )
             await session.commit()
             return False
         return True

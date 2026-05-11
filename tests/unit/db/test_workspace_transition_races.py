@@ -14,6 +14,7 @@ from awf.db.repositories import (
     OperationRepository,
     WorkspaceRepository,
     WorkspaceTransitionBlockedByActiveOperationError,
+    WorkspaceTransitionStaleError,
 )
 from tests.postgres import postgres_test_session
 
@@ -215,6 +216,70 @@ async def test_transition_caps_repeated_finished_teardown_races(
     assert inserted_operation_ids
     assert blocked.value.operation.id in inserted_operation_ids
     assert blocked.value.operation.status == OperationStatus.succeeded.value
+    assert workspace.status == WorkspaceStatus.requested.value
+    assert workspace.version == 1
+
+
+@pytest.mark.unit
+async def test_transition_reports_non_teardown_version_race_as_stale(
+    session: AsyncSession,
+) -> None:
+    repo = WorkspaceRepository(session)
+    workspace = await repo.create(
+        repo_url="git@github.com:example/a.git",
+        branch_base="development",
+        task_title="t",
+        task_prompt="p",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+    )
+    await session.commit()
+
+    raced = False
+    bind = session.get_bind()
+
+    def bump_version_before_workspace_update(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        nonlocal raced
+        del cursor, parameters, context, executemany
+        normalized = " ".join(statement.lower().split())
+        if raced or not normalized.startswith("update workspaces set "):
+            return
+        raced = True
+        conn.execute(
+            text(
+                """
+                UPDATE workspaces
+                SET version = version + 1
+                WHERE id = :workspace_id
+                """
+            ),
+            {"workspace_id": workspace.id},
+        )
+
+    event.listen(bind, "before_cursor_execute", bump_version_before_workspace_update)
+    try:
+        with pytest.raises(WorkspaceTransitionStaleError) as stale:
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.provisioning,
+                reason_code="WORKER_CLAIMED",
+            )
+    finally:
+        event.remove(bind, "before_cursor_execute", bump_version_before_workspace_update)
+
+    assert raced is True
+    assert stale.value.workspace_id == workspace.id
+    assert stale.value.expected_status == WorkspaceStatus.requested.value
+    assert stale.value.expected_version == 1
+    assert stale.value.actual_status == WorkspaceStatus.requested.value
+    assert stale.value.actual_version == 2
     assert workspace.status == WorkspaceStatus.requested.value
     assert workspace.version == 1
 

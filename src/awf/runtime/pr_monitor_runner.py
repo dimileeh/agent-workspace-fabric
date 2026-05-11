@@ -63,6 +63,7 @@ from awf.db.repositories import (
     WorkspaceEventCreate,
     WorkspaceRepository,
     WorkspaceTransitionBlockedByActiveOperationError,
+    WorkspaceTransitionStaleError,
     pr_feedback_body_hash,
 )
 from awf.runtime.logs import LogStore, WorkspaceLogSink
@@ -3126,6 +3127,10 @@ class PullRequestMonitorRunner:
                         operation_id=operation_id,
                     )
                     return True
+                except WorkspaceTransitionStaleError:
+                    await s.rollback()
+                    await _record_ignored_monitor_recovery_dispatch(s, workspace_id)
+                    return True
                 await s.commit()
             dispatch_payload: dict[str, object] = {
                 "pr_number": pr_number,
@@ -5010,6 +5015,16 @@ class PullRequestMonitorRunner:
                     operation_id=operation_id,
                 )
                 return
+            except WorkspaceTransitionStaleError:
+                await s.rollback()
+                await _record_stale_monitor_terminal_callback(
+                    s,
+                    workspace_id,
+                    requested_status=WorkspaceStatus.completed,
+                    reason_code="MONITOR_DONE",
+                    pr_merge_sha=pr_merge_sha,
+                )
+                return
             await s.commit()
         teardown_ok = True
         teardown_failure_reason = "compose_teardown_failed"
@@ -5292,6 +5307,17 @@ class PullRequestMonitorRunner:
                     failure_message=failure_message,
                 )
                 return
+            except WorkspaceTransitionStaleError:
+                await s.rollback()
+                await _record_stale_monitor_terminal_callback(
+                    s,
+                    workspace_id,
+                    requested_status=WorkspaceStatus.failed,
+                    reason_code=rc,
+                    failure_reason=failure_reason,
+                    failure_message=failure_message,
+                )
+                return
             await s.commit()
         if self._terminal_runtime_releaser is not None:
             released = await self._release_terminal_runtime(
@@ -5381,6 +5407,38 @@ async def _record_ignored_monitor_terminal_callback(
         event.payload = payload
 
 
+async def _record_stale_monitor_terminal_callback(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    requested_status: WorkspaceStatus,
+    reason_code: str,
+    pr_merge_sha: str | None = None,
+    failure_reason: str | None = None,
+    failure_message: str | None = None,
+) -> None:
+    repo = WorkspaceRepository(session)
+    workspace = await repo.get(workspace_id)
+    if workspace is None:
+        return
+    if (
+        requested_status == WorkspaceStatus.completed
+        and pr_merge_sha
+        and workspace.status == WorkspaceStatus.completed.value
+        and not workspace.pr_merge_sha
+    ):
+        workspace.pr_merge_sha = pr_merge_sha
+    await _record_ignored_monitor_terminal_callback(
+        repo,
+        workspace,
+        requested_status=requested_status,
+        reason_code=reason_code,
+        failure_reason=failure_reason,
+        failure_message=failure_message,
+    )
+    await session.commit()
+
+
 async def _record_blocked_monitor_terminal_callback(
     session: AsyncSession,
     workspace_id: str,
@@ -5407,11 +5465,11 @@ async def _record_blocked_monitor_terminal_callback(
     await session.commit()
 
 
-async def _record_blocked_monitor_recovery_dispatch(
+async def _record_ignored_monitor_recovery_dispatch(
     session: AsyncSession,
     workspace_id: str,
     *,
-    operation_id: str,
+    operation_id: str | None = None,
 ) -> None:
     repo = WorkspaceRepository(session)
     workspace = await repo.get(workspace_id)
@@ -5427,6 +5485,19 @@ async def _record_blocked_monitor_recovery_dispatch(
         reason_code="RECOVERY_DISPATCH",
     )
     await session.commit()
+
+
+async def _record_blocked_monitor_recovery_dispatch(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    operation_id: str,
+) -> None:
+    await _record_ignored_monitor_recovery_dispatch(
+        session,
+        workspace_id,
+        operation_id=operation_id,
+    )
 
 
 def _is_callback_terminal_workspace_status(status: str) -> bool:
