@@ -3677,6 +3677,7 @@ class TestFailurePaths:
         compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
         validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
         pr = PullRequestCreator(fake)
+        terminal_releaser = _RecordingTerminalRuntimeReleaser()
         executor = WorkspaceExecutor(
             session_factory=factory,
             runner=fake,
@@ -3693,10 +3694,8 @@ class TestFailurePaths:
                 },
                 max_validation_fix_passes=0,
             ),
-            terminal_runtime_releaser=_RecordingTerminalRuntimeReleaser(),
+            terminal_runtime_releaser=terminal_releaser,
         )
-        terminal_releaser = _RecordingTerminalRuntimeReleaser()
-        executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)  # adapter ok
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch

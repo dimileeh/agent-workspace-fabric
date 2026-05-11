@@ -183,7 +183,14 @@ def test_workspace_status_helpers_reject_unknown_and_active_release_statuses() -
         WorkspaceStatus.destroyed,
     ):
         assert _terminal_runtime_release_status_or_none(status.value) is status
-    assert _terminal_runtime_release_status_or_none(WorkspaceStatus.running.value) is None
+    for status in (
+        WorkspaceStatus.requested,
+        WorkspaceStatus.provisioning,
+        WorkspaceStatus.ready,
+        WorkspaceStatus.running,
+        WorkspaceStatus.destroying,
+    ):
+        assert _terminal_runtime_release_status_or_none(status.value) is None
     assert _terminal_runtime_release_status_or_none("not-a-workspace-status") is None
 
 
