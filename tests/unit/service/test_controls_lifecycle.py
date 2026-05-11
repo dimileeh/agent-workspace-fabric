@@ -893,6 +893,53 @@ async def test_cancel_and_stop_snapshot_runtime_fields_before_pre_io_commit(
 
 
 @pytest.mark.unit
+async def test_destroy_snapshots_runtime_fields_before_pre_io_commit() -> None:
+    async with postgres_test_engine() as engine:
+        session_factory = async_sessionmaker(
+            engine,
+            expire_on_commit=True,
+            class_=AsyncSession,
+        )
+        async with session_factory() as session:
+            workspace = await _workspace(session, status=WorkspaceStatus.ready)
+            workspace_id = workspace.id
+            repo_url = workspace.repo_url
+            compose_project_name = workspace.compose_project_name
+            compose_file_path = Path(cast(str, workspace.compose_file_path))
+            await session.commit()
+
+        async with session_factory() as session:
+            service, _stopper, cleaner = _service(
+                session,
+                session_factory=session_factory,
+            )
+            response = await service.destroy_workspace(
+                workspace_id,
+                force=True,
+                remove_volumes=False,
+                remove_worktree=True,
+            )
+
+        async with session_factory() as session:
+            persisted = await WorkspaceRepository(session).get(workspace_id)
+
+    assert response.status == WorkspaceStatus.destroyed
+    assert cleaner.calls == [
+        CleanupCall(
+            workspace_id=workspace_id,
+            repo_url=repo_url,
+            compose_project_name=compose_project_name,
+            compose_file_path=compose_file_path,
+            worktree_host_path=None,
+            remove_volumes=False,
+            remove_worktree=True,
+        )
+    ]
+    assert persisted is not None
+    assert persisted.status == WorkspaceStatus.destroyed.value
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("action", ["cancel", "stop"])
 async def test_cancel_and_stop_skip_cleanup_when_terminal_release_claim_is_active(
     action: str,

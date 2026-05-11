@@ -1731,6 +1731,7 @@ class WorkspaceControlService:
                 allow_active_operation_id=operation_id,
             )
 
+        terminal_runtime_snapshot = _snapshot_terminal_runtime_workspace_for_control(workspace)
         await self._commit_before_external_runtime_io()
         response: WorkspaceControlResponse | None = None
         try:
@@ -1739,12 +1740,12 @@ class WorkspaceControlService:
                 await self._run_with_teardown_operation_heartbeat(
                     operation_id,
                     cleaner.cleanup(
-                        workspace_id=workspace_id,
-                        repo_url=workspace.repo_url,
-                        compose_project_name=workspace.compose_project_name,
+                        workspace_id=terminal_runtime_snapshot.workspace_id,
+                        repo_url=terminal_runtime_snapshot.repo_url,
+                        compose_project_name=terminal_runtime_snapshot.compose_project_name,
                         compose_file_path=(
-                            Path(workspace.compose_file_path)
-                            if workspace.compose_file_path
+                            Path(terminal_runtime_snapshot.compose_file_path)
+                            if terminal_runtime_snapshot.compose_file_path
                             else None
                         ),
                         worktree_host_path=None,
