@@ -1449,16 +1449,18 @@ class PullRequestMonitorRunner:
                 )
                 return True
             if push_result.failed:
+                reason_code = push_result.reason_code
+                outcome = _git_push_failure_outcome(push_result)
                 await self._finish_monitor_operation(
                     operation,
                     status=OperationStatus.failed,
                     result={
                         "status": "failed",
-                        "outcome": "git_push_failed",
-                        "reason_code": _GIT_PUSH_FAILED_REASON,
+                        "outcome": outcome,
+                        "reason_code": reason_code,
                         "pushed": False,
                     },
-                    error_code=_GIT_PUSH_FAILED_REASON,
+                    error_code=reason_code,
                     error_message=push_result.error_message,
                 )
                 await self._record_pr_monitor_audit_event(
@@ -1466,7 +1468,7 @@ class PullRequestMonitorRunner:
                     event_type=_AUDIT_GIT_PUSH_EVENT,
                     action="sync_base_push",
                     outcome="failed",
-                    reason_code=_GIT_PUSH_FAILED_REASON,
+                    reason_code=reason_code,
                     pr_number=pr_number,
                     status=status,
                     base_branch=base_branch,
@@ -1476,6 +1478,13 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
+                if push_result.protected_scope_blocked:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 self._record_sync_base_progress(
                     state=state,
                     status=status,
