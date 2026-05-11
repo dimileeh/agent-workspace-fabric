@@ -2089,7 +2089,11 @@ def test_sync_classifier_computes_failed_no_work_when_precompute_missing(
 def test_sync_classifier_computes_live_runtime_when_precompute_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    calls = 0
+
     async def _live_runtime_state(workspace: Workspace) -> str:
+        nonlocal calls
+        calls += 1
         assert workspace.compose_project_name == "proj"
         return "live_runtime"
 
@@ -2118,6 +2122,7 @@ def test_sync_classifier_computes_live_runtime_when_precompute_missing(
     assert isinstance(result, WorkspaceGCPreserved)
     assert result.reason_code == TERMINAL_LIVE_RUNTIME_PRESERVED
     assert result.retention_class == "live_runtime"
+    assert calls == 1
 
 
 @pytest.mark.unit

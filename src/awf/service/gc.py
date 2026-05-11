@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
@@ -69,6 +70,11 @@ _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS = ("sleep infinity", "tail -f /dev/null")
 
 _log = get_logger(__name__)
 _RUNTIME_INSPECTOR = RuntimeInspector()
+# Scoped by _classify_workspace_for_gc so related sync decisions share one inspection.
+_FAILED_TERMINAL_RUNTIME_STATE_CACHE: ContextVar[dict[int, str] | None] = ContextVar(
+    "_FAILED_TERMINAL_RUNTIME_STATE_CACHE",
+    default=None,
+)
 
 PROTECTED_WORKSPACE_GC_STATUSES = frozenset(
     {
@@ -1293,17 +1299,21 @@ def _classify_workspace_for_gc(
         default_policy=default_policy,
         cleanup_enabled=cleanup_enabled,
     ):
-        if failed_terminal_workspace_no_work is None:
-            failed_terminal_workspace_no_work = _failed_terminal_workspace_no_work_decision(
-                workspace, None
-            )
-        if (
-            failed_terminal_workspace_no_work is False
-            and failed_terminal_workspace_live_runtime is None
-        ):
-            failed_terminal_workspace_live_runtime = (
-                _failed_terminal_workspace_runtime_state(workspace) == "live_runtime"
-            )
+        runtime_state_cache_token = _FAILED_TERMINAL_RUNTIME_STATE_CACHE.set({})
+        try:
+            if failed_terminal_workspace_no_work is None:
+                failed_terminal_workspace_no_work = _failed_terminal_workspace_no_work_decision(
+                    workspace, None
+                )
+            if (
+                failed_terminal_workspace_no_work is False
+                and failed_terminal_workspace_live_runtime is None
+            ):
+                failed_terminal_workspace_live_runtime = (
+                    _failed_terminal_workspace_runtime_state(workspace) == "live_runtime"
+                )
+        finally:
+            _FAILED_TERMINAL_RUNTIME_STATE_CACHE.reset(runtime_state_cache_token)
 
     if default_policy:
         if workspace.status == WorkspaceStatus.failed.value:
@@ -1469,10 +1479,19 @@ def _failed_terminal_workspace_has_no_work(workspace: Workspace) -> bool:
 
 
 def _failed_terminal_workspace_runtime_state(workspace: Workspace) -> str:
+    runtime_state_cache = _FAILED_TERMINAL_RUNTIME_STATE_CACHE.get()
+    runtime_state_cache_key = id(workspace)
+    if runtime_state_cache is not None and runtime_state_cache_key in runtime_state_cache:
+        return runtime_state_cache[runtime_state_cache_key]
     try:
-        return _run_awaitable_blocking(_failed_terminal_workspace_runtime_state_async(workspace))
+        runtime_state = _run_awaitable_blocking(
+            _failed_terminal_workspace_runtime_state_async(workspace)
+        )
     except Exception:
-        return "unknown"
+        runtime_state = "unknown"
+    if runtime_state_cache is not None:
+        runtime_state_cache[runtime_state_cache_key] = runtime_state
+    return runtime_state
 
 
 def _run_awaitable_blocking(awaitable: Coroutine[Any, Any, str]) -> str:
