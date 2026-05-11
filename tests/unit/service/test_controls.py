@@ -2243,9 +2243,9 @@ async def test_terminal_runtime_release_claim_refresh_loop_stops_after_error_gra
     monkeypatch.setattr(
         controls,
         "_terminal_runtime_release_claim_heartbeat_interval_seconds",
-        lambda: 0.001,
+        lambda: 0.005,
     )
-    monkeypatch.setattr(controls, "TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS", 0.003)
+    monkeypatch.setattr(controls, "TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS", 0.015)
     monkeypatch.setattr(
         WorkspaceRepository,
         "refresh_execution_claim",
