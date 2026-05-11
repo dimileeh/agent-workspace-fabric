@@ -155,6 +155,7 @@ class WorkerConfig:
     stale_active_execution_scan_interval_seconds: float = 300.0
     secret_lease_expiration_scan_interval_seconds: float = 60.0
     terminal_runtime_release_scan_interval_seconds: float = 300.0
+    terminal_runtime_release_max_per_scan: int = 5
     node_id: str | None = None
 
 
@@ -859,11 +860,17 @@ class ControlWorker:
     async def _release_terminal_runtime_resources(self) -> None:
         if self._runtime_cleaner is None:
             return
-        candidates = await self._list_terminal_runtime_candidates()
+        candidates = await self._list_terminal_runtime_candidates(
+            limit=self._config.terminal_runtime_release_max_per_scan,
+        )
         for candidate in candidates:
             await self._release_terminal_runtime_for_candidate(candidate)
 
-    async def _list_terminal_runtime_candidates(self) -> list[_TerminalRuntimeCandidate]:
+    async def _list_terminal_runtime_candidates(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> list[_TerminalRuntimeCandidate]:
         terminal_status_values = [status.value for status in _TERMINAL_RELEASE_STATUSES]
         released_event_exists = (
             select(WorkspaceEvent.id)
@@ -886,6 +893,8 @@ class ControlWorker:
             .where(~released_event_exists)
             .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
         )
+        if limit is not None and limit > 0:
+            stmt = stmt.limit(limit)
 
         async def _operation(session: AsyncSession) -> list[Any]:
             result = await session.execute(stmt)

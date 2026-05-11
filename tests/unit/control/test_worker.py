@@ -8582,3 +8582,58 @@ class TestTerminalRuntimeRelease:
                 event_type="workspace.terminal_runtime_released",
             )
         assert events == []
+
+    @pytest.mark.unit
+    async def test_release_bounds_work_per_scan_and_drains_backlog_across_scans(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_ids: list[str] = []
+        for i in range(5):
+            workspace_ids.append(
+                await _create_terminal_execution(
+                    session_factory,
+                    origin_repo,
+                    f"terminal-release-batch-{i}",
+                    WorkspaceStatus.failed,
+                )
+            )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+                terminal_runtime_release_max_per_scan=2,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        assert len(cleaner.calls) == 2
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        assert len(cleaner.calls) == 4
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        assert len(cleaner.calls) == 5
+
+        cleaned_workspace_ids = {call["workspace_id"] for call in cleaner.calls}
+        assert cleaned_workspace_ids == set(workspace_ids)
+
+        async with session_factory() as s:
+            repo = WorkspaceEventRepository(s)
+            released_counts = [
+                len(
+                    await repo.list(
+                        workspace_id=ws_id,
+                        event_type="workspace.terminal_runtime_released",
+                    )
+                )
+                for ws_id in workspace_ids
+            ]
+        assert released_counts == [1, 1, 1, 1, 1]
