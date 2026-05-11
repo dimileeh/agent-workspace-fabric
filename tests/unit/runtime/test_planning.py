@@ -1622,6 +1622,42 @@ def test_build_conformance_stall_failure_evidence_is_structured_and_bounded() ->
 
 
 @pytest.mark.unit
+def test_build_conformance_stall_failure_evidence_redacts_diff_error() -> None:
+    stall = ConformanceStallEvidence(
+        kind=ConformanceStallKind.no_output,
+        iteration_index=2,
+        elapsed_seconds=620.5,
+        no_output_seconds=620.5,
+        repeated_output_count=0,
+        last_report_digest=None,
+        plan_path="docs/awf-plans/ws_e.md",
+        report_path="docs/awf-plans/ws_e.conformance.json",
+        last_output_excerpt="",
+    )
+    diff_error = (
+        "fatal: unable to access https://user:pass-token@git.example/repo.git\n"
+        "Authorization: Bearer bearerSecret123456\n"
+        "GITHUB_TOKEN=ghp_fakeGitHubToken123456"
+    )
+
+    evidence = build_conformance_stall_failure_evidence(
+        stall=stall,
+        head_sha=None,
+        base_sha=None,
+        commit_count=0,
+        diff_error=diff_error,
+    )
+
+    persisted = evidence["diff_error"]
+    assert "pass-token" not in persisted
+    assert "bearerSecret123456" not in persisted
+    assert "ghp_fakeGitHubToken123456" not in persisted
+    assert "https://<redacted>@git.example/repo.git" in persisted
+    assert "Authorization: Bearer <redacted>" in persisted
+    assert "GITHUB_TOKEN=<redacted>" in persisted
+
+
+@pytest.mark.unit
 def test_build_conformance_stall_failure_evidence_omits_recovery_action_when_none() -> None:
     stall = ConformanceStallEvidence(
         kind=ConformanceStallKind.no_output,

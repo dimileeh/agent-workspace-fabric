@@ -676,7 +676,7 @@ def build_conformance_stall_failure_evidence(
             "changed_paths": salvage_paths,
         },
     }
-    safe_diff_error = _safe_conformance_text(diff_error)
+    safe_diff_error = _safe_conformance_text(redact_secrets(diff_error or ""))
     if safe_diff_error:
         payload["diff_error"] = safe_diff_error
     if recovery_action is not None:
