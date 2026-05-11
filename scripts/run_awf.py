@@ -115,6 +115,14 @@ class TaskConfig:
     unset, the driver queries GitHub for it and errors out if none
     exists (the scheduler should always populate this)."""
 
+    effort: str | None = "max"
+    """Reasoning effort level for the coding CLI. Maps to claude/codex
+    ``--effort {low|medium|high|xhigh|max}``. Defaults to ``"max"`` so
+    every workspace gets the deepest thinking budget by default; specs
+    can override per-task (e.g. ``"high"`` for cheaper polish work).
+    Set to ``null`` (JSON) to omit the flag entirely and let the CLI's
+    own default win."""
+
     auto_merge: bool = True
     """For ``sync_feature_pr`` only. ``True`` → monitor lands the feature
     PR (into ``development``) once all gates turn green; ``False`` →
@@ -574,6 +582,7 @@ async def _run_task(
             worktrees_root=work_dir / "git" / "worktrees",
             compose_projects_root=work_dir / "compose" / "compose",
             default_models=_DEFAULT_MODELS,
+            default_effort=cfg.effort,
         ),
         pr_monitor_factory=_monitor_factory,
     )
@@ -759,7 +768,9 @@ async def _run_sync_release_pr(
     from awf.adapters.base import get_adapter
 
     agent_runtime = AgentRuntime(cfg.agent)
-    adapter = get_adapter(agent_runtime, runner=runner, default_model=None)
+    adapter = get_adapter(
+        agent_runtime, runner=runner, default_model=None, default_effort=cfg.effort
+    )
     gh = GitHubClient(runner)
     monitor = build_release_pr_monitor(
         session_factory=session_factory,
@@ -969,7 +980,9 @@ async def _run_sync_feature_pr(
     from awf.adapters.base import get_adapter
 
     agent_runtime = AgentRuntime(cfg.agent)
-    adapter = get_adapter(agent_runtime, runner=runner, default_model=None)
+    adapter = get_adapter(
+        agent_runtime, runner=runner, default_model=None, default_effort=cfg.effort
+    )
     gh = GitHubClient(runner)
     factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
     monitor = factory(

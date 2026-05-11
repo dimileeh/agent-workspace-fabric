@@ -72,3 +72,18 @@ workspaces/
 # keep migration files; ignore local db dumps only
 *.dump
 *.sql.bak
+
+# AWF per-task spec files — ephemeral, personal workflow artifacts
+# that accumulate forever (each new task dispatch creates one).
+# Shared companion templates re-included below so they stay tracked
+# for reuse across tasks.
+scripts/airaagent_*.json
+scripts/airaweb_*.json
+scripts/awf_*.json
+!scripts/airaagent_postgres_only_companions.json
+!scripts/airaweb_release_monitor_companions.json
+!scripts/airaweb_no_companions.json
+!scripts/airaweb_only.json
+
+# Local Claude Code agent memory — never commit.
+.claude/

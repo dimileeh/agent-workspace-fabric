@@ -66,6 +66,13 @@ class ExecutorConfig:
     default_models: dict[AgentRuntime, str]
     """Default LLM model to pass each adapter when the request doesn't set one."""
 
+    default_effort: str | None = "max"
+    """Default reasoning effort level passed to the coding CLI. Values:
+    ``low|medium|high|xhigh|max`` for claude/codex; ``None`` to omit the
+    flag entirely. ``"max"`` by default to give every workspace the
+    deepest thinking budget. Per-task specs may override via
+    ``TaskConfig.effort``."""
+
     max_validation_fix_passes: int = 5
     """Maximum fix attempts on validation failure. After the initial agent
     run + validation, if validation fails, the executor re-invokes the
@@ -133,7 +140,12 @@ class WorkspaceExecutor:
         try:
             agent = AgentRuntime(ws.agent)
             default_model = self._config.default_models.get(agent)
-            adapter = get_adapter(agent, runner=self._runner, default_model=default_model)
+            adapter = get_adapter(
+                agent,
+                runner=self._runner,
+                default_model=default_model,
+                default_effort=self._config.default_effort,
+            )
             await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,

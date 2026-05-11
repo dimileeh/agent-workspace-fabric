@@ -90,9 +90,11 @@ class AgentAdapter(ABC):
         *,
         runner: AsyncCommandRunner,
         default_model: str | None = None,
+        default_effort: str | None = None,
     ) -> None:
         self._runner = runner
         self._default_model = default_model
+        self._default_effort = default_effort
 
     @property
     @abstractmethod
@@ -192,6 +194,7 @@ def get_adapter(
     *,
     runner: AsyncCommandRunner,
     default_model: str | None = None,
+    default_effort: str | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime.
 
@@ -199,4 +202,4 @@ def get_adapter(
     subclass forgot to import. Tests verify the registry is populated.
     """
     cls = _REGISTRY[runtime]
-    return cls(runner=runner, default_model=default_model)
+    return cls(runner=runner, default_model=default_model, default_effort=default_effort)

@@ -1,0 +1,12 @@
+[
+  {
+    "name": "postgres",
+    "image": "pgvector/pgvector:pg18",
+    "environment": {
+      "POSTGRES_USER": "awf",
+      "POSTGRES_PASSWORD": "awf_dev_${WORKSPACE_ID_SUFFIX}",
+      "POSTGRES_DB": "awf"
+    },
+    "healthcheck_cmd": "pg_isready -U awf -d awf"
+  }
+]
