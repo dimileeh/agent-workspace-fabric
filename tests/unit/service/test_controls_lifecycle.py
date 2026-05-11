@@ -949,6 +949,43 @@ async def test_cancel_and_stop_skip_cleanup_when_terminal_release_claim_is_activ
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_terminal_workspace_takes_over_leftover_execution_claim(
+    session: AsyncSession,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.completed)
+    workspace.execution_claimed_by = "worker:leaked-execution"
+    workspace.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    service, stopper, cleaner = _service(session)
+
+    if action == "cancel":
+        response = await service.cancel_workspace(
+            workspace.id,
+            reason="repeat cancel",
+            stop_stack=True,
+        )
+    else:
+        response = await service.stop_workspace(
+            workspace.id,
+            reason="containers only",
+        )
+    await session.refresh(workspace)
+    events = await _events(session, workspace.id)
+
+    release_event = next(
+        event for event in events if event.event_type == "workspace.terminal_runtime_released"
+    )
+    assert response.status == WorkspaceStatus.completed
+    assert stopper.calls == [workspace.compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert workspace.execution_claimed_by is None
+    assert workspace.execution_claim_expires_at is None
+    assert release_event.payload is not None
+    assert release_event.payload["source"] == f"service.controls.{action}"
+
+
+@pytest.mark.unit
 async def test_cancel_terminal_workspace_claims_release_before_cleanup() -> None:
     async with postgres_test_engine() as engine:
         session_factory = make_session_factory(engine)

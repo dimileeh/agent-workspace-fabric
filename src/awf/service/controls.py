@@ -119,6 +119,7 @@ _TEARDOWN_OPERATION_HEARTBEAT_STOPPED_MESSAGE = (
 _RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS: Final = (
     EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TIMEOUT_SECONDS / 3
 )
+_STALE_ACTIVE_EXECUTION_CLEANUP_CLAIM_OWNER_PREFIX: Final = "stale-cleanup:"
 
 
 class _PreparedOperationKind(StrEnum):
@@ -1012,21 +1013,34 @@ class WorkspaceControlService:
         self,
         workspace_id: str,
     ) -> tuple[bool, str | None]:
-        locked_workspace = await WorkspaceRepository(self._session).get_for_update(workspace_id)
+        repo = WorkspaceRepository(self._session)
+        locked_workspace = await repo.get_for_update(workspace_id)
         if locked_workspace is None:
             raise WorkspaceNotFoundError(workspace_id)
         now = datetime.now(UTC)
         claim_owner_id: str | None = None
         claim_required = _control_terminal_runtime_release_claim_required(locked_workspace)
         active = terminal_runtime_release_claim_active(locked_workspace, now=now) or (
-            claim_required and _execution_claim_active_for_control(locked_workspace, now=now)
+            claim_required
+            and _stale_active_execution_cleanup_claim_active_for_control(
+                locked_workspace,
+                now=now,
+            )
         )
         if not claim_required or active:
             await self._session.commit()
             return active, claim_owner_id
 
         claim_owner_id = f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:{uuid4().hex}"
-        claimed = await WorkspaceRepository(self._session).claim_execution_if_available(
+        if _execution_claim_active_for_control(locked_workspace, now=now):
+            locked_workspace.execution_claimed_by = claim_owner_id
+            locked_workspace.execution_claim_expires_at = (
+                _terminal_runtime_release_claim_expires_at()
+            )
+            await self._session.commit()
+            return False, claim_owner_id
+
+        claimed = await repo.claim_execution_if_available(
             locked_workspace.id,
             owner_id=claim_owner_id,
             lease_expires_at=_terminal_runtime_release_claim_expires_at(),
@@ -2962,6 +2976,19 @@ def _execution_claim_active_for_control(
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
     return expires_at > (now or datetime.now(UTC))
+
+
+def _stale_active_execution_cleanup_claim_active_for_control(
+    workspace: Workspace,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    owner_id = workspace.execution_claimed_by
+    if owner_id is None or not owner_id.startswith(
+        _STALE_ACTIVE_EXECUTION_CLEANUP_CLAIM_OWNER_PREFIX
+    ):
+        return False
+    return _execution_claim_active_for_control(workspace, now=now)
 
 
 def _control_terminal_runtime_release_claim_owner(workspace: Workspace) -> str | None:
