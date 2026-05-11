@@ -299,14 +299,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
-    assert (
-        "Workspace runtime context"
-        in created["feature_monitor_kwargs"]["workspace_runtime_context"]
-    )
-    assert (
-        "$AWF_TEST_DATABASE_URL" in created["feature_monitor_kwargs"]["workspace_runtime_context"]
-    )
-    assert "secret" not in created["feature_monitor_kwargs"]["workspace_runtime_context"]
+    expected_runtime_context = created["feature_monitor_kwargs"]["workspace_runtime_context"]
+    assert "Workspace runtime context" in expected_runtime_context
+    assert "$AWF_TEST_DATABASE_URL" in expected_runtime_context
+    assert "secret" not in expected_runtime_context
     assert "post_merge_target_reconciler" in created["feature_monitor_kwargs"]
     reconciler = created["feature_monitor_kwargs"]["post_merge_target_reconciler"]
     assert callable(reconciler)
@@ -334,6 +330,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "post_merge_target_reconciler" in created["release_monitor_kwargs"]
+    release_runtime_context = created["release_monitor_kwargs"]["workspace_runtime_context"]
+    assert release_runtime_context == expected_runtime_context
+    assert "Workspace runtime context" in release_runtime_context
+    assert "$AWF_TEST_DATABASE_URL" in release_runtime_context
+    assert "secret" not in release_runtime_context
     assert (
         created["release_monitor_kwargs"]["merge_coordinator"]
         is created["feature_monitor_kwargs"]["merge_coordinator"]
