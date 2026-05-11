@@ -2154,7 +2154,14 @@ async def _communicate(
     *,
     operation: str,
 ) -> tuple[str, str]:
-    stdout_bytes, stderr_bytes = await proc.communicate()
+    try:
+        stdout_bytes, stderr_bytes = await proc.communicate()
+    except asyncio.CancelledError:
+        with suppress(ProcessLookupError):
+            proc.kill()
+        with suppress(ProcessLookupError):
+            await proc.wait()
+        raise
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
     assert proc.returncode is not None

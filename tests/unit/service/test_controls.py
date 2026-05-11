@@ -32,6 +32,27 @@ def _mock_proc(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") ->
     return proc
 
 
+class _CancellationHangingProcess:
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.communicate_started = asyncio.Event()
+        self.kill_called = False
+        self.wait_called = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        self.communicate_started.set()
+        await asyncio.Event().wait()
+        return b"", b""
+
+    def kill(self) -> None:
+        self.kill_called = True
+        self.returncode = -9
+
+    async def wait(self) -> int | None:
+        self.wait_called = True
+        return self.returncode
+
+
 @pytest.mark.unit
 def test_idempotency_identity_matching_ignores_identity_keys_absent_from_identity() -> None:
     assert controls._payload_matches_idempotency_identity(
@@ -1739,6 +1760,20 @@ async def test_communicate_reports_no_output_failure() -> None:
     assert exc_info.value.message == "docker stop failed (exit=2): <no output>"
     assert exc_info.value.stdout == ""
     assert exc_info.value.stderr == ""
+
+
+@pytest.mark.unit
+async def test_communicate_cancellation_kills_and_waits_for_subprocess() -> None:
+    proc = _CancellationHangingProcess()
+    task = asyncio.create_task(controls._communicate(proc, operation="stop"))  # noqa: SLF001
+    await asyncio.wait_for(proc.communicate_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert proc.kill_called is True
+    assert proc.wait_called is True
 
 
 @pytest.mark.unit
