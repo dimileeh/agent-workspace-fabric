@@ -547,7 +547,8 @@ class Provisioner:
             await session.commit()
             return False
         except WorkspaceTransitionStaleError:
-            await session.rollback()
+            if not preserve_staged_on_blocked:
+                await session.rollback()
             current = await repo.get(workspace_id)
             if current is not None:
                 await self._record_stale_action_skip(

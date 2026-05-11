@@ -31,6 +31,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceRepository,
+    WorkspaceTransitionStaleError,
 )
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
@@ -278,6 +279,74 @@ class TestSuccess:
         assert reloaded.failure_message == "preserve me before recording blocked callback"
         assert reloaded.events[-1].event_type == "workspace.stale_callback_ignored"
         assert reloaded.events[-1].payload["operation_id"] == operation_id
+
+    @pytest.mark.unit
+    async def test_stale_transition_preserves_pending_salvage_writes(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="stale transition preserves salvage",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            await s.commit()
+            workspace_id = ws.id
+
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.failure_reason = FailureReason.infrastructure_failure.value
+            ws.failure_message = "preserve me before recording stale callback"
+
+            async def _raise_stale(
+                workspace: Workspace,
+                *,
+                to: WorkspaceStatus,
+                reason_code: str,
+            ) -> Workspace:
+                del to, reason_code
+                raise WorkspaceTransitionStaleError(
+                    workspace.id,
+                    expected_status=workspace.status,
+                    expected_version=workspace.version,
+                    actual_status=workspace.status,
+                    actual_version=workspace.version + 1,
+                )
+
+            monkeypatch.setattr(repo, "transition", _raise_stale)
+
+            transitioned = await provisioner._transition_or_record_blocked_active_operation(  # noqa: SLF001
+                s,
+                repo,
+                ws,
+                to=WorkspaceStatus.ready,
+                reason_code="PROVISIONING_COMPLETE",
+                action="provision",
+                expected=WorkspaceStatus.provisioning,
+                preserve_staged_on_blocked=True,
+            )
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(workspace_id)
+
+        assert transitioned is False
+        assert reloaded is not None
+        assert reloaded.status == WorkspaceStatus.provisioning.value
+        assert reloaded.failure_reason == FailureReason.infrastructure_failure.value
+        assert reloaded.failure_message == "preserve me before recording stale callback"
+        assert reloaded.events[-1].event_type == "workspace.stale_action_skipped"
+        assert reloaded.events[-1].payload["action"] == "provision"
 
     @pytest.mark.unit
     async def test_transitions_to_ready_only_after_stack_launch_succeeds(
