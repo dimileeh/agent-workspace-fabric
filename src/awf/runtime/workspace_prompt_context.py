@@ -131,11 +131,7 @@ def _environment_lines(
     endpoint_keys = {endpoint.key for endpoint in env_endpoints}
     lines: list[str] = []
     for key, value in sorted(environment.items()):
-        if (
-            key not in endpoint_keys
-            and key not in generated_endpoint_keys
-            and not _is_connection_env_key(key)
-        ):
+        if key not in endpoint_keys and key not in generated_endpoint_keys:
             continue
         if _is_sensitive_env_key(key):
             lines.append(f"- `${key}` is set.")

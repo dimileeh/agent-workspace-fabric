@@ -90,6 +90,35 @@ def test_workspace_runtime_context_keeps_generic_non_database_sidecars() -> None
 
 
 @pytest.mark.unit
+def test_workspace_runtime_context_omits_connection_env_for_external_hosts() -> None:
+    profile = WorkspaceProfile(
+        name="external-db",
+        runtime=ProfileRuntime(
+            environment={
+                "DATABASE_URL": "postgresql://awf:secret@postgres:5432/awf",
+                "EXTERNAL_POSTGRES_URL": (
+                    "postgresql://awf:external-secret@external.example.com:5432/awf"
+                ),
+                "REDIS_URL": "redis://cache.example.com:6379/0",
+            }
+        ),
+        services=[
+            ProfileService(name="postgres", image="postgres:16-alpine"),
+        ],
+    )
+
+    context = render_workspace_runtime_context(profile)
+
+    assert "$DATABASE_URL" in context
+    assert "postgresql://[redacted]@postgres:5432/awf" in context
+    assert "$EXTERNAL_POSTGRES_URL" not in context
+    assert "external.example.com" not in context
+    assert "$REDIS_URL" not in context
+    assert "cache.example.com" not in context
+    assert "external-secret" not in context
+
+
+@pytest.mark.unit
 def test_workspace_runtime_context_includes_generated_app_endpoint_env() -> None:
     profile = WorkspaceProfile(
         name="node-browser",
