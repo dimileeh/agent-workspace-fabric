@@ -8461,7 +8461,7 @@ class TestTerminalRuntimeRelease:
         )
 
     @pytest.mark.unit
-    async def test_release_skips_workspaces_without_compose_project_name(
+    async def test_release_runs_for_legacy_workspace_with_only_compose_file_path(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -8469,13 +8469,64 @@ class TestTerminalRuntimeRelease:
         workspace_id = await _create_terminal_execution(
             session_factory,
             origin_repo,
-            "terminal-release-no-compose",
+            "terminal-release-no-compose-project",
             WorkspaceStatus.failed,
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
             assert ws is not None
             ws.compose_project_name = None
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert cleaner.calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": str(origin_repo),
+                "compose_project_name": None,
+                "compose_file_path": Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+                "worktree_host_path": None,
+                "remove_volumes": False,
+                "remove_worktree": False,
+            }
+        ]
+        async with session_factory() as s:
+            released_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(released_events) == 1
+
+    @pytest.mark.unit
+    async def test_release_skips_workspaces_with_no_runtime_signal(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-no-runtime-signal",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.compose_project_name = None
+            ws.compose_file_path = None
             await s.commit()
         cleaner = _RecordingRuntimeCleaner()
         worker = ControlWorker(

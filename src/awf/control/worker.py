@@ -178,7 +178,10 @@ class _ActiveExecutionCandidate:
 class _TerminalRuntimeCandidate:
     workspace_id: str
     status: WorkspaceStatus
-    compose_project_name: str
+    # Legacy/partially persisted rows may have null compose_project_name; the
+    # cleaner derives ``awf_<workspace_id>`` as the default. compose_file_path
+    # can carry the runtime signal when project name was never persisted.
+    compose_project_name: str | None
     compose_file_path: str | None
     repo_url: str
 
@@ -929,7 +932,16 @@ class ControlWorker:
                 Workspace.compose_file_path,
             )
             .where(Workspace.status.in_(terminal_status_values))
-            .where(Workspace.compose_project_name.is_not(None))
+            # Include rows where either the persisted project name or the
+            # compose file path signals there may be runtime to release. The
+            # cleaner derives ``awf_<workspace_id>`` when project name is
+            # missing, so legacy/partial rows still get a teardown attempt.
+            .where(
+                or_(
+                    Workspace.compose_project_name.is_not(None),
+                    Workspace.compose_file_path.is_not(None),
+                )
+            )
             .where(Workspace.node_id == self._config.node_id)
             .where(~released_event_exists)
             .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
@@ -956,7 +968,9 @@ class ControlWorker:
                 compose_project_name,
                 compose_file_path,
             ) = row
-            if not compose_project_name or not repo_url:
+            if not repo_url:
+                continue
+            if not compose_project_name and not compose_file_path:
                 continue
             candidates.append(
                 _TerminalRuntimeCandidate(
