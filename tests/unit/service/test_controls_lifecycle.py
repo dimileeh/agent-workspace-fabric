@@ -61,8 +61,8 @@ from awf.service.controls import (
     stop_project_containers,
 )
 from awf.service.terminal_runtime import (
+    TERMINAL_RUNTIME_RELEASE_CLAIM_DENIED_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX,
-    TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE,
     TerminalRuntimeReleaser,
     TerminalRuntimeReleaseResult,
     terminal_runtime_release_claim_active,
@@ -890,7 +890,8 @@ async def test_cancel_terminal_workspace_claims_release_before_cleanup() -> None
     assert stopper.calls == [f"awf_{workspace_id}"]
     assert cleaner.claim_active_during_cleanup is True
     assert cleaner.release_result is not None
-    assert cleaner.release_result.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert cleaner.release_result.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_DENIED_REASON_CODE
+    assert not cleaner.release_result.ok
     assert cleaner.release_cleaner.calls == []
     assert persisted is not None
     assert persisted.execution_claimed_by is None

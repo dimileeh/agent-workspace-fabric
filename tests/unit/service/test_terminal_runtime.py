@@ -28,6 +28,7 @@ from awf.node.cleanup import (
 from awf.service import terminal_runtime as terminal_runtime_module
 from awf.service.controls import WorkspaceControlError, WorkspaceControlService
 from awf.service.terminal_runtime import (
+    TERMINAL_RUNTIME_RELEASE_CLAIM_DENIED_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
     TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX,
     TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
@@ -706,8 +707,10 @@ async def test_terminal_runtime_release_skips_missing_or_unexpected_status_works
 
     assert missing.status == "skipped"
     assert missing.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert missing.ok
     assert mismatch.status == "skipped"
     assert mismatch.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert mismatch.ok
     assert cleaner.calls == []
 
 
@@ -1084,6 +1087,7 @@ async def test_terminal_runtime_release_rechecks_locked_snapshot_before_cleanup(
 
     assert result.status == "skipped"
     assert result.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert result.ok
     assert releaser.snapshot_calls == 1
     assert cleaner_factory_calls == []
     assert cleaner.calls == []
@@ -1265,7 +1269,8 @@ async def test_terminal_runtime_release_skips_active_release_claim(
     )
 
     assert result.status == "skipped"
-    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_DENIED_REASON_CODE
+    assert not result.ok
     assert cleaner.calls == []
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -1312,7 +1317,8 @@ async def test_terminal_runtime_release_skips_active_execution_claim(
     )
 
     assert result.status == "skipped"
-    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_DENIED_REASON_CODE
+    assert not result.ok
     assert cleaner.calls == []
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -1361,7 +1367,8 @@ async def test_terminal_runtime_release_skips_active_teardown_operation(
     )
 
     assert result.status == "skipped"
-    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_DENIED_REASON_CODE
+    assert not result.ok
     assert cleaner.calls == []
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)

@@ -30,6 +30,7 @@ TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "workspace.terminal_runtime_release
 TERMINAL_RUNTIME_RELEASED_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
 TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_FAILED"
 TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_SKIPPED"
+TERMINAL_RUNTIME_RELEASE_CLAIM_DENIED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_CLAIM_DENIED"
 TERMINAL_RUNTIME_RELEASE_EXCEPTION_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_EXCEPTION"
 TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_CLAIM_LOST"
 TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE = (
@@ -85,7 +86,15 @@ class TerminalRuntimeReleaseResult:
 
     @property
     def ok(self) -> bool:
-        return self.status in {"released", "skipped"} and (self.cleanup is None or self.cleanup.ok)
+        cleanup_ok = self.cleanup is None or self.cleanup.ok
+        if not cleanup_ok:
+            return False
+        if self.status == "released":
+            return True
+        return (
+            self.status == "skipped"
+            and self.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+        )
 
 
 @dataclass(frozen=True)
@@ -159,10 +168,18 @@ class TerminalRuntimeReleaser:
             worktree_host_path=snapshot.worktree_host_path,
         )
         if claim is None:
+            reason_code = (
+                TERMINAL_RUNTIME_RELEASE_CLAIM_DENIED_REASON_CODE
+                if await self._terminal_status_still_matches(
+                    workspace_id,
+                    expected_status=expected_status,
+                )
+                else TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+            )
             return TerminalRuntimeReleaseResult(
                 workspace_id=workspace_id,
                 status="skipped",
-                reason_code=TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE,
+                reason_code=reason_code,
             )
         snapshot = claim.snapshot
 
@@ -355,6 +372,19 @@ class TerminalRuntimeReleaser:
                     workspace.id,
                     worktrees_root=self._worktrees_root,
                 ),
+            )
+
+    async def _terminal_status_still_matches(
+        self,
+        workspace_id: str,
+        *,
+        expected_status: WorkspaceStatus | None,
+    ) -> bool:
+        async with self._session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            return workspace is not None and _matches_release_status(
+                workspace.status,
+                expected_status,
             )
 
     async def _claim_locked_snapshot(
