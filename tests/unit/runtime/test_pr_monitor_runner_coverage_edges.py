@@ -4499,7 +4499,7 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
     assert reconcile_calls == []
     assert gc_calls == []
     assert monitor_terminal_events == []
-    assert ignored_events[-1].payload == {
+    expected_payload = {
         "callback_source": "pr_monitor",
         "callback_action": "terminal_completed" if callback == "completed" else "terminal_failed",
         "expected_status": WorkspaceStatus.monitoring_pr.value,
@@ -4507,6 +4507,9 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
         "requested_status": "completed" if callback == "completed" else "failed",
         "reason_code": "MONITOR_DONE" if callback == "completed" else "STALE_MONITOR",
     }
+    if callback == "completed":
+        expected_payload["pr_merge_sha"] = "stale-merge-sha"
+    assert ignored_events[-1].payload == expected_payload
 
 
 @pytest.mark.unit
@@ -4628,6 +4631,8 @@ async def test_monitor_terminal_callbacks_record_stale_transition_races(
     if callback == "failed":
         expected_payload["failure_reason"] = FailureReason.infrastructure_failure.value
         expected_payload["failure_message"] = "raced monitor failure"
+    else:
+        expected_payload["pr_merge_sha"] = "raced-merge-sha"
     assert ignored_events[-1].payload == expected_payload
 
 

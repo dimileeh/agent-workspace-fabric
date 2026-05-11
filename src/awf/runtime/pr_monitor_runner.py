@@ -5009,6 +5009,7 @@ class PullRequestMonitorRunner:
                     ws,
                     requested_status=WorkspaceStatus.completed,
                     reason_code="MONITOR_DONE",
+                    pr_merge_sha=pr_merge_sha,
                 )
                 await s.commit()
                 return
@@ -5453,6 +5454,7 @@ async def _record_stale_monitor_terminal_callback(
         workspace,
         requested_status=requested_status,
         reason_code=reason_code,
+        pr_merge_sha=(pr_merge_sha if requested_status == WorkspaceStatus.completed else None),
         failure_reason=failure_reason,
         failure_message=failure_message,
     )

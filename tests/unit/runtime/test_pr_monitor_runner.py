@@ -1309,6 +1309,7 @@ async def test_terminate_completed_persists_merge_sha_when_workspace_already_com
         "actual_status": WorkspaceStatus.completed.value,
         "requested_status": WorkspaceStatus.completed.value,
         "reason_code": "MONITOR_DONE",
+        "pr_merge_sha": "MERGESHA",
     }
 
 
