@@ -4647,10 +4647,15 @@ class PullRequestMonitorRunner:
                 f"Could not refresh the base branch for protected-scope validation: {exc}"
             ) from exc
 
-        changed_from_base = await self._changed_paths_between_ref_and_head(
+        merged_base = await self._merge_base_with_head(
             worktree_path=worktree_path,
             ref=f"origin/{base_branch}",
-            error_context="against the refreshed base branch",
+            error_context="against the merged base branch",
+        )
+        changed_from_base = await self._changed_paths_between_ref_and_head(
+            worktree_path=worktree_path,
+            ref=merged_base,
+            error_context="against the merged base commit",
         )
         if not changed_from_base:
             return []

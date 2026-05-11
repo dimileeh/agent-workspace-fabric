@@ -3021,6 +3021,7 @@ async def test_execute_sync_base_protected_scope_block_is_terminal(
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
+    cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     runner = make_runner(
         factory=factory,
@@ -3332,6 +3333,9 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
         (0, "", ""),  # fetch remote branch for committed diff
         (0, "merge-base-sha\n", ""),
         (0, "src/conflict.py\n", ""),
+        (0, "", ""),  # refresh base branch for sync-base diff
+        (0, "merged-base-sha\n", ""),
+        (0, "", ""),
         (0, "", ""),
     ]:
         cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
@@ -3451,6 +3455,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
+    cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     runner = make_runner(
         factory=factory,
@@ -3489,7 +3494,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
         args[:1] == ["git"]
         and "diff" in args
         and "--name-only" in args
-        and "origin/development..HEAD" in args
+        and "merged-base-sha..HEAD" in args
         for args in call_args
     )
     assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
@@ -3525,7 +3530,8 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\n")
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
-    cmd.queue_result(returncode=0, stdout="")  # diff against refreshed base excludes base changes
+    cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
+    cmd.queue_result(returncode=0, stdout="")  # diff against merged base excludes base changes
     cmd.queue_result(returncode=0, stdout="", stderr="pushed")
     runner = make_runner(
         factory=factory,
@@ -3559,7 +3565,7 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
         args[:1] == ["git"]
         and "diff" in args
         and "--name-only" in args
-        and "origin/development..HEAD" in args
+        and "merged-base-sha..HEAD" in args
         for args in call_args
     )
     assert any(args[:1] == ["git"] and "push" in args for args in call_args)
@@ -3570,6 +3576,85 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
             limit=10,
         )
     assert events == []
+
+
+@pytest.mark.unit
+async def test_sync_base_allows_base_owned_protected_changes_when_base_advances_again(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    class AdvancingBaseRunner(FakeCommandRunner):
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+        ) -> CommandResult:
+            await super().run(args, input_bytes=input_bytes, cwd=cwd)
+            if args[-1:] == [f"refs/heads/awf/{workspace_id}"]:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if args[-2:] == ["FETCH_HEAD", "HEAD"]:
+                return CommandResult(returncode=0, stdout="remote-branch-base-sha\n", stderr="")
+            if "remote-branch-base-sha..HEAD" in args:
+                return CommandResult(returncode=0, stdout=".github/workflows/ci.yml\n", stderr="")
+            if args[-1:] == ["+refs/heads/development:refs/remotes/origin/development"]:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if args[-2:] == ["origin/development", "HEAD"]:
+                return CommandResult(returncode=0, stdout="merged-base-sha\n", stderr="")
+            if "merged-base-sha..HEAD" in args:
+                return CommandResult(returncode=0, stdout="", stderr="")
+            if "origin/development..HEAD" in args:
+                return CommandResult(
+                    returncode=0,
+                    stdout=".github/workflows/ci.yml\n",
+                    stderr="",
+                )
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    cmd = AdvancingBaseRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    violations = await runner._protected_scope_violations_for_sync_base_push(
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / "worktree",
+        remote_branch=f"awf/{workspace_id}",
+        base_branch="development",
+    )
+
+    assert violations == []
+    call_args = [call.args for call in cmd.calls]
+    assert [
+        "git",
+        "-C",
+        str(tmp_path / "worktree"),
+        "diff",
+        "--name-only",
+        "origin/development..HEAD",
+        "--",
+    ] not in call_args
+    assert [
+        "git",
+        "-C",
+        str(tmp_path / "worktree"),
+        "diff",
+        "--name-only",
+        "merged-base-sha..HEAD",
+        "--",
+    ] in call_args
 
 
 @pytest.mark.unit
@@ -4215,7 +4300,7 @@ async def test_changed_paths_since_remote_branch_fails_closed_when_diff_fails(
 
 
 @pytest.mark.unit
-async def test_sync_base_protected_scope_refreshes_base_before_base_diff(
+async def test_sync_base_protected_scope_resolves_merged_base_before_base_diff(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -4225,7 +4310,8 @@ async def test_sync_base_protected_scope_refreshes_base_before_base_diff(
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # diff against remote PR branch
     cmd.queue_result(returncode=0, stdout="")  # refresh base branch
-    cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # diff against refreshed base
+    cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # diff against merged base
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -4272,9 +4358,17 @@ async def test_sync_base_protected_scope_refreshes_base_before_base_diff(
             "git",
             "-C",
             str(worktree),
+            "merge-base",
+            "origin/development",
+            "HEAD",
+        ],
+        [
+            "git",
+            "-C",
+            str(worktree),
             "diff",
             "--name-only",
-            "origin/development..HEAD",
+            "merged-base-sha..HEAD",
             "--",
         ],
     ]
