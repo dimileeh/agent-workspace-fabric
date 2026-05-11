@@ -8406,6 +8406,61 @@ class TestTerminalRuntimeRelease:
         assert release_events == []
 
     @pytest.mark.unit
+    async def test_release_rotates_past_persistent_failures_to_drain_backlog(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_ids: list[str] = []
+        for i in range(3):
+            workspace_ids.append(
+                await _create_terminal_execution(
+                    session_factory,
+                    origin_repo,
+                    f"terminal-release-rotation-{i}",
+                    WorkspaceStatus.failed,
+                )
+            )
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+                terminal_runtime_release_max_per_scan=2,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        first_scan_ids = {call["workspace_id"] for call in cleaner.calls}
+        assert len(first_scan_ids) == 2
+        assert workspace_ids[2] not in first_scan_ids
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        all_scanned_ids = {call["workspace_id"] for call in cleaner.calls}
+        assert all_scanned_ids == set(workspace_ids), (
+            "second scan must rotate past failed candidates so the third "
+            "workspace receives a cleanup attempt"
+        )
+
+    @pytest.mark.unit
     async def test_release_skips_workspaces_without_compose_project_name(
         self,
         session_factory: async_sessionmaker[AsyncSession],

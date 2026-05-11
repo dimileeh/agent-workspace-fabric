@@ -1096,6 +1096,12 @@ class ControlWorker:
                 return False
             if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
                 return False
+            # Push the workspace behind newer terminal rows in the next scan: the
+            # candidate query orders by ``updated_at.asc()`` and ``add_event``
+            # does not touch ``Workspace.updated_at``, so without this bump a
+            # persistently failing release would re-select the same rows every
+            # scan and starve the backlog past ``terminal_runtime_release_max_per_scan``.
+            ws.updated_at = datetime.now(UTC)
             if await self._has_terminal_runtime_release_failure_event(
                 session, candidate.workspace_id
             ):
