@@ -34,6 +34,11 @@ from awf.db.repositories import (
     WorkspaceTransitionStaleError,
 )
 from awf.db.session import make_session_factory
+from awf.node.cleanup import (
+    COMPOSE_DOWN_SUCCEEDED,
+    WorkspaceCleanupResult,
+    WorkspaceCleanupStepResult,
+)
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
@@ -51,7 +56,7 @@ from awf.node.provisioner import (
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import EgressMode, ProfileSecret, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError
-from awf.service.terminal_runtime import TerminalRuntimeReleaseResult
+from awf.service.terminal_runtime import TerminalRuntimeReleaser, TerminalRuntimeReleaseResult
 from tests.postgres import postgres_test_engine
 
 
@@ -2407,6 +2412,7 @@ class TestOperatorControlRaces:
                 *,
                 source: str,
                 expected_status: WorkspaceStatus | None = None,
+                allow_active_teardown_operation_id: str | None = None,
             ) -> TerminalRuntimeReleaseResult:
                 async with session_factory() as s:
                     reloaded = await WorkspaceRepository(s).get(workspace_id)
@@ -2419,6 +2425,9 @@ class TestOperatorControlRaces:
                             "status_seen": reloaded.status,
                             "compose_project_name_seen": reloaded.compose_project_name,
                             "compose_file_path_seen": reloaded.compose_file_path,
+                            "allow_active_teardown_operation_id": (
+                                allow_active_teardown_operation_id
+                            ),
                         }
                     )
                 return TerminalRuntimeReleaseResult(
@@ -2460,6 +2469,7 @@ class TestOperatorControlRaces:
                 "status_seen": WorkspaceStatus.provisioning.value,
                 "compose_project_name_seen": f"awf_{ws_id}",
                 "compose_file_path_seen": compose_file,
+                "allow_active_teardown_operation_id": launcher.operation_id,
             }
         ]
 
@@ -2482,6 +2492,126 @@ class TestOperatorControlRaces:
             "operation_id": launcher.operation_id,
             "reason_code": "PROVISIONING_COMPLETE",
         }
+
+    @pytest.mark.unit
+    async def test_active_teardown_after_stack_launch_real_releaser_bypasses_blocking_operation(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        class _BlockingStackLauncher:
+            def __init__(self) -> None:
+                self.operation_id: str | None = None
+
+            async def launch(self, request: Any) -> ComposeProjectPaths:
+                async with session_factory() as s:
+                    operation = await OperationRepository(s).create(
+                        workspace_id=request.workspace_id,
+                        operation_type=OperationType.stop,
+                        status=OperationStatus.running,
+                        payload={"source": "operator_api"},
+                    )
+                    await s.commit()
+                    self.operation_id = operation.id
+                project_dir = tmp_path / "compose" / request.workspace_id
+                return ComposeProjectPaths(
+                    project_dir=project_dir,
+                    compose_file=project_dir / "compose.yml",
+                )
+
+        class _RecordingCleaner:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def cleanup(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                compose_project_name: str | None = None,
+                compose_file_path: Path | None = None,
+                worktree_host_path: Path | None = None,
+                remove_volumes: bool = True,
+                remove_worktree: bool = True,
+            ) -> WorkspaceCleanupResult:
+                self.calls.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "repo_url": repo_url,
+                        "compose_project_name": compose_project_name,
+                        "compose_file_path": compose_file_path,
+                        "worktree_host_path": worktree_host_path,
+                        "remove_volumes": remove_volumes,
+                        "remove_worktree": remove_worktree,
+                    }
+                )
+                return WorkspaceCleanupResult.from_steps(
+                    [
+                        WorkspaceCleanupStepResult(
+                            name="compose_down",
+                            status="succeeded",
+                            reason_code=COMPOSE_DOWN_SUCCEEDED,
+                        )
+                    ]
+                )
+
+        launcher = _BlockingStackLauncher()
+        cleaner = _RecordingCleaner()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            terminal_runtime_releaser=TerminalRuntimeReleaser(
+                session_factory=session_factory,
+                cleaner_factory=lambda: cleaner,
+            ),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.operation_id is not None
+        compose_file = tmp_path / "compose" / ws_id / "compose.yml"
+        assert cleaner.calls == [
+            {
+                "workspace_id": ws_id,
+                "repo_url": str(origin_repo),
+                "compose_project_name": f"awf_{ws_id}",
+                "compose_file_path": compose_file,
+                "worktree_host_path": None,
+                "remove_volumes": False,
+                "remove_worktree": False,
+            }
+        ]
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            release_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.terminal_runtime_released"
+            ]
+
+        assert reloaded.status == WorkspaceStatus.provisioning.value
+        assert reloaded.execution_claimed_by is None
+        assert reloaded.execution_claim_expires_at is None
+        assert len(release_events) == 1
+        assert release_events[0].payload["source"] == "provisioner.ready_transition_blocked"
+        assert release_events[0].payload["cleanup"]["reason_code"] == "CLEANUP_SUCCEEDED"
 
     @pytest.mark.unit
     async def test_active_teardown_blocks_mark_failed_rolls_back_failure_fields(

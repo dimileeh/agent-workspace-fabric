@@ -80,6 +80,7 @@ class TerminalRuntimeReleaserProtocol(Protocol):
         *,
         source: str,
         expected_status: WorkspaceStatus | None = None,
+        allow_active_teardown_operation_id: str | None = None,
     ) -> TerminalRuntimeReleaseResult: ...  # pragma: no cover - Protocol declaration only.
 
 
@@ -158,6 +159,7 @@ class TerminalRuntimeReleaser:
         *,
         source: str,
         expected_status: WorkspaceStatus | None = None,
+        allow_active_teardown_operation_id: str | None = None,
     ) -> TerminalRuntimeReleaseResult:
         allow_non_terminal_event = _allows_non_terminal_release(expected_status)
         snapshot = await self._snapshot(workspace_id, expected_status=expected_status)
@@ -172,6 +174,7 @@ class TerminalRuntimeReleaser:
             workspace_id,
             expected_status=expected_status,
             worktree_host_path=snapshot.worktree_host_path,
+            allow_active_teardown_operation_id=allow_active_teardown_operation_id,
         )
         if claim is None:
             reason_code = (
@@ -409,6 +412,7 @@ class TerminalRuntimeReleaser:
         *,
         expected_status: WorkspaceStatus | None,
         worktree_host_path: Path | None,
+        allow_active_teardown_operation_id: str | None,
     ) -> _TerminalRuntimeReleaseClaim | None:
         owner_id = f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}{uuid4().hex}"
         async with self._session_factory() as session:
@@ -419,6 +423,7 @@ class TerminalRuntimeReleaser:
                 lease_expires_at=self._terminal_runtime_claim_expires_at(),
                 statuses=_release_status_values(expected_status),
                 block_active_teardown_operation=True,
+                allow_active_operation_id=allow_active_teardown_operation_id,
             )
             if workspace is None:
                 return None

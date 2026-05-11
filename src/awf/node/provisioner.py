@@ -61,6 +61,12 @@ class ProvisionerConfig:
     """Prefix for feature branches; full branch = ``<prefix>/<workspace_id>``."""
 
 
+@dataclass(frozen=True)
+class _TransitionOrBlockedOperationResult:
+    transitioned: bool
+    blocked_operation_id: str | None = None
+
+
 class Provisioner:
     """Orchestrates git + state transitions for one workspace at a time.
 
@@ -363,7 +369,7 @@ class Provisioner:
                 profile=profile,
             )
 
-            if not await self._transition_or_record_blocked_active_operation(
+            ready_transition = await self._transition_or_record_blocked_active_operation_result(
                 session,
                 repo,
                 persisted,
@@ -372,12 +378,14 @@ class Provisioner:
                 action="provision",
                 expected=WorkspaceStatus.provisioning,
                 preserve_staged_on_blocked=True,
-            ):
+            )
+            if not ready_transition.transitioned:
                 if stack_paths is not None:
                     await self._release_provisioning_runtime(
                         workspace_id,
                         source="provisioner.ready_transition_blocked",
                         expected_status=WorkspaceStatus.provisioning,
+                        allow_active_teardown_operation_id=(ready_transition.blocked_operation_id),
                     )
                 return
             await session.commit()
@@ -532,16 +540,25 @@ class Provisioner:
         *,
         source: str,
         expected_status: WorkspaceStatus,
+        allow_active_teardown_operation_id: str | None = None,
     ) -> None:
         releaser = self._terminal_runtime_releaser
         if releaser is None:
             return
         try:
-            result = await releaser.release(
-                workspace_id,
-                source=source,
-                expected_status=expected_status,
-            )
+            if allow_active_teardown_operation_id is None:
+                result = await releaser.release(
+                    workspace_id,
+                    source=source,
+                    expected_status=expected_status,
+                )
+            else:
+                result = await releaser.release(
+                    workspace_id,
+                    source=source,
+                    expected_status=expected_status,
+                    allow_active_teardown_operation_id=allow_active_teardown_operation_id,
+                )
         except Exception:
             _log.exception(
                 "provisioner.terminal_runtime_release_failed",
@@ -568,6 +585,30 @@ class Provisioner:
         expected: WorkspaceStatus,
         preserve_staged_on_blocked: bool = False,
     ) -> bool:
+        result = await self._transition_or_record_blocked_active_operation_result(
+            session,
+            repo,
+            ws,
+            to=to,
+            reason_code=reason_code,
+            action=action,
+            expected=expected,
+            preserve_staged_on_blocked=preserve_staged_on_blocked,
+        )
+        return result.transitioned
+
+    async def _transition_or_record_blocked_active_operation_result(
+        self,
+        session: AsyncSession,
+        repo: WorkspaceRepository,
+        ws: Workspace,
+        *,
+        to: WorkspaceStatus,
+        reason_code: str,
+        action: str,
+        expected: WorkspaceStatus,
+        preserve_staged_on_blocked: bool = False,
+    ) -> _TransitionOrBlockedOperationResult:
         workspace_id = ws.id
         try:
             if preserve_staged_on_blocked:
@@ -589,7 +630,10 @@ class Provisioner:
                 operation_id=operation_id,
             )
             await session.commit()
-            return False
+            return _TransitionOrBlockedOperationResult(
+                transitioned=False,
+                blocked_operation_id=operation_id,
+            )
         except WorkspaceTransitionStaleError:
             if not preserve_staged_on_blocked:
                 await session.rollback()
@@ -603,8 +647,8 @@ class Provisioner:
                     reason_code="PROVISIONER_STALE_STATUS",
                 )
             await session.commit()
-            return False
-        return True
+            return _TransitionOrBlockedOperationResult(transitioned=False)
+        return _TransitionOrBlockedOperationResult(transitioned=True)
 
     async def _record_active_operation_blocked_callback_in_session(
         self,
