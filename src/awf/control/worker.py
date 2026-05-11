@@ -179,6 +179,10 @@ class _OrderedDecisionCandidate:
 type _OrderedDecisionKey = tuple[str, str, str]
 
 
+class _StaleActiveExecutionReleaseCommitError(RuntimeError):
+    """Raised after stale cleanup evidence is preserved as far as possible."""
+
+
 class WorkspaceExecutorProtocol(Protocol):
     async def execute(  # pragma: no cover - Protocol method declaration only.
         self,
@@ -822,6 +826,8 @@ class ControlWorker:
         for candidate in candidates:
             try:
                 await self._recover_stale_active_execution(candidate)
+            except _StaleActiveExecutionReleaseCommitError:
+                continue
             except Exception as exc:
                 if _worker_exception_is_transient_db_connection(exc):
                     _log.warning(
@@ -1416,6 +1422,11 @@ class ControlWorker:
                     cleanup=None,
                     message=f"runtime cleanup raised unexpected exception: {safe_exception}",
                 )
+                if is_transient_closed_connection_error(
+                    exc,
+                    include_unsuppressed_context=True,
+                ):
+                    raise
                 return
         finally:
             if cleanup_task is not None and not cleanup_task.done():
@@ -1744,7 +1755,7 @@ class ControlWorker:
                 error=redact_audit_text(repr(exc), limit=400),
             )
             await self._release_execution_claim(workspace_id, owner_id=cleanup_owner)
-            raise
+            raise _StaleActiveExecutionReleaseCommitError(str(exc)) from exc
 
     async def _record_terminal_runtime_release_event_in_session(
         self,

@@ -5833,6 +5833,88 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
 
     @pytest.mark.unit
+    async def test_stale_active_scan_continues_when_release_commit_fails(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        compose_project = "awf_stale_scan_release_commit_fail"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-scan-release-commit-fail",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.refresh_requested",
+                reason_code="OPERATOR_REFRESH",
+                payload={"reason": "operator requested stale runtime cleanup"},
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={
+                    "compose_project_name": compose_project,
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "runtime": {"stack_state": "running"},
+                },
+            )
+            ws.execution_claimed_by = "dead-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await s.commit()
+
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector(
+                {compose_project: _live_agent_snapshot(container_id="agent-stale-cleanup")}
+            ),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        _fail_stale_active_execution_worker_flush(
+            monkeypatch,
+            "synthetic stale scan release commit failure",
+        )
+
+        await worker._recover_stale_active_executions()  # noqa: SLF001
+
+        assert len(cleaner.calls) == 1
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+        assert ws.failure_reason is None
+        assert not any(
+            event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+            for event in events
+        )
+
+    @pytest.mark.unit
     async def test_stale_active_execution_release_omits_missing_worktree_path(
         self,
         session_factory: async_sessionmaker[AsyncSession],

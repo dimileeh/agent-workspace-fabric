@@ -911,20 +911,28 @@ class WorkspaceControlService:
         if locked_workspace is None:
             raise WorkspaceNotFoundError(workspace.id)
         now = datetime.now(UTC)
-        active = terminal_runtime_release_claim_active(
-            locked_workspace,
-            now=now,
-        ) or (
-            _control_terminal_runtime_release_claim_required(locked_workspace)
-            and _execution_claim_active_for_control(locked_workspace, now=now)
-        )
         claim_owner_id: str | None = None
-        if not active and _control_terminal_runtime_release_claim_required(locked_workspace):
-            claim_owner_id = f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:{uuid4().hex}"
-            locked_workspace.execution_claimed_by = claim_owner_id
-            locked_workspace.execution_claim_expires_at = (
-                _terminal_runtime_release_claim_expires_at()
-            )
+        claim_required = _control_terminal_runtime_release_claim_required(locked_workspace)
+        active = terminal_runtime_release_claim_active(locked_workspace, now=now) or (
+            claim_required and _execution_claim_active_for_control(locked_workspace, now=now)
+        )
+        if not claim_required or active:
+            await self._session.commit()
+            return active, claim_owner_id
+
+        claim_owner_id = f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:{uuid4().hex}"
+        claimed = await WorkspaceRepository(self._session).claim_execution_if_available(
+            locked_workspace.id,
+            owner_id=claim_owner_id,
+            lease_expires_at=_terminal_runtime_release_claim_expires_at(),
+            statuses=(locked_workspace.status,),
+            claim_cutoff=now,
+        )
+        if claimed is None:
+            active = True
+            claim_owner_id = None
+        else:
+            active = False
         await self._session.commit()
         return active, claim_owner_id
 

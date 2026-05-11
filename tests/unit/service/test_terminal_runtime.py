@@ -1210,6 +1210,111 @@ async def test_terminal_runtime_release_skips_active_release_claim(
 
 
 @pytest.mark.unit
+async def test_terminal_runtime_release_skips_active_execution_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    existing_owner_id = "stale-cleanup:worker-1"
+    existing_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.execution_claimed_by = existing_owner_id
+        workspace.execution_claim_expires_at = existing_expires_at
+        await session.commit()
+    cleaner = _RecordingCleaner()
+    releaser = TerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+    )
+
+    result = await releaser.release(
+        workspace_id,
+        source="test",
+        expected_status=WorkspaceStatus.failed,
+    )
+
+    assert result.status == "skipped"
+    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert cleaner.calls == []
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.execution_claimed_by == existing_owner_id
+        assert workspace.execution_claim_expires_at is not None
+        assert workspace.execution_claim_expires_at.replace(tzinfo=UTC) == existing_expires_at
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.terminal_runtime_released",
+        )
+    assert events == []
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_claim_is_conditional_under_racy_read(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    loaded = 0
+    both_loaded = asyncio.Event()
+    original_get = WorkspaceRepository.get
+
+    async def unlocked_get_for_update(
+        repo: WorkspaceRepository,
+        observed_workspace_id: str,
+    ) -> Any | None:
+        nonlocal loaded
+        workspace = await original_get(repo, observed_workspace_id)
+        loaded += 1
+        if loaded == 2:
+            both_loaded.set()
+        await asyncio.wait_for(
+            both_loaded.wait(),
+            timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
+        return workspace
+
+    monkeypatch.setattr(WorkspaceRepository, "get_for_update", unlocked_get_for_update)
+    releaser = TerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=_RecordingCleaner,
+        worktrees_root=worktrees_root,
+    )
+
+    claims = await asyncio.gather(
+        releaser._claim_locked_snapshot(  # noqa: SLF001
+            workspace_id,
+            expected_status=WorkspaceStatus.failed,
+            worktree_host_path=None,
+        ),
+        releaser._claim_locked_snapshot(  # noqa: SLF001
+            workspace_id,
+            expected_status=WorkspaceStatus.failed,
+            worktree_host_path=None,
+        ),
+    )
+
+    acquired = [claim for claim in claims if claim is not None]
+    assert len(acquired) == 1
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.execution_claimed_by == acquired[0].owner_id
+
+
+@pytest.mark.unit
 async def test_terminal_runtime_release_refreshes_claim_during_long_cleanup(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

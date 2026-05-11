@@ -367,16 +367,14 @@ class TerminalRuntimeReleaser:
         owner_id = f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}{uuid4().hex}"
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            workspace = await repo.get_for_update(workspace_id)
+            workspace = await repo.claim_execution_if_available(
+                workspace_id,
+                owner_id=owner_id,
+                lease_expires_at=self._terminal_runtime_claim_expires_at(),
+                statuses=_release_status_values(expected_status),
+            )
             if workspace is None:
                 return None
-            if not _matches_release_status(workspace.status, expected_status):
-                return None
-            if terminal_runtime_release_claim_active(workspace):
-                return None
-
-            workspace.execution_claimed_by = owner_id
-            workspace.execution_claim_expires_at = self._terminal_runtime_claim_expires_at()
             snapshot = _snapshot_for_workspace(
                 workspace,
                 worktree_host_path=worktree_host_path,
@@ -653,6 +651,17 @@ def _matches_release_status(
     ):
         return False
     return status == expected_status.value
+
+
+def _release_status_values(expected_status: WorkspaceStatus | None) -> tuple[str, ...]:
+    if expected_status is None:
+        return tuple(sorted(TERMINAL_WORKSPACE_STATUSES))
+    if (
+        expected_status.value not in TERMINAL_WORKSPACE_STATUSES
+        and not _allows_non_terminal_release(expected_status)
+    ):
+        return ()
+    return (expected_status.value,)
 
 
 def _allows_non_terminal_release(expected_status: WorkspaceStatus | None) -> bool:

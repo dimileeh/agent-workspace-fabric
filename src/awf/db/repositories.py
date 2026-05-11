@@ -3662,6 +3662,53 @@ class WorkspaceRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def claim_execution_if_available(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+        statuses: Iterable[WorkspaceStatus | str],
+        claim_cutoff: datetime | None = None,
+    ) -> Workspace | None:
+        """Claim execution only when the row is still in status and no live claim exists."""
+
+        status_values = tuple(
+            status.value if isinstance(status, WorkspaceStatus) else status for status in statuses
+        )
+        if not status_values:
+            return None
+
+        cutoff = claim_cutoff or datetime.now(UTC)
+        claim_available = or_(
+            Workspace.execution_claimed_by.is_(None),
+            Workspace.execution_claim_expires_at.is_(None),
+            Workspace.execution_claim_expires_at <= cutoff,
+        )
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status.in_(status_values),
+                claim_available,
+            )
+            .values(
+                execution_claimed_by=owner_id,
+                execution_claim_expires_at=lease_expires_at,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+            .execution_options(synchronize_session=False)
+        )
+        if result.scalar_one_or_none() is None:
+            return None
+        stmt = (
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def release_execution_claim(
         self,
         workspace_id: str,
