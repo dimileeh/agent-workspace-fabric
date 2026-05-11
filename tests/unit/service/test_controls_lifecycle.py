@@ -1217,6 +1217,96 @@ async def test_cancel_and_stop_retry_external_cleanup_when_teardown_lease_renew_
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_abort_external_cleanup_after_repeated_teardown_lease_renew_failures(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    monkeypatch.setattr(
+        controls_module,
+        "_RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        controls_module,
+        "EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TIMEOUT_SECONDS",
+        0.03,
+    )
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    workspace_id = workspace.id
+    compose_project_name = workspace.compose_project_name
+    lease_renew_attempts = 0
+
+    async def _fail_teardown_lease_renew(
+        repo: OperationRepository,
+        operation_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> Operation | None:
+        nonlocal lease_renew_attempts
+        del repo, operation_id, now
+        lease_renew_attempts += 1
+        raise SQLAlchemyError("database unavailable")
+
+    monkeypatch.setattr(
+        OperationRepository,
+        "renew_teardown_lease",
+        _fail_teardown_lease_renew,
+    )
+    stopper = LeaseLossBlockingStopper()
+    service, _stopper, cleaner = _service(session, stopper=stopper)  # type: ignore[arg-type]
+    expected_runtime_message = (
+        "teardown operation lease heartbeat stopped before external runtime work "
+        "completed: operation lease renewal failed for longer than teardown timeout"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="operation lease renewal failed for longer than teardown timeout",
+    ):
+        if action == "cancel":
+            await asyncio.wait_for(
+                service.cancel_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                    stop_stack=True,
+                ),
+                timeout=1.0,
+            )
+        else:
+            await asyncio.wait_for(
+                service.stop_workspace(
+                    workspace_id,
+                    reason="operator requested",
+                ),
+                timeout=1.0,
+            )
+
+    await session.rollback()
+    operations = await _operations(session, workspace_id)
+    release_events = [
+        event
+        for event in await _events(session, workspace_id)
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+
+    assert lease_renew_attempts >= 2
+    assert stopper.started.is_set()
+    assert stopper.cancelled is True
+    assert stopper.calls == [compose_project_name]
+    assert cleaner.calls == []
+    assert len(operations) == 1
+    assert operations[0].type == action
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
+    assert operations[0].error_message == f"RuntimeError: {expected_runtime_message}"
+    assert operations[0].result == {"status": WorkspaceStatus.ready.value}
+    assert operations[0].finished_at is not None
+    assert release_events == []
+
+
+@pytest.mark.unit
 async def test_active_runtime_teardown_blocks_control_requests_and_atomic_transitions(
     session: AsyncSession,
 ) -> None:

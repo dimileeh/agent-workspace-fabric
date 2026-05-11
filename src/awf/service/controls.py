@@ -2354,6 +2354,9 @@ async def _renew_runtime_teardown_operation_lease_loop(
     interval_seconds: float = _RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS,
 ) -> str:
     interval = max(float(interval_seconds), 0.001)
+    lease_timeout_seconds = max(float(EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TIMEOUT_SECONDS), 0.001)
+    loop = asyncio.get_running_loop()
+    last_lease_renewed_at = loop.time()
     while True:
         await asyncio.sleep(interval)
         try:
@@ -2361,14 +2364,25 @@ async def _renew_runtime_teardown_operation_lease_loop(
                 renewed = await OperationRepository(session).renew_teardown_lease(operation_id)
                 await session.commit()
         except Exception as exc:
+            elapsed_since_lease_renewal = loop.time() - last_lease_renewed_at
             _log.warning(
                 "controls.teardown_operation_lease_renew_failed",
                 operation_id=operation_id,
                 error=redact_audit_text(repr(exc), limit=400),
+                elapsed_since_lease_renewal_seconds=round(elapsed_since_lease_renewal, 3),
             )
+            if elapsed_since_lease_renewal >= lease_timeout_seconds:
+                _log.warning(
+                    "controls.teardown_operation_lease_renew_abandoned",
+                    operation_id=operation_id,
+                    elapsed_since_lease_renewal_seconds=round(elapsed_since_lease_renewal, 3),
+                    lease_timeout_seconds=round(lease_timeout_seconds, 3),
+                )
+                return "operation lease renewal failed for longer than teardown timeout"
             continue
         if renewed is None:
             return "operation lease is no longer active"
+        last_lease_renewed_at = loop.time()
 
 
 async def _refresh_terminal_runtime_release_claim_loop(
