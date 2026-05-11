@@ -194,6 +194,32 @@ def _retry_events(ws: Workspace) -> list:
     ]
 
 
+def _assert_committed_diff_phase_ran(
+    cmd: FakeCommandRunner,
+    *,
+    worktree_path: Path,
+    remote_branch: str,
+    remote: str = "origin",
+) -> None:
+    call_args = [call.args for call in cmd.calls]
+    assert [
+        "git",
+        "-C",
+        str(worktree_path),
+        "fetch",
+        remote,
+        f"refs/heads/{remote_branch}",
+    ] in call_args
+    assert [
+        "git",
+        "-C",
+        str(worktree_path),
+        "merge-base",
+        "FETCH_HEAD",
+        "HEAD",
+    ] in call_args
+
+
 async def _mark_refactor_task(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -2345,7 +2371,8 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="partial CI fix")
     workspace_id = await seed_monitoring_workspace(factory)
-    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -2380,6 +2407,11 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     assert terminal is False
     assert state.iter_count == 1
     assert "traceback" in adapter.calls[0]
+    _assert_committed_diff_phase_ran(
+        cmd,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
     assert cmd.calls[-1].args[-2:] == ["origin", f"HEAD:refs/heads/awf/{workspace_id}"]
     async with factory() as s:
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
@@ -2418,7 +2450,8 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
     adapter = FakeAdapter()
     adapter.queue(stdout="partial CI fix")
     workspace_id = await seed_monitoring_workspace(factory)
-    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -2455,6 +2488,11 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
 
     assert terminal is False
     assert state.iter_count == 1
+    _assert_committed_diff_phase_ran(
+        cmd,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
     async with factory() as s:
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
         push_events = await WorkspaceEventRepository(s).list(
@@ -3280,7 +3318,8 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="partial conflict resolution")
     workspace_id = await seed_monitoring_workspace(factory)
-    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
     for result in [
         (0, "", ""),
         (0, "", ""),
@@ -3316,6 +3355,11 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
 
     assert len(adapter.calls) == 1
     assert "src/conflict.py" in adapter.calls[0]
+    _assert_committed_diff_phase_ran(
+        cmd,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
     assert [call.args[-2:] for call in cmd.calls[:2]] == [
         ["merge", "--abort"],
         ["origin", "+refs/heads/development:refs/remotes/origin/development"],
@@ -3505,6 +3549,11 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
 
     assert push_result.failed is False
     assert push_result.pushed is True
+    _assert_committed_diff_phase_ran(
+        cmd,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
     call_args = [call.args for call in cmd.calls]
     assert any(
         args[:1] == ["git"]
@@ -3532,7 +3581,8 @@ async def test_ci_fix_records_agent_failure_but_commits_and_pushes_changes(
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="format failed")
     workspace_id = await seed_monitoring_workspace(factory)
-    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
     for result in [
         (0, " M tests/test_app.py\n", ""),
         (0, "", ""),
@@ -3564,6 +3614,11 @@ async def test_ci_fix_records_agent_failure_but_commits_and_pushes_changes(
 
     assert len(adapter.calls) == 1
     assert "assert 1 == 2" in adapter.calls[0]
+    _assert_committed_diff_phase_ran(
+        cmd,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
     assert cmd.calls[-1].args[-2:] == ["origin", f"HEAD:refs/heads/awf/{workspace_id}"]
 
 
