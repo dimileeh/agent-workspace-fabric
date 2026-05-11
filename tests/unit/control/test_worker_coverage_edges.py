@@ -1356,11 +1356,13 @@ async def test_cleanup_claim_allows_failure_clears_or_preserves_claim_by_state(
 
     async with factory() as session:
         changed = await WorkspaceRepository(session).get(changed_id)
+        wrong_owner = await WorkspaceRepository(session).get(wrong_owner_id)
         no_evidence = await WorkspaceRepository(session).get(no_evidence_id)
         evidence = await WorkspaceRepository(session).get(evidence_id)
 
     assert evidence_calls == 2
     assert changed is not None and changed.execution_claimed_by is None
+    assert wrong_owner is not None and wrong_owner.execution_claimed_by == "other-worker"
     assert no_evidence is not None and no_evidence.execution_claimed_by is None
     assert evidence is not None and evidence.execution_claimed_by == owner
 
