@@ -1070,6 +1070,10 @@ class ControlWorker:
                 return
             if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
                 return
+            if await self._has_terminal_runtime_release_failure_event(
+                session, candidate.workspace_id
+            ):
+                return
             await repo.add_event(
                 ws,
                 event_type=_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
@@ -1098,6 +1102,22 @@ class ControlWorker:
                 WorkspaceEvent.workspace_id == workspace_id,
                 WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
                 WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _has_terminal_runtime_release_failure_event(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+    ) -> bool:
+        stmt = (
+            select(WorkspaceEvent.id)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
+                WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
             )
             .limit(1)
         )

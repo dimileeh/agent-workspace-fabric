@@ -8350,6 +8350,62 @@ class TestTerminalRuntimeRelease:
         assert len(release_events) == 1
 
     @pytest.mark.unit
+    async def test_release_does_not_record_duplicate_failure_event_on_repeated_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-repeated-failure",
+            WorkspaceStatus.failed,
+        )
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert len(cleaner.calls) == 3
+        async with session_factory() as s:
+            release_failure_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_release_failed",
+            )
+            release_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(release_failure_events) == 1
+        assert release_failure_events[0].reason_code == "TERMINAL_RUNTIME_RELEASE_FAILED"
+        assert release_events == []
+
+    @pytest.mark.unit
     async def test_release_skips_workspaces_without_compose_project_name(
         self,
         session_factory: async_sessionmaker[AsyncSession],
