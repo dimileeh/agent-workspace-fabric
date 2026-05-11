@@ -2359,11 +2359,7 @@ async def _renew_runtime_teardown_operation_lease_loop(
                 operation_id=operation_id,
                 error=redact_audit_text(repr(exc), limit=400),
             )
-            safe_exception = redact_audit_text(
-                f"{type(exc).__name__}: {exc}",
-                limit=400,
-            )
-            return f"lease renewal failed: {safe_exception}"
+            continue
         if renewed is None:
             return "operation lease is no longer active"
 

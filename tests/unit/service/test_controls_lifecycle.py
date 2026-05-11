@@ -1136,7 +1136,7 @@ async def test_cancel_and_stop_abort_external_cleanup_when_teardown_lease_is_los
 
 @pytest.mark.unit
 @pytest.mark.parametrize("action", ["cancel", "stop"])
-async def test_cancel_and_stop_abort_external_cleanup_when_teardown_lease_renew_fails(
+async def test_cancel_and_stop_retry_external_cleanup_when_teardown_lease_renew_fails(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
     action: str,
@@ -1149,78 +1149,71 @@ async def test_cancel_and_stop_abort_external_cleanup_when_teardown_lease_renew_
     workspace = await _workspace(session, status=WorkspaceStatus.ready)
     workspace_id = workspace.id
     compose_project_name = workspace.compose_project_name
+    renew_after_failure = asyncio.Event()
     lease_renew_attempts = 0
+    original_renew_teardown_lease = OperationRepository.renew_teardown_lease
 
-    async def _fail_teardown_lease_renew(
+    async def _fail_teardown_lease_renew_once(
         repo: OperationRepository,
         operation_id: str,
         *,
         now: datetime | None = None,
     ) -> Operation | None:
         nonlocal lease_renew_attempts
-        del repo, operation_id, now
         lease_renew_attempts += 1
-        raise SQLAlchemyError("database unavailable")
+        if lease_renew_attempts == 1:
+            raise SQLAlchemyError("database unavailable")
+        operation = await original_renew_teardown_lease(repo, operation_id, now=now)
+        if operation is not None:
+            renew_after_failure.set()
+        return operation
 
     monkeypatch.setattr(
         OperationRepository,
         "renew_teardown_lease",
-        _fail_teardown_lease_renew,
-    )
-    stopper = LeaseLossBlockingStopper()
-    service, _stopper, cleaner = _service(session, stopper=stopper)  # type: ignore[arg-type]
-    expected_runtime_message = (
-        "teardown operation lease heartbeat stopped before external runtime work "
-        "completed: lease renewal failed: SQLAlchemyError: database unavailable"
+        _fail_teardown_lease_renew_once,
     )
 
-    with pytest.raises(
-        RuntimeError,
-        match="lease renewal failed: SQLAlchemyError: database unavailable",
-    ):
-        if action == "cancel":
+    @dataclass
+    class RetryWaitingStopper:
+        calls: list[str | None] = field(default_factory=list)
+
+        async def __call__(self, compose_project_name: str | None) -> None:
+            self.calls.append(compose_project_name)
             await asyncio.wait_for(
-                service.cancel_workspace(
-                    workspace_id,
-                    reason="operator requested",
-                    stop_stack=True,
-                ),
+                renew_after_failure.wait(),
                 timeout=CONTROL_ASYNC_TEST_TIMEOUT_SECONDS,
             )
+
+    stopper = RetryWaitingStopper()
+    service, _stopper, cleaner = _service(session, stopper=stopper)  # type: ignore[arg-type]
+
+    with capture_logs() as logs:
+        if action == "cancel":
+            response = await service.cancel_workspace(
+                workspace_id,
+                reason="operator requested",
+                stop_stack=True,
+            )
         else:
-            await asyncio.wait_for(
-                service.stop_workspace(
-                    workspace_id,
-                    reason="operator requested",
-                ),
-                timeout=CONTROL_ASYNC_TEST_TIMEOUT_SECONDS,
+            response = await service.stop_workspace(
+                workspace_id,
+                reason="operator requested",
             )
 
     await session.rollback()
     operations = await _operations(session, workspace_id)
-    audit_events = await WorkspaceEventRepository(session).list(
-        workspace_id=workspace_id,
-        event_type="workspace.audit.control_operation",
-        limit=10,
-    )
 
-    assert lease_renew_attempts == 1
-    assert stopper.started.is_set()
-    assert stopper.cancelled is True
+    assert any(log["event"] == "controls.teardown_operation_lease_renew_failed" for log in logs)
+    assert response.status == WorkspaceStatus.cancelled
+    assert lease_renew_attempts >= 2
     assert stopper.calls == [compose_project_name]
-    assert cleaner.calls == []
+    assert len(cleaner.calls) == 1
     assert len(operations) == 1
     assert operations[0].type == action
-    assert operations[0].status == OperationStatus.failed.value
-    assert operations[0].error_code == "CONTROL_OPERATION_FAILED"
-    assert operations[0].error_message == f"RuntimeError: {expected_runtime_message}"
-    assert operations[0].result == {"status": WorkspaceStatus.ready.value}
-    assert len(audit_events) == 1
-    assert audit_events[0].reason_code == "CONTROL_OPERATION_FAILED"
-    assert audit_events[0].payload is not None
-    assert audit_events[0].payload["evidence"]["error_message"] == (
-        f"RuntimeError: {expected_runtime_message}"
-    )
+    assert operations[0].status == OperationStatus.succeeded.value
+    assert operations[0].result == {"status": WorkspaceStatus.cancelled.value}
+    assert operations[0].lease_renewed_at is not None
 
 
 @pytest.mark.unit
