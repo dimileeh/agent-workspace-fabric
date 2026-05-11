@@ -1552,6 +1552,7 @@ class PullRequestMonitorRunner:
                     remote_push_url=remote_push_url,
                 )
             failures_payload = [_ci_failure_payload(failure) for failure in action.failures]
+            rerun_signature = _ci_transient_rerun_state_key(status.head_sha, action.failures)
             operation = await self._begin_monitor_operation(
                 workspace_id=workspace_id,
                 operation_type=OperationType.ci_repair,
@@ -1572,7 +1573,7 @@ class PullRequestMonitorRunner:
                     "failures": failures_payload,
                     "run_ids": list(run_ids),
                 },
-                extra_identity=(attempt, *run_ids),
+                extra_identity=(rerun_signature, attempt, *run_ids),
             )
             event_payload: dict[str, object] = {
                 "attempt": attempt,
@@ -1675,7 +1676,7 @@ class PullRequestMonitorRunner:
                 wait_seconds=self._config.poll_interval_seconds,
                 monitor_log=monitor_log,
                 extra_payload=event_payload,
-                extra_identity=(attempt, *run_ids, "wait"),
+                extra_identity=(rerun_signature, attempt, *run_ids, "wait"),
             )
             state.iter_count += 1
             return False
