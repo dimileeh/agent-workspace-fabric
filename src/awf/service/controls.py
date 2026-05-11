@@ -1572,13 +1572,15 @@ class WorkspaceControlService:
         if _is_active(current) and not force:
             raise ActiveWorkspaceDestroyError()
 
-        operation = await operations.create(
-            workspace_id=workspace_id,
-            operation_type=OperationType.destroy,
-            status=OperationStatus.running,
-            payload=operation_payload,
-            idempotency_key=prepared.idempotency_key,
-        )
+        operation = prepared.resume
+        if operation is None:
+            operation = await operations.create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.destroy,
+                status=OperationStatus.running,
+                payload=operation_payload,
+                idempotency_key=prepared.idempotency_key,
+            )
         operation_id = operation.id
         secret_lease_summary = await self._revoke_destroy_secret_leases(workspace)
         if current == WorkspaceStatus.destroyed:
@@ -2890,7 +2892,8 @@ def _json_datetime(value: datetime | None) -> str | None:
 def _can_resume_expired_runtime_teardown_operation(operation: Operation) -> bool:
     return (
         operation.status == OperationStatus.running.value
-        and operation.type in {OperationType.cancel.value, OperationType.stop.value}
+        and operation.type
+        in {OperationType.cancel.value, OperationType.stop.value, OperationType.destroy.value}
         and not external_runtime_teardown_operation_blocks_controls(operation)
     )
 

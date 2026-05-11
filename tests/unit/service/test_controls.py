@@ -1335,6 +1335,73 @@ async def test_destroy_workspace_renews_teardown_operation_while_cleanup_runs(
 
 
 @pytest.mark.unit
+async def test_destroy_workspace_resumes_expired_idempotent_destroy_operation(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    cleaner = _RecordingCleaner()
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.destroying,
+            compose_project_name="awf_ws_resume_destroy",
+        )
+        operation_payload = controls._operation_payload(
+            controls._operator_operation_payload(
+                reason=None,
+                reason_code="OPERATOR_DESTROY",
+                requested_action=OperationType.destroy.value,
+                extra={
+                    "force": False,
+                    "remove_volumes": True,
+                    "remove_worktree": True,
+                },
+            ),
+            expected_version=None,
+        )
+        expired_at = datetime.now(UTC) - timedelta(minutes=30)
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace.id,
+            operation_type=OperationType.destroy,
+            status=OperationStatus.running,
+            payload=operation_payload,
+            idempotency_key="destroy-expired-resume",
+        )
+        operation.created_at = expired_at
+        operation.started_at = expired_at
+        operation.lease_renewed_at = expired_at
+        await session.flush()
+
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: cleaner,
+            session_factory=factory,
+        )
+
+        response = await service.destroy_workspace(
+            workspace.id,
+            force=False,
+            remove_volumes=True,
+            remove_worktree=True,
+            idempotency_key="destroy-expired-resume",
+        )
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace.id,
+            operation_type=OperationType.destroy,
+        )
+
+    assert response.operation_id == operation.id
+    assert response.status == WorkspaceStatus.destroyed
+    assert response.operation_status == OperationStatus.succeeded.value
+    assert len(cleaner.calls) == 1
+    assert [persisted.id for persisted in operations] == [operation.id]
+    assert operations[0].status == OperationStatus.succeeded.value
+    assert operations[0].lease_renewed_at is not None
+    assert operations[0].lease_renewed_at > expired_at
+
+
+@pytest.mark.unit
 async def test_destroy_workspace_records_cleanup_failures(
     engine: AsyncEngine,
 ) -> None:
