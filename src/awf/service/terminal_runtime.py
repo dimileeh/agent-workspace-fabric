@@ -372,6 +372,7 @@ class TerminalRuntimeReleaser:
                 owner_id=owner_id,
                 lease_expires_at=self._terminal_runtime_claim_expires_at(),
                 statuses=_release_status_values(expected_status),
+                block_active_teardown_operation=True,
             )
             if workspace is None:
                 return None

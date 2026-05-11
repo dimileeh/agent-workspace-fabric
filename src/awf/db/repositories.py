@@ -3670,6 +3670,8 @@ class WorkspaceRepository:
         lease_expires_at: datetime,
         statuses: Iterable[WorkspaceStatus | str],
         claim_cutoff: datetime | None = None,
+        block_active_teardown_operation: bool = False,
+        allow_active_operation_id: str | None = None,
     ) -> Workspace | None:
         """Claim execution only when the row is still in status and no live claim exists."""
 
@@ -3685,12 +3687,21 @@ class WorkspaceRepository:
             Workspace.execution_claim_expires_at.is_(None),
             Workspace.execution_claim_expires_at <= cutoff,
         )
+        teardown_conditions: tuple[ColumnElement[bool], ...] = ()
+        if block_active_teardown_operation:
+            teardown_conditions = (
+                ~_active_external_runtime_teardown_operation_exists(
+                    workspace_id,
+                    allow_active_operation_id=allow_active_operation_id,
+                ),
+            )
         result = await self._session.execute(
             update(Workspace)
             .where(
                 Workspace.id == workspace_id,
                 Workspace.status.in_(status_values),
                 claim_available,
+                *teardown_conditions,
             )
             .values(
                 execution_claimed_by=owner_id,

@@ -16,8 +16,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
-from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.repositories import OperationRepository, WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.cleanup import (
     CLEANUP_PARTIAL,
@@ -1249,6 +1249,54 @@ async def test_terminal_runtime_release_skips_active_execution_claim(
         assert workspace.execution_claimed_by == existing_owner_id
         assert workspace.execution_claim_expires_at is not None
         assert workspace.execution_claim_expires_at.replace(tzinfo=UTC) == existing_expires_at
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.terminal_runtime_released",
+        )
+    assert events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation_type", [OperationType.cancel, OperationType.stop])
+async def test_terminal_runtime_release_skips_active_teardown_operation(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    operation_type: OperationType,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    async with session_factory() as session:
+        await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            status=OperationStatus.running,
+            payload={"source": "operator_api"},
+        )
+        await session.commit()
+    cleaner = _RecordingCleaner()
+    releaser = TerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+    )
+
+    result = await releaser.release(
+        workspace_id,
+        source="test",
+        expected_status=WorkspaceStatus.failed,
+    )
+
+    assert result.status == "skipped"
+    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
+    assert cleaner.calls == []
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.execution_claimed_by is None
+        assert workspace.execution_claim_expires_at is None
         events = await WorkspaceEventRepository(session).list(
             workspace_id=workspace_id,
             event_type="workspace.terminal_runtime_released",
