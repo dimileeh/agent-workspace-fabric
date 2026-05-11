@@ -1454,6 +1454,93 @@ async def test_readyz_orphan_resources_present_returns_503(
 
 
 @pytest.mark.unit
+async def test_readyz_terminal_workspace_with_live_container_reports_leak(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = ready_app_and_client
+    workspace_id = await create_workspace(
+        engine,
+        status=WorkspaceStatus.failed,
+        updated_at=datetime.now(UTC),
+    )
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    runner.queue_result(
+        stdout=json.dumps(
+            {
+                "id": "abc",
+                "name": f"awf_{workspace_id}-agent-1",
+                "project": f"awf_{workspace_id}",
+                "service": "agent",
+                "state": "running",
+                "status": "Up 5 minutes",
+            }
+        )
+        + "\n"
+    )
+    runner.queue_result(stdout="")
+    runner.queue_result(stdout="")
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 503
+    orphan_check = body["checks"]["orphan_resources"]
+    assert orphan_check["ok"] is False
+    assert orphan_check["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_check["orphan_count"] == 1
+    example = orphan_check["examples"][0]
+    assert example["workspace_id"] == workspace_id
+    assert example["classification"] == "terminal"
+    assert example["reason"] == "WORKSPACE_TERMINAL_LIVE_RUNTIME"
+
+
+@pytest.mark.unit
+async def test_readyz_terminal_workspace_with_only_retained_worktree_stays_healthy(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = ready_app_and_client
+    workspace_id = await create_workspace(
+        engine,
+        status=WorkspaceStatus.completed,
+        updated_at=datetime.now(UTC),
+    )
+    settings = health_route.get_settings()
+    worktree = Path(settings.work_dir) / "git" / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    runner.queue_result(stdout="")
+    runner.queue_result(stdout="")
+    runner.queue_result(
+        stdout=json.dumps(
+            {
+                "name": f"awf_{workspace_id}_pgdata",
+                "project": f"awf_{workspace_id}",
+                "driver": "local",
+                "scope": "local",
+            }
+        )
+        + "\n"
+    )
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    orphan_check = body["checks"]["orphan_resources"]
+    assert orphan_check["ok"] is True
+    assert orphan_check["reason"] == "NO_ORPHANS"
+    assert orphan_check["orphan_count"] == 0
+    assert orphan_check["expected_count"] == 2
+
+
+@pytest.mark.unit
 async def test_readyz_retains_recent_terminal_worktree_without_failing(
     ready_app_and_client: tuple[Any, AsyncClient],
     engine: AsyncEngine,

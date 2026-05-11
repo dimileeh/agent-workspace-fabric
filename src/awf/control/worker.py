@@ -134,6 +134,15 @@ ORDERED_MONITOR_RESUME_REASON = "ORDERED_MONITOR_RESUME"
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"
 _DB_CONNECTION_TRANSIENT_EVENT_TYPE = "workspace.db_connection_transient"
+_TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = "workspace.terminal_runtime_released"
+_TERMINAL_RUNTIME_RELEASE_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
+_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "workspace.terminal_runtime_release_failed"
+_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_FAILED"
+_TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
+    WorkspaceStatus.failed,
+    WorkspaceStatus.cancelled,
+    WorkspaceStatus.completed,
+)
 
 
 @dataclass(frozen=True)
@@ -145,6 +154,7 @@ class WorkerConfig:
     execution_claim_lease_seconds: float = 300.0
     stale_active_execution_scan_interval_seconds: float = 300.0
     secret_lease_expiration_scan_interval_seconds: float = 60.0
+    terminal_runtime_release_scan_interval_seconds: float = 300.0
     node_id: str | None = None
 
 
@@ -157,6 +167,15 @@ class _ActiveExecutionCandidate:
     compose_file_path: str | None = None
     pr_url: str | None = None
     task_policy: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _TerminalRuntimeCandidate:
+    workspace_id: str
+    status: WorkspaceStatus
+    compose_project_name: str
+    compose_file_path: str | None
+    repo_url: str
 
 
 @dataclass(frozen=True)
@@ -237,6 +256,7 @@ class ControlWorker:
         self._worker_id = f"control-worker-{uuid.uuid4().hex}"
         self._next_stale_active_execution_scan_at = 0.0
         self._next_secret_lease_expiration_scan_at = 0.0
+        self._next_terminal_runtime_release_scan_at = 0.0
 
     def request_stop(self) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -252,6 +272,7 @@ class ControlWorker:
         dispatched_ids: set[str] = set()
 
         await self._maybe_expire_due_secret_leases()
+        await self._maybe_release_terminal_runtime()
 
         if self._executor is not None:
             await self._maybe_recover_stale_active_executions()
@@ -808,6 +829,225 @@ class ControlWorker:
                 expired_count=expired_count,
                 workspace_ids=workspace_ids,
             )
+
+    async def _maybe_release_terminal_runtime(self) -> None:
+        now = monotonic()
+        if now < self._next_terminal_runtime_release_scan_at:
+            return
+
+        try:
+            await self._release_terminal_runtime_resources()
+        except Exception as exc:
+            if _worker_exception_is_transient_db_connection(exc):
+                interval = max(
+                    0.0,
+                    self._config.terminal_runtime_release_scan_interval_seconds,
+                )
+                self._next_terminal_runtime_release_scan_at = monotonic() + interval
+                _log.warning(
+                    "worker.terminal_runtime_release_db_connection_closed",
+                    reason_code=DB_CONNECTION_CLOSED_REASON,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                )
+                return
+            raise
+
+        interval = max(0.0, self._config.terminal_runtime_release_scan_interval_seconds)
+        self._next_terminal_runtime_release_scan_at = monotonic() + interval
+
+    async def _release_terminal_runtime_resources(self) -> None:
+        if self._runtime_cleaner is None:
+            return
+        candidates = await self._list_terminal_runtime_candidates()
+        for candidate in candidates:
+            await self._release_terminal_runtime_for_candidate(candidate)
+
+    async def _list_terminal_runtime_candidates(self) -> list[_TerminalRuntimeCandidate]:
+        terminal_status_values = [status.value for status in _TERMINAL_RELEASE_STATUSES]
+        released_event_exists = (
+            select(WorkspaceEvent.id)
+            .where(WorkspaceEvent.workspace_id == Workspace.id)
+            .where(WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+            .where(WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE)
+            .exists()
+        )
+        stmt = (
+            select(
+                Workspace.id,
+                Workspace.status,
+                Workspace.repo_url,
+                Workspace.compose_project_name,
+                Workspace.compose_file_path,
+            )
+            .where(Workspace.status.in_(terminal_status_values))
+            .where(Workspace.compose_project_name.is_not(None))
+            .where(Workspace.node_id == self._config.node_id)
+            .where(~released_event_exists)
+            .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
+        )
+
+        async def _operation(session: AsyncSession) -> list[Any]:
+            result = await session.execute(stmt)
+            return list(result.all())
+
+        rows = await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            on_retry=self._log_transient_db_retry,
+        )
+
+        candidates: list[_TerminalRuntimeCandidate] = []
+        for row in rows:
+            compose_project_name = row[3]
+            repo_url = row[2]
+            if not compose_project_name or not repo_url:
+                continue
+            candidates.append(
+                _TerminalRuntimeCandidate(
+                    workspace_id=row[0],
+                    status=WorkspaceStatus(row[1]),
+                    repo_url=repo_url,
+                    compose_project_name=compose_project_name,
+                    compose_file_path=row[4],
+                )
+            )
+        return candidates
+
+    async def _release_terminal_runtime_for_candidate(
+        self,
+        candidate: _TerminalRuntimeCandidate,
+    ) -> None:
+        if self._runtime_cleaner is None:
+            return
+        try:
+            cleanup = await self._runtime_cleaner.cleanup(
+                workspace_id=candidate.workspace_id,
+                repo_url=candidate.repo_url,
+                compose_project_name=candidate.compose_project_name,
+                compose_file_path=(
+                    Path(candidate.compose_file_path) if candidate.compose_file_path else None
+                ),
+                remove_volumes=False,
+                remove_worktree=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.exception(
+                "worker.terminal_runtime_release_failed",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                compose_project_name=candidate.compose_project_name,
+                reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+                error_type=type(exc).__name__,
+                error=str(exc)[:240],
+            )
+            await self._record_terminal_runtime_release_failed(
+                candidate,
+                cleanup=None,
+                message=f"runtime cleanup raised {type(exc).__name__}: {exc}"[:480],
+            )
+            return
+
+        if cleanup.ok:
+            await self._record_terminal_runtime_released(candidate, cleanup)
+        else:
+            await self._record_terminal_runtime_release_failed(
+                candidate,
+                cleanup=cleanup,
+                message="failed to stop or remove terminal workspace runtime",
+            )
+
+    async def _record_terminal_runtime_released(
+        self,
+        candidate: _TerminalRuntimeCandidate,
+        cleanup: WorkspaceCleanupResult,
+    ) -> None:
+        payload = {
+            "compose_project_name": candidate.compose_project_name,
+            "workspace_status": candidate.status.value,
+            "cleanup": cleanup.to_dict(),
+        }
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None:
+                return
+            if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
+                return
+            if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
+                return
+            await repo.add_event(
+                ws,
+                event_type=_TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=_TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                payload=payload,
+            )
+            await session.commit()
+
+        _log.info(
+            _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            compose_project_name=candidate.compose_project_name,
+            reason_code=_TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+
+    async def _record_terminal_runtime_release_failed(
+        self,
+        candidate: _TerminalRuntimeCandidate,
+        *,
+        cleanup: WorkspaceCleanupResult | None,
+        message: str,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "compose_project_name": candidate.compose_project_name,
+            "workspace_status": candidate.status.value,
+            "message": message,
+        }
+        if cleanup is not None:
+            payload["cleanup"] = cleanup.to_dict()
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None:
+                return
+            if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
+                return
+            await repo.add_event(
+                ws,
+                event_type=_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
+                reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+                payload=payload,
+            )
+            await session.commit()
+
+        _log.error(
+            _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            compose_project_name=candidate.compose_project_name,
+            reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+            message=message,
+        )
+
+    async def _has_terminal_runtime_release_event(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+    ) -> bool:
+        stmt = (
+            select(WorkspaceEvent.id)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                WorkspaceEvent.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none() is not None
 
     async def _recover_stale_active_executions(self) -> None:
         candidates = await self._list_stale_active_execution_candidates(
