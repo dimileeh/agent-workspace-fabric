@@ -6593,7 +6593,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
         monkeypatch.setattr(
             worker,
-            "_refresh_execution_claim_loop",
+            "_refresh_stale_cleanup_execution_claim_loop",
             _lose_claim_after_cleanup_starts,
         )
 
@@ -6620,6 +6620,90 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert not any(
             event.event_type == "workspace.terminal_runtime_released" for event in events
         )
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_cleanup_retries_transient_claim_heartbeat_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-cleanup-heartbeat-transient",
+            WorkspaceStatus.running,
+            compose_project_name="awf_stale_cleanup_heartbeat_transient",
+        )
+        cleaner = _BlockingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                execution_claim_lease_seconds=30,
+            ),
+        )
+        monkeypatch.setattr(
+            worker,
+            "_execution_claim_refresh_interval_seconds",
+            lambda: 0.001,
+            raising=False,
+        )
+        original_refresh_execution_claim = worker._refresh_execution_claim  # noqa: SLF001
+        refresh_attempts = 0
+
+        async def _flaky_refresh_execution_claim(
+            observed_workspace_id: str,
+            *,
+            owner_id: str | None = None,
+        ) -> bool:
+            nonlocal refresh_attempts
+            assert observed_workspace_id == workspace_id
+            assert owner_id == worker._stale_active_execution_cleanup_owner()  # noqa: SLF001
+            refresh_attempts += 1
+            if refresh_attempts == 1:
+                raise RuntimeError("synthetic transient heartbeat failure")
+            refreshed = await original_refresh_execution_claim(
+                observed_workspace_id,
+                owner_id=owner_id,
+            )
+            cleaner.release.set()
+            return refreshed
+
+        monkeypatch.setattr(
+            worker,
+            "_refresh_execution_claim",
+            _flaky_refresh_execution_claim,
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_stale_cleanup_heartbeat_transient",
+            repo_url=str(origin_repo),
+        )
+        snapshot = RuntimeSnapshot(stack_state="running", reason="lost worker task")
+        assert await worker._record_stale_active_execution_detected(candidate, snapshot)
+
+        await asyncio.wait_for(
+            worker._cleanup_and_fail_stale_active_execution(candidate, snapshot),
+            timeout=WORKER_TEST_TIMEOUT_SECONDS,
+        )
+
+        assert refresh_attempts == 2
+        assert len(cleaner.calls) == 1
+        assert cleaner.completed
+        assert not cleaner.cancelled
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.infrastructure_failure.value
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+        assert any(event.event_type == "workspace.terminal_runtime_released" for event in events)
 
     @pytest.mark.unit
     async def test_stale_active_execution_cleanup_keeps_result_when_heartbeat_also_done(

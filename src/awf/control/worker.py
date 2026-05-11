@@ -1374,7 +1374,7 @@ class ControlWorker:
 
         claim_owner = self._stale_active_execution_cleanup_owner()
         heartbeat = asyncio.create_task(
-            self._refresh_execution_claim_loop(
+            self._refresh_stale_cleanup_execution_claim_loop(
                 candidate.workspace_id,
                 owner_id=claim_owner,
             ),
@@ -2286,6 +2286,9 @@ class ControlWorker:
                 )
                 return
 
+    def _execution_claim_refresh_interval_seconds(self) -> float:
+        return max(1.0, min(60.0, self._config.execution_claim_lease_seconds / 3))
+
     async def _refresh_execution_claim_loop(
         self,
         workspace_id: str,
@@ -2293,7 +2296,7 @@ class ControlWorker:
         owner_id: str | None = None,
     ) -> None:
         claim_owner = owner_id or self._worker_id
-        interval = max(1.0, min(60.0, self._config.execution_claim_lease_seconds / 3))
+        interval = self._execution_claim_refresh_interval_seconds()
         while True:
             await asyncio.sleep(interval)
             try:
@@ -2315,6 +2318,57 @@ class ControlWorker:
                     worker_id=claim_owner,
                 )
                 return
+
+    async def _refresh_stale_cleanup_execution_claim_loop(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> None:
+        interval = self._execution_claim_refresh_interval_seconds()
+        claim_timeout_seconds = max(float(self._config.execution_claim_lease_seconds), 0.001)
+        loop = asyncio.get_running_loop()
+        last_claim_renewed_at = loop.time()
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                refreshed = await self._refresh_execution_claim(
+                    workspace_id,
+                    owner_id=owner_id,
+                )
+            except Exception as exc:
+                elapsed_since_claim_renewal = loop.time() - last_claim_renewed_at
+                _log.warning(
+                    "worker.stale_cleanup_execution_claim_refresh_failed",
+                    workspace_id=workspace_id,
+                    worker_id=owner_id,
+                    error=redact_audit_text(repr(exc), limit=400),
+                    elapsed_since_claim_renewal_seconds=round(
+                        elapsed_since_claim_renewal,
+                        3,
+                    ),
+                )
+                if elapsed_since_claim_renewal >= claim_timeout_seconds:
+                    _log.warning(
+                        "worker.stale_cleanup_execution_claim_refresh_abandoned",
+                        workspace_id=workspace_id,
+                        worker_id=owner_id,
+                        elapsed_since_claim_renewal_seconds=round(
+                            elapsed_since_claim_renewal,
+                            3,
+                        ),
+                        claim_timeout_seconds=round(claim_timeout_seconds, 3),
+                    )
+                    return
+                continue
+            if not refreshed:
+                _log.warning(
+                    "worker.execution_claim_lost",
+                    workspace_id=workspace_id,
+                    worker_id=owner_id,
+                )
+                return
+            last_claim_renewed_at = loop.time()
 
     async def _refresh_monitoring_pr_claim(self, workspace_id: str) -> bool:
         async def _operation(session: AsyncSession) -> bool:
