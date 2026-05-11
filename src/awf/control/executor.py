@@ -4995,7 +4995,7 @@ class WorkspaceExecutor:
                     reason_code="EXECUTOR_CLAIMED",
                 )
             except WorkspaceTransitionBlockedByActiveOperationError as exc:
-                operation_id = exc.operation.id
+                operation_id = exc.operation_id
                 await session.rollback()
                 await self._record_active_operation_blocked_callback_in_session(
                     session,
@@ -5137,7 +5137,7 @@ class WorkspaceExecutor:
             else:
                 await repo.transition(ws, to=to, reason_code=reason_code, payload=payload)
         except WorkspaceTransitionBlockedByActiveOperationError as exc:
-            operation_id = exc.operation.id
+            operation_id = exc.operation_id
             if not preserve_staged_on_blocked:
                 await session.rollback()
             await self._record_active_operation_blocked_callback_in_session(
@@ -5184,7 +5184,7 @@ class WorkspaceExecutor:
         expected: WorkspaceStatus,
         requested: WorkspaceStatus,
         reason_code: str,
-        operation_id: str,
+        operation_id: str | None,
     ) -> None:
         repo = WorkspaceRepository(session)
         ws = await repo.get(workspace_id)

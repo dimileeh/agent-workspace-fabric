@@ -378,11 +378,19 @@ class TaskExternalIdConflictError(ValueError):
 class WorkspaceTransitionBlockedByActiveOperationError(RuntimeError):
     """Raised when a teardown control operation owns workspace transition rights."""
 
-    def __init__(self, operation: Operation) -> None:
+    def __init__(self, operation: Operation | None) -> None:
         self.operation = operation
-        super().__init__(
-            f"Workspace transition blocked by teardown {operation.type} operation {operation.id}."
-        )
+        self.operation_id = operation.id if operation is not None else None
+        self.operation_type = operation.type if operation is not None else None
+        self.operation_status = operation.status if operation is not None else None
+        if operation is None:
+            message = "Workspace transition blocked by teardown operation contention."
+        else:
+            message = (
+                f"Workspace transition blocked by teardown {operation.type} "
+                f"operation {operation.id}."
+            )
+        super().__init__(message)
 
 
 class WorkspaceTransitionStaleError(RuntimeError):
@@ -3509,10 +3517,11 @@ class WorkspaceRepository:
         workspace_id: str,
         *,
         allow_active_operation_id: str | None,
-    ) -> Operation:
+    ) -> Operation | None:
         # Retry exhaustion means each guarded UPDATE observed a teardown row
         # that completed before diagnostics could read it. Operation rows are
-        # durable audit evidence, so keep callers on the typed blocked path.
+        # durable audit evidence; if the row was removed despite that contract,
+        # keep callers on the typed blocked path without fabricating a join key.
         stmt = (
             select(Operation)
             .where(
@@ -3524,15 +3533,7 @@ class WorkspaceRepository:
         )
         if allow_active_operation_id is not None:
             stmt = stmt.where(Operation.id != allow_active_operation_id)
-        operation = (await self._session.execute(stmt)).scalar_one_or_none()
-        if operation is None:  # pragma: no cover - retry miss requires a teardown row
-            operation = Operation(
-                id=f"{workspace_id}:teardown-contention",
-                workspace_id=workspace_id,
-                type=OperationType.stop.value,
-                status=OperationStatus.running.value,
-            )
-        return operation
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def _sync_merge_candidate_lifecycle(
         self,

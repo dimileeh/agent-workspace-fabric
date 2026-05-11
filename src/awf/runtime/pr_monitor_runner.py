@@ -3119,7 +3119,7 @@ class PullRequestMonitorRunner:
                         reason_code="RECOVERY_DISPATCH",
                     )
                 except WorkspaceTransitionBlockedByActiveOperationError as exc:
-                    operation_id = exc.operation.id
+                    operation_id = exc.operation_id
                     await s.rollback()
                     await _record_blocked_monitor_recovery_dispatch(
                         s,
@@ -5005,7 +5005,7 @@ class PullRequestMonitorRunner:
                     reason_code="MONITOR_DONE",
                 )
             except WorkspaceTransitionBlockedByActiveOperationError as exc:
-                operation_id = exc.operation.id
+                operation_id = exc.operation_id
                 await s.rollback()
                 await _record_blocked_monitor_terminal_callback(
                     s,
@@ -5295,7 +5295,7 @@ class PullRequestMonitorRunner:
             try:
                 await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc)
             except WorkspaceTransitionBlockedByActiveOperationError as exc:
-                operation_id = exc.operation.id
+                operation_id = exc.operation_id
                 await s.rollback()
                 await _record_blocked_monitor_terminal_callback(
                     s,
@@ -5445,7 +5445,7 @@ async def _record_blocked_monitor_terminal_callback(
     *,
     requested_status: WorkspaceStatus,
     reason_code: str,
-    operation_id: str,
+    operation_id: str | None,
     failure_reason: str | None = None,
     failure_message: str | None = None,
 ) -> None:
@@ -5491,7 +5491,7 @@ async def _record_blocked_monitor_recovery_dispatch(
     session: AsyncSession,
     workspace_id: str,
     *,
-    operation_id: str,
+    operation_id: str | None,
 ) -> None:
     await _record_ignored_monitor_recovery_dispatch(
         session,

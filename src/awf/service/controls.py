@@ -339,7 +339,7 @@ class WorkspaceRebaseActiveConflictError(WorkspaceControlError):
 
 
 class WorkspaceActiveOperationConflictError(WorkspaceControlError):
-    def __init__(self, operation: Operation) -> None:
+    def __init__(self, operation: Operation | None) -> None:
         super().__init__(
             error_code="WORKSPACE_OPERATION_CONFLICT",
             message="Workspace operation conflicts with active runtime teardown.",
@@ -2821,7 +2821,13 @@ async def _find_active_operation(
     return None
 
 
-def _operation_conflict_detail(operation: Operation) -> dict[str, object]:
+def _operation_conflict_detail(operation: Operation | None) -> dict[str, object]:
+    if operation is None:
+        return {
+            "operation_id": None,
+            "operation_type": None,
+            "operation_status": None,
+        }
     return {
         "operation_id": operation.id,
         "operation_type": operation.type,

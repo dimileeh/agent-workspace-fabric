@@ -1652,7 +1652,7 @@ class ControlWorker:
                     extra_conditions=extra_conditions,
                 )
             except WorkspaceTransitionBlockedByActiveOperationError as exc:
-                operation_id = exc.operation.id
+                operation_id = exc.operation_id
                 await session.rollback()
                 await self._record_active_operation_blocked_transition_in_session(
                     session,
@@ -1799,7 +1799,7 @@ class ControlWorker:
                     extra_conditions=_claim_recheck_conditions(candidate.status),
                 )
             except WorkspaceTransitionBlockedByActiveOperationError as exc:
-                operation_id = exc.operation.id
+                operation_id = exc.operation_id
                 await session.rollback()
                 await self._record_active_operation_blocked_transition_in_session(
                     session,
@@ -1848,7 +1848,7 @@ class ControlWorker:
         expected: WorkspaceStatus,
         requested: WorkspaceStatus,
         reason_code: str,
-        operation_id: str,
+        operation_id: str | None,
         release_execution_claim_owner_id: str | None = None,
         clear_stale_claims_for_status: WorkspaceStatus | None = None,
     ) -> None:
@@ -2106,7 +2106,7 @@ class ControlWorker:
                     reason_code="WORKER_CLAIMED",
                 )
             except WorkspaceTransitionBlockedByActiveOperationError as exc:
-                operation_id = exc.operation.id
+                operation_id = exc.operation_id
                 await session.rollback()
                 await self._record_active_operation_blocked_transition_in_session(
                     session,

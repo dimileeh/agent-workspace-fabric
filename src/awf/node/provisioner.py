@@ -382,7 +382,7 @@ class Provisioner:
                 reason_code="WORKER_CLAIMED",
             )
         except WorkspaceTransitionBlockedByActiveOperationError as exc:
-            operation_id = exc.operation.id
+            operation_id = exc.operation_id
             await session.rollback()
             await self._record_active_operation_blocked_callback_in_session(
                 session,
@@ -513,7 +513,7 @@ class Provisioner:
             else:
                 await repo.transition(ws, to=to, reason_code=reason_code)
         except WorkspaceTransitionBlockedByActiveOperationError as exc:
-            operation_id = exc.operation.id
+            operation_id = exc.operation_id
             if not preserve_staged_on_blocked:
                 await session.rollback()
             await self._record_active_operation_blocked_callback_in_session(
@@ -551,7 +551,7 @@ class Provisioner:
         expected: WorkspaceStatus,
         requested: WorkspaceStatus,
         reason_code: str,
-        operation_id: str,
+        operation_id: str | None,
     ) -> None:
         repo = WorkspaceRepository(session)
         ws = await repo.get(workspace_id)

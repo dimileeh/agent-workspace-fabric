@@ -2313,6 +2313,32 @@ class TestTransition:
         assert ws.version == 1
 
     @pytest.mark.unit
+    async def test_latest_teardown_operation_missing_audit_row_stays_unknown(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+        operation = await repo._latest_external_runtime_teardown_operation(  # noqa: SLF001
+            ws.id,
+            allow_active_operation_id=None,
+        )
+        exc = WorkspaceTransitionBlockedByActiveOperationError(operation)
+
+        assert operation is None
+        assert exc.operation is None
+        assert exc.operation_id is None
+        assert "teardown-contention" not in str(exc)
+
+    @pytest.mark.unit
     async def test_transition_retries_when_teardown_finishes_before_diagnostic(
         self, session: AsyncSession
     ) -> None:
