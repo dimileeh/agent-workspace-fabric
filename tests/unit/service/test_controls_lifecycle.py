@@ -29,6 +29,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
     WorkspaceTransitionBlockedByActiveOperationError,
+    WorkspaceTransitionStaleError,
 )
 from awf.db.session import make_session_factory
 from awf.node.cleanup import (
@@ -3243,6 +3244,41 @@ async def test_validate_translates_teardown_race_during_ready_transition(
 
 
 @pytest.mark.unit
+async def test_validate_translates_missing_workspace_race_during_ready_transition(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/52"
+    await session.flush()
+
+    async def raise_missing_stale(
+        self: WorkspaceRepository,
+        target: Workspace,
+        **_kwargs: object,
+    ) -> Workspace:
+        raise WorkspaceTransitionStaleError(
+            target.id,
+            expected_status=target.status,
+            expected_version=target.version,
+            actual_status=None,
+            actual_version=None,
+        )
+
+    monkeypatch.setattr(WorkspaceRepository, "transition", raise_missing_stale)
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceNotFoundError) as exc_info:
+        await service.request_validate_workspace(
+            workspace.id,
+            reason="rerun required validation",
+        )
+
+    assert exc_info.value.error_code == "NOT_FOUND"
+    assert exc_info.value.message == f"No workspace with id {workspace.id}"
+
+
+@pytest.mark.unit
 async def test_validate_fresh_key_with_stale_if_match_does_not_coalesce_active_operation(
     session: AsyncSession,
 ) -> None:
@@ -3443,6 +3479,39 @@ async def test_rebase_monitoring_pr_creates_rebase_operation_and_replays_exact_k
     }
     assert state_event.old_state == WorkspaceStatus.monitoring_pr.value
     assert state_event.new_state == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_rebase_translates_missing_workspace_race_during_ready_transition(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, _candidate = await _workspace_with_candidate(session)
+
+    async def raise_missing_stale(
+        self: WorkspaceRepository,
+        target: Workspace,
+        **_kwargs: object,
+    ) -> Workspace:
+        raise WorkspaceTransitionStaleError(
+            target.id,
+            expected_status=target.status,
+            expected_version=target.version,
+            actual_status=None,
+            actual_version=None,
+        )
+
+    monkeypatch.setattr(WorkspaceRepository, "transition", raise_missing_stale)
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceNotFoundError) as exc_info:
+        await service.request_rebase_workspace(
+            workspace.id,
+            reason="base branch advanced",
+        )
+
+    assert exc_info.value.error_code == "NOT_FOUND"
+    assert exc_info.value.message == f"No workspace with id {workspace.id}"
 
 
 @pytest.mark.unit

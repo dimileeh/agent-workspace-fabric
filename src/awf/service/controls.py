@@ -1937,7 +1937,7 @@ async def _transition_workspace_for_control(
         raise WorkspaceActiveOperationConflictError(exc.operation) from exc
     except WorkspaceTransitionStaleError as exc:
         if exc.actual_version is None:
-            raise
+            raise WorkspaceNotFoundError(exc.workspace_id) from exc
         raise VersionConflictError(
             expected_version=exc.expected_version,
             actual_version=exc.actual_version,
