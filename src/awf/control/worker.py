@@ -998,11 +998,24 @@ class ControlWorker:
                 error_type=type(exc).__name__,
                 error=str(exc)[:240],
             )
-            await self._record_terminal_runtime_release_failed(
-                candidate,
-                cleanup=None,
-                message=f"runtime cleanup raised {type(exc).__name__}: {exc}"[:480],
-            )
+            try:
+                await self._record_terminal_runtime_release_failed(
+                    candidate,
+                    cleanup=None,
+                    message=f"runtime cleanup raised {type(exc).__name__}: {exc}"[:480],
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as record_exc:
+                _log.exception(
+                    "worker.terminal_runtime_release_event_write_failed",
+                    workspace_id=candidate.workspace_id,
+                    status=candidate.status.value,
+                    compose_project_name=candidate.compose_project_name,
+                    reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+                    error_type=type(record_exc).__name__,
+                    error=str(record_exc)[:240],
+                )
             return
 
         if cleanup.ok:
