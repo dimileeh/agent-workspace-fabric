@@ -4069,7 +4069,7 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
     assert cmd.calls[2].args[3:6] == ["diff", "--name-only", "merge-base-sha..HEAD"]
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 async def test_changed_paths_since_remote_branch_reports_only_local_paths_when_remote_diverged(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
