@@ -251,6 +251,7 @@ def _tracked_exec_wrapper_script(*, preserve_stdin: bool = False) -> str:
     stdin_setup = ""
     setsid_stdin_redirect = "</dev/null"
     setsid_stdin_cleanup = ""
+    setsid_stdin_fd_close = ""
     exec_stdin_setup = "exec </dev/null"
     permissions_setup = ""
     if preserve_stdin:
@@ -280,6 +281,7 @@ if [ "$exec_status" -ne 0 ]; then
 fi
 rm -f "$stdin_path" 2>/dev/null || true
 """.strip()
+        setsid_stdin_fd_close = "exec 9<&-"
         exec_stdin_setup = """
 exec < "$stdin_path"
 exec_status=$?
@@ -303,7 +305,7 @@ if command -v setsid >/dev/null 2>&1; then
   {setsid_stdin_cleanup}
   setsid "$@" {setsid_stdin_redirect} &
   child_pid=$!
-  exec 9<&-
+  {setsid_stdin_fd_close}
   printf '%s\\n' "$child_pid" > "$awf_exec_dir/pid" 2>/dev/null || true
   printf '%s\\n' "$child_pid" > "$awf_exec_dir/pgid" 2>/dev/null || true
   wait "$child_pid"
