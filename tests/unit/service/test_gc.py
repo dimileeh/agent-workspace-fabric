@@ -2450,7 +2450,7 @@ def test_explicit_failed_gc_filter_still_inspects_terminal_runtime():
 
     assert _needs_failed_terminal_workspace_no_work_inspection(
         ws,
-        default_policy=False,
+        _default_policy=False,
         cleanup_enabled=True,
     )
 

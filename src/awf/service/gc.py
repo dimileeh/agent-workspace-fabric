@@ -1225,7 +1225,7 @@ async def _classify_workspace_for_gc_async(
     failed_terminal_workspace_live_runtime: bool | None = None
     if _needs_failed_terminal_workspace_no_work_inspection(
         workspace,
-        default_policy=default_policy,
+        _default_policy=default_policy,
         cleanup_enabled=cleanup_enabled,
     ):
         runtime_state = await _failed_terminal_workspace_runtime_state_async(workspace)
@@ -1247,18 +1247,15 @@ async def _classify_workspace_for_gc_async(
 def _needs_failed_terminal_workspace_no_work_inspection(
     workspace: Workspace,
     *,
-    default_policy: bool,
+    _default_policy: bool,
     cleanup_enabled: bool,
 ) -> bool:
     if not cleanup_enabled:
         return False
     if workspace.status not in _FAILED_NO_WORK_TERMINAL_STATUSES:
         return False
-    if _compose_project_name_for_workspace(workspace) is None:
-        return False
     # Explicit status filters still inspect terminal runtime so live work is preserved.
-    del default_policy
-    return True
+    return _compose_project_name_for_workspace(workspace) is not None
 
 
 def _failed_terminal_workspace_no_work_decision(
@@ -1299,7 +1296,7 @@ def _classify_workspace_for_gc(
 
     if _needs_failed_terminal_workspace_no_work_inspection(
         workspace,
-        default_policy=default_policy,
+        _default_policy=default_policy,
         cleanup_enabled=cleanup_enabled,
     ):
         runtime_state_cache_token = _FAILED_TERMINAL_RUNTIME_STATE_CACHE.set({})
