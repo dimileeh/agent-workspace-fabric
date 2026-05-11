@@ -147,6 +147,38 @@ class PersistCheckingSleep(RecordedSleep):
         await super().__call__(seconds)
 
 
+class PersistCheckingCommandRunner(FakeCommandRunner):
+    def __init__(
+        self,
+        *,
+        factory: async_sessionmaker[AsyncSession],
+        workspace_id: str,
+        state_key: str,
+        expected_value: str,
+    ) -> None:
+        super().__init__()
+        self._factory = factory
+        self._workspace_id = workspace_id
+        self._state_key = state_key
+        self._expected_value = expected_value
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        if args[:3] == ["gh", "run", "rerun"]:
+            async with self._factory() as session:
+                workspace = await WorkspaceRepository(session).get(self._workspace_id)
+                assert workspace is not None
+                assert (
+                    workspace.monitor_threads_addressed.get(self._state_key) == self._expected_value
+                )
+        return await super().run(args, input_bytes=input_bytes, cwd=cwd)
+
+
 def _monitor_runner(
     tmp_path: Path,
     fake: FakeCommandRunner,
@@ -327,6 +359,66 @@ async def test_rerun_transient_ci_action_requests_failed_job_rerun_and_records_a
         rerun_operations = [op for op in operations if op.payload["action"] == "ci_transient_rerun"]
         assert len(rerun_operations) == 1
         assert rerun_operations[0].status == OperationStatus.succeeded.value
+
+
+@pytest.mark.unit
+async def test_rerun_transient_ci_action_persists_attempt_before_github_rerun(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    failure = CheckFailure(
+        name="python-full-coverage",
+        conclusion="FAILURE",
+        log_excerpt="HTTP status server error (502 Bad Gateway)",
+        run_id="25655330295",
+    )
+    status = _status(
+        check_state=CheckState.FAILURE,
+        ci_failures=(failure,),
+        head_sha="abc1234567890def",
+    )
+    state_key = _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+    cmd = PersistCheckingCommandRunner(
+        factory=factory,
+        workspace_id=workspace_id,
+        state_key=state_key,
+        expected_value="1",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    terminal = await runner._execute(
+        action=RerunTransientCI(failures=(failure,)),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert cmd.calls[0].args == [
+        "gh",
+        "run",
+        "rerun",
+        "25655330295",
+        "--repo",
+        "dimileeh/aira-web",
+        "--failed",
+    ]
 
 
 @pytest.mark.unit

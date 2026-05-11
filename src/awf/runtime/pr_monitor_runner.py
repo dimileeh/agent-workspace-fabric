@@ -1549,17 +1549,17 @@ class PullRequestMonitorRunner:
                 "run_ids": list(run_ids),
                 "head_sha": status.head_sha,
             }
+            recorded_attempt = _ci_transient_rerun_attempt(
+                state,
+                head_sha=status.head_sha,
+                failures=action.failures,
+            )
+            event_payload["attempt"] = recorded_attempt
+            await self._persist_state(workspace_id, state)
             try:
                 for run_id in run_ids:
                     await self._deps.gh.rerun_failed_workflow_jobs(repo=repo, run_id=run_id)
             except GitHubClientError as exc:
-                recorded_attempt = _ci_transient_rerun_attempt(
-                    state,
-                    head_sha=status.head_sha,
-                    failures=action.failures,
-                )
-                event_payload["attempt"] = recorded_attempt
-                await self._persist_state(workspace_id, state)
                 error_message = _redact_and_truncate_github_error(str(exc))
                 await self._finish_monitor_operation(
                     operation,
@@ -1596,14 +1596,6 @@ class PullRequestMonitorRunner:
                 )
                 state.iter_count += 1
                 return False
-
-            recorded_attempt = _ci_transient_rerun_attempt(
-                state,
-                head_sha=status.head_sha,
-                failures=action.failures,
-            )
-            event_payload["attempt"] = recorded_attempt
-            await self._persist_state(workspace_id, state)
 
             await self._finish_monitor_operation(
                 operation,
