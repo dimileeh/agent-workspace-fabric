@@ -2785,6 +2785,71 @@ async def test_idempotent_replay_returns_original_operation_audit_unchanged(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_run_terminal_cleanup_when_fast_stop_fails(
+    session: AsyncSession,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    stopper = FailingStopper()
+    service, _stopper, cleaner = _service(session, stopper=stopper)
+
+    with pytest.raises(WorkspaceStackStopError):
+        if action == "cancel":
+            await service.cancel_workspace(
+                workspace.id,
+                reason="operator cancel",
+                stop_stack=True,
+                idempotency_key="cancel-fast-stop-fails",
+            )
+        else:
+            await service.stop_workspace(
+                workspace.id,
+                reason="operator stop",
+                idempotency_key="stop-fast-stop-fails",
+            )
+
+    operations = await _operations(session, workspace.id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
+
+    terminal_runtime_release = {
+        "cleanup": {
+            "status": "succeeded",
+            "reason_code": "CLEANUP_SUCCEEDED",
+            "steps": [],
+            "failed_steps": [],
+            "completed_steps": [],
+        },
+        "preserved": {},
+    }
+    assert stopper.calls == [workspace.compose_project_name]
+    assert len(cleaner.calls) == 1
+    assert len(operations) == 1
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "STACK_STOP_FAILED"
+    assert operations[0].result == {
+        "status": WorkspaceStatus.ready.value,
+        "terminal_runtime_release": terminal_runtime_release,
+    }
+    assert len(audit_events) == 1
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["action"] == action
+    assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["reason_code"] == "STACK_STOP_FAILED"
+    assert audit_events[0].payload["terminal_runtime_release"] == {
+        "cleanup_status": "succeeded",
+        "cleanup_reason_code": "CLEANUP_SUCCEEDED",
+    }
+    assert audit_events[0].payload["evidence"]["terminal_runtime_release"] == (
+        terminal_runtime_release
+    )
+
+
+@pytest.mark.unit
 async def test_stop_stack_failure_finishes_operation_failed_with_audit(
     session: AsyncSession,
 ) -> None:

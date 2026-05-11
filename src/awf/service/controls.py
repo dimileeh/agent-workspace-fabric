@@ -143,6 +143,12 @@ class _ControlTerminalRuntimeCleanup:
 
 
 @dataclass(frozen=True)
+class _ControlExternalRuntimeStop:
+    cleanup: _ControlTerminalRuntimeCleanup | None
+    stop_error: Exception | None = None
+
+
+@dataclass(frozen=True)
 class _ControlTerminalRuntimeWorkspaceSnapshot:
     workspace_id: str
     repo_url: str
@@ -433,11 +439,14 @@ class WorkspaceControlService:
             assert terminal_runtime_snapshot is not None
             await self._commit_before_external_runtime_io()
             committed_before_external_io = True
+            terminal_runtime_stop_error: Exception | None = None
             try:
-                terminal_runtime_cleanup = await self._run_with_teardown_operation_heartbeat(
+                terminal_runtime_stop = await self._run_with_teardown_operation_heartbeat(
                     operation_id,
                     self._stop_external_runtime_for_control(terminal_runtime_snapshot),
                 )
+                terminal_runtime_cleanup = terminal_runtime_stop.cleanup
+                terminal_runtime_stop_error = terminal_runtime_stop.stop_error
             except WorkspaceStackStopError as exc:
                 operation = await _require_control_operation(operations, operation_id)
                 workspace = await self._require_workspace(repo, workspace_id)
@@ -460,6 +469,16 @@ class WorkspaceControlService:
                     exc=exc,
                 )
                 raise
+            if terminal_runtime_stop_error is not None:
+                await self._finish_external_runtime_stop_error_for_control(
+                    operations,
+                    repo,
+                    operation_id=operation_id,
+                    workspace_id=workspace_id,
+                    exc=terminal_runtime_stop_error,
+                    terminal_runtime_cleanup=terminal_runtime_cleanup,
+                )
+                raise terminal_runtime_stop_error
         response: WorkspaceControlResponse | None = None
         try:
             operation = await _require_control_operation(operations, operation_id)
@@ -630,11 +649,14 @@ class WorkspaceControlService:
         terminal_runtime_snapshot = _snapshot_terminal_runtime_workspace_for_control(workspace)
         await self._commit_before_external_runtime_io()
         terminal_runtime_cleanup: _ControlTerminalRuntimeCleanup | None = None
+        terminal_runtime_stop_error: Exception | None = None
         try:
-            terminal_runtime_cleanup = await self._run_with_teardown_operation_heartbeat(
+            terminal_runtime_stop = await self._run_with_teardown_operation_heartbeat(
                 operation_id,
                 self._stop_external_runtime_for_control(terminal_runtime_snapshot),
             )
+            terminal_runtime_cleanup = terminal_runtime_stop.cleanup
+            terminal_runtime_stop_error = terminal_runtime_stop.stop_error
         except WorkspaceStackStopError as exc:
             operation = await _require_control_operation(operations, operation_id)
             workspace = await self._require_workspace(repo, workspace_id)
@@ -657,6 +679,16 @@ class WorkspaceControlService:
                 exc=exc,
             )
             raise
+        if terminal_runtime_stop_error is not None:
+            await self._finish_external_runtime_stop_error_for_control(
+                operations,
+                repo,
+                operation_id=operation_id,
+                workspace_id=workspace_id,
+                exc=terminal_runtime_stop_error,
+                terminal_runtime_cleanup=terminal_runtime_cleanup,
+            )
+            raise terminal_runtime_stop_error
         response: WorkspaceControlResponse | None = None
         try:
             operation = await _require_control_operation(operations, operation_id)
@@ -771,9 +803,54 @@ class WorkspaceControlService:
     async def _stop_external_runtime_for_control(
         self,
         workspace: _ControlTerminalRuntimeWorkspaceSnapshot,
-    ) -> _ControlTerminalRuntimeCleanup | None:
-        await self._project_stopper(workspace.compose_project_name)
-        return await self._cleanup_terminal_runtime_for_control(workspace)
+    ) -> _ControlExternalRuntimeStop:
+        stop_error: Exception | None = None
+        try:
+            await self._project_stopper(workspace.compose_project_name)
+        except Exception as exc:
+            stop_error = exc
+        cleanup = await self._cleanup_terminal_runtime_for_control(workspace)
+        return _ControlExternalRuntimeStop(cleanup=cleanup, stop_error=stop_error)
+
+    async def _finish_external_runtime_stop_error_for_control(
+        self,
+        operations: OperationRepository,
+        repo: WorkspaceRepository,
+        *,
+        operation_id: str,
+        workspace_id: str,
+        exc: Exception,
+        terminal_runtime_cleanup: _ControlTerminalRuntimeCleanup | None,
+    ) -> None:
+        if isinstance(exc, WorkspaceStackStopError):
+            operation = await _require_control_operation(operations, operation_id)
+            workspace = await self._require_workspace(repo, workspace_id)
+            await _finish_stack_stop_failed_operation(
+                self._session,
+                operations,
+                operation,
+                workspace=workspace,
+                exc=exc,
+                terminal_runtime_cleanup=terminal_runtime_cleanup,
+                terminal_runtime_release_claim_owner_id=(
+                    terminal_runtime_cleanup.claim_owner_id
+                    if terminal_runtime_cleanup is not None
+                    else None
+                ),
+            )
+            return
+        await _finish_precommitted_control_operation_failed(
+            self._session,
+            operation_id=operation_id,
+            workspace_id=workspace_id,
+            exc=exc,
+            terminal_runtime_cleanup=terminal_runtime_cleanup,
+            terminal_runtime_release_claim_owner_id=(
+                terminal_runtime_cleanup.claim_owner_id
+                if terminal_runtime_cleanup is not None
+                else None
+            ),
+        )
 
     async def _run_with_teardown_operation_heartbeat(
         self,
@@ -2575,16 +2652,44 @@ async def _finish_stack_stop_failed_operation(
     *,
     workspace: Workspace,
     exc: WorkspaceStackStopError,
+    terminal_runtime_cleanup: _ControlTerminalRuntimeCleanup | None = None,
+    terminal_runtime_release_claim_owner_id: str | None = None,
 ) -> None:
     repo = WorkspaceRepository(session)
     operation_payload = operation.payload if isinstance(operation.payload, dict) else {}
+    if (
+        terminal_runtime_release_claim_owner_id is not None
+        and workspace.execution_claimed_by == terminal_runtime_release_claim_owner_id
+    ):
+        workspace.execution_claimed_by = None
+        workspace.execution_claim_expires_at = None
+    terminal_runtime_release = _terminal_runtime_release_evidence(terminal_runtime_cleanup)
+    operation_result: dict[str, object] = {"status": workspace.status}
+    if terminal_runtime_release is not None:
+        operation_result["terminal_runtime_release"] = terminal_runtime_release
     await operations.finish(
         operation,
         status=OperationStatus.failed,
-        result={"status": workspace.status},
+        result=operation_result,
         error_code=exc.error_code,
         error_message=_bounded_operation_error_message(exc.message),
     )
+    audit_extra: dict[str, object | None] = {
+        "stop_stack": operation_payload.get("stop_stack"),
+        "expected_version": operation_payload.get("expected_version"),
+    }
+    terminal_runtime_release_summary = _terminal_runtime_release_audit_summary(
+        terminal_runtime_cleanup
+    )
+    if terminal_runtime_release_summary is not None:
+        audit_extra["terminal_runtime_release"] = terminal_runtime_release_summary
+    audit_evidence: dict[str, object] = {
+        "operation": f"docker {exc.operation}",
+        "returncode": exc.returncode,
+        "error_message": _bounded_operation_error_message(exc.message),
+    }
+    if terminal_runtime_release is not None:
+        audit_evidence["terminal_runtime_release"] = terminal_runtime_release
     await _add_control_audit_event(
         repo,
         workspace,
@@ -2592,15 +2697,8 @@ async def _finish_stack_stop_failed_operation(
         action=operation.type,
         outcome="failed",
         reason_code=exc.error_code,
-        extra={
-            "stop_stack": operation_payload.get("stop_stack"),
-            "expected_version": operation_payload.get("expected_version"),
-        },
-        evidence={
-            "operation": f"docker {exc.operation}",
-            "returncode": exc.returncode,
-            "error_message": _bounded_operation_error_message(exc.message),
-        },
+        extra=audit_extra,
+        evidence=audit_evidence,
     )
     await session.commit()
 
