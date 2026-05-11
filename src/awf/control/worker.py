@@ -1666,6 +1666,16 @@ class ControlWorker:
                         cleanup_owner if cleanup is not None else None
                     ),
                 )
+                if cleanup is not None:
+                    source = "control_worker.stale_active_execution"
+                    await session.flush()
+                    await self._record_terminal_runtime_release_event_in_session(
+                        session,
+                        workspace_id=candidate.workspace_id,
+                        cleanup=cleanup,
+                        source=source,
+                        allow_non_terminal=True,
+                    )
                 await session.commit()
                 return
             if ws is None:
@@ -1683,22 +1693,12 @@ class ControlWorker:
             if cleanup is not None:
                 source = "control_worker.stale_active_execution"
                 await session.flush()
-                try:
-                    async with session.begin_nested():
-                        await record_terminal_runtime_release_event(
-                            session,
-                            workspace_id=candidate.workspace_id,
-                            cleanup=cleanup,
-                            source=source,
-                            worktree_host_path=self._worktree_host_path(candidate.workspace_id),
-                        )
-                except Exception as exc:
-                    _log.warning(
-                        "worker.terminal_runtime_release_event_record_failed",
-                        workspace_id=candidate.workspace_id,
-                        source=source,
-                        error=redact_audit_text(repr(exc), limit=400),
-                    )
+                await self._record_terminal_runtime_release_event_in_session(
+                    session,
+                    workspace_id=candidate.workspace_id,
+                    cleanup=cleanup,
+                    source=source,
+                )
             await session.commit()
 
         _log.error(
@@ -1710,6 +1710,33 @@ class ControlWorker:
             runtime_reason=snapshot.reason,
             reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
         )
+
+    async def _record_terminal_runtime_release_event_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        cleanup: WorkspaceCleanupResult,
+        source: str,
+        allow_non_terminal: bool = False,
+    ) -> None:
+        try:
+            async with session.begin_nested():
+                await record_terminal_runtime_release_event(
+                    session,
+                    workspace_id=workspace_id,
+                    cleanup=cleanup,
+                    source=source,
+                    worktree_host_path=self._worktree_host_path(workspace_id),
+                    allow_non_terminal=allow_non_terminal,
+                )
+        except Exception as exc:
+            _log.warning(
+                "worker.terminal_runtime_release_event_record_failed",
+                workspace_id=workspace_id,
+                source=source,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
 
     def _worktree_host_path(self, workspace_id: str) -> Path | None:
         if self._worktrees_root is None:

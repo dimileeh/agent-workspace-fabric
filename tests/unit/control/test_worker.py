@@ -6032,6 +6032,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
             ignored_events = [
                 event for event in events if event.event_type == "workspace.stale_callback_ignored"
             ]
+            release_events = [
+                event
+                for event in events
+                if event.event_type == "workspace.terminal_runtime_released"
+            ]
         assert [operation.type for operation in operations] == [OperationType.stop.value]
         assert operations[0].status == OperationStatus.running.value
         assert ignored_events[-1].payload == {
@@ -6043,6 +6048,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
             "operation_id": operations[0].id,
             "reason_code": "STALE_ACTIVE_EXECUTION",
         }
+        assert len(release_events) == 1
+        assert release_events[0].payload["source"] == "control_worker.stale_active_execution"
+        assert release_events[0].payload["workspace_status"] == WorkspaceStatus.running.value
+        assert release_events[0].payload["cleanup"]["reason_code"] == "CLEANUP_SUCCEEDED"
         assert not any(
             event.event_type == "workspace.state_changed"
             and event.new_state == WorkspaceStatus.failed.value
