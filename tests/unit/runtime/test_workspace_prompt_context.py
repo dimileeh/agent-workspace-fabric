@@ -14,7 +14,10 @@ from awf.profiles.models import (
     ProfileService,
     WorkspaceProfile,
 )
-from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
+from awf.runtime.workspace_prompt_context import (
+    render_workspace_runtime_context,
+    render_workspace_runtime_context_section,
+)
 
 
 @pytest.mark.unit
@@ -132,3 +135,14 @@ def test_workspace_runtime_context_includes_generated_app_endpoint_env() -> None
 @pytest.mark.unit
 def test_workspace_runtime_context_is_empty_without_services_or_runtime_env() -> None:
     assert render_workspace_runtime_context(WorkspaceProfile(name="plain")) == ""
+
+
+@pytest.mark.unit
+def test_workspace_runtime_context_section_trims_and_preserves_prompt_gap() -> None:
+    assert (
+        render_workspace_runtime_context_section(
+            "\n Workspace runtime context\n- Use `$DATABASE_URL`. \n"
+        )
+        == "Workspace runtime context\n- Use `$DATABASE_URL`.\n\n"
+    )
+    assert render_workspace_runtime_context_section(" \n\t ") == ""

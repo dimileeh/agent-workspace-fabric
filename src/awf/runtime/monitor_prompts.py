@@ -22,6 +22,7 @@ from datetime import datetime
 
 from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
 from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread
+from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
 _FOOTER = (
     "\n\nDo NOT push — AWF handles the push once this fix cycle settles.\n"
@@ -223,10 +224,10 @@ def fix_ci_prompt(
 
 
 def _workspace_runtime_context_section(workspace_runtime_context: str) -> str:
-    context = workspace_runtime_context.strip()
-    if not context:
+    section = render_workspace_runtime_context_section(workspace_runtime_context)
+    if not section:
         return ""
-    return f"\n\n{context}\n\n"
+    return f"\n\n{section}"
 
 
 def ready_to_merge_comment(

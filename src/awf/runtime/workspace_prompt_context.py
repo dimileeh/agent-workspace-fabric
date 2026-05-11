@@ -85,6 +85,15 @@ def render_workspace_runtime_context(profile: WorkspaceProfile) -> str:
     return "\n".join(lines)
 
 
+def render_workspace_runtime_context_section(workspace_runtime_context: str) -> str:
+    """Render optional trusted runtime context as a prompt section."""
+
+    context = workspace_runtime_context.strip()
+    if not context:
+        return ""
+    return f"{context}\n\n"
+
+
 def _service_lines(
     services: tuple[ProfileService, ...],
     env_endpoints: tuple[_EnvEndpoint, ...],

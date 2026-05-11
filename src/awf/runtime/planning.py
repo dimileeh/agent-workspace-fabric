@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 from awf.common.redaction import redact_secrets
+from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
 if TYPE_CHECKING:
     from awf.adapters.base import AgentRunError
@@ -287,13 +288,6 @@ def build_execution_prompt(
         f"{warning_section}"
         f"### Task\n{task_prompt}\n"
     )
-
-
-def render_workspace_runtime_context_section(workspace_runtime_context: str) -> str:
-    context = workspace_runtime_context.strip()
-    if not context:
-        return ""
-    return f"{context}\n\n"
 
 
 def build_conformance_prompt(
