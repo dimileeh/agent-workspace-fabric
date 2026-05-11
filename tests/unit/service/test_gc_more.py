@@ -150,6 +150,27 @@ def test_classify_workspace_failed_has_work_but_expired():
         assert isinstance(res, WorkspaceGCPreserved)
 
 
+def test_classify_workspace_failed_empty_compose_name_is_missing():
+    ws = Workspace(
+        id="ws_1",
+        status=WorkspaceStatus.failed.value,
+        updated_at=datetime.now(UTC) - timedelta(hours=25),
+        compose_project_name="",
+    )
+    with patch("awf.service.gc._failed_terminal_workspace_has_no_work") as has_no_work:
+        res = _classify_workspace_for_gc(
+            ws,
+            work_dir=Path("/tmp"),
+            now=datetime.now(UTC),
+            cutoff_at=datetime.now(UTC) - timedelta(hours=24),
+            default_policy=False,
+            cleanup_enabled=True,
+        )
+        assert isinstance(res, WorkspaceGCCandidate)
+        assert res.reason_code == FAILED_WORKSPACE_NO_WORK
+        has_no_work.assert_not_called()
+
+
 def test_completed_workspace_without_merged_pr_is_preserved():
     ws = Workspace(
         id="ws_unmerged",
