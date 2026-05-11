@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy import text
@@ -65,15 +66,19 @@ from awf.service.terminal_runtime import (
     TerminalRuntimeReleaseResult,
     terminal_runtime_release_claim_active,
 )
-from tests.postgres import postgres_test_engine, postgres_test_session
+from tests.postgres import postgres_test_engine
 
 CONTROL_ASYNC_TEST_TIMEOUT_SECONDS = 30.0
+_CONTROL_SESSION_FACTORY_INFO_KEY = "awf_control_session_factory"
 
 
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
-    async with postgres_test_session() as s:
-        yield s
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        async with factory() as s:
+            s.info[_CONTROL_SESSION_FACTORY_INFO_KEY] = factory
+            yield s
 
 
 @dataclass
@@ -575,15 +580,21 @@ def _service(
     stopper: RecordingStopper | None = None,
     cleaner: RecordingCleaner | None = None,
     worktrees_root: Path | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[WorkspaceControlService, RecordingStopper, RecordingCleaner]:
     stopper = stopper or RecordingStopper()
     cleaner = cleaner or RecordingCleaner()
+    control_session_factory = session_factory or cast(
+        async_sessionmaker[AsyncSession] | None,
+        session.info.get(_CONTROL_SESSION_FACTORY_INFO_KEY),
+    )
     return (
         WorkspaceControlService(
             session,
             project_stopper=stopper,
             cleaner_factory=lambda: cleaner,
             worktrees_root=worktrees_root,
+            session_factory=control_session_factory,
         ),
         stopper,
         cleaner,
@@ -704,7 +715,11 @@ async def test_cancel_and_stop_release_workspace_lock_before_stack_stop(
             subphase=f"{action}-stack-stop-observed-unlocked-row",
         )
         async with session_factory() as session:
-            service, _stopper, _cleaner = _service(session, stopper=stopper)
+            service, _stopper, _cleaner = _service(
+                session,
+                stopper=stopper,
+                session_factory=session_factory,
+            )
             if action == "cancel":
                 response = await service.cancel_workspace(
                     workspace_id,
@@ -746,7 +761,11 @@ async def test_cancel_and_stop_release_workspace_lock_before_terminal_runtime_cl
             subphase=f"{action}-terminal-cleanup-observed-unlocked-row",
         )
         async with session_factory() as session:
-            service, stopper, _cleaner = _service(session, cleaner=cleaner)
+            service, stopper, _cleaner = _service(
+                session,
+                cleaner=cleaner,
+                session_factory=session_factory,
+            )
             if action == "cancel":
                 response = await service.cancel_workspace(
                     workspace_id,
@@ -793,7 +812,11 @@ async def test_cancel_and_stop_skip_cleanup_when_terminal_release_claim_is_activ
             workspace_id=workspace_id,
         )
         async with session_factory() as session:
-            service, _stopper, cleaner = _service(session, stopper=stopper)
+            service, _stopper, cleaner = _service(
+                session,
+                stopper=stopper,
+                session_factory=session_factory,
+            )
             if action == "cancel":
                 response = await service.cancel_workspace(
                     workspace_id,
@@ -841,7 +864,11 @@ async def test_cancel_terminal_workspace_claims_release_before_cleanup() -> None
             workspace_id=workspace_id,
         )
         async with session_factory() as session:
-            service, stopper, _cleaner = _service(session, cleaner=cleaner)
+            service, stopper, _cleaner = _service(
+                session,
+                cleaner=cleaner,
+                session_factory=session_factory,
+            )
             response = await service.cancel_workspace(
                 workspace_id,
                 reason="repeat cancel",
@@ -901,7 +928,11 @@ async def test_cancel_and_stop_refresh_terminal_release_claim_during_cleanup(
             workspace_id=workspace_id,
         )
         async with session_factory() as session:
-            service, stopper, _cleaner = _service(session, cleaner=cleaner)
+            service, stopper, _cleaner = _service(
+                session,
+                cleaner=cleaner,
+                session_factory=session_factory,
+            )
             if action == "cancel":
                 response = await service.cancel_workspace(
                     workspace_id,
@@ -943,7 +974,11 @@ async def test_cancel_and_stop_fence_external_stack_io_from_concurrent_version_b
             to_status=WorkspaceStatus.running,
         )
         async with session_factory() as session:
-            service, _stopper, cleaner = _service(session, stopper=stopper)
+            service, _stopper, cleaner = _service(
+                session,
+                stopper=stopper,
+                session_factory=session_factory,
+            )
             if action == "cancel":
                 response = await service.cancel_workspace(
                     workspace_id,
@@ -1008,7 +1043,11 @@ async def test_cancel_and_stop_renew_teardown_operation_lease_during_external_cl
             operation_type=operation_type,
         )
         async with session_factory() as session:
-            service, _stopper, cleaner = _service(session, stopper=stopper)
+            service, _stopper, cleaner = _service(
+                session,
+                stopper=stopper,
+                session_factory=session_factory,
+            )
             if action == "cancel":
                 response = await service.cancel_workspace(
                     workspace_id,
