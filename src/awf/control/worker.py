@@ -873,6 +873,8 @@ class ControlWorker:
         *,
         limit: int | None = None,
     ) -> list[_TerminalRuntimeCandidate]:
+        if limit is not None and limit <= 0:
+            return []
         terminal_status_values = [status.value for status in _TERMINAL_RELEASE_STATUSES]
         released_event_exists = (
             select(WorkspaceEvent.id)
@@ -895,7 +897,7 @@ class ControlWorker:
             .where(~released_event_exists)
             .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
         )
-        if limit is not None and limit > 0:
+        if limit is not None:
             stmt = stmt.limit(limit)
 
         async def _operation(session: AsyncSession) -> list[Any]:
