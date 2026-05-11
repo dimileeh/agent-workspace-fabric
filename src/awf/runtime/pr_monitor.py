@@ -537,6 +537,7 @@ _CI_CODE_FAILURE_PATTERNS = (
 )
 
 _CI_TRANSIENT_FAILURE_MARKERS = (
+    "timed_out",
     "http status server error",
     "http 500",
     "http 502",
