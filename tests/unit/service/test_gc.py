@@ -1169,6 +1169,59 @@ async def test_default_plan_marks_live_runtime_preserved_separately(
 
 
 @pytest.mark.unit
+async def test_explicit_status_filter_marks_recent_live_runtime_preserved_separately(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=2),
+    )
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        compose_project_name="awf_recent_failed_live_runtime",
+        updated_at=now - timedelta(hours=2),
+    )
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="running",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="running",
+                        command="python -m awf.agent",
+                    )
+                ],
+            )
+        ),
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        include_statuses=[WorkspaceStatus.failed],
+        now=now,
+    )
+
+    assert plan.candidates == []
+    assert plan.preserved_count == 1
+    assert plan.preserved[0].workspace_id == workspace_id
+    assert plan.preserved[0].reason_code == TERMINAL_LIVE_RUNTIME_PRESERVED
+    assert plan.to_dict()["preserved"][0]["retention_class"] == "live_runtime"
+
+
+@pytest.mark.unit
 async def test_cleanup_disabled_preserves_completed_pr_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

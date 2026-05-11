@@ -1225,7 +1225,6 @@ async def _classify_workspace_for_gc_async(
     failed_terminal_workspace_live_runtime: bool | None = None
     if _needs_failed_terminal_workspace_no_work_inspection(
         workspace,
-        cutoff_at=cutoff_at,
         default_policy=default_policy,
         cleanup_enabled=cleanup_enabled,
     ):
@@ -1248,7 +1247,6 @@ async def _classify_workspace_for_gc_async(
 def _needs_failed_terminal_workspace_no_work_inspection(
     workspace: Workspace,
     *,
-    cutoff_at: datetime,
     default_policy: bool,
     cleanup_enabled: bool,
 ) -> bool:
@@ -1260,7 +1258,7 @@ def _needs_failed_terminal_workspace_no_work_inspection(
         return False
     if default_policy:
         return True
-    return _to_utc(workspace.updated_at) <= cutoff_at
+    return True
 
 
 def _failed_terminal_workspace_no_work_decision(
@@ -1301,7 +1299,6 @@ def _classify_workspace_for_gc(
 
     if _needs_failed_terminal_workspace_no_work_inspection(
         workspace,
-        cutoff_at=cutoff_at,
         default_policy=default_policy,
         cleanup_enabled=cleanup_enabled,
     ):
@@ -1419,7 +1416,11 @@ def _classify_workspace_for_gc(
             status=workspace.status,
             updated_at=updated_at,
             age_hours=age_hours,
-            reason_code=WORKSPACE_WITHIN_RETENTION,
+            reason_code=(
+                TERMINAL_LIVE_RUNTIME_PRESERVED
+                if failed_terminal_workspace_live_runtime
+                else WORKSPACE_WITHIN_RETENTION
+            ),
         )
     if (
         workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES
