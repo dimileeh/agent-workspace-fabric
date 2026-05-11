@@ -1493,7 +1493,7 @@ def _snapshot_has_no_work(snapshot: RuntimeSnapshot) -> bool:
     if snapshot.stack_state == "unavailable":
         return False
     if not snapshot.services:
-        return False
+        return snapshot.stack_state == "stopped"
 
     agent_services = [
         service for service in snapshot.services if (service.name or "").lower() == "agent"

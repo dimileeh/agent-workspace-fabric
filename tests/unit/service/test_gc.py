@@ -964,7 +964,20 @@ async def test_default_plan_preserves_superseded_when_agent_service_missing(
     monkeypatch.setattr(
         gc,
         "_RUNTIME_INSPECTOR",
-        _StaticRuntimeInspector(RuntimeSnapshot(stack_state="stopped", services=[])),
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="stopped",
+                services=[
+                    RuntimeService(
+                        name="db",
+                        container_id="db",
+                        image="postgres",
+                        state="exited",
+                        command="postgres",
+                    )
+                ],
+            )
+        ),
     )
 
     plan = await plan_terminal_workspace_gc(
@@ -978,6 +991,44 @@ async def test_default_plan_preserves_superseded_when_agent_service_missing(
     assert plan.preserved_count == 1
     assert plan.preserved[0].workspace_id == workspace_id
     assert plan.preserved[0].reason_code == FAILED_WORKSPACE_TRIAGE_PRESERVED
+
+
+@pytest.mark.unit
+async def test_explicit_status_filter_reclaims_failed_empty_stopped_stack(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+    await _set_workspace_gc_state(
+        session_factory,
+        workspace_id,
+        compose_project_name="awf_failed_empty_stopped_stack",
+        updated_at=now - timedelta(hours=200),
+    )
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(RuntimeSnapshot(stack_state="stopped", services=[])),
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        include_statuses=[WorkspaceStatus.failed],
+        now=now,
+    )
+
+    assert [candidate.workspace_id for candidate in plan.candidates] == [workspace_id]
+    assert plan.candidates[0].reason_code == FAILED_WORKSPACE_NO_WORK
+    assert plan.preserved == []
 
 
 @pytest.mark.unit
@@ -1917,6 +1968,11 @@ def test_snapshot_has_no_work_no_agent():
         ],
     )
     assert _snapshot_has_no_work(snap) is False
+
+
+def test_snapshot_has_no_work_empty_stopped_stack():
+    snap = RuntimeSnapshot(stack_state="stopped", services=[])
+    assert _snapshot_has_no_work(snap) is True
 
 
 def test_container_command_is_idle_no_command():
