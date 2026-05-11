@@ -5027,6 +5027,62 @@ async def test_failed_monitor_without_runtime_releaser_tears_down_stack_and_pres
 
 
 @pytest.mark.unit
+async def test_failed_monitor_already_failed_workspace_tears_down_metadata_stack(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _update_workspace(
+        factory,
+        workspace_id,
+        status=WorkspaceStatus.failed.value,
+    )
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="monitor abort after failed transition",
+        reason_code="STALE_MONITOR",
+    )
+
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args == _compose_down_args(
+        f"awf_{workspace_id}",
+        Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+        remove_volumes=False,
+    )
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        ignored_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.failure_reason == FailureReason.infrastructure_failure.value
+    assert workspace.failure_message == "monitor abort after failed transition"
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "terminal_failed",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": WorkspaceStatus.failed.value,
+        "requested_status": WorkspaceStatus.failed.value,
+        "reason_code": "STALE_MONITOR",
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "failure_message": "monitor abort after failed transition",
+    }
+
+
+@pytest.mark.unit
 async def test_failed_monitor_falls_back_to_compose_when_terminal_release_raises(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -5512,9 +5568,22 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
         assert workspace.pr_merge_sha == "stale-merge-sha"
     else:
         assert workspace.pr_merge_sha is None
-    assert workspace.failure_reason is None
-    assert workspace.failure_message is None
-    assert cmd.calls == []
+    failed_callback_on_failed_workspace = (
+        callback == "failed" and operator_status == WorkspaceStatus.failed
+    )
+    if failed_callback_on_failed_workspace:
+        assert workspace.failure_reason == FailureReason.infrastructure_failure.value
+        assert workspace.failure_message == "stale monitor failure"
+        assert len(cmd.calls) == 1
+        assert cmd.calls[0].args == _compose_down_args(
+            f"awf_{workspace_id}",
+            Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+            remove_volumes=False,
+        )
+    else:
+        assert workspace.failure_reason is None
+        assert workspace.failure_message is None
+        assert cmd.calls == []
     assert reconcile_calls == []
     assert gc_calls == []
     assert monitor_terminal_events == []
@@ -5528,6 +5597,9 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
     }
     if callback == "completed":
         expected_payload["pr_merge_sha"] = "stale-merge-sha"
+    elif failed_callback_on_failed_workspace:
+        expected_payload["failure_reason"] = FailureReason.infrastructure_failure.value
+        expected_payload["failure_message"] = "stale monitor failure"
     assert ignored_events[-1].payload == expected_payload
 
 
@@ -5640,7 +5712,15 @@ async def test_monitor_terminal_callbacks_record_stale_transition_races(
     else:
         assert workspace.failure_reason is None
         assert workspace.failure_message is None
-    assert cmd.calls == []
+    if callback == "failed":
+        assert len(cmd.calls) == 1
+        assert cmd.calls[0].args == _compose_down_args(
+            f"awf_{workspace_id}",
+            Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+            remove_volumes=False,
+        )
+    else:
+        assert cmd.calls == []
     assert reconcile_calls == []
     assert gc_calls == []
     expected_payload = {
@@ -5699,7 +5779,12 @@ async def test_stale_failed_monitor_callback_preserves_existing_failure_diagnost
     assert workspace.status == WorkspaceStatus.failed.value
     assert workspace.failure_reason == FailureReason.validation_failure.value
     assert workspace.failure_message == "validation failed before monitor callback"
-    assert cmd.calls == []
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args == _compose_down_args(
+        f"awf_{workspace_id}",
+        Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+        remove_volumes=False,
+    )
     assert ignored_events[-1].payload == {
         "callback_source": "pr_monitor",
         "callback_action": "terminal_failed",

@@ -5858,6 +5858,7 @@ class PullRequestMonitorRunner:
     ) -> None:
         teardown_compose_project: str | None = None
         teardown_compose_file: Path | None = None
+        should_teardown_failed_runtime = False
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
@@ -5865,7 +5866,26 @@ class PullRequestMonitorRunner:
                 return
             rc = reason_code.value if isinstance(reason_code, AbortReason) else reason_code
             rc = rc or "MONITOR_ABORT"
+            safe_message = redact_audit_text(message, limit=2000)
+            teardown_compose_project, teardown_compose_file = _workspace_compose_inputs(
+                ws,
+                compose_project=compose_project,
+                compose_file=compose_file,
+            )
+            if ws.failure_reason:
+                failure_reason = ws.failure_reason
+                failure_message = ws.failure_message
+            else:
+                failure_reason = FailureReason.infrastructure_failure.value
+                failure_message = safe_message
             if ws.status != WorkspaceStatus.monitoring_pr.value:
+                if ws.status == WorkspaceStatus.failed.value:
+                    _restore_failed_terminal_diagnostics(
+                        ws,
+                        failure_reason=failure_reason,
+                        failure_message=failure_message,
+                    )
+                    should_teardown_failed_runtime = True
                 await _record_ignored_monitor_terminal_callback(
                     repo,
                     ws,
@@ -5875,54 +5895,55 @@ class PullRequestMonitorRunner:
                     failure_message=ws.failure_message,
                 )
                 await s.commit()
-                return
-            safe_message = redact_audit_text(message, limit=2000)
-            teardown_compose_project = compose_project or ws.compose_project_name
-            teardown_compose_file = compose_file
-            if teardown_compose_file is None and ws.compose_file_path:
-                teardown_compose_file = Path(ws.compose_file_path)
-            if ws.failure_reason:
-                failure_reason = ws.failure_reason
-                failure_message = ws.failure_message
-            else:
+                if not should_teardown_failed_runtime:
+                    return
+            elif not ws.failure_reason:
                 failure_reason = FailureReason.infrastructure_failure.value
                 failure_message = safe_message
                 ws.failure_reason = failure_reason
                 ws.failure_message = failure_message
-            if rc == EXEC_PROCESS_CLEANUP_FAILED:
+            if (
+                ws.status == WorkspaceStatus.monitoring_pr.value
+                and rc == EXEC_PROCESS_CLEANUP_FAILED
+            ):
                 await repo.add_event(
                     ws,
                     event_type="workspace.exec_process_cleanup_failed",
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                     payload={"message": safe_message[:1000]},
                 )
-            try:
-                await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc)
-            except WorkspaceTransitionBlockedByActiveOperationError as exc:
-                operation_id = exc.operation_id
-                await s.rollback()
-                await _record_blocked_monitor_terminal_callback(
-                    s,
-                    workspace_id,
-                    requested_status=WorkspaceStatus.failed,
-                    reason_code=rc,
-                    operation_id=operation_id,
-                    failure_reason=failure_reason,
-                    failure_message=failure_message,
-                )
-                return
-            except WorkspaceTransitionStaleError:
-                await s.rollback()
-                await _record_stale_monitor_terminal_callback(
-                    s,
-                    workspace_id,
-                    requested_status=WorkspaceStatus.failed,
-                    reason_code=rc,
-                    failure_reason=failure_reason,
-                    failure_message=failure_message,
-                )
-                return
-            await s.commit()
+            if ws.status == WorkspaceStatus.monitoring_pr.value:
+                try:
+                    await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc)
+                except WorkspaceTransitionBlockedByActiveOperationError as exc:
+                    operation_id = exc.operation_id
+                    await s.rollback()
+                    await _record_blocked_monitor_terminal_callback(
+                        s,
+                        workspace_id,
+                        requested_status=WorkspaceStatus.failed,
+                        reason_code=rc,
+                        operation_id=operation_id,
+                        failure_reason=failure_reason,
+                        failure_message=failure_message,
+                    )
+                    return
+                except WorkspaceTransitionStaleError:
+                    await s.rollback()
+                    stale_status = await _record_stale_monitor_terminal_callback(
+                        s,
+                        workspace_id,
+                        requested_status=WorkspaceStatus.failed,
+                        reason_code=rc,
+                        failure_reason=failure_reason,
+                        failure_message=failure_message,
+                    )
+                    if stale_status != WorkspaceStatus.failed:
+                        return
+                    should_teardown_failed_runtime = True
+                else:
+                    should_teardown_failed_runtime = True
+                    await s.commit()
         if self._terminal_runtime_releaser is not None:
             released = await self._release_terminal_runtime(
                 workspace_id,
@@ -5979,6 +6000,38 @@ class PullRequestMonitorRunner:
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
+def _workspace_compose_inputs(
+    workspace: Workspace,
+    *,
+    compose_project: str | None,
+    compose_file: Path | None,
+) -> tuple[str | None, Path | None]:
+    teardown_compose_project = compose_project or workspace.compose_project_name
+    teardown_compose_file = compose_file
+    if teardown_compose_file is None and workspace.compose_file_path:
+        teardown_compose_file = Path(workspace.compose_file_path)
+    return teardown_compose_project, teardown_compose_file
+
+
+def _restore_failed_terminal_diagnostics(
+    workspace: Workspace,
+    *,
+    failure_reason: str | None,
+    failure_message: str | None,
+) -> None:
+    if (
+        workspace.status != WorkspaceStatus.failed.value
+        or not (failure_reason or failure_message)
+        or workspace.failure_reason
+        or workspace.failure_message
+    ):
+        return
+    if failure_reason:
+        workspace.failure_reason = failure_reason
+    if failure_message:
+        workspace.failure_message = redact_audit_text(failure_message, limit=2000)
+
+
 async def _record_ignored_monitor_terminal_callback(
     repo: WorkspaceRepository,
     workspace: Workspace,
@@ -6023,11 +6076,12 @@ async def _record_stale_monitor_terminal_callback(
     pr_merge_sha: str | None = None,
     failure_reason: str | None = None,
     failure_message: str | None = None,
-) -> None:
+) -> WorkspaceStatus | None:
     repo = WorkspaceRepository(session)
     workspace = await repo.get(workspace_id)
     if workspace is None:
-        return
+        return None
+    actual_status = WorkspaceStatus(workspace.status)
     if (
         requested_status == WorkspaceStatus.completed
         and pr_merge_sha
@@ -6056,6 +6110,7 @@ async def _record_stale_monitor_terminal_callback(
         failure_message=failure_message,
     )
     await session.commit()
+    return actual_status
 
 
 async def _record_blocked_monitor_terminal_callback(
