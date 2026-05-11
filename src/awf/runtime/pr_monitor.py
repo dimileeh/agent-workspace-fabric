@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -156,6 +157,7 @@ class CheckFailure:
     name: str
     conclusion: str  # FAILURE / TIMED_OUT / CANCELLED / ACTION_REQUIRED
     log_excerpt: str  # tail of the failing step's log, truncated
+    run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -275,6 +277,10 @@ class MonitorConfig:
     prevents stale git mirrors or unreproducible GitHub DIRTY states from
     burning monitor iterations forever."""
 
+    ci_transient_rerun_max_attempts: int = 2
+    """Maximum deterministic GitHub reruns for the same transient CI
+    failure signature before falling back to agent CI repair."""
+
 
 # ── Actions — the vocabulary decide() returns to the runner ────────────────
 
@@ -313,6 +319,13 @@ class AddressComments:
 @dataclass(frozen=True)
 class ReportCiFailure:
     """Re-invoke the CLI with logs of the failing checks."""
+
+    failures: tuple[CheckFailure, ...]
+
+
+@dataclass(frozen=True)
+class RerunTransientCI:
+    """Ask GitHub to rerun failed jobs for infra-like CI failures."""
 
     failures: tuple[CheckFailure, ...]
 
@@ -361,6 +374,7 @@ class Abort:
 MonitorAction = (
     AddressComments
     | ReportCiFailure
+    | RerunTransientCI
     | SyncBase
     | WaitForCI
     | Merge
@@ -492,6 +506,144 @@ def _sync_base_no_progress_exhausted(
         config.max_no_progress_sync_base_attempts > 0
         and state.sync_base_no_progress_signature == sync_base_no_progress_signature(status)
         and state.sync_base_no_progress_count >= config.max_no_progress_sync_base_attempts
+    )
+
+
+_CI_TRANSIENT_RERUN_KEY_PREFIX = "__awf_ci_rerun:"
+
+_CI_FAILED_JOB_RERUN_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT"})
+
+_CI_CODE_FAILURE_MARKERS = (
+    "failed test",
+    "pytest failed",
+    "assertionerror",
+    "assert failed",
+    "coverage failure",
+    "fail-under",
+    "typecheck",
+    "type check",
+    "would reformat:",
+    "found lint errors",
+    "found type errors",
+    "syntaxerror",
+    "traceback (most recent call last)",
+)
+
+_CI_CODE_FAILURE_PATTERNS = (
+    re.compile(r"(?m)^[^\n:]+:\d+:\d+:\s+[A-Z]\d{3}\b"),
+    re.compile(r"(?m)^[^\n:]+:\d+:\s+error:\s+.+\[[a-z0-9-]+\]"),
+    re.compile(r"\b(?:ruff|mypy|eslint)\b[^\n]*\b(?:failed|found|would reformat|errors?)\b"),
+)
+
+_CI_TRANSIENT_FAILURE_MARKERS = (
+    "timed_out",
+    "http status server error",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "500 internal server",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway timeout",
+    "bad gateway",
+    "gateway timeout",
+    "internal server error",
+    "service unavailable",
+    "temporarily unavailable",
+    "try again",
+    "timed out waiting for",
+    "timeout awaiting",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "recv failure",
+    "tls handshake timeout",
+    "failed to download",
+    "network is unreachable",
+    "runner has received a shutdown signal",
+    "lost communication with the server",
+)
+
+
+def _ci_transient_rerun_state_key(
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> str:
+    """Stable retry-budget key for one PR head/failing-run signature.
+
+    The key deliberately excludes free-form log text. A rerun can produce
+    slightly different infrastructure wording while still representing the
+    same failing workflow run on the same PR head.
+    """
+
+    signature = json.dumps(
+        [
+            (failure.run_id or "", failure.name, failure.conclusion)
+            for failure in sorted(
+                failures,
+                key=lambda item: (item.run_id or "", item.name, item.conclusion),
+            )
+        ],
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
+    return f"{_CI_TRANSIENT_RERUN_KEY_PREFIX}{head_sha}:{digest}"
+
+
+def _ci_transient_rerun_count(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> int:
+    raw_count = state.threads_addressed_ids.get(
+        _ci_transient_rerun_state_key(head_sha, failures),
+        "0",
+    )
+    try:
+        return int(raw_count)
+    except ValueError:
+        return 0
+
+
+def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
+    log_text = failure.log_excerpt.lower()
+    if not log_text.strip():
+        return bool(failure.run_id) and failure.conclusion.upper() == "TIMED_OUT"
+    if any(marker in log_text for marker in _CI_CODE_FAILURE_MARKERS):
+        return False
+    if any(pattern.search(log_text) for pattern in _CI_CODE_FAILURE_PATTERNS):
+        return False
+    return any(marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
+
+
+def _supports_failed_job_rerun(failure: CheckFailure) -> bool:
+    return failure.conclusion.upper() in _CI_FAILED_JOB_RERUN_CONCLUSIONS
+
+
+def _should_rerun_transient_ci(
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+) -> bool:
+    if config.ci_transient_rerun_max_attempts <= 0:
+        return False
+    if not status.ci_failures:
+        return False
+    if any(not failure.run_id for failure in status.ci_failures):
+        return False
+    if any(not _supports_failed_job_rerun(failure) for failure in status.ci_failures):
+        return False
+    if not all(_looks_like_transient_ci_failure(failure) for failure in status.ci_failures):
+        return False
+    return (
+        _ci_transient_rerun_count(
+            state,
+            head_sha=status.head_sha,
+            failures=status.ci_failures,
+        )
+        < config.ci_transient_rerun_max_attempts
     )
 
 
@@ -627,6 +779,8 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             # grab ``gh run view --log-failed`` on its end; we still hand
             # off a ReportCiFailure action.
             return ReportCiFailure(failures=())
+        if _should_rerun_transient_ci(status, state, config):
+            return RerunTransientCI(failures=status.ci_failures)
         return ReportCiFailure(failures=status.ci_failures)
 
     # 5. CI still running, or GitHub is still computing state → passive wait.

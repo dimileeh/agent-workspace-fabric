@@ -199,6 +199,54 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace remonitor <workspace_id>",
         "docs/REASON_CATALOG.md#git_base_fetch_transient_retry_exhausted",
     ),
+    "CI_TRANSIENT_RERUN_FAILED": _ReasonText(
+        (
+            "AWF could not request a GitHub rerun for CI failures classified "
+            "as transient infrastructure failures."
+        ),
+        (
+            "Verify `gh run rerun <run_id> --failed` works with the AWF "
+            "GitHub token, then remonitor the workspace if the failure was transient."
+        ),
+        (
+            "GitHub rejected the rerun request, the workflow run no longer "
+            "exists, or the token lacks permission to rerun workflow jobs."
+        ),
+        "gh run rerun <run_id> --failed",
+        "docs/REASON_CATALOG.md#ci_transient_rerun_failed",
+    ),
+    "PROTECTED_SCOPE_DIFF_UNAVAILABLE": _ReasonText(
+        (
+            "The PR monitor could not verify protected-scope changes against "
+            "the remote PR branch before push."
+        ),
+        (
+            "Verify GitHub/network access and the PR branch ref, then remonitor "
+            "the workspace once the remote branch is reachable."
+        ),
+        (
+            "The PR branch diff baseline could not be fetched because of a "
+            "GitHub/network failure, a missing remote ref, or delayed ref replication."
+        ),
+        "awf workspace remonitor <workspace_id>",
+        "docs/REASON_CATALOG.md#protected_scope_diff_unavailable",
+    ),
+    "PROTECTED_SCOPE_PUSH_BLOCKED": _ReasonText(
+        (
+            "The PR monitor refused to push because committed changes touched "
+            "protected quality-gate paths outside the workspace owned paths."
+        ),
+        (
+            "Inspect the blocked paths in the monitor event, remove or revert the "
+            "out-of-scope quality-gate changes, then remonitor the workspace."
+        ),
+        (
+            "A CI-fix, sync-base, or comment-addressing push included protected "
+            "quality-gate files that the workspace profile does not own."
+        ),
+        "awf workspace logs <workspace_id>",
+        "docs/REASON_CATALOG.md#protected_scope_push_blocked",
+    ),
     "CODEX_AUTH_MISSING": _ReasonText(
         "No Codex auth signal was visible.",
         "Mount ~/.codex or set OPENAI_API_KEY, OPENAI_API_TOKEN, CODEX_API_KEY, or CODEX_AUTH_TOKEN.",

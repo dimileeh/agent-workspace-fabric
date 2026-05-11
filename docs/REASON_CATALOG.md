@@ -9,6 +9,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs`
 **Docs Link:** [docs/REASON_CATALOG.md#api_unreachable](#api_unreachable)
 
+### CI_TRANSIENT_RERUN_FAILED
+**Problem:** AWF could not request a GitHub rerun for CI failures classified as transient infrastructure failures.
+**Likely Cause:** GitHub rejected the rerun request, the workflow run no longer exists, or the token lacks permission to rerun workflow jobs.
+**Operator Fix:** Verify `gh run rerun <run_id> --failed` works with the AWF GitHub token, then remonitor the workspace if the failure was transient.
+**Related Command:** `gh run rerun <run_id> --failed`
+**Docs Link:** [docs/REASON_CATALOG.md#ci_transient_rerun_failed](#ci_transient_rerun_failed)
+
 ### CLAUDE_AUTH_MISSING
 **Problem:** No Claude Code auth signal was visible.
 **Likely Cause:** Missing Claude API credentials.
@@ -197,6 +204,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Fix the local AWF URL configuration and re-run doctor.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#port_config_invalid](#port_config_invalid)
+
+### PROTECTED_SCOPE_DIFF_UNAVAILABLE
+**Problem:** The PR monitor could not verify protected-scope changes against the remote PR branch before push.
+**Likely Cause:** The PR branch diff baseline could not be fetched because of a GitHub/network failure, a missing remote ref, or delayed ref replication.
+**Operator Fix:** Verify GitHub/network access and the PR branch ref, then remonitor the workspace once the remote branch is reachable.
+**Related Command:** `awf workspace remonitor <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#protected_scope_diff_unavailable](#protected_scope_diff_unavailable)
+
+### PROTECTED_SCOPE_PUSH_BLOCKED
+**Problem:** The PR monitor refused to push because committed changes touched protected quality-gate paths outside the workspace owned paths.
+**Likely Cause:** A CI-fix, sync-base, or comment-addressing push included protected quality-gate files that the workspace profile does not own.
+**Operator Fix:** Inspect the blocked paths in the monitor event, remove or revert the out-of-scope quality-gate changes, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#protected_scope_push_blocked](#protected_scope_push_blocked)
 
 ### PR_ADOPTION_INPUT_REQUIRED
 **Problem:** A PR monitor adoption request omitted required input.

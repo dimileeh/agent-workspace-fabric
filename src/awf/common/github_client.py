@@ -926,29 +926,62 @@ class GitHubClient:
             conclusion = run.get("conclusion") or ""
             if conclusion.upper() not in {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
                 continue
-            run_id = str(run["databaseId"])
-            log = await self._run_gh(
-                [
-                    "gh",
-                    "run",
-                    "view",
-                    run_id,
-                    "--repo",
-                    repo.slug(),
-                    "--log-failed",
-                ],
-                operation="view_run_log",
-                strict=False,  # logs may be purged; don't fail the monitor
+            database_id = run.get("databaseId")
+            run_id = str(database_id) if database_id is not None else None
+            log = (
+                await self._run_gh(
+                    [
+                        "gh",
+                        "run",
+                        "view",
+                        run_id,
+                        "--repo",
+                        repo.slug(),
+                        "--log-failed",
+                    ],
+                    operation="view_run_log",
+                    strict=False,  # logs may be purged; don't fail the monitor
+                )
+                if run_id is not None
+                else None
             )
             log_text = log.stdout if log is not None else ""
             failures.append(
                 CheckFailure(
-                    name=run.get("name") or f"run/{run_id}",
+                    name=run.get("name")
+                    or (f"run/{run_id}" if run_id is not None else "run/unknown"),
                     conclusion=conclusion.upper(),
                     log_excerpt=_tail(log_text, log_tail_chars),
+                    run_id=run_id,
                 )
             )
         return tuple(failures)
+
+    async def rerun_failed_workflow_jobs(self, *, repo: RepoRef, run_id: str) -> None:
+        """Rerun only failed jobs for a workflow run.
+
+        Used by the PR monitor before involving a coding agent when the
+        failure evidence points at GitHub/runner/package-download
+        infrastructure rather than repository code.
+        """
+
+        result = await self._runner.run(
+            [
+                "gh",
+                "run",
+                "rerun",
+                run_id,
+                "--repo",
+                repo.slug(),
+                "--failed",
+            ]
+        )
+        if not result.ok:
+            raise GitHubClientError(
+                operation="rerun_failed_workflow_jobs",
+                returncode=result.returncode,
+                stderr=result.stderr,
+            )
 
     async def resolve_thread(self, *, thread_id: str) -> None:
         await self._graphql(
