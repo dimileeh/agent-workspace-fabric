@@ -443,6 +443,24 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_transient_failure_with_code_like_check_name_dispatches_rerun(self) -> None:
+        failure = CheckFailure(
+            name="TypeCheck / ubuntu-latest",
+            conclusion="FAILURE",
+            log_excerpt="runner has received a shutdown signal",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_timed_out_failure_without_logs_dispatches_rerun(self) -> None:
         failure = CheckFailure(
             name="python-full-coverage",

@@ -609,12 +609,13 @@ def _ci_transient_rerun_count(
 
 
 def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
-    text = f"{failure.name}\n{failure.conclusion}\n{failure.log_excerpt}".lower()
-    if any(marker in text for marker in _CI_CODE_FAILURE_MARKERS):
+    log_text = failure.log_excerpt.lower()
+    if any(marker in log_text for marker in _CI_CODE_FAILURE_MARKERS):
         return False
-    if any(pattern.search(text) for pattern in _CI_CODE_FAILURE_PATTERNS):
+    if any(pattern.search(log_text) for pattern in _CI_CODE_FAILURE_PATTERNS):
         return False
-    return any(marker in text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
+    transient_text = f"{failure.conclusion}\n{failure.log_excerpt}".lower()
+    return any(marker in transient_text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
 
 
 def _supports_failed_job_rerun(failure: CheckFailure) -> bool:
