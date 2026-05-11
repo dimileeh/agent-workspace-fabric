@@ -1755,6 +1755,101 @@ class TestOperatorControlRaces:
             }
 
     @pytest.mark.unit
+    async def test_stack_failure_after_cancel_releases_cancelled_terminal_runtime(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        async def _cancel_provisioning_workspace(workspace_id: str) -> None:
+            async with session_factory() as s:
+                repo = WorkspaceRepository(s)
+                ws = await repo.get(workspace_id)
+                assert ws is not None
+                assert ws.status == WorkspaceStatus.provisioning.value
+                await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
+                await s.commit()
+
+        class _CancellingFailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                await _cancel_provisioning_workspace(request.workspace_id)
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="workspace was already cancelled",
+                )
+
+        class _RecordingTerminalRuntimeReleaser:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def release(
+                self,
+                workspace_id: str,
+                *,
+                source: str,
+                expected_status: WorkspaceStatus | None = None,
+            ) -> TerminalRuntimeReleaseResult:
+                async with session_factory() as s:
+                    reloaded = await WorkspaceRepository(s).get(workspace_id)
+                    assert reloaded is not None
+                    self.calls.append(
+                        {
+                            "workspace_id": workspace_id,
+                            "source": source,
+                            "expected_status": expected_status,
+                            "status_seen": reloaded.status,
+                            "failure_reason_seen": reloaded.failure_reason,
+                        }
+                    )
+                return TerminalRuntimeReleaseResult(
+                    workspace_id=workspace_id,
+                    status="released",
+                    reason_code="TERMINAL_RUNTIME_RELEASED",
+                )
+
+        releaser = _RecordingTerminalRuntimeReleaser()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_CancellingFailingStackLauncher(),
+            terminal_runtime_releaser=releaser,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        assert releaser.calls == [
+            {
+                "workspace_id": ws_id,
+                "source": "provisioner.stack_startup_failed",
+                "expected_status": WorkspaceStatus.cancelled,
+                "status_seen": WorkspaceStatus.cancelled.value,
+                "failure_reason_seen": None,
+            }
+        ]
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.cancelled.value
+            assert reloaded.failure_reason is None
+            assert reloaded.failure_message is None
+
+    @pytest.mark.unit
     async def test_destroy_after_secret_lease_issue_skips_stack_launch(
         self,
         session_factory: async_sessionmaker[AsyncSession],

@@ -250,7 +250,7 @@ class Provisioner:
                         workspace_id=workspace_id,
                         failure_context="stack_startup_failed",
                     )
-            await self._mark_failed(
+            release_expected_status = await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.service_startup_failure,
                 message=str(exc)[:2000],
@@ -259,7 +259,7 @@ class Provisioner:
             await self._release_provisioning_runtime(
                 workspace_id,
                 source="provisioner.stack_startup_failed",
-                expected_status=WorkspaceStatus.failed,
+                expected_status=release_expected_status or WorkspaceStatus.failed,
             )
             raise
         except Exception as exc:
@@ -268,7 +268,7 @@ class Provisioner:
                 workspace_id=workspace_id,
                 error=str(exc),
             )
-            await self._mark_failed(
+            release_expected_status = await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.infrastructure_failure,
                 message=f"unexpected provisioning failure: {exc}"[:2000],
@@ -277,7 +277,7 @@ class Provisioner:
             await self._release_provisioning_runtime(
                 workspace_id,
                 source="provisioner.unexpected_failed",
-                expected_status=WorkspaceStatus.failed,
+                expected_status=release_expected_status or WorkspaceStatus.failed,
             )
             raise
 
@@ -418,19 +418,21 @@ class Provisioner:
         message: str,
         from_status: WorkspaceStatus,
         reason_code: str | None = None,
-    ) -> None:
+    ) -> WorkspaceStatus | None:
         """Best-effort transition to ``failed``.
 
         We swallow secondary failures here: if the DB itself is unavailable the
         caller's exception will already bubble up with the primary cause, and
         logging twice is better than masking the root error.
+        The returned status tells callers which lifecycle state should guard any
+        follow-up runtime cleanup.
         """
         try:
             async with self._session_factory() as session:
                 repo = WorkspaceRepository(session)
                 ws = await repo.get(workspace_id)
                 if ws is None:  # pragma: no cover - race with destroy
-                    return
+                    return None
                 if ws.status != from_status.value:
                     # Already moved elsewhere (e.g. cancelled). Respect that.
                     await self._record_stale_action_skip(
@@ -441,7 +443,7 @@ class Provisioner:
                         reason_code="PROVISIONER_MARK_FAILED_SKIPPED",
                     )
                     await session.commit()
-                    return
+                    return _workspace_status_or_none(ws.status)
                 await SecretLeaseService(session).revoke_workspace_secret_leases(
                     ws,
                     now=datetime.now(UTC),
@@ -458,10 +460,13 @@ class Provisioner:
                     action="mark_failed",
                     expected=from_status,
                 ):
-                    return
+                    current = await repo.get(workspace_id)
+                    return _workspace_status_or_none(current.status) if current else None
                 await session.commit()
+                return WorkspaceStatus.failed
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
+            return None
 
     async def _release_provisioning_runtime(
         self,
@@ -833,6 +838,13 @@ def _positive_int(value: object) -> int | None:
             parsed = int(stripped)
             return parsed if parsed > 0 else None
     return None
+
+
+def _workspace_status_or_none(value: str) -> WorkspaceStatus | None:
+    try:
+        return WorkspaceStatus(value)
+    except ValueError:
+        return None
 
 
 def _egress_plan_decision(mode: ProfileEgressMode) -> EgressDecision:
