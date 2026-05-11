@@ -407,6 +407,13 @@ class TestSyncBaseConflictPrompt:
             "AWF just ran `git merge origin/main` and it stopped on conflicts in these files:"
             in prompt
         )
+        assert (
+            "AWF just ran `git merge origin/main` and it stopped on conflicts in these files:\n\n"
+            "  - src/app.py\n\n"
+            "Workspace runtime context\n"
+            "- Sidecar services are running.\n\n"
+            "Resolve each conflict" in prompt
+        )
 
 
 class TestFixCiPrompt:

@@ -152,13 +152,14 @@ def sync_base_conflict_prompt(
     files_block = (
         "\n".join(f"  - {p}" for p in conflicting_files) or "  (run git status for the list)"
     )
+    runtime_context_section = _workspace_runtime_context_section(workspace_runtime_context)
+    post_files_gap = runtime_context_section or "\n\n"
     return (
         f"PR #{pr_number} ({repo_slug}) has merge conflicts with base branch "
         f"`{base_branch}`. "
-        f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         f"AWF just ran `git merge origin/{base_branch}` and it "
         "stopped on conflicts in these files:\n\n"
-        f"{files_block}\n\n"
+        f"{files_block}{post_files_gap}"
         "Resolve each conflict by preserving the intent of BOTH sides (the base "
         "branch's recent commits and this PR's changes). When unsure which side to "
         "favour for a given hunk, prefer the base-branch semantics — reviewers on "
