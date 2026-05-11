@@ -1974,6 +1974,120 @@ class TestOperatorControlRaces:
         }
 
     @pytest.mark.unit
+    async def test_active_teardown_after_stack_launch_releases_ready_handoff_runtime(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        class _BlockingStackLauncher:
+            def __init__(self) -> None:
+                self.operation_id: str | None = None
+
+            async def launch(self, request: Any) -> ComposeProjectPaths:
+                async with session_factory() as s:
+                    operation = await OperationRepository(s).create(
+                        workspace_id=request.workspace_id,
+                        operation_type=OperationType.stop,
+                        status=OperationStatus.running,
+                        payload={"source": "operator_api"},
+                    )
+                    await s.commit()
+                    self.operation_id = operation.id
+                project_dir = tmp_path / "compose" / request.workspace_id
+                return ComposeProjectPaths(
+                    project_dir=project_dir,
+                    compose_file=project_dir / "compose.yml",
+                )
+
+        class _RecordingTerminalRuntimeReleaser:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def release(
+                self,
+                workspace_id: str,
+                *,
+                source: str,
+                expected_status: WorkspaceStatus | None = None,
+            ) -> TerminalRuntimeReleaseResult:
+                async with session_factory() as s:
+                    reloaded = await WorkspaceRepository(s).get(workspace_id)
+                    assert reloaded is not None
+                    self.calls.append(
+                        {
+                            "workspace_id": workspace_id,
+                            "source": source,
+                            "expected_status": expected_status,
+                            "status_seen": reloaded.status,
+                            "compose_project_name_seen": reloaded.compose_project_name,
+                            "compose_file_path_seen": reloaded.compose_file_path,
+                        }
+                    )
+                return TerminalRuntimeReleaseResult(
+                    workspace_id=workspace_id,
+                    status="released",
+                    reason_code="TERMINAL_RUNTIME_RELEASED",
+                )
+
+        launcher = _BlockingStackLauncher()
+        releaser = _RecordingTerminalRuntimeReleaser()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            terminal_runtime_releaser=releaser,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.operation_id is not None
+        compose_file = str(tmp_path / "compose" / ws_id / "compose.yml")
+        assert releaser.calls == [
+            {
+                "workspace_id": ws_id,
+                "source": "provisioner.ready_transition_blocked",
+                "expected_status": WorkspaceStatus.provisioning,
+                "status_seen": WorkspaceStatus.provisioning.value,
+                "compose_project_name_seen": f"awf_{ws_id}",
+                "compose_file_path_seen": compose_file,
+            }
+        ]
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            ignored_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_callback_ignored"
+            ]
+
+        assert reloaded.status == WorkspaceStatus.provisioning.value
+        assert ignored_events[-1].payload == {
+            "callback_source": "provisioner",
+            "callback_action": "provision",
+            "expected_status": WorkspaceStatus.provisioning.value,
+            "actual_status": WorkspaceStatus.provisioning.value,
+            "requested_status": WorkspaceStatus.ready.value,
+            "operation_id": launcher.operation_id,
+            "reason_code": "PROVISIONING_COMPLETE",
+        }
+
+    @pytest.mark.unit
     async def test_active_teardown_blocks_mark_failed_rolls_back_failure_fields(
         self,
         session_factory: async_sessionmaker[AsyncSession],

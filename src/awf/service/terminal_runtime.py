@@ -46,6 +46,7 @@ TERMINAL_WORKSPACE_STATUSES = frozenset(
         WorkspaceStatus.destroyed.value,
     }
 )
+_EXPLICIT_NON_TERMINAL_RELEASE_STATUSES = frozenset({WorkspaceStatus.provisioning.value})
 
 
 _T = TypeVar("_T")
@@ -143,6 +144,7 @@ class TerminalRuntimeReleaser:
         source: str,
         expected_status: WorkspaceStatus | None = None,
     ) -> TerminalRuntimeReleaseResult:
+        allow_non_terminal_event = _allows_non_terminal_release(expected_status)
         snapshot = await self._snapshot(workspace_id, expected_status=expected_status)
         if snapshot is None:
             return TerminalRuntimeReleaseResult(
@@ -189,6 +191,7 @@ class TerminalRuntimeReleaser:
                         cleanup=cleanup,
                         source=source,
                         worktree_host_path=snapshot.worktree_host_path,
+                        allow_non_terminal=allow_non_terminal_event,
                     )
                 return _terminal_runtime_release_claim_failure_result(
                     workspace_id,
@@ -207,6 +210,7 @@ class TerminalRuntimeReleaser:
                     cleanup=cleanup,
                     source=source,
                     worktree_host_path=snapshot.worktree_host_path,
+                    allow_non_terminal=allow_non_terminal_event,
                 )
                 return _terminal_runtime_release_post_cleanup_claim_failure_result(
                     workspace_id,
@@ -219,6 +223,7 @@ class TerminalRuntimeReleaser:
                 cleanup=cleanup,
                 source=source,
                 worktree_host_path=snapshot.worktree_host_path,
+                allow_non_terminal=allow_non_terminal_event,
             )
 
             return TerminalRuntimeReleaseResult(
@@ -272,6 +277,7 @@ class TerminalRuntimeReleaser:
         cleanup: WorkspaceCleanupResult,
         source: str,
         worktree_host_path: Path | None,
+        allow_non_terminal: bool = False,
     ) -> None:
         try:
             async with self._session_factory() as session:
@@ -282,6 +288,7 @@ class TerminalRuntimeReleaser:
                         cleanup=cleanup,
                         source=source,
                         worktree_host_path=worktree_host_path,
+                        allow_non_terminal=allow_non_terminal,
                     )
                     await session.commit()
                 except Exception:
@@ -340,7 +347,7 @@ class TerminalRuntimeReleaser:
             workspace = await WorkspaceRepository(session).get(workspace_id)
             if workspace is None:
                 return None
-            if not _matches_terminal_status(workspace.status, expected_status):
+            if not _matches_release_status(workspace.status, expected_status):
                 return None
             return _snapshot_for_workspace(
                 workspace,
@@ -363,7 +370,7 @@ class TerminalRuntimeReleaser:
             workspace = await repo.get_for_update(workspace_id)
             if workspace is None:
                 return None
-            if not _matches_terminal_status(workspace.status, expected_status):
+            if not _matches_release_status(workspace.status, expected_status):
                 return None
             if terminal_runtime_release_claim_active(workspace):
                 return None
@@ -634,13 +641,25 @@ def _resolve_worktree_host_path(
     return candidate if candidate.exists() else None
 
 
-def _matches_terminal_status(
+def _matches_release_status(
     status: str,
     expected_status: WorkspaceStatus | None,
 ) -> bool:
-    if status not in TERMINAL_WORKSPACE_STATUSES:
+    if expected_status is None:
+        return status in TERMINAL_WORKSPACE_STATUSES
+    if (
+        expected_status.value not in TERMINAL_WORKSPACE_STATUSES
+        and not _allows_non_terminal_release(expected_status)
+    ):
         return False
-    return expected_status is None or status == expected_status.value
+    return status == expected_status.value
+
+
+def _allows_non_terminal_release(expected_status: WorkspaceStatus | None) -> bool:
+    return (
+        expected_status is not None
+        and expected_status.value in _EXPLICIT_NON_TERMINAL_RELEASE_STATUSES
+    )
 
 
 def terminal_runtime_release_claim_active(

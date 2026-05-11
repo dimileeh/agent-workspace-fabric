@@ -623,6 +623,33 @@ async def _seed_failed_workspace(
     return workspace_id
 
 
+async def _seed_provisioning_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    worktree: Path,
+) -> str:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/repo.git",
+            branch_base="main",
+            task_title="terminal cleanup",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        workspace.branch_name = f"awf/{workspace.id}"
+        workspace.remote_push_branch = workspace.branch_name
+        workspace.base_commit = "a" * 40
+        workspace.compose_project_name = f"awf_{workspace.id}"
+        workspace.compose_file_path = f"/tmp/awf/{workspace.id}/compose.yml"
+        await session.commit()
+        workspace_id = workspace.id
+    worktree.mkdir(parents=True)
+    return workspace_id
+
+
 @pytest.mark.unit
 async def test_terminal_runtime_release_skips_missing_or_unexpected_status_workspaces(
     session_factory: async_sessionmaker[AsyncSession],
@@ -654,6 +681,56 @@ async def test_terminal_runtime_release_skips_missing_or_unexpected_status_works
     assert mismatch.status == "skipped"
     assert mismatch.reason_code == TERMINAL_RUNTIME_RELEASE_SKIPPED_REASON_CODE
     assert cleaner.calls == []
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_allows_explicit_nonterminal_handoff(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_provisioning_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    actual_worktree = worktrees_root / workspace_id
+    actual_worktree.mkdir(parents=True, exist_ok=True)
+    cleaner = _RecordingCleaner()
+    releaser = TerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+    )
+
+    result = await releaser.release(
+        workspace_id,
+        source="test.provisioning_handoff",
+        expected_status=WorkspaceStatus.provisioning,
+    )
+
+    assert result.ok
+    assert cleaner.calls == [
+        {
+            "workspace_id": workspace_id,
+            "repo_url": "git@github.com:example/repo.git",
+            "compose_project_name": f"awf_{workspace_id}",
+            "compose_file_path": Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+            "worktree_host_path": actual_worktree,
+            "remove_volumes": False,
+            "remove_worktree": False,
+        }
+    ]
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.provisioning.value
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.terminal_runtime_released",
+        )
+    assert len(events) == 1
+    assert events[0].payload["source"] == "test.provisioning_handoff"
+    assert events[0].payload["workspace_status"] == WorkspaceStatus.provisioning.value
 
 
 @pytest.mark.unit

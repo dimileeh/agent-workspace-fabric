@@ -256,9 +256,10 @@ class Provisioner:
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
             )
-            await self._release_failed_provisioning_runtime(
+            await self._release_provisioning_runtime(
                 workspace_id,
                 source="provisioner.stack_startup_failed",
+                expected_status=WorkspaceStatus.failed,
             )
             raise
         except Exception as exc:
@@ -273,9 +274,10 @@ class Provisioner:
                 message=f"unexpected provisioning failure: {exc}"[:2000],
                 from_status=WorkspaceStatus.provisioning,
             )
-            await self._release_failed_provisioning_runtime(
+            await self._release_provisioning_runtime(
                 workspace_id,
                 source="provisioner.unexpected_failed",
+                expected_status=WorkspaceStatus.failed,
             )
             raise
 
@@ -345,6 +347,12 @@ class Provisioner:
                 expected=WorkspaceStatus.provisioning,
                 preserve_staged_on_blocked=True,
             ):
+                if stack_paths is not None:
+                    await self._release_provisioning_runtime(
+                        workspace_id,
+                        source="provisioner.ready_transition_blocked",
+                        expected_status=WorkspaceStatus.provisioning,
+                    )
                 return
             await session.commit()
 
@@ -455,11 +463,12 @@ class Provisioner:
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
 
-    async def _release_failed_provisioning_runtime(
+    async def _release_provisioning_runtime(
         self,
         workspace_id: str,
         *,
         source: str,
+        expected_status: WorkspaceStatus,
     ) -> None:
         releaser = self._terminal_runtime_releaser
         if releaser is None:
@@ -468,7 +477,7 @@ class Provisioner:
             result = await releaser.release(
                 workspace_id,
                 source=source,
-                expected_status=WorkspaceStatus.failed,
+                expected_status=expected_status,
             )
         except Exception:
             _log.exception(
