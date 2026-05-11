@@ -29,7 +29,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.audit import redact_audit_text
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
@@ -1569,7 +1569,7 @@ class ControlWorker:
             "message": message,
         }
         if cleanup is not None:
-            payload["cleanup"] = cleanup.to_dict()
+            payload["cleanup"] = redact_audit_value(cleanup.to_dict())
 
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)

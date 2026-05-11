@@ -6775,7 +6775,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
                         name="compose_down",
                         status="failed",
                         reason_code="DOCKER_UNAVAILABLE",
-                        error="cannot connect to docker",
+                        error=(
+                            "cannot connect to docker while pulling "
+                            "https://runner:ghp_cleanupsecret123456@github.com/"
+                            "example/private.git with Authorization: Bearer "
+                            "ghp_cleanupsecret123456"
+                        ),
                     ),
                 ),
             )
@@ -6812,6 +6817,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert len(cleanup_events) == 1
             assert cleanup_events[0].reason_code == "STALE_ACTIVE_EXECUTION_CLEANUP_FAILED"
             assert cleanup_events[0].payload["cleanup"]["reason_code"] == CLEANUP_PARTIAL
+            payload_repr = repr(cleanup_events[0].payload)
+            assert "ghp_cleanupsecret123456" not in payload_repr
+            assert "runner:" not in payload_repr
+            assert "https://[redacted]@github.com/example/private.git" in payload_repr
+            assert "Authorization: Bearer [redacted]" in payload_repr
 
     @pytest.mark.unit
     async def test_stale_active_execution_cleanup_exception_records_failure(
