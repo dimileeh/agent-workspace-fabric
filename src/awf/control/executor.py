@@ -1211,7 +1211,6 @@ class WorkspaceExecutor:
                     reason_code=_PR_ADOPTION_METADATA_MISSING_REASON_CODE,
                     action="sync_feature_pr_adoption",
                     expected=WorkspaceStatus.running,
-                    preserve_staged_on_blocked=True,
                     payload={
                         "failure_reason": FailureReason.infrastructure_failure.value,
                         "reason_code": _PR_ADOPTION_METADATA_MISSING_REASON_CODE,

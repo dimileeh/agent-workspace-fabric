@@ -3918,6 +3918,93 @@ class TestExecutorCoverageEdges:
         ]
 
     @pytest.mark.unit
+    async def test_sync_feature_pr_metadata_loss_blocked_by_teardown_rolls_back_failure_fields(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_runs: list[str] = []
+        active_operation_ids: list[str] = []
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        terminal_releaser = _RecordingTerminalRuntimeReleaser()
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+            terminal_releaser=terminal_releaser,
+        )
+
+        async def _ensure_available(**_kwargs: Any) -> bool:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                metadata = dict(ws.task_policy["pr_adoption"])
+                metadata.pop("base_sha")
+                ws.task_policy = {"pr_adoption": metadata}
+                operation = await OperationRepository(s).create(
+                    workspace_id=ws_id,
+                    operation_type=OperationType.stop,
+                    status=OperationStatus.running,
+                    payload={"source": "operator_api"},
+                )
+                active_operation_ids.append(operation.id)
+                await s.commit()
+            return True
+
+        monkeypatch.setattr(executor, "_ensure_worktree_available", _ensure_available)
+
+        await executor.execute(ws_id)
+
+        assert monitor_runs == []
+        assert terminal_releaser.calls == []
+        assert active_operation_ids
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            ignored_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.stale_callback_ignored"
+            ]
+        assert ignored_events[-1].payload == {
+            "callback_source": "executor",
+            "callback_action": "sync_feature_pr_adoption",
+            "expected_status": WorkspaceStatus.running.value,
+            "actual_status": WorkspaceStatus.running.value,
+            "requested_status": WorkspaceStatus.failed.value,
+            "operation_id": active_operation_ids[-1],
+            "reason_code": "PR_ADOPTION_METADATA_MISSING",
+        }
+
+    @pytest.mark.unit
     async def test_sync_feature_pr_persisted_status_change_skips_handoff(
         self,
         monkeypatch: pytest.MonkeyPatch,
