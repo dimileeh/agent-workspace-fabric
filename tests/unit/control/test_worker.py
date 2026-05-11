@@ -8613,8 +8613,12 @@ class TestTerminalRuntimeRelease:
 
             async def _read_during_io() -> None:
                 async with session_factory() as session:
-                    ws = await WorkspaceRepository(session).get(workspace_id)
-                    assert ws is not None
+                    locked = await session.execute(
+                        select(Workspace)
+                        .where(Workspace.id == workspace_id)
+                        .with_for_update(nowait=True)
+                    )
+                    ws = locked.scalar_one()
                     assert ws.status == WorkspaceStatus.failed.value
                 second_read_done.set()
 
