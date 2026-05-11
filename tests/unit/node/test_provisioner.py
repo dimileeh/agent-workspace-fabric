@@ -1988,6 +1988,95 @@ class TestOperatorControlRaces:
             }
 
     @pytest.mark.unit
+    async def test_destroy_after_stack_launch_releases_terminal_runtime_with_stack_paths(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        class _DestroyingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                await _force_destroy_provisioning_workspace(session_factory, request.workspace_id)
+                project_dir = tmp_path / "compose" / request.workspace_id
+                return ComposeProjectPaths(
+                    project_dir=project_dir,
+                    compose_file=project_dir / "compose.yml",
+                )
+
+        class _RecordingTerminalRuntimeReleaser:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def release(
+                self,
+                workspace_id: str,
+                *,
+                source: str,
+                expected_status: WorkspaceStatus | None = None,
+            ) -> TerminalRuntimeReleaseResult:
+                async with session_factory() as s:
+                    reloaded = await WorkspaceRepository(s).get(workspace_id)
+                    assert reloaded is not None
+                    self.calls.append(
+                        {
+                            "workspace_id": workspace_id,
+                            "source": source,
+                            "expected_status": expected_status,
+                            "status_seen": reloaded.status,
+                            "compose_project_name_seen": reloaded.compose_project_name,
+                            "compose_file_path_seen": reloaded.compose_file_path,
+                        }
+                    )
+                return TerminalRuntimeReleaseResult(
+                    workspace_id=workspace_id,
+                    status="released",
+                    reason_code="TERMINAL_RUNTIME_RELEASED",
+                )
+
+        releaser = _RecordingTerminalRuntimeReleaser()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_DestroyingStackLauncher(),
+            terminal_runtime_releaser=releaser,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        compose_file = str(tmp_path / "compose" / ws_id / "compose.yml")
+        assert releaser.calls == [
+            {
+                "workspace_id": ws_id,
+                "source": "provisioner.ready_handoff_stale_status",
+                "expected_status": WorkspaceStatus.destroyed,
+                "status_seen": WorkspaceStatus.destroyed.value,
+                "compose_project_name_seen": f"awf_{ws_id}",
+                "compose_file_path_seen": compose_file,
+            }
+        ]
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value
+            assert reloaded.node_id is None
+            assert reloaded.compose_project_name == f"awf_{ws_id}"
+            assert reloaded.compose_file_path == compose_file
+
+    @pytest.mark.unit
     async def test_active_teardown_after_git_records_blocked_ready_callback(
         self,
         session_factory: async_sessionmaker[AsyncSession],

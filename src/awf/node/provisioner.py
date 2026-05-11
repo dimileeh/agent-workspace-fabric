@@ -292,6 +292,14 @@ class Provisioner:
             if persisted is None:  # pragma: no cover - defensive; workspace removed mid-provision
                 return
             if persisted.status != WorkspaceStatus.provisioning.value:
+                terminal_release_status = (
+                    _terminal_runtime_release_status_or_none(persisted.status)
+                    if stack_paths is not None
+                    else None
+                )
+                if stack_paths is not None and terminal_release_status is not None:
+                    persisted.compose_project_name = f"awf_{workspace_id}"
+                    persisted.compose_file_path = str(stack_paths.compose_file)
                 await self._record_stale_action_skip(
                     repo,
                     persisted,
@@ -300,6 +308,12 @@ class Provisioner:
                     reason_code="PROVISIONER_STALE_STATUS",
                 )
                 await session.commit()
+                if terminal_release_status is not None:
+                    await self._release_provisioning_runtime(
+                        workspace_id,
+                        source="provisioner.ready_handoff_stale_status",
+                        expected_status=terminal_release_status,
+                    )
                 return
 
             persisted.node_id = self._config.node_id
@@ -845,6 +859,18 @@ def _workspace_status_or_none(value: str) -> WorkspaceStatus | None:
         return WorkspaceStatus(value)
     except ValueError:
         return None
+
+
+def _terminal_runtime_release_status_or_none(value: str) -> WorkspaceStatus | None:
+    status = _workspace_status_or_none(value)
+    if status in {
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
+        WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroyed,
+    }:
+        return status
+    return None
 
 
 def _egress_plan_decision(mode: ProfileEgressMode) -> EgressDecision:
