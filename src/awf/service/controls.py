@@ -796,10 +796,13 @@ class WorkspaceControlService:
         self,
         workspace: Workspace,
     ) -> _ControlTerminalRuntimeCleanup | None:
-        if await self._terminal_runtime_release_claim_active_for_control(workspace):
+        (
+            claim_active,
+            claim_owner_id,
+        ) = await self._terminal_runtime_release_claim_active_for_control(workspace)
+        if claim_active:
             return None
 
-        claim_owner_id = _control_terminal_runtime_release_claim_owner(workspace)
         cleanup_worktree_host_path: Path | None = None
         preserved_worktree_host_path: Path | None = None
         if self._worktrees_root is not None:
@@ -894,7 +897,7 @@ class WorkspaceControlService:
     async def _terminal_runtime_release_claim_active_for_control(
         self,
         workspace: Workspace,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         locked_workspace = await WorkspaceRepository(self._session).get_for_update(workspace.id)
         if locked_workspace is None:
             raise WorkspaceNotFoundError(workspace.id)
@@ -906,15 +909,15 @@ class WorkspaceControlService:
             _control_terminal_runtime_release_claim_required(locked_workspace)
             and _execution_claim_active_for_control(locked_workspace, now=now)
         )
+        claim_owner_id: str | None = None
         if not active and _control_terminal_runtime_release_claim_required(locked_workspace):
-            locked_workspace.execution_claimed_by = (
-                f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:{uuid4().hex}"
-            )
+            claim_owner_id = f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:{uuid4().hex}"
+            locked_workspace.execution_claimed_by = claim_owner_id
             locked_workspace.execution_claim_expires_at = (
                 _terminal_runtime_release_claim_expires_at()
             )
         await self._session.commit()
-        return active
+        return active, claim_owner_id
 
     async def _release_terminal_runtime_claim_for_control_now(
         self,

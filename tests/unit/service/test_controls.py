@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.common.config import get_settings
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
@@ -20,6 +20,7 @@ from awf.service import controls
 from awf.service.controls import WorkspaceStackStopError, stop_project_containers
 from awf.service.terminal_runtime import (
     TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
+    TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX,
     TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
 )
 
@@ -1676,6 +1677,28 @@ async def test_terminal_runtime_claim_active_for_control_handles_missing_workspa
 
 
 @pytest.mark.unit
+async def test_terminal_runtime_claim_active_for_control_returns_owner_with_expiring_session(
+    engine: AsyncEngine,
+) -> None:
+    factory = async_sessionmaker(engine, expire_on_commit=True, class_=AsyncSession)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.completed)
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        active, claim_owner_id = await service._terminal_runtime_release_claim_active_for_control(  # noqa: SLF001
+            workspace,
+        )
+
+    assert active is False
+    assert claim_owner_id is not None
+    assert claim_owner_id.startswith(f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:")
+
+
+@pytest.mark.unit
 async def test_terminal_runtime_claim_active_for_control_preserves_active_stale_cleanup_claim(
     engine: AsyncEngine,
 ) -> None:
@@ -1690,11 +1713,12 @@ async def test_terminal_runtime_claim_active_for_control_preserves_active_stale_
             cleaner_factory=lambda: _RecordingCleaner(),
         )
 
-        active = await service._terminal_runtime_release_claim_active_for_control(  # noqa: SLF001
+        active, claim_owner_id = await service._terminal_runtime_release_claim_active_for_control(  # noqa: SLF001
             workspace,
         )
 
     assert active
+    assert claim_owner_id is None
     assert workspace.execution_claimed_by == "stale-cleanup:worker-1"
 
 
