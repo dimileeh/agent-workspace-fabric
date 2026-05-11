@@ -412,7 +412,7 @@ class TerminalRuntimeReleaser:
         *,
         expected_status: WorkspaceStatus | None,
         worktree_host_path: Path | None,
-        allow_active_teardown_operation_id: str | None,
+        allow_active_teardown_operation_id: str | None = None,
     ) -> _TerminalRuntimeReleaseClaim | None:
         owner_id = f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}{uuid4().hex}"
         async with self._session_factory() as session:
