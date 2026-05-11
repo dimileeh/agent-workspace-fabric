@@ -205,6 +205,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace remonitor <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#protected_scope_diff_unavailable](#protected_scope_diff_unavailable)
 
+### PROTECTED_SCOPE_PUSH_BLOCKED
+**Problem:** The PR monitor refused to push because committed changes touched protected quality-gate paths outside the workspace owned paths.
+**Likely Cause:** A CI-fix, sync-base, or comment-addressing push included protected quality-gate files that the workspace profile does not own.
+**Operator Fix:** Inspect the blocked paths in the monitor event, remove or revert the out-of-scope quality-gate changes, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#protected_scope_push_blocked](#protected_scope_push_blocked)
+
 ### PR_ADOPTION_INPUT_REQUIRED
 **Problem:** A PR monitor adoption request omitted required input.
 **Likely Cause:** The request did not include enough repository or PR information to identify the PR.
