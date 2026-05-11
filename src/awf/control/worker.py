@@ -987,7 +987,7 @@ class ControlWorker:
             raise
         except Exception as exc:
             _log.exception(
-                "worker.terminal_runtime_release_failed",
+                "worker.terminal_runtime_release_candidate_failed",
                 workspace_id=candidate.workspace_id,
                 status=candidate.status.value,
                 compose_project_name=candidate.compose_project_name,
