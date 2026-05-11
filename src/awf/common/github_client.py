@@ -948,7 +948,8 @@ class GitHubClient:
             log_text = log.stdout if log is not None else ""
             failures.append(
                 CheckFailure(
-                    name=run.get("name") or f"run/{run_id}",
+                    name=run.get("name")
+                    or (f"run/{run_id}" if run_id is not None else "run/unknown"),
                     conclusion=conclusion.upper(),
                     log_excerpt=_tail(log_text, log_tail_chars),
                     run_id=run_id,

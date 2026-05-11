@@ -1816,6 +1816,34 @@ class TestFetchFailingCheckLogs:
         assert len(fake.calls) == 1
 
     @pytest.mark.unit
+    async def test_missing_run_database_id_and_name_uses_unknown_fallback(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": None,
+                        "name": None,
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
+        )
+
+        assert len(failures) == 1
+        assert failures[0].name == "run/unknown"
+        assert failures[0].run_id is None
+        assert failures[0].log_excerpt == ""
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
     async def test_ignores_non_failure_runs(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
