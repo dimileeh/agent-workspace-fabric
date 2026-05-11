@@ -55,27 +55,6 @@ dev = [
     "pre-commit>=4.0.0",
 ]
 
-# PEP 735 dependency group mirroring the ``dev`` extra so that bare ``uv run``
-# (which auto-installs default groups but not extras) can find ruff/mypy/pytest
-# when AWF validation recreates the venv between phases.
-[dependency-groups]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-cov>=5.0.0",
-    "pytest-asyncio>=0.24.0",
-    "pytest-timeout>=2.3.0",
-    "pytest-mock>=3.14.0",
-    "pytest-xdist>=3.6.0",
-    "testcontainers[postgres]>=4.8.0",
-    "hypothesis>=6.112.0",
-    "openapi-spec-validator>=0.7.0",
-    "types-PyYAML>=6.0.0",
-    "ruff>=0.6.0",
-    "mypy>=1.11.0",
-    "types-jinja2>=2.11.0",
-    "pre-commit>=4.0.0",
-]
-
 [project.scripts]
 awf = "awf.cli.main:app"
 awf-watchdog = "awf.cli.watchdog:main"

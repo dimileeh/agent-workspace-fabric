@@ -46,24 +46,6 @@ dev = [
     { name = "types-pyyaml" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "hypothesis" },
-    { name = "mypy" },
-    { name = "openapi-spec-validator" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pytest-mock" },
-    { name = "pytest-timeout" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "testcontainers" },
-    { name = "types-jinja2" },
-    { name = "types-pyyaml" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13.0" },
@@ -97,24 +79,6 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
 provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "hypothesis", specifier = ">=6.112.0" },
-    { name = "mypy", specifier = ">=1.11.0" },
-    { name = "openapi-spec-validator", specifier = ">=0.7.0" },
-    { name = "pre-commit", specifier = ">=4.0.0" },
-    { name = "pytest", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", specifier = ">=0.24.0" },
-    { name = "pytest-cov", specifier = ">=5.0.0" },
-    { name = "pytest-mock", specifier = ">=3.14.0" },
-    { name = "pytest-timeout", specifier = ">=2.3.0" },
-    { name = "pytest-xdist", specifier = ">=3.6.0" },
-    { name = "ruff", specifier = ">=0.6.0" },
-    { name = "testcontainers", extras = ["postgres"], specifier = ">=4.8.0" },
-    { name = "types-jinja2", specifier = ">=2.11.0" },
-    { name = "types-pyyaml", specifier = ">=6.0.0" },
-]
 
 [[package]]
 name = "alembic"
