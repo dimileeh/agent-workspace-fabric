@@ -142,6 +142,7 @@ _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
     WorkspaceStatus.completed,
+    WorkspaceStatus.destroyed,
 )
 
 

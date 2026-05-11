@@ -8128,9 +8128,10 @@ class TestTerminalRuntimeRelease:
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
             WorkspaceStatus.completed,
+            WorkspaceStatus.destroyed,
         ],
     )
-    async def test_release_runs_for_all_non_destroyed_terminal_states(
+    async def test_release_runs_for_all_terminal_states(
         self,
         status: WorkspaceStatus,
         session_factory: async_sessionmaker[AsyncSession],
@@ -8389,7 +8390,7 @@ class TestTerminalRuntimeRelease:
         assert released_events == []
 
     @pytest.mark.unit
-    async def test_release_skips_destroyed_workspaces(
+    async def test_release_runs_for_destroyed_workspace_with_leaked_runtime(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -8415,13 +8416,19 @@ class TestTerminalRuntimeRelease:
 
         await worker._release_terminal_runtime_resources()  # noqa: SLF001
 
-        assert cleaner.calls == []
+        assert len(cleaner.calls) == 1
+        assert cleaner.calls[0]["workspace_id"] == workspace_id
+        assert cleaner.calls[0]["remove_volumes"] is False
+        assert cleaner.calls[0]["remove_worktree"] is False
         async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.destroyed.value
             events = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
                 event_type="workspace.terminal_runtime_released",
             )
-        assert events == []
+        assert len(events) == 1
 
     @pytest.mark.unit
     async def test_release_does_not_run_when_runtime_cleaner_not_configured(
