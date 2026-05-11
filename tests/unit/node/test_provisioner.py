@@ -1096,6 +1096,14 @@ class TestFailureHandling:
                 "failure_reason_seen": FailureReason.service_startup_failure.value,
             }
         ]
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == FailureReason.service_startup_failure.value
+            assert reloaded.failure_message is not None
+            assert "docker compose up failed" in reloaded.failure_message
+            assert "container healthcheck failed" in reloaded.failure_message
 
     @pytest.mark.unit
     @pytest.mark.parametrize("release_mode", ["raises", "not_ok"])
