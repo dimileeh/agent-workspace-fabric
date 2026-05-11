@@ -25,6 +25,7 @@ from awf.node.cleanup import (
     WorkspaceCleanupResult,
     WorkspaceCleanupStepResult,
 )
+from awf.service import terminal_runtime as terminal_runtime_module
 from awf.service.controls import WorkspaceControlError, WorkspaceControlService
 from awf.service.terminal_runtime import (
     TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
@@ -937,6 +938,49 @@ async def test_terminal_runtime_release_resolves_worktree_path_once_before_claim
     assert result.ok
     assert exists_calls == 1
     assert cleaner.calls[0]["worktree_host_path"] == actual_worktree
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_resolves_worktree_path_off_event_loop(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    actual_worktree = worktrees_root / workspace_id
+    actual_worktree.mkdir(parents=True, exist_ok=True)
+    to_thread_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_to_thread(function, /, *args, **kwargs):  # type: ignore[no-untyped-def]
+        to_thread_calls.append((function, args, kwargs))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(terminal_runtime_module.asyncio, "to_thread", fake_to_thread)
+    cleaner = _RecordingCleaner()
+    releaser = TerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+    )
+
+    result = await releaser.release(
+        workspace_id,
+        source="test",
+        expected_status=WorkspaceStatus.failed,
+    )
+
+    assert result.ok
+    assert cleaner.calls[0]["worktree_host_path"] == actual_worktree
+    assert len(to_thread_calls) == 1
+    function, args, kwargs = to_thread_calls[0]
+    assert getattr(function, "__self__", None) == actual_worktree
+    assert getattr(function, "__name__", None) == "exists"
+    assert args == ()
+    assert kwargs == {}
 
 
 @pytest.mark.unit

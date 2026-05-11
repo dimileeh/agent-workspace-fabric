@@ -5637,6 +5637,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         workspace_id = await _create_active_execution(
             session_factory,
@@ -5649,6 +5650,18 @@ class TestRunOnceStaleActiveExecutionRecovery:
         worktrees_root = tmp_path / "worktrees"
         worktree_path = worktrees_root / workspace_id
         worktree_path.mkdir(parents=True)
+        to_thread_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+        async def fake_to_thread(function, /, *args, **kwargs):  # type: ignore[no-untyped-def]
+            to_thread_calls.append((function, args, kwargs))
+            return function(*args, **kwargs)
+
+        async def fail_unlocked_precheck(
+            _candidate: _ActiveExecutionCandidate,
+        ) -> bool:
+            raise AssertionError("stale active execution cleanup should claim under lock")
+
+        monkeypatch.setattr(worker_module.asyncio, "to_thread", fake_to_thread)
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -5669,6 +5682,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
             stack_state="running",
             reason="worker process exited before releasing its claim",
         )
+        monkeypatch.setattr(
+            worker,
+            "_stale_active_execution_can_fail",
+            fail_unlocked_precheck,
+            raising=False,
+        )
         assert await worker._record_stale_active_execution_detected(candidate, snapshot)
 
         await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)
@@ -5684,6 +5703,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 "remove_worktree": False,
             }
         ]
+        assert len(to_thread_calls) == 2
+        for function, args, kwargs in to_thread_calls:
+            assert getattr(function, "__self__", None) == worktree_path
+            assert getattr(function, "__name__", None) == "exists"
+            assert args == ()
+            assert kwargs == {}
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
             assert ws is not None
@@ -5969,7 +5994,6 @@ class TestRunOnceStaleActiveExecutionRecovery:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         workspace_id = await _create_active_execution(
             session_factory,
@@ -5994,31 +6018,17 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
         snapshot = RuntimeSnapshot(stack_state="running", reason="lost worker task")
         assert await worker._record_stale_active_execution_detected(candidate, snapshot)
-
-        original_can_fail = worker._stale_active_execution_can_fail  # noqa: SLF001
-
-        async def _refresh_after_stale_check(
-            checked_candidate: _ActiveExecutionCandidate,
-        ) -> bool:
-            assert await original_can_fail(checked_candidate)
-            async with session_factory() as s:
-                await WorkspaceControlService(
-                    s,
-                    project_stopper=_noop_project_stop,
-                    cleaner_factory=_unexpected_cleaner_factory,
-                ).request_refresh_workspace(
-                    workspace_id,
-                    reason="operator recovery",
-                    idempotency_key="refresh-before-stale-cleanup",
-                )
-                await s.commit()
-            return True
-
-        monkeypatch.setattr(
-            worker,
-            "_stale_active_execution_can_fail",
-            _refresh_after_stale_check,
-        )
+        async with session_factory() as s:
+            await WorkspaceControlService(
+                s,
+                project_stopper=_noop_project_stop,
+                cleaner_factory=_unexpected_cleaner_factory,
+            ).request_refresh_workspace(
+                workspace_id,
+                reason="operator recovery",
+                idempotency_key="refresh-before-stale-cleanup",
+            )
+            await s.commit()
 
         await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)
 
@@ -6491,7 +6501,6 @@ class TestRunOnceStaleActiveExecutionRecovery:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         workspace_id = await _create_active_execution(
             session_factory,
@@ -6516,26 +6525,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
         snapshot = RuntimeSnapshot(stack_state="running", reason="lost worker task")
         assert await worker._record_stale_active_execution_detected(candidate, snapshot)
-
-        original_can_fail = worker._stale_active_execution_can_fail  # noqa: SLF001
-
-        async def _reclaim_after_stale_check(
-            checked_candidate: _ActiveExecutionCandidate,
-        ) -> bool:
-            assert await original_can_fail(checked_candidate)
-            async with session_factory() as s:
-                ws = await WorkspaceRepository(s).get(workspace_id)
-                assert ws is not None
-                ws.execution_claimed_by = "live-worker"
-                ws.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
-                await s.commit()
-            return True
-
-        monkeypatch.setattr(
-            worker,
-            "_stale_active_execution_can_fail",
-            _reclaim_after_stale_check,
-        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "live-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+            await s.commit()
 
         await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)
 
@@ -9114,7 +9109,7 @@ async def test_db_connection_closed_event_rolls_back_when_event_write_fails(
 
 
 @pytest.mark.unit
-async def test_stale_active_execution_check_preserves_unexpired_execution_claim(
+async def test_stale_active_execution_claim_preserves_unexpired_execution_claim(
     worker: ControlWorker,
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,
@@ -9132,7 +9127,7 @@ async def test_stale_active_execution_check_preserves_unexpired_execution_claim(
         ws.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
         await session.commit()
 
-    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+    assert not await worker._claim_stale_active_execution_cleanup(  # noqa: SLF001
         _ActiveExecutionCandidate(
             workspace_id=workspace_id,
             status=WorkspaceStatus.running,
@@ -9143,7 +9138,7 @@ async def test_stale_active_execution_check_preserves_unexpired_execution_claim(
 
 
 @pytest.mark.unit
-async def test_stale_active_execution_check_ignores_stale_event_before_refresh(
+async def test_stale_active_execution_claim_ignores_stale_event_before_refresh(
     worker: ControlWorker,
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,
@@ -9198,7 +9193,7 @@ async def test_stale_active_execution_check_ignores_stale_event_before_refresh(
         refresh_events[0].occurred_at = refresh_requested_at
         await session.commit()
 
-    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+    assert not await worker._claim_stale_active_execution_cleanup(  # noqa: SLF001
         _ActiveExecutionCandidate(
             workspace_id=workspace_id,
             status=WorkspaceStatus.running,

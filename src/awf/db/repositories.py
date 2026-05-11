@@ -4128,10 +4128,13 @@ async def _lock_workspace_for_external_runtime_teardown_serialization(
     )
 
 
-def _active_external_runtime_teardown_operation_lease_current() -> ColumnElement[bool]:
+def _active_external_runtime_teardown_operation_lease_current(
+    *,
+    now: datetime | None = None,
+) -> ColumnElement[bool]:
     return func.coalesce(
         Operation.lease_renewed_at, Operation.started_at, Operation.created_at
-    ) > _as_utc_naive(external_runtime_teardown_operation_cutoff())
+    ) > _as_utc_naive(external_runtime_teardown_operation_cutoff(now=now))
 
 
 def _scheduler_scoring_time(

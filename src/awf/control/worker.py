@@ -1356,8 +1356,9 @@ class ControlWorker:
         candidate: _ActiveExecutionCandidate,
         snapshot: RuntimeSnapshot,
     ) -> None:
-        if not await self._stale_active_execution_can_fail(candidate):
+        if not await self._claim_stale_active_execution_cleanup(candidate):
             return
+
         if self._runtime_cleaner is None or not candidate.repo_url:
             await self._record_stale_active_execution_cleanup_failed(
                 candidate,
@@ -1371,9 +1372,6 @@ class ControlWorker:
             )
             return
 
-        if not await self._claim_stale_active_execution_cleanup(candidate):
-            return
-
         claim_owner = self._stale_active_execution_cleanup_owner()
         heartbeat = asyncio.create_task(
             self._refresh_execution_claim_loop(
@@ -1385,6 +1383,7 @@ class ControlWorker:
         cleanup_task: asyncio.Task[WorkspaceCleanupResult] | None = None
         try:
             try:
+                worktree_host_path = await self._worktree_host_path(candidate.workspace_id)
                 cleanup_task = asyncio.create_task(
                     self._runtime_cleaner.cleanup(
                         workspace_id=candidate.workspace_id,
@@ -1395,7 +1394,7 @@ class ControlWorker:
                             if candidate.compose_file_path
                             else None
                         ),
-                        worktree_host_path=self._worktree_host_path(candidate.workspace_id),
+                        worktree_host_path=worktree_host_path,
                         remove_volumes=False,
                         remove_worktree=False,
                     ),
@@ -1500,29 +1499,6 @@ class ControlWorker:
 
     def _stale_active_execution_cleanup_owner(self) -> str:
         return f"stale-cleanup:{self._worker_id}"
-
-    async def _stale_active_execution_can_fail(
-        self,
-        candidate: _ActiveExecutionCandidate,
-    ) -> bool:
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get(candidate.workspace_id)
-            if ws is None or ws.status != candidate.status.value:
-                return False
-            if not _execution_claim_is_stale(ws, datetime.now(UTC)):
-                return False
-            event_floor = await self._active_execution_preservation_event_floor(
-                session,
-                ws,
-                candidate.status,
-            )
-            return await self._has_current_stale_active_execution_failure_evidence(
-                session,
-                ws,
-                candidate.status,
-                event_floor=event_floor,
-            )
 
     async def _has_current_stale_active_execution_failure_evidence(
         self,
@@ -1767,13 +1743,14 @@ class ControlWorker:
         allow_non_terminal: bool = False,
     ) -> None:
         try:
+            worktree_host_path = await self._worktree_host_path(workspace_id)
             async with session.begin_nested():
                 await record_terminal_runtime_release_event(
                     session,
                     workspace_id=workspace_id,
                     cleanup=cleanup,
                     source=source,
-                    worktree_host_path=self._worktree_host_path(workspace_id),
+                    worktree_host_path=worktree_host_path,
                     allow_non_terminal=allow_non_terminal,
                 )
         except Exception as exc:
@@ -1784,11 +1761,11 @@ class ControlWorker:
                 error=redact_audit_text(repr(exc), limit=400),
             )
 
-    def _worktree_host_path(self, workspace_id: str) -> Path | None:
+    async def _worktree_host_path(self, workspace_id: str) -> Path | None:
         if self._worktrees_root is None:
             return None
         candidate = self._worktrees_root / workspace_id
-        if candidate.exists():
+        if await asyncio.to_thread(candidate.exists):
             return candidate
         return None
 

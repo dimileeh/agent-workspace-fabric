@@ -1385,11 +1385,19 @@ async def test_active_runtime_teardown_blocks_control_requests_and_atomic_transi
 async def test_cancel_releases_terminal_runtime_with_preserved_worktree_path(
     session: AsyncSession,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.ready)
     worktrees_root = tmp_path / "git" / "worktrees"
     worktree_path = worktrees_root / workspace.id
     worktree_path.mkdir(parents=True)
+    to_thread_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_to_thread(function, /, *args, **kwargs):  # type: ignore[no-untyped-def]
+        to_thread_calls.append((function, args, kwargs))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(controls_module.asyncio, "to_thread", fake_to_thread)
     service, _stopper, cleaner = _service(session, worktrees_root=worktrees_root)
 
     await service.cancel_workspace(
@@ -1407,6 +1415,12 @@ async def test_cancel_releases_terminal_runtime_with_preserved_worktree_path(
     assert cleaner.calls[0].remove_worktree is False
     assert release_event.payload is not None
     assert release_event.payload["preserved"]["worktree_path"] == str(worktree_path)
+    assert len(to_thread_calls) == 1
+    function, args, kwargs = to_thread_calls[0]
+    assert getattr(function, "__self__", None) == worktree_path
+    assert getattr(function, "__name__", None) == "exists"
+    assert args == ()
+    assert kwargs == {}
 
 
 @pytest.mark.unit

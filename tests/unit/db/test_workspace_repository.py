@@ -129,13 +129,15 @@ def _recorded_workspace_row(
 
 @pytest.mark.unit
 def test_active_external_runtime_teardown_operation_sql_cutoff_is_timezone_naive() -> None:
-    expression = _active_external_runtime_teardown_operation_lease_current()
+    now = datetime(2026, 5, 8, 10, 31, 41, tzinfo=UTC)
+    expression = _active_external_runtime_teardown_operation_lease_current(now=now)
 
     compiled = expression.compile(dialect=postgresql.dialect())
     cutoff_values = [value for value in compiled.params.values() if isinstance(value, datetime)]
 
     assert len(cutoff_values) == 1
     assert cutoff_values[0].tzinfo is None
+    assert cutoff_values[0] == datetime(2026, 5, 8, 10, 16, 41)
 
 
 class TestCreate:

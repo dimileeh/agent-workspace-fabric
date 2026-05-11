@@ -810,7 +810,7 @@ class WorkspaceControlService:
         preserved_worktree_host_path: Path | None = None
         if self._worktrees_root is not None:
             candidate_worktree_path = self._worktrees_root / workspace.id
-            if candidate_worktree_path.exists():
+            if await asyncio.to_thread(candidate_worktree_path.exists):
                 cleanup_worktree_host_path = candidate_worktree_path
                 preserved_worktree_host_path = candidate_worktree_path
         cleaner = self._cleaner_factory()

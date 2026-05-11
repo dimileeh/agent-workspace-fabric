@@ -981,7 +981,7 @@ async def test_record_preserved_active_execution_skips_missing_workspace(
 
 
 @pytest.mark.unit
-async def test_stale_active_execution_can_fail_rejects_preserved_runtime(
+async def test_stale_active_execution_claim_rejects_preserved_runtime(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     workspace_id = await _seed_status(factory, WorkspaceStatus.running, title="preserved")
@@ -1006,7 +1006,7 @@ async def test_stale_active_execution_can_fail_rejects_preserved_runtime(
         )
         await session.commit()
 
-    assert not await worker._stale_active_execution_can_fail(  # noqa: SLF001
+    assert not await worker._claim_stale_active_execution_cleanup(  # noqa: SLF001
         _ActiveExecutionCandidate(
             workspace_id=workspace_id,
             status=WorkspaceStatus.running,

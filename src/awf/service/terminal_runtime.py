@@ -351,7 +351,7 @@ class TerminalRuntimeReleaser:
                 return None
             return _snapshot_for_workspace(
                 workspace,
-                worktree_host_path=_resolve_worktree_host_path(
+                worktree_host_path=await _resolve_worktree_host_path(
                     workspace.id,
                     worktrees_root=self._worktrees_root,
                 ),
@@ -629,7 +629,7 @@ def _snapshot_for_workspace(
     )
 
 
-def _resolve_worktree_host_path(
+async def _resolve_worktree_host_path(
     workspace_id: str,
     *,
     worktrees_root: Path | None,
@@ -637,7 +637,7 @@ def _resolve_worktree_host_path(
     if worktrees_root is None:
         return None
     candidate = worktrees_root / workspace_id
-    return candidate if candidate.exists() else None
+    return candidate if await asyncio.to_thread(candidate.exists) else None
 
 
 def _matches_release_status(
