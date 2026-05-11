@@ -898,7 +898,14 @@ class WorkspaceControlService:
         locked_workspace = await WorkspaceRepository(self._session).get_for_update(workspace.id)
         if locked_workspace is None:
             raise WorkspaceNotFoundError(workspace.id)
-        active = terminal_runtime_release_claim_active(locked_workspace)
+        now = datetime.now(UTC)
+        active = terminal_runtime_release_claim_active(
+            locked_workspace,
+            now=now,
+        ) or (
+            _control_terminal_runtime_release_claim_required(locked_workspace)
+            and _execution_claim_active_for_control(locked_workspace, now=now)
+        )
         if not active and _control_terminal_runtime_release_claim_required(locked_workspace):
             locked_workspace.execution_claimed_by = (
                 f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:{uuid4().hex}"
@@ -2713,6 +2720,19 @@ def _control_terminal_runtime_release_claim_required(workspace: Workspace) -> bo
         WorkspaceStatus.cancelled.value,
         WorkspaceStatus.destroyed.value,
     }
+
+
+def _execution_claim_active_for_control(
+    workspace: Workspace,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if workspace.execution_claimed_by is None or workspace.execution_claim_expires_at is None:
+        return False
+    expires_at = workspace.execution_claim_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at > (now or datetime.now(UTC))
 
 
 def _control_terminal_runtime_release_claim_owner(workspace: Workspace) -> str | None:

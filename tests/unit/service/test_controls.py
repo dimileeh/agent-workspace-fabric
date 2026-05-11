@@ -1676,6 +1676,29 @@ async def test_terminal_runtime_claim_active_for_control_handles_missing_workspa
 
 
 @pytest.mark.unit
+async def test_terminal_runtime_claim_active_for_control_preserves_active_stale_cleanup_claim(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.completed)
+        workspace.execution_claimed_by = "stale-cleanup:worker-1"
+        workspace.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        active = await service._terminal_runtime_release_claim_active_for_control(  # noqa: SLF001
+            workspace,
+        )
+
+    assert active
+    assert workspace.execution_claimed_by == "stale-cleanup:worker-1"
+
+
+@pytest.mark.unit
 async def test_release_terminal_runtime_claim_for_control_preserves_unmatched_claim(
     engine: AsyncEngine,
 ) -> None:
