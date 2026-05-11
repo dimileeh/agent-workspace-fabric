@@ -8511,7 +8511,7 @@ class TestTerminalRuntimeRelease:
         assert len(released_events) == 1
 
     @pytest.mark.unit
-    async def test_release_skips_workspaces_with_no_runtime_signal(
+    async def test_release_runs_for_legacy_workspace_with_no_persisted_runtime_state(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -8543,13 +8543,23 @@ class TestTerminalRuntimeRelease:
 
         await worker._release_terminal_runtime_resources()  # noqa: SLF001
 
-        assert cleaner.calls == []
+        assert cleaner.calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": str(origin_repo),
+                "compose_project_name": None,
+                "compose_file_path": None,
+                "worktree_host_path": None,
+                "remove_volumes": False,
+                "remove_worktree": False,
+            }
+        ]
         async with session_factory() as s:
             released_events = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
                 event_type="workspace.terminal_runtime_released",
             )
-        assert released_events == []
+        assert len(released_events) == 1
 
     @pytest.mark.unit
     async def test_release_runs_for_destroyed_workspace_with_leaked_runtime(

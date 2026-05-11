@@ -932,16 +932,12 @@ class ControlWorker:
                 Workspace.compose_file_path,
             )
             .where(Workspace.status.in_(terminal_status_values))
-            # Include rows where either the persisted project name or the
-            # compose file path signals there may be runtime to release. The
-            # cleaner derives ``awf_<workspace_id>`` when project name is
-            # missing, so legacy/partial rows still get a teardown attempt.
-            .where(
-                or_(
-                    Workspace.compose_project_name.is_not(None),
-                    Workspace.compose_file_path.is_not(None),
-                )
-            )
+            # Include every terminal row on this node — even those where both
+            # ``compose_project_name`` and ``compose_file_path`` are NULL.
+            # The cleaner derives ``awf_<workspace_id>`` and falls back to
+            # label-based removal, so legacy rows that predate persistence of
+            # either field can still have a leaked default Compose project torn
+            # down. ``~released_event_exists`` keeps each row to a single sweep.
             .where(Workspace.node_id == self._config.node_id)
             .where(~released_event_exists)
             .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
@@ -969,8 +965,6 @@ class ControlWorker:
                 compose_file_path,
             ) = row
             if not repo_url:
-                continue
-            if not compose_project_name and not compose_file_path:
                 continue
             candidates.append(
                 _TerminalRuntimeCandidate(
