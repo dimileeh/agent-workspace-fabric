@@ -950,13 +950,54 @@ async def test_cancel_and_stop_skip_cleanup_when_terminal_release_claim_is_activ
 
 @pytest.mark.unit
 @pytest.mark.parametrize("action", ["cancel", "stop"])
-async def test_cancel_and_stop_terminal_workspace_takes_over_leftover_execution_claim(
+async def test_cancel_and_stop_terminal_workspace_preserves_active_execution_claim(
+    session: AsyncSession,
+    action: str,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.completed)
+    existing_owner_id = "control-worker-live-execution"
+    existing_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    workspace.execution_claimed_by = existing_owner_id
+    workspace.execution_claim_expires_at = existing_expires_at
+    service, stopper, cleaner = _service(session)
+
+    if action == "cancel":
+        response = await service.cancel_workspace(
+            workspace.id,
+            reason="repeat cancel",
+            stop_stack=True,
+        )
+    else:
+        response = await service.stop_workspace(
+            workspace.id,
+            reason="containers only",
+        )
+    await session.refresh(workspace)
+    events = await _events(session, workspace.id)
+
+    release_events = [
+        event
+        for event in events
+        if event.event_type.startswith("workspace.terminal_runtime_release")
+    ]
+    assert response.status == WorkspaceStatus.completed
+    assert stopper.calls == [workspace.compose_project_name]
+    assert cleaner.calls == []
+    assert workspace.execution_claimed_by == existing_owner_id
+    assert workspace.execution_claim_expires_at is not None
+    assert workspace.execution_claim_expires_at.replace(tzinfo=UTC) == existing_expires_at
+    assert release_events == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop"])
+async def test_cancel_and_stop_terminal_workspace_takes_over_expired_leftover_execution_claim(
     session: AsyncSession,
     action: str,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.completed)
     workspace.execution_claimed_by = "worker:leaked-execution"
-    workspace.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    workspace.execution_claim_expires_at = datetime.now(UTC) - timedelta(minutes=5)
     service, stopper, cleaner = _service(session)
 
     if action == "cancel":
