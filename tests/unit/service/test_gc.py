@@ -25,11 +25,14 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
+    COMPLETED_PR_NOT_MERGED,
     COMPLETED_PR_RETENTION_EXPIRED,
+    COMPLETED_WORKSPACE_WITHOUT_PR,
     FAILED_WORKSPACE_NO_WORK,
     FAILED_WORKSPACE_TRIAGE_PRESERVED,
     TERMINAL_LIVE_RUNTIME_PRESERVED,
     TERMINAL_WORKSPACE_RETENTION_EXPIRED,
+    WORKSPACE_CLEANUP_DISABLED,
     WORKSPACE_WITHIN_RETENTION,
     WorkspaceGCCandidate,
     WorkspaceGCComposeTeardownResult,
@@ -55,6 +58,50 @@ def test_gc_to_utc_accepts_naive_datetime() -> None:
     naive = datetime(2026, 5, 8, 12, 30)
 
     assert gc._to_utc(naive) == naive.replace(tzinfo=UTC)  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("reason_code", "retention_class"),
+    [
+        (TERMINAL_LIVE_RUNTIME_PRESERVED, "live_runtime"),
+        (FAILED_WORKSPACE_TRIAGE_PRESERVED, "salvage_evidence"),
+        (WORKSPACE_CLEANUP_DISABLED, "policy_disabled"),
+        (COMPLETED_PR_RETENTION_EXPIRED, "retention_policy"),
+        (TERMINAL_WORKSPACE_RETENTION_EXPIRED, "retention_policy"),
+        (WORKSPACE_WITHIN_RETENTION, "retention_policy"),
+        (FAILED_WORKSPACE_NO_WORK, "retention_policy"),
+        (COMPLETED_WORKSPACE_WITHOUT_PR, "retention_policy"),
+        (COMPLETED_PR_NOT_MERGED, "retention_policy"),
+    ],
+)
+def test_workspace_gc_preserved_retention_class_maps_known_reason_codes(
+    reason_code: str,
+    retention_class: str,
+) -> None:
+    preserved = WorkspaceGCPreserved(
+        workspace_id="ws_1",
+        status=WorkspaceStatus.completed.value,
+        updated_at=datetime(2026, 5, 8, 12, tzinfo=UTC),
+        age_hours=1,
+        reason_code=reason_code,
+    )
+
+    assert preserved.retention_class == retention_class
+
+
+@pytest.mark.unit
+def test_workspace_gc_preserved_retention_class_rejects_unknown_reason_code() -> None:
+    preserved = WorkspaceGCPreserved(
+        workspace_id="ws_1",
+        status=WorkspaceStatus.completed.value,
+        updated_at=datetime(2026, 5, 8, 12, tzinfo=UTC),
+        age_hours=1,
+        reason_code="NEW_UNMAPPED_REASON",
+    )
+
+    with pytest.raises(ValueError, match="NEW_UNMAPPED_REASON"):
+        _ = preserved.retention_class
 
 
 @pytest.fixture(autouse=True)
@@ -2031,7 +2078,7 @@ def test_failed_terminal_workspace_has_no_work_exception(monkeypatch: pytest.Mon
 
 
 @pytest.mark.unit
-async def test_run_awaitable_blocking_returns_unknown_without_thread_in_running_loop(
+async def test_run_awaitable_blocking_logs_error_without_thread_in_running_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _thread_should_not_start(*_args: object, **_kwargs: object) -> threading.Thread:
@@ -2048,7 +2095,12 @@ async def test_run_awaitable_blocking_returns_unknown_without_thread_in_running_
     finally:
         awaitable.close()
     assert awaitable.cr_frame is None
-    assert any(entry.get("event") == "gc.awaitable_blocking_running_loop" for entry in logs)
+    assert any(
+        entry.get("event") == "gc.awaitable_blocking_running_loop_unexpected"
+        and entry.get("hint") == "Use _classify_workspace_for_gc_async instead of the sync path"
+        and entry.get("log_level") == "error"
+        for entry in logs
+    )
 
 
 @pytest.mark.unit

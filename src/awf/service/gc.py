@@ -44,6 +44,18 @@ COMPLETED_WORKSPACE_WITHOUT_PR = "COMPLETED_WORKSPACE_WITHOUT_PR"
 COMPLETED_PR_NOT_MERGED = "COMPLETED_PR_NOT_MERGED"
 WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
 
+_RETENTION_CLASS_BY_REASON_CODE = {
+    TERMINAL_LIVE_RUNTIME_PRESERVED: "live_runtime",
+    FAILED_WORKSPACE_TRIAGE_PRESERVED: "salvage_evidence",
+    WORKSPACE_CLEANUP_DISABLED: "policy_disabled",
+    COMPLETED_PR_RETENTION_EXPIRED: "retention_policy",
+    TERMINAL_WORKSPACE_RETENTION_EXPIRED: "retention_policy",
+    WORKSPACE_WITHIN_RETENTION: "retention_policy",
+    FAILED_WORKSPACE_NO_WORK: "retention_policy",
+    COMPLETED_WORKSPACE_WITHOUT_PR: "retention_policy",
+    COMPLETED_PR_NOT_MERGED: "retention_policy",
+}
+
 PATH_DELETED = "PATH_DELETED"
 PATH_ALREADY_REMOVED = "PATH_ALREADY_REMOVED"
 PATH_DELETE_FAILED = "PATH_DELETE_FAILED"
@@ -136,13 +148,12 @@ class WorkspaceGCPreserved:
 
     @property
     def retention_class(self) -> str:
-        if self.reason_code == TERMINAL_LIVE_RUNTIME_PRESERVED:
-            return "live_runtime"
-        if self.reason_code == FAILED_WORKSPACE_TRIAGE_PRESERVED:
-            return "salvage_evidence"
-        if self.reason_code == WORKSPACE_CLEANUP_DISABLED:
-            return "policy_disabled"
-        return "retention_policy"
+        try:
+            return _RETENTION_CLASS_BY_REASON_CODE[self.reason_code]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown workspace GC preserved reason code: {self.reason_code}"
+            ) from exc
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1500,7 +1511,10 @@ def _run_awaitable_blocking(awaitable: Coroutine[Any, Any, str]) -> str:
     except RuntimeError:
         return asyncio.run(awaitable)
     awaitable.close()
-    _log.warning("gc.awaitable_blocking_running_loop")
+    _log.error(
+        "gc.awaitable_blocking_running_loop_unexpected",
+        hint="Use _classify_workspace_for_gc_async instead of the sync path",
+    )
     return "unknown"
 
 
