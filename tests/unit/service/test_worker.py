@@ -11,7 +11,7 @@ import pytest
 import structlog
 
 from awf.common.config import Settings
-from awf.profiles.models import ProfileMonitor, WorkspaceProfile
+from awf.profiles.models import ProfileMonitor, ProfileRuntime, ProfileService, WorkspaceProfile
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
 from awf.service import worker as worker_mod
 from awf.service.config import ServiceSettings, resolve_service_settings
@@ -275,6 +275,12 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
 
     profile = WorkspaceProfile(
         name="custom",
+        runtime=ProfileRuntime(
+            environment={
+                "AWF_TEST_DATABASE_URL": "postgresql+asyncpg://awf:secret@postgres:5432/awf"
+            }
+        ),
+        services=[ProfileService(name="postgres", image="postgres:16-alpine")],
         monitor=ProfileMonitor(
             initial_review_grace_period_seconds=321,
             non_check_reviewer_settle_seconds=45,
@@ -293,6 +299,14 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
+    assert (
+        "Workspace runtime context"
+        in created["feature_monitor_kwargs"]["workspace_runtime_context"]
+    )
+    assert (
+        "$AWF_TEST_DATABASE_URL" in created["feature_monitor_kwargs"]["workspace_runtime_context"]
+    )
+    assert "secret" not in created["feature_monitor_kwargs"]["workspace_runtime_context"]
     assert "post_merge_target_reconciler" in created["feature_monitor_kwargs"]
     reconciler = created["feature_monitor_kwargs"]["post_merge_target_reconciler"]
     assert callable(reconciler)

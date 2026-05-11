@@ -56,6 +56,19 @@ class TestAddressThread:
         assert "reviewer-bot" in prompt
 
     @pytest.mark.unit
+    def test_includes_trusted_workspace_runtime_context(self) -> None:
+        thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="x")
+        prompt = address_thread_prompt(
+            pr_number=1,
+            repo_slug="a/b",
+            thread=thread,
+            workspace_runtime_context="Workspace runtime context\n- Service `postgres`: use `postgres:5432`.",
+        )
+
+        assert "Workspace runtime context" in prompt
+        assert "postgres:5432" in prompt
+
+    @pytest.mark.unit
     def test_forbids_push_in_footer(self) -> None:
         thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="")
         prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
@@ -244,6 +257,19 @@ class TestAddressReviewComment:
         assert "print `AWF-VERDICT: FALSE POSITIVE:" in prompt
 
     @pytest.mark.unit
+    def test_includes_trusted_workspace_runtime_context(self) -> None:
+        c = ReviewComment(comment_id="C", body_excerpt="x")
+        prompt = address_review_comment_prompt(
+            pr_number=1,
+            repo_slug="a/b",
+            comment=c,
+            workspace_runtime_context="Workspace runtime context\n- Use `$AWF_TEST_DATABASE_URL`.",
+        )
+
+        assert "Workspace runtime context" in prompt
+        assert "$AWF_TEST_DATABASE_URL" in prompt
+
+    @pytest.mark.unit
     def test_forbids_push(self) -> None:
         c = ReviewComment(comment_id="C", body_excerpt="")
         prompt = address_review_comment_prompt(pr_number=1, repo_slug="a/b", comment=c)
@@ -365,6 +391,19 @@ class TestSyncBaseConflictPrompt:
         )
         assert "run git status" in prompt
 
+    @pytest.mark.unit
+    def test_includes_trusted_workspace_runtime_context(self) -> None:
+        prompt = sync_base_conflict_prompt(
+            pr_number=1,
+            repo_slug="a/b",
+            base_branch="main",
+            conflicting_files=("src/app.py",),
+            workspace_runtime_context="Workspace runtime context\n- Sidecar services are running.",
+        )
+
+        assert "Workspace runtime context" in prompt
+        assert "Sidecar services are running" in prompt
+
 
 class TestFixCiPrompt:
     @pytest.mark.unit
@@ -391,6 +430,18 @@ class TestFixCiPrompt:
     def test_falls_back_when_failures_empty(self) -> None:
         prompt = fix_ci_prompt(pr_number=1, repo_slug="a/b", failures=())
         assert "gh run list" in prompt
+
+    @pytest.mark.unit
+    def test_includes_trusted_workspace_runtime_context(self) -> None:
+        prompt = fix_ci_prompt(
+            pr_number=1,
+            repo_slug="a/b",
+            failures=(),
+            workspace_runtime_context="Workspace runtime context\n- Use `$DATABASE_URL`.",
+        )
+
+        assert "Workspace runtime context" in prompt
+        assert "$DATABASE_URL" in prompt
 
     @pytest.mark.unit
     def test_marks_missing_log_as_not_available_without_quoting_it_as_evidence(self) -> None:

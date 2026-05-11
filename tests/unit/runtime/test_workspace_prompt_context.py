@@ -1,0 +1,88 @@
+"""Workspace runtime context prompt rendering tests."""
+
+from __future__ import annotations
+
+import pytest
+
+from awf.profiles.models import (
+    DockerMode,
+    ProfileDocker,
+    ProfileRuntime,
+    ProfileService,
+    WorkspaceProfile,
+)
+from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
+
+
+@pytest.mark.unit
+def test_workspace_runtime_context_describes_sidecar_database_env_without_secrets() -> None:
+    profile = WorkspaceProfile(
+        name="awf-self",
+        docker=ProfileDocker(mode=DockerMode.none),
+        runtime=ProfileRuntime(
+            environment={
+                "AWF_DATABASE_URL": (
+                    "postgresql+asyncpg://awf:super-secret-password@postgres:5432/awf"
+                ),
+                "AWF_TEST_DATABASE_URL": (
+                    "postgresql+asyncpg://awf:super-secret-password@postgres:5432/awf"
+                ),
+                "PYTHONUNBUFFERED": "1",
+            }
+        ),
+        services=[
+            ProfileService(
+                name="postgres",
+                image="postgres:16-alpine",
+                environment={
+                    "POSTGRES_DB": "awf",
+                    "POSTGRES_PASSWORD": "super-secret-password",
+                    "POSTGRES_USER": "awf",
+                },
+                healthcheck_cmd="pg_isready -U awf -d awf",
+            )
+        ],
+    )
+
+    context = render_workspace_runtime_context(profile)
+
+    assert "Workspace runtime context" in context
+    assert "postgres" in context
+    assert "postgres:5432" in context
+    assert "$AWF_TEST_DATABASE_URL" in context
+    assert "postgresql+asyncpg://[redacted]@postgres:5432/awf" in context
+    assert "localhost is the agent container" in context
+    assert "AWF already started" in context
+    assert "Docker may be unavailable" in context
+    assert "super-secret-password" not in context
+
+
+@pytest.mark.unit
+def test_workspace_runtime_context_keeps_generic_non_database_sidecars() -> None:
+    profile = WorkspaceProfile(
+        name="redis-app",
+        runtime=ProfileRuntime(
+            environment={
+                "APP_BASE_URL": "http://app:8080",
+                "CACHE_URL": "redis://redis:6379/0",
+            }
+        ),
+        services=[
+            ProfileService(name="app", image="example/app:latest", ports=[(8080, 18080)]),
+            ProfileService(name="redis", image="redis:7-alpine"),
+        ],
+    )
+
+    context = render_workspace_runtime_context(profile)
+
+    assert "app" in context
+    assert "app:8080" in context
+    assert "redis" in context
+    assert "redis:6379" in context
+    assert "$APP_BASE_URL" in context
+    assert "$CACHE_URL" in context
+
+
+@pytest.mark.unit
+def test_workspace_runtime_context_is_empty_without_services_or_runtime_env() -> None:
+    assert render_workspace_runtime_context(WorkspaceProfile(name="plain")) == ""
