@@ -2161,6 +2161,99 @@ class TestOperatorControlRaces:
             assert reloaded.compose_file_path == compose_file
 
     @pytest.mark.unit
+    async def test_destroy_after_stack_launch_preserves_worktree_breadcrumbs(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingGit:
+            def __init__(self) -> None:
+                self.add_worktree_calls: list[dict[str, object]] = []
+
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                self.add_worktree_calls.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "repo_url": repo_url,
+                        "base_branch": base_branch,
+                        "new_branch": new_branch,
+                    }
+                )
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "b" * 40
+
+        class _DestroyingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                await _force_destroy_provisioning_workspace(session_factory, request.workspace_id)
+                project_dir = tmp_path / "compose" / request.workspace_id
+                return ComposeProjectPaths(
+                    project_dir=project_dir,
+                    compose_file=project_dir / "compose.yml",
+                )
+
+        fake_git = _RecordingGit()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=fake_git,  # type: ignore[arg-type]
+            stack_launcher=_DestroyingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url="https://github.com/example/project.git",
+                branch_base="development",
+                task_title="adopt",
+                task_prompt="monitor",
+                agent="codex",
+                test_commands=[],
+                task_kind="sync_feature_pr",
+                task_policy={
+                    "pr_adoption": {
+                        "pr_number": 277,
+                        "head_ref": "feature/review",
+                        "base_ref": "development",
+                    }
+                },
+                resolved_profile={"name": "generic"},
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert fake_git.add_worktree_calls == [
+            {
+                "workspace_id": ws_id,
+                "repo_url": "https://github.com/example/project.git",
+                "base_branch": "refs/pull/277/head",
+                "new_branch": f"feature-sync/{ws_id}",
+            }
+        ]
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value
+            assert reloaded.branch_name == f"feature-sync/{ws_id}"
+            assert reloaded.base_commit == "b" * 40
+            assert reloaded.remote_push_branch == "feature/review"
+            assert reloaded.compose_project_name == f"awf_{ws_id}"
+            assert reloaded.compose_file_path == str(tmp_path / "compose" / ws_id / "compose.yml")
+
+    @pytest.mark.unit
     async def test_active_teardown_after_git_records_blocked_ready_callback(
         self,
         session_factory: async_sessionmaker[AsyncSession],

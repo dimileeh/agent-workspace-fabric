@@ -292,6 +292,11 @@ class Provisioner:
             if persisted is None:  # pragma: no cover - defensive; workspace removed mid-provision
                 return
             if persisted.status != WorkspaceStatus.provisioning.value:
+                persisted.branch_name = layout.branch_name
+                persisted.base_commit = base_commit
+                remote_push_branch = _provision_remote_push_branch(persisted)
+                if remote_push_branch is not None:
+                    persisted.remote_push_branch = remote_push_branch
                 terminal_release_status = (
                     _terminal_runtime_release_status_or_none(persisted.status)
                     if stack_paths is not None
