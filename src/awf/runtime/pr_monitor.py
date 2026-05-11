@@ -514,7 +514,6 @@ _CI_TRANSIENT_RERUN_KEY_PREFIX = "__awf_ci_rerun:"
 _CI_FAILED_JOB_RERUN_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT"})
 
 _CI_CODE_FAILURE_MARKERS = (
-    "failed tests/",
     "failed test",
     "pytest failed",
     "assertionerror",
@@ -610,6 +609,8 @@ def _ci_transient_rerun_count(
 
 def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     log_text = failure.log_excerpt.lower()
+    if not log_text.strip():
+        return bool(failure.run_id) and failure.conclusion.upper() == "TIMED_OUT"
     if any(marker in log_text for marker in _CI_CODE_FAILURE_MARKERS):
         return False
     if any(pattern.search(log_text) for pattern in _CI_CODE_FAILURE_PATTERNS):
