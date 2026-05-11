@@ -356,6 +356,7 @@ class WorkspaceRebaseActiveConflictError(WorkspaceControlError):
 
 class WorkspaceActiveOperationConflictError(WorkspaceControlError):
     def __init__(self, operation: Operation | None) -> None:
+        self.operation = operation
         super().__init__(
             error_code="WORKSPACE_OPERATION_CONFLICT",
             message="Workspace operation conflicts with active runtime teardown.",
@@ -448,17 +449,6 @@ class WorkspaceControlService:
                 )
                 terminal_runtime_cleanup = terminal_runtime_stop.cleanup
                 terminal_runtime_stop_error = terminal_runtime_stop.stop_error
-            except WorkspaceStackStopError as exc:
-                operation = await _require_control_operation(operations, operation_id)
-                workspace = await self._require_workspace(repo, workspace_id)
-                await _finish_stack_stop_failed_operation(
-                    self._session,
-                    operations,
-                    operation,
-                    workspace=workspace,
-                    exc=exc,
-                )
-                raise
             except asyncio.CancelledError:
                 await self._preserve_precommitted_cancelled_operation(operation_id)
                 raise
@@ -658,17 +648,6 @@ class WorkspaceControlService:
             )
             terminal_runtime_cleanup = terminal_runtime_stop.cleanup
             terminal_runtime_stop_error = terminal_runtime_stop.stop_error
-        except WorkspaceStackStopError as exc:
-            operation = await _require_control_operation(operations, operation_id)
-            workspace = await self._require_workspace(repo, workspace_id)
-            await _finish_stack_stop_failed_operation(
-                self._session,
-                operations,
-                operation,
-                workspace=workspace,
-                exc=exc,
-            )
-            raise
         except asyncio.CancelledError:
             await self._preserve_precommitted_cancelled_operation(operation_id)
             raise
@@ -1516,18 +1495,30 @@ class WorkspaceControlService:
             base_payload,
             expected_version=expected_version,
         )
-        prepared = await self._prepare_operation(
-            repo,
-            operations,
-            workspace_id=workspace_id,
-            operation_type=OperationType.rebase,
-            payload=idempotency_payload,
-            idempotency_key=idempotency_key,
-            expected_version=expected_version,
-            active_payload_identity=base_payload,
-            idempotency_payload_identity=idempotency_payload,
-            idempotency_identity_keys=frozenset({*base_payload.keys(), "expected_version"}),
-        )
+        try:
+            prepared = await self._prepare_operation(
+                repo,
+                operations,
+                workspace_id=workspace_id,
+                operation_type=OperationType.rebase,
+                payload=idempotency_payload,
+                idempotency_key=idempotency_key,
+                expected_version=expected_version,
+                active_payload_identity=base_payload,
+                idempotency_payload_identity=idempotency_payload,
+                idempotency_identity_keys=frozenset({*base_payload.keys(), "expected_version"}),
+            )
+        except WorkspaceActiveOperationConflictError as exc:
+            if (
+                exc.operation is not None
+                and exc.operation.type in _REBASE_DESTRUCTIVE_CONFLICT_TYPES
+            ):
+                raise WorkspaceRebaseActiveConflictError(
+                    exc.operation,
+                    error_code="WORKSPACE_OPERATION_CONFLICT",
+                    message=("Workspace rebase conflicts with an active destructive operation."),
+                ) from exc
+            raise
         workspace = prepared.workspace
         replay = prepared.replay
         current = WorkspaceStatus(workspace.status)

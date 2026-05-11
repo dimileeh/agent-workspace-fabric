@@ -1256,6 +1256,25 @@ def _needs_failed_terminal_workspace_no_work_inspection(
     return _compose_project_name_for_workspace(workspace) is not None
 
 
+def _failed_terminal_runtime_sync_inspection_required(
+    *,
+    failed_terminal_workspace_no_work: bool | None,
+    failed_terminal_workspace_live_runtime: bool | None,
+) -> bool:
+    return failed_terminal_workspace_no_work is None or (
+        failed_terminal_workspace_no_work is False
+        and failed_terminal_workspace_live_runtime is None
+    )
+
+
+def _running_event_loop_active() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _failed_terminal_workspace_no_work_decision(
     workspace: Workspace,
     precomputed: bool | None,
@@ -1296,6 +1315,18 @@ def _classify_workspace_for_gc(
         workspace,
         cleanup_enabled=cleanup_enabled,
     ):
+        if (
+            _failed_terminal_runtime_sync_inspection_required(
+                failed_terminal_workspace_no_work=failed_terminal_workspace_no_work,
+                failed_terminal_workspace_live_runtime=failed_terminal_workspace_live_runtime,
+            )
+            and _running_event_loop_active()
+        ):
+            raise RuntimeError(
+                "Sync GC classification requires precomputed failed-terminal "
+                "runtime state in async contexts; use "
+                "_classify_workspace_for_gc_async instead."
+            )
         runtime_state_cache_token = _FAILED_TERMINAL_RUNTIME_STATE_CACHE.set({})
         try:
             if failed_terminal_workspace_no_work is None:

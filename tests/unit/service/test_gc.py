@@ -2316,6 +2316,52 @@ def test_sync_classifier_computes_live_runtime_when_precompute_missing(
 
 
 @pytest.mark.unit
+async def test_sync_classifier_rejects_missing_runtime_precompute_in_async_context() -> None:
+    now = datetime.now(UTC)
+    workspace = Workspace(
+        id="ws_async_sync_classifier",
+        status=WorkspaceStatus.failed.value,
+        updated_at=now - timedelta(hours=25),
+        compose_project_name="proj",
+    )
+
+    with pytest.raises(RuntimeError, match="_classify_workspace_for_gc_async"):
+        _classify_workspace_for_gc(
+            workspace,
+            work_dir=Path("/tmp"),
+            now=now,
+            cutoff_at=now - timedelta(hours=24),
+            default_policy=True,
+            cleanup_enabled=True,
+        )
+
+
+@pytest.mark.unit
+async def test_sync_classifier_accepts_precomputed_runtime_state_in_async_context() -> None:
+    now = datetime.now(UTC)
+    workspace = Workspace(
+        id="ws_async_sync_classifier_precomputed",
+        status=WorkspaceStatus.failed.value,
+        updated_at=now - timedelta(hours=25),
+        compose_project_name="proj",
+    )
+
+    result = _classify_workspace_for_gc(
+        workspace,
+        work_dir=Path("/tmp"),
+        now=now,
+        cutoff_at=now - timedelta(hours=24),
+        default_policy=True,
+        cleanup_enabled=True,
+        failed_terminal_workspace_no_work=False,
+        failed_terminal_workspace_live_runtime=True,
+    )
+
+    assert isinstance(result, WorkspaceGCPreserved)
+    assert result.reason_code == TERMINAL_LIVE_RUNTIME_PRESERVED
+
+
+@pytest.mark.unit
 async def test_failed_terminal_workspace_runtime_state_unknown_without_compose_project() -> None:
     workspace = Workspace(id="ws_1", compose_project_name=None)
 
