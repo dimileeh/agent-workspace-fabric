@@ -507,6 +507,17 @@ class _RefreshFailingTerminalRuntimeReleaser(TerminalRuntimeReleaser):
         raise RuntimeError("claim refresh failed")
 
 
+class _RefreshLostTerminalRuntimeReleaser(TerminalRuntimeReleaser):
+    async def _refresh_terminal_runtime_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> bool:
+        del workspace_id, owner_id
+        return False
+
+
 class _RefreshObservingTerminalRuntimeReleaser(TerminalRuntimeReleaser):
     def __init__(
         self,
@@ -1295,6 +1306,54 @@ async def test_terminal_runtime_release_succeeds_when_final_claim_refresh_fails_
         assert workspace is not None
         assert workspace.execution_claimed_by is None
         assert workspace.execution_claim_expires_at is None
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.terminal_runtime_released",
+        )
+    assert len(events) == 1
+    assert events[0].payload["cleanup"]["reason_code"] == "CLEANUP_SUCCEEDED"
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_succeeds_when_final_claim_lost_after_cleanup(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    cleaner = _RecordingCleaner()
+    releaser = _RefreshLostTerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+    )
+
+    result = await releaser.release(
+        workspace_id,
+        source="test",
+        expected_status=WorkspaceStatus.failed,
+    )
+
+    assert result.ok
+    assert result.status == "released"
+    assert result.reason_code == TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE
+    assert result.cleanup is not None
+    assert result.cleanup.ok
+    assert cleaner.calls == [
+        {
+            "workspace_id": workspace_id,
+            "repo_url": "git@github.com:example/repo.git",
+            "compose_project_name": f"awf_{workspace_id}",
+            "compose_file_path": Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+            "worktree_host_path": None,
+            "remove_volumes": False,
+            "remove_worktree": False,
+        }
+    ]
+    async with session_factory() as session:
         events = await WorkspaceEventRepository(session).list(
             workspace_id=workspace_id,
             event_type="workspace.terminal_runtime_released",
