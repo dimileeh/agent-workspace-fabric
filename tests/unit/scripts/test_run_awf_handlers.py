@@ -39,7 +39,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.audit import REDACTION_MARKER
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    WorkspaceRepository,
+    WorkspaceTransitionBlockedByActiveOperationError,
+)
 from awf.db.session import make_engine, make_session_factory
 from scripts import run_awf
 from tests.postgres import postgres_test_engine, postgres_test_url
@@ -592,6 +596,89 @@ async def test_monitor_handoff_failure_records_blocked_callback_during_active_te
         "actual_status": WorkspaceStatus.monitoring_pr.value,
         "requested_status": WorkspaceStatus.failed.value,
         "operation_id": operation_id,
+        "reason_code": "RUN_AWF_MONITOR_CRASHED",
+        "failure_reason": "infrastructure_failure",
+        "failure_message": "monitor handoff crashed: RuntimeError('synthetic monitor crash')",
+    }
+    assert releaser.calls == []
+
+
+@pytest.mark.unit
+async def test_monitor_handoff_failure_records_blocked_callback_without_operation_row(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monitor = _CrashingMonitor()
+    releaser = _RecordingTerminalRuntimeReleaser()
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            branch_base="development",
+            task_title="blocked monitor crash without durable op",
+            task_prompt="preserve monitor crash handoff",
+            agent="codex",
+            profile_ref=None,
+            requested_profile=None,
+            test_commands=[],
+            requires_database=False,
+        )
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+        ):
+            await repo.transition(ws, to=target, reason_code="TEST")
+        await s.commit()
+        workspace_id = ws.id
+
+    original_transition = WorkspaceRepository.transition
+
+    async def _transition_blocked_without_operation(
+        self: WorkspaceRepository,
+        workspace: Workspace,
+        **kwargs: Any,
+    ) -> Workspace:
+        if kwargs.get("to") == WorkspaceStatus.failed:
+            raise WorkspaceTransitionBlockedByActiveOperationError(None)
+        return await original_transition(self, workspace, **kwargs)
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "transition",
+        _transition_blocked_without_operation,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic monitor crash"):
+        await run_awf._run_monitor_with_release_fallback(
+            monitor,
+            workspace_id=workspace_id,
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            session_factory=factory,
+            terminal_runtime_releaser=releaser,
+        )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ignored_events = [
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert ws.status == WorkspaceStatus.monitoring_pr.value
+    assert ws.failure_reason is None
+    assert ws.failure_message is None
+    assert ignored_events[-1].payload == {
+        "callback_source": "run_awf",
+        "callback_action": "monitor_handoff_failed",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": WorkspaceStatus.monitoring_pr.value,
+        "requested_status": WorkspaceStatus.failed.value,
         "reason_code": "RUN_AWF_MONITOR_CRASHED",
         "failure_reason": "infrastructure_failure",
         "failure_message": "monitor handoff crashed: RuntimeError('synthetic monitor crash')",

@@ -747,7 +747,7 @@ async def _mark_monitor_handoff_failed(
                 reason_code="RUN_AWF_MONITOR_CRASHED",
             )
         except WorkspaceTransitionBlockedByActiveOperationError as exc:
-            operation_id = exc.operation.id
+            operation_id = exc.operation_id
             await s.rollback()
             await _record_blocked_monitor_handoff_failed(
                 s,
@@ -765,7 +765,7 @@ async def _record_blocked_monitor_handoff_failed(
     session: AsyncSession,
     *,
     workspace_id: str,
-    operation_id: str,
+    operation_id: str | None,
     failure_reason: str,
     failure_message: str,
 ) -> None:
