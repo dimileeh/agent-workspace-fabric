@@ -1637,6 +1637,59 @@ async def test_terminal_runtime_release_redacts_cleanup_result_errors_in_event(
 
 
 @pytest.mark.unit
+async def test_terminal_runtime_release_redacts_preserved_failure_message_in_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    credentialed_url = "https://svc-user:super-secret-token@github.com/example/private.git"
+    api_token = "ghp_1234567890abcdef"
+    raw_failure_message = (
+        f"agent failed for {credentialed_url} "
+        f"with Authorization: Bearer {api_token} and GITHUB_TOKEN={api_token}"
+    )
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.failure_message = raw_failure_message
+        await session.commit()
+    cleaner = _RecordingCleaner()
+    releaser = TerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+    )
+
+    result = await releaser.release(
+        workspace_id,
+        source="test",
+        expected_status=WorkspaceStatus.failed,
+    )
+
+    assert result.ok
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.terminal_runtime_released",
+        )
+    assert workspace.failure_message == raw_failure_message
+    assert len(events) == 1
+    persisted_message = events[0].payload["preserved"]["failure_message"]
+    serialized_payload = repr(events[0].payload)
+    assert "super-secret-token" not in serialized_payload
+    assert api_token not in serialized_payload
+    assert "https://[redacted]@github.com/example/private.git" in persisted_message
+    assert "Authorization: Bearer [redacted]" in persisted_message
+    assert "GITHUB_TOKEN=[redacted]" in persisted_message
+
+
+@pytest.mark.unit
 async def test_terminal_runtime_release_redacts_cleanup_exception_evidence(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

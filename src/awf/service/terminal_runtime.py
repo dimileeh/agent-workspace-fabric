@@ -573,7 +573,11 @@ async def record_terminal_runtime_release_event(
                 "pr_url": workspace.pr_url,
                 "pr_number": workspace.pr_number,
                 "failure_reason": workspace.failure_reason,
-                "failure_message": workspace.failure_message,
+                "failure_message": (
+                    redact_audit_text(workspace.failure_message, limit=2048)
+                    if workspace.failure_message is not None
+                    else None
+                ),
             }.items()
             if value is not None
         },
