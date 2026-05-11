@@ -7,6 +7,8 @@ since each call is distinguishable by its argv.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
@@ -162,6 +164,38 @@ class _RecordingTerminalRuntimeReleaser:
                 "expected_status": expected_status,
             }
         )
+        return None
+
+
+class _BlockingTerminalRuntimeReleaser:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.started = asyncio.Event()
+        self.allow_finish = asyncio.Event()
+        self.cancelled = False
+        self.completed = False
+
+    async def release(
+        self,
+        workspace_id: str,
+        *,
+        source: str,
+        expected_status: WorkspaceStatus | None = None,
+    ) -> object:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "source": source,
+                "expected_status": expected_status,
+            }
+        )
+        self.started.set()
+        try:
+            await self.allow_finish.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        self.completed = True
         return None
 
 
@@ -3518,6 +3552,47 @@ class TestHappyPath:
 
 
 class TestFailurePaths:
+    @pytest.mark.unit
+    async def test_terminal_runtime_release_finishes_when_caller_is_cancelled(
+        self,
+        executor: WorkspaceExecutor,
+    ) -> None:
+        terminal_releaser = _BlockingTerminalRuntimeReleaser()
+        executor._terminal_runtime_releaser = terminal_releaser  # type: ignore[attr-defined]
+        release_task = asyncio.create_task(
+            executor._release_terminal_runtime(  # noqa: SLF001
+                "ws_cancelled",
+                expected_status=WorkspaceStatus.failed,
+            )
+        )
+
+        try:
+            await asyncio.wait_for(terminal_releaser.started.wait(), timeout=1)
+            release_task.cancel()
+            await asyncio.sleep(0)
+
+            assert not terminal_releaser.cancelled
+            assert not release_task.done()
+
+            terminal_releaser.allow_finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(release_task, timeout=1)
+        finally:
+            terminal_releaser.allow_finish.set()
+            if not release_task.done():
+                release_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await release_task
+
+        assert terminal_releaser.completed
+        assert terminal_releaser.calls == [
+            {
+                "workspace_id": "ws_cancelled",
+                "source": "executor",
+                "expected_status": WorkspaceStatus.failed,
+            }
+        ]
+
     @pytest.mark.unit
     async def test_agent_failure_with_no_work_marks_failed(
         self,

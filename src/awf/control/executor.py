@@ -5390,23 +5390,34 @@ class WorkspaceExecutor:
         expected_status: WorkspaceStatus,
         execution_claim_owner_id: str | None = None,
     ) -> None:
+        async def _release() -> None:
+            try:
+                await self._release_execution_claim_before_terminal_runtime(
+                    workspace_id,
+                    owner_id=execution_claim_owner_id,
+                )
+                await self._terminal_runtime_releaser.release(
+                    workspace_id,
+                    source="executor",
+                    expected_status=expected_status,
+                )
+            except Exception as exc:  # pragma: no cover - defensive; terminal state already landed.
+                _log.warning(
+                    "executor.terminal_runtime_release_failed",
+                    workspace_id=workspace_id,
+                    expected_status=expected_status.value,
+                    error=redact_audit_text(repr(exc), limit=400),
+                )
+
+        release_task = asyncio.create_task(
+            _release(),
+            name=f"awf-executor-terminal-runtime-release-{workspace_id}",
+        )
         try:
-            await self._release_execution_claim_before_terminal_runtime(
-                workspace_id,
-                owner_id=execution_claim_owner_id,
-            )
-            await self._terminal_runtime_releaser.release(
-                workspace_id,
-                source="executor",
-                expected_status=expected_status,
-            )
-        except Exception as exc:  # pragma: no cover - defensive; terminal state already landed.
-            _log.warning(
-                "executor.terminal_runtime_release_failed",
-                workspace_id=workspace_id,
-                expected_status=expected_status.value,
-                error=redact_audit_text(repr(exc), limit=400),
-            )
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            await release_task
+            raise
 
     async def _prepare_provider_recovery(self, workspace_id: str) -> None:
         async with self._session_factory() as session:
