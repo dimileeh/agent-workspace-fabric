@@ -866,8 +866,41 @@ class ControlWorker:
         candidates = await self._list_terminal_runtime_candidates(
             limit=self._config.terminal_runtime_release_max_per_scan,
         )
+        release_errors: list[Exception] = []
         for candidate in candidates:
-            await self._release_terminal_runtime_for_candidate(candidate)
+            try:
+                await self._release_terminal_runtime_for_candidate(candidate)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if _worker_exception_is_transient_db_connection(exc):
+                    _log.warning(
+                        "worker.terminal_runtime_release_candidate_db_connection_closed",
+                        workspace_id=candidate.workspace_id,
+                        status=candidate.status.value,
+                        compose_project_name=candidate.compose_project_name,
+                        reason_code=DB_CONNECTION_CLOSED_REASON,
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:240],
+                    )
+                else:
+                    _log.exception(
+                        "worker.terminal_runtime_release_candidate_failed",
+                        workspace_id=candidate.workspace_id,
+                        status=candidate.status.value,
+                        compose_project_name=candidate.compose_project_name,
+                        reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:240],
+                    )
+                release_errors.append(exc)
+        if len(release_errors) == 1:
+            raise release_errors[0]
+        if release_errors:
+            raise ExceptionGroup(
+                "terminal runtime release failed",
+                release_errors,
+            )
 
     async def _list_terminal_runtime_candidates(
         self,

@@ -8722,3 +8722,67 @@ class TestTerminalRuntimeRelease:
                 for ws_id in workspace_ids
             ]
         assert released_counts == [1, 1, 1, 1, 1]
+
+    @pytest.mark.unit
+    async def test_release_continues_batch_when_per_candidate_recording_raises(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_ids: list[str] = []
+        for i in range(3):
+            workspace_ids.append(
+                await _create_terminal_execution(
+                    session_factory,
+                    origin_repo,
+                    f"terminal-release-per-candidate-error-{i}",
+                    WorkspaceStatus.failed,
+                )
+            )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        failing_workspace_id = workspace_ids[1]
+        original_record = worker._record_terminal_runtime_released  # noqa: SLF001
+
+        async def _record_with_one_failure(
+            candidate: _TerminalRuntimeCandidate,
+            cleanup: WorkspaceCleanupResult,
+        ) -> None:
+            if candidate.workspace_id == failing_workspace_id:
+                raise RuntimeError("simulated event recording failure")
+            await original_record(candidate, cleanup)
+
+        worker._record_terminal_runtime_released = _record_with_one_failure  # type: ignore[method-assign]  # noqa: SLF001
+
+        with pytest.raises(RuntimeError, match="simulated event recording failure"):
+            await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        cleaned_workspace_ids = [call["workspace_id"] for call in cleaner.calls]
+        assert set(cleaned_workspace_ids) == set(workspace_ids)
+        async with session_factory() as s:
+            repo = WorkspaceEventRepository(s)
+            released_counts = {
+                ws_id: len(
+                    await repo.list(
+                        workspace_id=ws_id,
+                        event_type="workspace.terminal_runtime_released",
+                    )
+                )
+                for ws_id in workspace_ids
+            }
+        assert released_counts[failing_workspace_id] == 0
+        for ws_id, count in released_counts.items():
+            if ws_id == failing_workspace_id:
+                continue
+            assert count == 1
