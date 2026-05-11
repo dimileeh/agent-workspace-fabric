@@ -628,11 +628,16 @@ class TestCiFailure:
         )
 
     @pytest.mark.unit
-    def test_transient_failure_without_run_id_dispatches_agent_repair(self) -> None:
+    @pytest.mark.parametrize("run_id", [None, ""])
+    def test_transient_failure_without_run_id_dispatches_agent_repair(
+        self,
+        run_id: str | None,
+    ) -> None:
         failure = CheckFailure(
             name="CI",
             conclusion="FAILURE",
             log_excerpt="HTTP status server error (502 Bad Gateway)",
+            run_id=run_id,
         )
 
         action = decide(
