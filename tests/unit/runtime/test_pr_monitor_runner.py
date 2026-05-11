@@ -127,6 +127,7 @@ def _monitor_runner(
     fake: FakeCommandRunner,
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
+    workspace_runtime_context: str = "",
 ) -> PullRequestMonitorRunner:
     return PullRequestMonitorRunner(
         session_factory=session_factory or object(),  # type: ignore[arg-type]
@@ -134,6 +135,7 @@ def _monitor_runner(
         adapter=object(),  # type: ignore[arg-type]
         gh=object(),  # type: ignore[arg-type]
         worktrees_root=tmp_path / "work" / "git" / "worktrees",
+        workspace_runtime_context=workspace_runtime_context,
     )
 
 
@@ -148,6 +150,38 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
     )
+
+
+@pytest.mark.unit
+async def test_address_review_comment_prompt_receives_workspace_runtime_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = "Workspace runtime context\n- Use `$AWF_TEST_DATABASE_URL`."
+    runner = _monitor_runner(
+        tmp_path,
+        FakeCommandRunner(),
+        workspace_runtime_context=context,
+    )
+    captured: dict[str, str] = {}
+
+    async def _capture_verdict(**kwargs: object) -> VerdictResult:
+        captured["prompt"] = str(kwargs["prompt"])
+        return VerdictResult(verdict="false_positive", reason="covered")
+
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _capture_verdict)
+
+    await runner._address_review_comment_result(
+        workspace_id="ws_1",
+        repo=RepoRef(owner="acme", name="repo"),
+        pr_number=12,
+        comment=ReviewComment(comment_id="issue:1", body_excerpt="please check DB test"),
+        compose_project="awf_ws_1",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert "Workspace runtime context" in captured["prompt"]
+    assert "$AWF_TEST_DATABASE_URL" in captured["prompt"]
 
 
 def _gh_pr_merge_calls(cmd: FakeCommandRunner) -> list[list[str]]:

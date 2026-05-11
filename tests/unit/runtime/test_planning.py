@@ -188,6 +188,33 @@ def test_prompts_reference_plan_and_report_paths() -> None:
 
 
 @pytest.mark.unit
+def test_agent_planning_and_execution_prompts_include_workspace_runtime_context() -> None:
+    plan = Path("docs/awf-plans/ws_123.md")
+    context = "Workspace runtime context\n- Use `$AWF_TEST_DATABASE_URL` for DB tests."
+
+    agent_prompt = build_agent_task_prompt(
+        task_prompt="Add metrics",
+        workspace_runtime_context=context,
+    )
+    planning_prompt = build_planning_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        workspace_runtime_context=context,
+    )
+    execution_prompt = build_execution_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        iteration=0,
+        gaps=(),
+        workspace_runtime_context=context,
+    )
+
+    for prompt in (agent_prompt, planning_prompt, execution_prompt):
+        assert "Workspace runtime context" in prompt
+        assert "$AWF_TEST_DATABASE_URL" in prompt
+
+
+@pytest.mark.unit
 def test_conformance_prompt_is_evidence_only_and_does_not_rerun_validation() -> None:
     prompt = build_conformance_prompt(
         task_prompt="Add metrics",

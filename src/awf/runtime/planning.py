@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 from awf.common.redaction import redact_secrets
+from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
 if TYPE_CHECKING:
     from awf.adapters.base import AgentRunError
@@ -170,11 +171,13 @@ def build_agent_task_prompt(
     *,
     task_prompt: str,
     coordination_warnings: Sequence[Mapping[str, Any]] = (),
+    workspace_runtime_context: str = "",
 ) -> str:
     warning_section = render_coordination_warning_section(coordination_warnings)
-    if not warning_section:
+    runtime_section = render_workspace_runtime_context_section(workspace_runtime_context)
+    if not warning_section and not runtime_section:
         return task_prompt
-    return f"{warning_section}### Task\n{task_prompt}\n"
+    return f"{runtime_section}{warning_section}### Task\n{task_prompt}\n"
 
 
 def build_planning_prompt(
@@ -182,8 +185,10 @@ def build_planning_prompt(
     task_prompt: str,
     plan_path: Path,
     coordination_warnings: Sequence[Mapping[str, Any]] = (),
+    workspace_runtime_context: str = "",
 ) -> str:
     warning_section = render_coordination_warning_section(coordination_warnings)
+    runtime_section = render_workspace_runtime_context_section(workspace_runtime_context)
     return (
         "## Planning phase\n\n"
         "Create a concrete implementation plan for the task below.\n\n"
@@ -202,6 +207,7 @@ def build_planning_prompt(
         "- tests to write first;\n"
         "- validation commands;\n"
         "- risks, assumptions, and explicit non-goals.\n\n"
+        f"{runtime_section}"
         f"{warning_section}"
         f"### Task\n{task_prompt}\n"
     )
@@ -256,6 +262,7 @@ def build_execution_prompt(
     iteration: int,
     gaps: tuple[str, ...],
     coordination_warnings: Sequence[Mapping[str, Any]] = (),
+    workspace_runtime_context: str = "",
 ) -> str:
     if iteration == 0:
         instruction = (
@@ -271,11 +278,13 @@ def build_execution_prompt(
         )
 
     warning_section = render_coordination_warning_section(coordination_warnings)
+    runtime_section = render_workspace_runtime_context_section(workspace_runtime_context)
     return (
         "## Execution phase\n\n"
         f"Read `{plan_path.as_posix()}` and use it as the implementation contract.\n"
         f"{instruction}\n\n"
         "Do not switch branches, push, or open a PR. AWF owns branch and PR lifecycle.\n\n"
+        f"{runtime_section}"
         f"{warning_section}"
         f"### Task\n{task_prompt}\n"
     )

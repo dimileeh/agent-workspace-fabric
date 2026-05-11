@@ -59,6 +59,7 @@ def build_release_pr_monitor(
     merge_coordinator: MergeCoordinator | None = None,
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
     terminal_runtime_releaser: TerminalRuntimeReleaserProtocol | None = None,
+    workspace_runtime_context: str = "",
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` preconfigured for
     release PRs — the single divergence from a feature PR is
@@ -87,6 +88,7 @@ def build_release_pr_monitor(
         merge_coordinator=merge_coordinator,
         post_merge_target_reconciler=post_merge_target_reconciler,
         terminal_runtime_releaser=terminal_runtime_releaser,
+        workspace_runtime_context=workspace_runtime_context,
     )
 
 
@@ -110,6 +112,7 @@ def build_feature_pr_monitor(
     merge_coordinator: MergeCoordinator | None = None,
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
     terminal_runtime_releaser: TerminalRuntimeReleaserProtocol | None = None,
+    workspace_runtime_context: str = "",
 ) -> PullRequestMonitorRunner:
     """Instantiate a ``PullRequestMonitorRunner`` for feature→development
     work. ``auto_merge=True``; on green gates the monitor squash-merges
@@ -138,4 +141,5 @@ def build_feature_pr_monitor(
         merge_coordinator=merge_coordinator,
         post_merge_target_reconciler=post_merge_target_reconciler,
         terminal_runtime_releaser=terminal_runtime_releaser,
+        workspace_runtime_context=workspace_runtime_context,
     )

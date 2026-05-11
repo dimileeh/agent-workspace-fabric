@@ -431,6 +431,7 @@ class PullRequestMonitorRunner:
         merge_coordinator: MergeCoordinator | None = None,
         post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
         terminal_runtime_releaser: TerminalRuntimeReleaserProtocol | None = None,
+        workspace_runtime_context: str = "",
     ) -> None:
         self._deps = _RunnerDeps(
             session_factory=session_factory,
@@ -443,6 +444,7 @@ class PullRequestMonitorRunner:
         )
         self._config = monitor_config or MonitorConfig()
         self._runner_config = runner_config or MonitorRunnerConfig()
+        self._workspace_runtime_context = workspace_runtime_context
         self._merge_coordinator = merge_coordinator or DEFAULT_MERGE_COORDINATOR
         self._worktrees_root = worktrees_root
         self._work_dir = _infer_service_work_dir(worktrees_root)
@@ -3689,7 +3691,12 @@ class PullRequestMonitorRunner:
         compose_file: Path,
         state: MonitorState | None = None,
     ) -> Verdict:
-        prompt = address_thread_prompt(pr_number=pr_number, repo_slug=repo.slug(), thread=thread)
+        prompt = address_thread_prompt(
+            pr_number=pr_number,
+            repo_slug=repo.slug(),
+            thread=thread,
+            workspace_runtime_context=self._workspace_runtime_context,
+        )
         return await self._invoke_cli_for_verdict(
             workspace_id=workspace_id,
             prompt=prompt,
@@ -3733,7 +3740,10 @@ class PullRequestMonitorRunner:
         state: MonitorState | None = None,
     ) -> VerdictResult:
         prompt = address_review_comment_prompt(
-            pr_number=pr_number, repo_slug=repo.slug(), comment=comment
+            pr_number=pr_number,
+            repo_slug=repo.slug(),
+            comment=comment,
+            workspace_runtime_context=self._workspace_runtime_context,
         )
         return await self._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
@@ -3879,6 +3889,7 @@ class PullRequestMonitorRunner:
                 repo_slug=repo.slug(),
                 base_branch=base_branch,
                 conflicting_files=conflicting_files,
+                workspace_runtime_context=self._workspace_runtime_context,
             )
             agent_run_err = None
             command_evidence: list[str] = []
@@ -3948,7 +3959,12 @@ class PullRequestMonitorRunner:
         remote_branch: str,
         remote_push_url: str | None = None,
     ) -> _GitPushResult:
-        prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
+        prompt = fix_ci_prompt(
+            pr_number=pr_number,
+            repo_slug=repo.slug(),
+            failures=failures,
+            workspace_runtime_context=self._workspace_runtime_context,
+        )
         agent_run_err = None
         command_evidence: list[str] = []
         if await self._provider_recovery_suppresses_cli(workspace_id):
