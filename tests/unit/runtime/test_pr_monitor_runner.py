@@ -357,6 +357,7 @@ async def test_rerun_transient_ci_action_records_failed_rerun_request(
         ci_failures=(failure,),
         head_sha="abc1234567890def",
     )
+    state_key = _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
     state = MonitorState()
 
     terminal = await runner._execute(
@@ -377,7 +378,7 @@ async def test_rerun_transient_ci_action_records_failed_rerun_request(
     assert terminal is False
     assert adapter.calls == []
     assert state.iter_count == 1
-    assert state.threads_addressed_ids == {}
+    assert state.threads_addressed_ids[state_key] == "1"
     assert cmd.calls[0].args == [
         "gh",
         "run",
@@ -390,6 +391,7 @@ async def test_rerun_transient_ci_action_records_failed_rerun_request(
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
+        assert workspace.monitor_threads_addressed[state_key] == "1"
         events = [
             event
             for event in workspace.events
