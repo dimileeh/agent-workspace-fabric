@@ -403,6 +403,10 @@ class TestSyncBaseConflictPrompt:
 
         assert "Workspace runtime context" in prompt
         assert "Sidecar services are running" in prompt
+        assert (
+            "AWF just ran `git merge origin/main` and it stopped on conflicts in these files:"
+            in prompt
+        )
 
 
 class TestFixCiPrompt:

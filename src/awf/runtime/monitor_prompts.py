@@ -154,8 +154,9 @@ def sync_base_conflict_prompt(
     )
     return (
         f"PR #{pr_number} ({repo_slug}) has merge conflicts with base branch "
-        f"`{base_branch}`. AWF just ran `git merge origin/{base_branch}` and it "
+        f"`{base_branch}`. "
         f"{_workspace_runtime_context_section(workspace_runtime_context)}"
+        f"AWF just ran `git merge origin/{base_branch}` and it "
         "stopped on conflicts in these files:\n\n"
         f"{files_block}\n\n"
         "Resolve each conflict by preserving the intent of BOTH sides (the base "
