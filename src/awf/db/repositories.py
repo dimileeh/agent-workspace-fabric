@@ -424,6 +424,7 @@ class WorkspaceTransitionStaleError(RuntimeError):
 _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES: Final[tuple[str, ...]] = (
     OperationType.cancel.value,
     OperationType.stop.value,
+    OperationType.destroy.value,
 )
 _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES: Final[tuple[str, ...]] = (
     OperationStatus.pending.value,
@@ -438,7 +439,7 @@ def external_runtime_teardown_operation_blocks_controls(
     *,
     now: datetime | None = None,
 ) -> bool:
-    """Return whether a stop/cancel operation still owns the teardown gate."""
+    """Return whether a destructive teardown operation still owns the teardown gate."""
     if operation.type not in _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_TYPES:
         return False
     if operation.status not in _EXTERNAL_RUNTIME_TEARDOWN_OPERATION_STATUSES:

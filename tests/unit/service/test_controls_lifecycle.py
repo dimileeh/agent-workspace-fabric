@@ -1527,14 +1527,16 @@ async def test_cancel_and_stop_abort_external_cleanup_after_repeated_teardown_le
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("operation_type", [OperationType.stop, OperationType.destroy])
 async def test_active_runtime_teardown_blocks_control_requests_and_atomic_transitions(
     session: AsyncSession,
+    operation_type: OperationType,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
     workspace.pr_url = "https://github.com/example/control-lifecycle/pull/77"
-    active_stop = await OperationRepository(session).create(
+    active_teardown = await OperationRepository(session).create(
         workspace_id=workspace.id,
-        operation_type=OperationType.stop,
+        operation_type=operation_type,
         status=OperationStatus.running,
         payload={"source": "operator_api"},
     )
@@ -1552,11 +1554,11 @@ async def test_active_runtime_teardown_blocks_control_requests_and_atomic_transi
         )
 
     assert conflict.value.detail == {
-        "operation_id": active_stop.id,
-        "operation_type": OperationType.stop.value,
+        "operation_id": active_teardown.id,
+        "operation_type": operation_type.value,
         "operation_status": OperationStatus.running.value,
     }
-    assert blocked.value.operation.id == active_stop.id
+    assert blocked.value.operation.id == active_teardown.id
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
     assert workspace.version == 1
 

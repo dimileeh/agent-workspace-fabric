@@ -95,13 +95,14 @@ _RESOURCE_RESERVATION_RELEASE_STATUSES = frozenset(
         WorkspaceStatus.destroyed,
     }
 )
-_REBASE_DESTRUCTIVE_CONFLICT_TYPES = frozenset(
+_RUNTIME_TEARDOWN_OPERATION_TYPES: Final[frozenset[str]] = frozenset(
     {
         OperationType.cancel.value,
         OperationType.stop.value,
         OperationType.destroy.value,
     }
 )
+_REBASE_DESTRUCTIVE_CONFLICT_TYPES: Final[frozenset[str]] = _RUNTIME_TEARDOWN_OPERATION_TYPES
 _OPERATOR_API_SOURCE = "operator_api"
 _OPERATOR_CANCEL_REASON_CODE = "OPERATOR_CANCEL"
 _OPERATOR_STOP_REASON_CODE = "OPERATOR_STOP"
@@ -1899,7 +1900,7 @@ class WorkspaceControlService:
                     active_teardown = await _find_active_operation(
                         operations,
                         workspace_id=workspace_id,
-                        operation_types={OperationType.cancel.value, OperationType.stop.value},
+                        operation_types=_RUNTIME_TEARDOWN_OPERATION_TYPES,
                     )
                     if active_teardown is not None:
                         raise WorkspaceActiveOperationConflictError(active_teardown)
@@ -1923,7 +1924,7 @@ class WorkspaceControlService:
         active_teardown = await _find_active_operation(
             operations,
             workspace_id=workspace_id,
-            operation_types={OperationType.cancel.value, OperationType.stop.value},
+            operation_types=_RUNTIME_TEARDOWN_OPERATION_TYPES,
         )
         if active_teardown is not None:
             raise WorkspaceActiveOperationConflictError(active_teardown)
@@ -2894,10 +2895,10 @@ async def _find_active_operation(
     for operation in active:
         if operation.type not in operation_types:
             continue
-        if operation.type in {
-            OperationType.cancel.value,
-            OperationType.stop.value,
-        } and not external_runtime_teardown_operation_blocks_controls(operation, now=now):
+        if (
+            operation.type in _RUNTIME_TEARDOWN_OPERATION_TYPES
+            and not external_runtime_teardown_operation_blocks_controls(operation, now=now)
+        ):
             continue
         return operation
     return None

@@ -143,6 +143,17 @@ def test_repository_private_helper_edges() -> None:
             "created_at": now,
         },
     )()
+    active_destroy = type(
+        "OperationShape",
+        (),
+        {
+            "type": OperationType.destroy.value,
+            "status": OperationStatus.running.value,
+            "lease_renewed_at": now,
+            "started_at": now,
+            "created_at": now,
+        },
+    )()
     finished_teardown = type(
         "OperationShape",
         (),
@@ -183,6 +194,10 @@ def test_repository_private_helper_edges() -> None:
 
     assert external_runtime_teardown_operation_blocks_controls(
         active_teardown,  # type: ignore[arg-type]
+        now=now + timedelta(seconds=1),
+    )
+    assert external_runtime_teardown_operation_blocks_controls(
+        active_destroy,  # type: ignore[arg-type]
         now=now + timedelta(seconds=1),
     )
     assert not external_runtime_teardown_operation_blocks_controls(
@@ -1467,6 +1482,37 @@ async def test_workspace_transition_if_current_blocks_pending_teardown_operation
 
     assert exc_info.value.operation.id == operation.id
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_claim_execution_if_available_blocks_active_destroy_operation(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    operation_repo = OperationRepository(session)
+    workspace = await _workspace(
+        session,
+        title="active destroy execution claim block",
+        status=WorkspaceStatus.requested,
+    )
+    await operation_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.running,
+        payload={"source": "operator_api"},
+    )
+
+    claimed = await workspace_repo.claim_execution_if_available(
+        workspace.id,
+        owner_id="execution-worker",
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        statuses=(WorkspaceStatus.requested,),
+        block_active_teardown_operation=True,
+    )
+
+    assert claimed is None
+    assert workspace.execution_claimed_by is None
+    assert workspace.execution_claim_expires_at is None
 
 
 @pytest.mark.unit
