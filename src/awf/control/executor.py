@@ -1204,6 +1204,7 @@ class WorkspaceExecutor:
                 )
                 persisted.failure_reason = FailureReason.infrastructure_failure.value
                 persisted.failure_message = safe_message
+                terminal_runtime_claim_owner_id = persisted.execution_claimed_by
                 if not await self._transition_or_record_blocked_active_operation(
                     session,
                     repo,
@@ -1224,6 +1225,7 @@ class WorkspaceExecutor:
                 await self._release_terminal_runtime(
                     workspace_id,
                     expected_status=WorkspaceStatus.failed,
+                    execution_claim_owner_id=terminal_runtime_claim_owner_id,
                 )
                 return
 
@@ -2933,6 +2935,7 @@ class WorkspaceExecutor:
                     recovered_status = (
                         WorkspaceStatus.monitoring_pr if has_monitor else WorkspaceStatus.completed
                     )
+                    terminal_runtime_claim_owner_id = persisted.execution_claimed_by
                     if not await self._transition_or_record_blocked_active_operation(
                         session,
                         repo,
@@ -2948,6 +2951,7 @@ class WorkspaceExecutor:
                     await self._release_terminal_runtime(
                         workspace_id,
                         expected_status=WorkspaceStatus.completed,
+                        execution_claim_owner_id=terminal_runtime_claim_owner_id,
                     )
                 _log.info(
                     "executor.recovery_skip_push",
@@ -3187,6 +3191,7 @@ class WorkspaceExecutor:
             else:
                 # No monitor wired (legacy executor path / unit-test shim) —
                 # preserve the original ``pushing → completed`` contract.
+                terminal_runtime_claim_owner_id = persisted.execution_claimed_by
                 if not await self._transition_or_record_blocked_active_operation(
                     session,
                     repo,
@@ -3202,6 +3207,7 @@ class WorkspaceExecutor:
                 await self._release_terminal_runtime(
                     workspace_id,
                     expected_status=WorkspaceStatus.completed,
+                    execution_claim_owner_id=terminal_runtime_claim_owner_id,
                 )
 
         if successful_validation_run_id is not None and pr.head_sha:
@@ -3691,6 +3697,7 @@ class WorkspaceExecutor:
             )
             persisted.failure_reason = FailureReason.infrastructure_failure.value
             persisted.failure_message = message
+            terminal_runtime_claim_owner_id = persisted.execution_claimed_by
             if not await self._transition_or_record_blocked_active_operation(
                 session,
                 repo,
@@ -3707,6 +3714,7 @@ class WorkspaceExecutor:
         await self._release_terminal_runtime(
             workspace_id,
             expected_status=WorkspaceStatus.failed,
+            execution_claim_owner_id=terminal_runtime_claim_owner_id,
         )
         _log.error(
             "executor.pr_reexecution_blocked",
@@ -3786,6 +3794,7 @@ class WorkspaceExecutor:
                 )
             ws.failure_reason = FailureReason.infrastructure_failure.value
             ws.failure_message = message[:2000]
+            terminal_runtime_claim_owner_id = ws.execution_claimed_by
             if not await self._transition_or_record_blocked_active_operation(
                 session,
                 repo,
@@ -3801,6 +3810,7 @@ class WorkspaceExecutor:
             await self._release_terminal_runtime(
                 workspace_id,
                 expected_status=WorkspaceStatus.failed,
+                execution_claim_owner_id=terminal_runtime_claim_owner_id,
             )
             return False
 
@@ -5320,6 +5330,7 @@ class WorkspaceExecutor:
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                     payload={"message": safe_message[:1000]},
                 )
+            terminal_runtime_claim_owner_id = ws.execution_claimed_by
             payload: dict[str, Any] | None = None
             if details is not None or salvage is not None:
                 payload = {
@@ -5346,15 +5357,44 @@ class WorkspaceExecutor:
         await self._release_terminal_runtime(
             workspace_id,
             expected_status=WorkspaceStatus.failed,
+            execution_claim_owner_id=terminal_runtime_claim_owner_id,
         )
+
+    async def _release_execution_claim_before_terminal_runtime(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str | None,
+    ) -> None:
+        if owner_id is None:
+            return
+        try:
+            async with self._session_factory() as session:
+                await WorkspaceRepository(session).release_execution_claim(
+                    workspace_id,
+                    owner_id=owner_id,
+                )
+                await session.commit()
+        except Exception as exc:  # pragma: no cover - defensive; terminal release still runs.
+            _log.warning(
+                "executor.terminal_runtime_execution_claim_release_failed",
+                workspace_id=workspace_id,
+                owner_id=owner_id,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
 
     async def _release_terminal_runtime(
         self,
         workspace_id: str,
         *,
         expected_status: WorkspaceStatus,
+        execution_claim_owner_id: str | None = None,
     ) -> None:
         try:
+            await self._release_execution_claim_before_terminal_runtime(
+                workspace_id,
+                owner_id=execution_claim_owner_id,
+            )
             await self._terminal_runtime_releaser.release(
                 workspace_id,
                 source="executor",

@@ -36,6 +36,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.node.cleanup import CLEANUP_SUCCEEDED, WorkspaceCleanupResult
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -53,6 +54,7 @@ from awf.runtime.validation import (
     ValidationResult,
     ValidationRunner,
 )
+from awf.service.terminal_runtime import TerminalRuntimeReleaser
 from tests.postgres import postgres_test_engine
 
 from .executor_paths import _test_worktrees_root
@@ -161,6 +163,15 @@ class _RecordingTerminalRuntimeReleaser:
             }
         )
         return None
+
+
+class _RecordingTerminalRuntimeCleaner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def cleanup(self, **kwargs: object) -> WorkspaceCleanupResult:
+        self.calls.append(dict(kwargs))
+        return WorkspaceCleanupResult(status="succeeded", reason_code=CLEANUP_SUCCEEDED)
 
 
 def _adapter_prompt_from_call(call: Any) -> str:
@@ -3639,6 +3650,67 @@ class TestFailurePaths:
                 "expected_status": WorkspaceStatus.failed,
             }
         ]
+
+    @pytest.mark.unit
+    async def test_validation_failure_releases_worker_claim_before_terminal_runtime_cleanup(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        cleaner = _RecordingTerminalRuntimeCleaner()
+        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+        pr = PullRequestCreator(fake)
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=compose,
+            validation=validation,
+            pr_creator=pr,
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                default_models={
+                    AgentRuntime.codex: "gpt-5",
+                    AgentRuntime.claude_code: "sonnet",
+                    AgentRuntime.gemini: "gemini-2.5-pro",
+                },
+                max_validation_fix_passes=0,
+            ),
+            terminal_runtime_releaser=TerminalRuntimeReleaser(
+                session_factory=factory,
+                cleaner_factory=lambda: cleaner,
+                worktrees_root=tmp_path / "work" / "worktrees",
+            ),
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        owner_id = "worker-validation-failure"
+        fake.queue_result(returncode=0)  # adapter ok
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="f\n")  # diff --cached (non-empty)
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 5 failed")
+
+        await executor.execute(
+            ws_id,
+            execution_owner_id=owner_id,
+            execution_lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+
+        assert [call["workspace_id"] for call in cleaner.calls] == [ws_id]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+        assert any(event.event_type == "workspace.terminal_runtime_released" for event in events)
 
     @pytest.mark.unit
     async def test_coverage_below_threshold_fails_validation_with_structured_reason(
