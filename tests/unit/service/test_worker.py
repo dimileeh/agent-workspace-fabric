@@ -10,8 +10,9 @@ from typing import Any
 import pytest
 import structlog
 
+from awf.common.audit import REDACTION_MARKER
 from awf.common.config import Settings
-from awf.profiles.models import ProfileMonitor, WorkspaceProfile
+from awf.profiles.models import ProfileMonitor, ProfileRuntime, ProfileService, WorkspaceProfile
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
 from awf.service import worker as worker_mod
 from awf.service.config import ServiceSettings, resolve_service_settings
@@ -273,8 +274,13 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         "chatgpt-codex-connector",
     ]
 
+    raw_database_password = "runtime-db-password"
+    raw_database_url = f"postgresql+asyncpg://awf:{raw_database_password}@postgres:5432/awf"
+    redacted_database_url = f"postgresql+asyncpg://{REDACTION_MARKER}@postgres:5432/awf"
     profile = WorkspaceProfile(
         name="custom",
+        runtime=ProfileRuntime(environment={"AWF_TEST_DATABASE_URL": raw_database_url}),
+        services=[ProfileService(name="postgres", image="postgres:16-alpine")],
         monitor=ProfileMonitor(
             initial_review_grace_period_seconds=321,
             non_check_reviewer_settle_seconds=45,
@@ -293,6 +299,12 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
+    expected_runtime_context = created["feature_monitor_kwargs"]["workspace_runtime_context"]
+    assert "Workspace runtime context" in expected_runtime_context
+    assert "$AWF_TEST_DATABASE_URL" in expected_runtime_context
+    assert redacted_database_url in expected_runtime_context
+    assert raw_database_url not in expected_runtime_context
+    assert raw_database_password not in expected_runtime_context
     assert "post_merge_target_reconciler" in created["feature_monitor_kwargs"]
     reconciler = created["feature_monitor_kwargs"]["post_merge_target_reconciler"]
     assert callable(reconciler)
@@ -320,6 +332,13 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "post_merge_target_reconciler" in created["release_monitor_kwargs"]
+    release_runtime_context = created["release_monitor_kwargs"]["workspace_runtime_context"]
+    assert release_runtime_context == expected_runtime_context
+    assert "Workspace runtime context" in release_runtime_context
+    assert "$AWF_TEST_DATABASE_URL" in release_runtime_context
+    assert redacted_database_url in release_runtime_context
+    assert raw_database_url not in release_runtime_context
+    assert raw_database_password not in release_runtime_context
     assert (
         created["release_monitor_kwargs"]["merge_coordinator"]
         is created["feature_monitor_kwargs"]["merge_coordinator"]

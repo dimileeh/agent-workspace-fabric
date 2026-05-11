@@ -39,6 +39,7 @@ from awf.runtime.merge_coordinator import (
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
+from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.config import ServiceSettings
 from awf.service.staleness import TargetBranchState
 from awf.service.target_branch_monitor import (
@@ -172,6 +173,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "log_store": log_store,
             "merge_coordinator": merge_coordinator,
             "post_merge_target_reconciler": _post_merge_reconciler,
+            "workspace_runtime_context": render_workspace_runtime_context(profile),
         }
         return monitor_builder(**monitor_kwargs)
 

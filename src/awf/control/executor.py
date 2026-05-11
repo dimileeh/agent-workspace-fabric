@@ -142,6 +142,7 @@ from awf.runtime.validation_identity import (
     environment_identity_inputs,
     resolved_profile_digest,
 )
+from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_APPLIED_EVENT_TYPE,
     CONFORMANCE_SALVAGE_APPLIED_REASON,
@@ -4203,6 +4204,7 @@ class WorkspaceExecutor:
         coordination_warnings = coordination_warnings_from_task_policy(
             getattr(workspace, "task_policy", None)
         )
+        workspace_runtime_context = render_workspace_runtime_context(profile)
         if not planning.required:
             await self._update_subphase(workspace.id, "agent")
             result = await adapter.run(
@@ -4211,6 +4213,7 @@ class WorkspaceExecutor:
                 prompt=build_agent_task_prompt(
                     task_prompt=workspace.task_prompt,
                     coordination_warnings=coordination_warnings,
+                    workspace_runtime_context=workspace_runtime_context,
                 ),
                 model=model,
                 workspace_id=workspace.id,
@@ -4253,6 +4256,7 @@ class WorkspaceExecutor:
                 task_prompt=workspace.task_prompt,
                 plan_path=plan_path,
                 coordination_warnings=coordination_warnings,
+                workspace_runtime_context=workspace_runtime_context,
             ),
             model=model,
             workspace_id=workspace.id,
@@ -4328,6 +4332,7 @@ class WorkspaceExecutor:
                     iteration=iteration,
                     gaps=gaps,
                     coordination_warnings=coordination_warnings,
+                    workspace_runtime_context=workspace_runtime_context,
                 ),
                 model=model,
                 workspace_id=workspace.id,
