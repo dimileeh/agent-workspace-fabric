@@ -363,7 +363,7 @@ class WorkspaceControlService:
         self._project_stopper = project_stopper
         self._cleaner_factory = cleaner_factory
         self._worktrees_root = worktrees_root
-        self._session_factory = session_factory or _derive_control_session_factory(session)
+        self._session_factory = session_factory
 
     async def cancel_workspace(
         self,
@@ -753,7 +753,10 @@ class WorkspaceControlService:
         work: Coroutine[Any, Any, _T],
     ) -> _T:
         if self._session_factory is None:
-            return await work
+            work.close()
+            raise RuntimeError(
+                "WorkspaceControlService requires session_factory for teardown operation heartbeats"
+            )
 
         work_task: asyncio.Task[_T] = asyncio.create_task(
             work,
@@ -851,8 +854,14 @@ class WorkspaceControlService:
         owner_id: str | None,
         work: Coroutine[Any, Any, _T],
     ) -> _T:
-        if self._session_factory is None or owner_id is None:
+        if owner_id is None:
             return await work
+        if self._session_factory is None:
+            work.close()
+            raise RuntimeError(
+                "WorkspaceControlService requires session_factory for terminal runtime "
+                "release claim heartbeats"
+            )
 
         work_task: asyncio.Task[_T] = asyncio.create_task(
             work,
@@ -2334,20 +2343,6 @@ def _cleanup_failure_message(cleanup_result: WorkspaceCleanupResult) -> str:
     if failures:
         return ", ".join(failures)
     return cleanup_result.reason_code
-
-
-def _derive_control_session_factory(
-    session: AsyncSession,
-) -> ControlSessionFactory | None:
-    bind = getattr(session, "bind", None)
-    if bind is None:
-        return None
-    return async_sessionmaker(
-        cast(Any, bind),
-        expire_on_commit=False,
-        class_=AsyncSession,
-        info=dict(session.info),
-    )
 
 
 async def _renew_runtime_teardown_operation_lease_loop(

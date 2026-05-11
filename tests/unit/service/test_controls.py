@@ -276,6 +276,7 @@ async def test_cancel_workspace_stops_stack_transitions_and_replays_operation(
             session,
             project_stopper=stopper,
             cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
         )
 
         response = await service.cancel_workspace(
@@ -344,6 +345,7 @@ async def test_stop_workspace_transitions_active_workspace_and_replays(
             session,
             project_stopper=stopper,
             cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
         )
 
         response = await service.stop_workspace(
@@ -400,6 +402,7 @@ async def test_stop_and_cancel_record_terminal_cleanup_before_version_conflict(
             session,
             project_stopper=stopper,
             cleaner_factory=lambda: cleaner,
+            session_factory=factory,
         )
         with pytest.raises(controls.VersionConflictError) as exc_info:
             if action == "cancel":
@@ -451,6 +454,7 @@ async def test_stop_workspace_records_event_for_inactive_workspace(
             session,
             project_stopper=stopper,
             cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
         )
 
         response = await service.stop_workspace(
@@ -491,6 +495,7 @@ async def test_control_runtime_claim_check_failure_marks_precommitted_operation_
             session,
             project_stopper=_RecordingStopper(),
             cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
         )
 
         async def fail_claim_check(_workspace: object) -> bool:
@@ -535,6 +540,7 @@ async def test_cancel_workspace_records_post_cleanup_failures_after_precommit(
             session,
             project_stopper=_RecordingStopper(),
             cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
         )
 
         async def fail_transition(*_args: object, **_kwargs: object) -> object:
@@ -593,10 +599,8 @@ async def test_teardown_operation_heartbeat_helper_handles_sessionless_and_stopp
             return "done"
 
         service._session_factory = None  # type: ignore[assignment]  # noqa: SLF001
-        assert (
+        with pytest.raises(RuntimeError, match="session_factory"):
             await service._run_with_teardown_operation_heartbeat("op-sessionless", _done())  # noqa: SLF001
-            == "done"
-        )
         service._session_factory = factory  # type: ignore[assignment]  # noqa: SLF001
 
         async def _lease_stopped(*_args: object, **_kwargs: object) -> str:
@@ -618,6 +622,25 @@ async def test_teardown_operation_heartbeat_helper_handles_sessionless_and_stopp
 
         with pytest.raises(RuntimeError, match="operation lease is no longer active"):
             await service._run_with_teardown_operation_heartbeat("op-lost", _pending())  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_teardown_operation_heartbeat_requires_explicit_session_factory(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        async def _done() -> str:
+            return "done"
+
+        with pytest.raises(RuntimeError, match="session_factory"):
+            await service._run_with_teardown_operation_heartbeat("op-no-factory", _done())  # noqa: SLF001
 
 
 @pytest.mark.unit
@@ -669,6 +692,31 @@ async def test_terminal_runtime_release_claim_heartbeat_helper_handles_stopped_h
                 "ws-lost",
                 owner_id="owner",
                 work=_pending(),
+            )
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_claim_heartbeat_requires_session_factory(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
+        )
+
+        async def _done() -> str:
+            return "done"
+
+        service._session_factory = None  # type: ignore[assignment]  # noqa: SLF001
+        with pytest.raises(RuntimeError, match="session_factory"):
+            await service._run_with_terminal_runtime_release_claim_heartbeat(  # noqa: SLF001
+                "ws-sessionless",
+                owner_id="owner",
+                work=_done(),
             )
 
 
@@ -804,8 +852,6 @@ def test_terminal_runtime_release_claim_owner_helpers_cover_ineligible_owners() 
 
 @pytest.mark.unit
 async def test_control_private_helpers_cover_defensive_branches() -> None:
-    assert controls._derive_control_session_factory(SimpleNamespace(bind=None)) is None  # noqa: SLF001
-
     operation = SimpleNamespace(
         status=OperationStatus.failed.value,
         type=OperationType.cancel.value,
@@ -1864,6 +1910,7 @@ async def test_stop_precommitted_failure_preserves_terminal_runtime_release_evid
             project_stopper=_RecordingStopper(),
             cleaner_factory=lambda: cleaner,
             worktrees_root=worktrees_root,
+            session_factory=factory,
         )
         require_workspace_for_update = service._require_workspace_for_update  # noqa: SLF001
         require_workspace_calls = 0
@@ -1919,6 +1966,7 @@ async def test_teardown_operation_heartbeat_edges(
             session,
             project_stopper=_RecordingStopper(),
             cleaner_factory=lambda: _RecordingCleaner(),
+            session_factory=factory,
         )
 
         async def immediate_heartbeat_stop(
@@ -1940,12 +1988,11 @@ async def test_teardown_operation_heartbeat_edges(
             )
 
         service._session_factory = None  # type: ignore[assignment]  # noqa: SLF001
-        result = await service._run_with_teardown_operation_heartbeat(  # noqa: SLF001
-            "op_inline",
-            asyncio.sleep(0, result="inline-result"),
-        )
-
-    assert result == "inline-result"
+        with pytest.raises(RuntimeError, match="session_factory"):
+            await service._run_with_teardown_operation_heartbeat(  # noqa: SLF001
+                "op_inline",
+                asyncio.sleep(0, result="inline-result"),
+            )
 
 
 @pytest.mark.unit
