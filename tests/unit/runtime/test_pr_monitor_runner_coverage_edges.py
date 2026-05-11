@@ -5634,8 +5634,12 @@ async def test_monitor_terminal_callbacks_record_stale_transition_races(
     assert raced is True
     assert workspace.status == operator_status.value
     assert workspace.pr_merge_sha == ("raced-merge-sha" if callback == "completed" else None)
-    assert workspace.failure_reason is None
-    assert workspace.failure_message is None
+    if callback == "failed":
+        assert workspace.failure_reason == FailureReason.infrastructure_failure.value
+        assert workspace.failure_message == "raced monitor failure"
+    else:
+        assert workspace.failure_reason is None
+        assert workspace.failure_message is None
     assert cmd.calls == []
     assert reconcile_calls == []
     assert gc_calls == []

@@ -6035,6 +6035,17 @@ async def _record_stale_monitor_terminal_callback(
         and not workspace.pr_merge_sha
     ):
         workspace.pr_merge_sha = pr_merge_sha
+    if (
+        requested_status == WorkspaceStatus.failed
+        and workspace.status == WorkspaceStatus.failed.value
+        and (failure_reason or failure_message)
+        and not workspace.failure_reason
+        and not workspace.failure_message
+    ):
+        if failure_reason:
+            workspace.failure_reason = failure_reason
+        if failure_message:
+            workspace.failure_message = redact_audit_text(failure_message, limit=2000)
     await _record_ignored_monitor_terminal_callback(
         repo,
         workspace,
