@@ -445,14 +445,67 @@ class TerminalRuntimeReleaser:
         *,
         owner_id: str,
     ) -> _TerminalRuntimeReleaseClaimFailure:
+        loop = asyncio.get_running_loop()
+        claim_timeout_seconds = max(float(TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS), 0.001)
+        last_claim_renewed_at = loop.time()
+        last_safe_exception: str | None = None
         while True:
             await asyncio.sleep(self._claim_refresh_interval_seconds)
-            claim_failure = await self._refresh_terminal_runtime_claim_or_failure(
+            try:
+                refreshed = await self._refresh_terminal_runtime_claim(
+                    workspace_id,
+                    owner_id=owner_id,
+                )
+            except Exception as exc:
+                self._observe_terminal_runtime_claim_refresh_attempt(
+                    workspace_id,
+                    owner_id=owner_id,
+                    refreshed=None,
+                )
+                last_safe_exception = redact_audit_text(
+                    f"{type(exc).__name__}: {exc}",
+                    limit=1000,
+                )
+                elapsed_since_claim_renewal = loop.time() - last_claim_renewed_at
+                _log.warning(
+                    "terminal_runtime.release_claim_refresh_failed",
+                    workspace_id=workspace_id,
+                    error=redact_audit_text(repr(exc), limit=400),
+                    elapsed_since_claim_renewal_seconds=round(
+                        elapsed_since_claim_renewal,
+                        3,
+                    ),
+                )
+                if elapsed_since_claim_renewal >= claim_timeout_seconds:
+                    _log.warning(
+                        "terminal_runtime.release_claim_refresh_abandoned",
+                        workspace_id=workspace_id,
+                        elapsed_since_claim_renewal_seconds=round(
+                            elapsed_since_claim_renewal,
+                            3,
+                        ),
+                        claim_timeout_seconds=round(claim_timeout_seconds, 3),
+                    )
+                    return _TerminalRuntimeReleaseClaimFailure(
+                        reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_REFRESH_FAILED_REASON_CODE,
+                        error=last_safe_exception,
+                    )
+                continue
+
+            self._observe_terminal_runtime_claim_refresh_attempt(
                 workspace_id,
                 owner_id=owner_id,
+                refreshed=refreshed,
             )
-            if claim_failure is not None:
-                return claim_failure
+            if not refreshed:
+                _log.warning(
+                    "terminal_runtime.release_claim_lost",
+                    workspace_id=workspace_id,
+                )
+                return _TerminalRuntimeReleaseClaimFailure(
+                    reason_code=TERMINAL_RUNTIME_RELEASE_CLAIM_LOST_REASON_CODE,
+                )
+            last_claim_renewed_at = loop.time()
 
     async def _refresh_terminal_runtime_claim_or_failure(
         self,

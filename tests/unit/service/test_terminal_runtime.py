@@ -554,6 +554,47 @@ class _RefreshFailingTerminalRuntimeReleaser(TerminalRuntimeReleaser):
         raise RuntimeError("claim refresh failed")
 
 
+class _TransientRefreshFailingTerminalRuntimeReleaser(TerminalRuntimeReleaser):
+    def __init__(
+        self,
+        *,
+        transient_refresh_failed: asyncio.Event,
+        refresh_recovered: asyncio.Event,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._transient_refresh_failed = transient_refresh_failed
+        self._refresh_recovered = refresh_recovered
+        self.refresh_attempts = 0
+
+    async def _refresh_terminal_runtime_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> bool:
+        self.refresh_attempts += 1
+        if self.refresh_attempts == 1:
+            raise RuntimeError("transient claim refresh failed")
+        return await super()._refresh_terminal_runtime_claim(
+            workspace_id,
+            owner_id=owner_id,
+        )
+
+    def _observe_terminal_runtime_claim_refresh_attempt(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        refreshed: bool | None,
+    ) -> None:
+        del workspace_id, owner_id
+        if refreshed is None:
+            self._transient_refresh_failed.set()
+        if refreshed:
+            self._refresh_recovered.set()
+
+
 class _RefreshLostTerminalRuntimeReleaser(TerminalRuntimeReleaser):
     async def _refresh_terminal_runtime_claim(
         self,
@@ -1610,7 +1651,7 @@ async def test_terminal_runtime_release_fails_when_claim_is_lost_during_cleanup(
 
 
 @pytest.mark.unit
-async def test_terminal_runtime_release_fails_when_claim_refresh_fails_during_cleanup(
+async def test_terminal_runtime_release_continues_cleanup_after_transient_claim_refresh_error(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1618,6 +1659,84 @@ async def test_terminal_runtime_release_fails_when_claim_refresh_fails_during_cl
     workspace_id = await _seed_failed_workspace(
         session_factory,
         worktree=worktrees_root / "ws-placeholder",
+    )
+    cleaner = _BlockingCleaner()
+    transient_refresh_failed = asyncio.Event()
+    refresh_recovered = asyncio.Event()
+    releaser = _TransientRefreshFailingTerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+        claim_refresh_interval_seconds=0.01,
+        transient_refresh_failed=transient_refresh_failed,
+        refresh_recovered=refresh_recovered,
+    )
+
+    release_task = asyncio.create_task(
+        releaser.release(
+            workspace_id,
+            source="test",
+            expected_status=WorkspaceStatus.failed,
+        )
+    )
+    try:
+        await asyncio.wait_for(
+            cleaner.started.wait(),
+            timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
+        await asyncio.wait_for(
+            transient_refresh_failed.wait(),
+            timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
+        await asyncio.wait_for(
+            refresh_recovered.wait(),
+            timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
+        cleaner.release.set()
+        result = await asyncio.wait_for(
+            release_task,
+            timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
+    finally:
+        if not release_task.done():
+            release_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await release_task
+
+    assert result.ok
+    assert result.status == "released"
+    assert result.reason_code == "TERMINAL_RUNTIME_RELEASED"
+    assert releaser.refresh_attempts >= 2
+    assert cleaner.calls == 1
+    assert not cleaner.cancelled
+    assert cleaner.completed
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.execution_claimed_by is None
+        assert workspace.execution_claim_expires_at is None
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.terminal_runtime_released",
+        )
+    assert len(events) == 1
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_fails_when_claim_refresh_fails_through_error_grace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    monkeypatch.setattr(
+        terminal_runtime_module,
+        "TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS",
+        0.03,
     )
     cleaner = _SleepingCleaner()
     releaser = _RefreshFailingTerminalRuntimeReleaser(
