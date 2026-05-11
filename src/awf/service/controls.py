@@ -2998,19 +2998,6 @@ def _stale_active_execution_cleanup_claim_active_for_control(
     return _execution_claim_active_for_control(workspace, now=now)
 
 
-def _control_terminal_runtime_release_claim_owner(workspace: Workspace) -> str | None:
-    if not _control_terminal_runtime_release_claim_required(workspace):
-        return None
-    owner_id = workspace.execution_claimed_by
-    if owner_id is None or not owner_id.startswith(
-        f"{TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX}control:"
-    ):
-        return None
-    if not terminal_runtime_release_claim_active(workspace):
-        return None
-    return owner_id
-
-
 def _session_has_pending_state(session: AsyncSession) -> bool:
     return bool(session.new or session.dirty or session.deleted)
 

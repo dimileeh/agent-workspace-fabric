@@ -300,6 +300,45 @@ async def test_stop_project_containers_ignores_racy_missing_container_on_stop() 
 
 
 @pytest.mark.unit
+async def test_stop_project_containers_cancellation_kills_ps_subprocess() -> None:
+    proc = _CancellationHangingProcess()
+    with patch(
+        "awf.service.controls.asyncio.create_subprocess_exec",
+        return_value=proc,
+    ):
+        task = asyncio.create_task(stop_project_containers("awf_ws_hanging_ps"))
+        await asyncio.wait_for(proc.communicate_started.wait(), timeout=1)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+    assert proc.kill_called is True
+    assert proc.wait_called is True
+
+
+@pytest.mark.unit
+async def test_stop_project_containers_cancellation_kills_stop_subprocess() -> None:
+    stop_proc = _CancellationHangingProcess()
+    with patch(
+        "awf.service.controls.asyncio.create_subprocess_exec",
+        side_effect=[
+            _mock_proc(stdout=b"abc123\n"),
+            stop_proc,
+        ],
+    ):
+        task = asyncio.create_task(stop_project_containers("awf_ws_hanging_stop"))
+        await asyncio.wait_for(stop_proc.communicate_started.wait(), timeout=1)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+    assert stop_proc.kill_called is True
+    assert stop_proc.wait_called is True
+
+
+@pytest.mark.unit
 async def test_cancel_workspace_stops_stack_transitions_and_replays_operation(
     engine: AsyncEngine,
 ) -> None:
@@ -858,36 +897,6 @@ async def test_terminal_runtime_release_claim_heartbeat_helper_cancels_cleanup_o
         ):
             await helper
         assert work_cancelled.is_set()
-
-
-@pytest.mark.unit
-def test_terminal_runtime_release_claim_owner_helpers_cover_ineligible_owners() -> None:
-    assert (
-        controls._control_terminal_runtime_release_claim_owner(  # noqa: SLF001
-            SimpleNamespace(status=WorkspaceStatus.ready.value)
-        )
-        is None
-    )
-    assert (
-        controls._control_terminal_runtime_release_claim_owner(  # noqa: SLF001
-            SimpleNamespace(
-                status=WorkspaceStatus.completed.value,
-                execution_claimed_by="worker-1",
-                execution_claim_expires_at=datetime.now(UTC) + timedelta(minutes=1),
-            )
-        )
-        is None
-    )
-    assert (
-        controls._control_terminal_runtime_release_claim_owner(  # noqa: SLF001
-            SimpleNamespace(
-                status=WorkspaceStatus.completed.value,
-                execution_claimed_by="terminal-runtime-release:control:owner",
-                execution_claim_expires_at=datetime.now(UTC) - timedelta(seconds=1),
-            )
-        )
-        is None
-    )
 
 
 @pytest.mark.unit
