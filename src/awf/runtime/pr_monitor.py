@@ -518,7 +518,7 @@ _CI_CODE_FAILURE_MARKERS = (
     "failed test",
     "pytest failed",
     "assertionerror",
-    "assert ",
+    "assert failed",
     "coverage failure",
     "fail-under",
     "typecheck",

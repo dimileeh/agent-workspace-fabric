@@ -2977,6 +2977,7 @@ async def test_execute_sync_base_protected_scope_block_is_terminal(
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     runner = make_runner(
         factory=factory,
@@ -3396,6 +3397,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     runner = make_runner(
         factory=factory,
@@ -3468,6 +3470,7 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
     cmd.queue_result(returncode=0)  # merge
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\n")
+    cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
     cmd.queue_result(returncode=0, stdout="")  # diff against refreshed base excludes base changes
     cmd.queue_result(returncode=0, stdout="", stderr="pushed")
     runner = make_runner(
@@ -4040,6 +4043,63 @@ async def test_changed_paths_since_remote_branch_fails_closed_when_diff_fails(
     message = str(exc_info.value)
     assert "diff FETCH_HEAD..HEAD" in message
     assert "bad revision FETCH_HEAD" in message
+
+
+@pytest.mark.unit
+async def test_sync_base_protected_scope_refreshes_base_before_base_diff(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # diff against remote PR branch
+    cmd.queue_result(returncode=0, stdout="")  # refresh base branch
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # diff against refreshed base
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktree"
+
+    await runner._protected_scope_violations_for_sync_base_push(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        base_branch="development",
+    )
+
+    assert [call.args for call in cmd.calls] == [
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "fetch",
+            "origin",
+            f"refs/heads/awf/{workspace_id}",
+        ],
+        ["git", "-C", str(worktree), "diff", "--name-only", "FETCH_HEAD..HEAD", "--"],
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "fetch",
+            "origin",
+            "+refs/heads/development:refs/remotes/origin/development",
+        ],
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "diff",
+            "--name-only",
+            "origin/development..HEAD",
+            "--",
+        ],
+    ]
 
 
 @pytest.mark.unit

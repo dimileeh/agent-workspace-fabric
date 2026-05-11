@@ -602,6 +602,24 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_infra_assert_log_does_not_mask_transient_ci_rerun(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="assert passed while reconnecting runner\nHTTP 502 Bad Gateway",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_transient_rerun_helper_rejects_empty_failure_snapshot(self) -> None:
         assert not _should_rerun_transient_ci(
             _status(check_state=CheckState.FAILURE, ci_failures=()),

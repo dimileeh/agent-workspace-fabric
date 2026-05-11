@@ -4537,6 +4537,17 @@ class PullRequestMonitorRunner:
         if not changed_from_remote:
             return []
 
+        try:
+            await self._fetch_base(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_branch=base_branch,
+            )
+        except BaseFetchError as exc:
+            raise ProtectedScopeDiffError(
+                f"Could not refresh the base branch for protected-scope validation: {exc}"
+            ) from exc
+
         changed_from_base = await self._changed_paths_between_ref_and_head(
             worktree_path=worktree_path,
             ref=f"origin/{base_branch}",
