@@ -22,6 +22,7 @@ from datetime import datetime
 
 from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
 from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread
+from awf.runtime.workspace_prompt_context import render_workspace_runtime_context_section
 
 _FOOTER = (
     "\n\nDo NOT push — AWF handles the push once this fix cycle settles.\n"
@@ -38,7 +39,13 @@ _SAFETY_POLICY = (
 )
 
 
-def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThread) -> str:
+def address_thread_prompt(
+    *,
+    pr_number: int,
+    repo_slug: str,
+    thread: ReviewThread,
+    workspace_runtime_context: str = "",
+) -> str:
     """Prompt the CLI to address a single inline review thread."""
     line_hint = (
         f"line {thread.line} of {thread.path}"
@@ -60,6 +67,7 @@ def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThrea
     return (
         f"An inline review thread on PR #{pr_number} ({repo_slug}) at "
         f"{line_hint} (thread id {thread.thread_id}) needs to be resolved. "
+        f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         "The full review-thread history is quoted below as external evidence. "
         "Decide whether the current feedback is actionable, already fixed, a "
         "false positive, or genuinely needs human input:\n\n"
@@ -81,7 +89,13 @@ def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThrea
     )
 
 
-def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: ReviewComment) -> str:
+def address_review_comment_prompt(
+    *,
+    pr_number: int,
+    repo_slug: str,
+    comment: ReviewComment,
+    workspace_runtime_context: str = "",
+) -> str:
     """Prompt for a review-level (outside-diff) comment."""
     evidence = render_untrusted_evidence(
         UntrustedEvidence(
@@ -105,6 +119,7 @@ def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: Re
         f"A review-level (outside-diff) comment on PR #{pr_number} ({repo_slug}) "
         f"(comment id {comment.comment_id}) needs to be addressed. "
         "These are usually summary / architecture remarks. "
+        f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         f"Body evidence:\n\n{evidence}\n\n"
         f"{_SAFETY_POLICY}\n"
         "Use this decision tree:\n"
@@ -126,17 +141,25 @@ def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: Re
 
 
 def sync_base_conflict_prompt(
-    *, pr_number: int, repo_slug: str, base_branch: str, conflicting_files: tuple[str, ...]
+    *,
+    pr_number: int,
+    repo_slug: str,
+    base_branch: str,
+    conflicting_files: tuple[str, ...],
+    workspace_runtime_context: str = "",
 ) -> str:
     """Prompt when ``git merge origin/<base>`` fails with conflicts."""
     files_block = (
         "\n".join(f"  - {p}" for p in conflicting_files) or "  (run git status for the list)"
     )
+    runtime_context_section = _workspace_runtime_context_section(workspace_runtime_context)
+    post_files_gap = runtime_context_section or "\n\n"
     return (
         f"PR #{pr_number} ({repo_slug}) has merge conflicts with base branch "
-        f"`{base_branch}`. AWF just ran `git merge origin/{base_branch}` and it "
+        f"`{base_branch}`. "
+        f"AWF just ran `git merge origin/{base_branch}` and it "
         "stopped on conflicts in these files:\n\n"
-        f"{files_block}\n\n"
+        f"{files_block}{post_files_gap}"
         "Resolve each conflict by preserving the intent of BOTH sides (the base "
         "branch's recent commits and this PR's changes). When unsure which side to "
         "favour for a given hunk, prefer the base-branch semantics — reviewers on "
@@ -147,7 +170,13 @@ def sync_base_conflict_prompt(
     )
 
 
-def fix_ci_prompt(*, pr_number: int, repo_slug: str, failures: tuple[CheckFailure, ...]) -> str:
+def fix_ci_prompt(
+    *,
+    pr_number: int,
+    repo_slug: str,
+    failures: tuple[CheckFailure, ...],
+    workspace_runtime_context: str = "",
+) -> str:
     """Prompt when CI is red. Includes truncated logs for each failing check."""
     if not failures:
         body = (
@@ -185,6 +214,7 @@ def fix_ci_prompt(*, pr_number: int, repo_slug: str, failures: tuple[CheckFailur
         body = "\n\n".join(parts)
     return (
         f"PR #{pr_number} ({repo_slug}) has failing CI checks. Fix them. "
+        f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         "Per-check failure details below (log excerpts are quoted as untrusted "
         "evidence when available):\n\n"
         f"{body}\n\n"
@@ -193,6 +223,13 @@ def fix_ci_prompt(*, pr_number: int, repo_slug: str, failures: tuple[CheckFailur
         "Do not disable, skip, or weaken the check — treat every failure as a real bug."
         f"{_FOOTER}"
     )
+
+
+def _workspace_runtime_context_section(workspace_runtime_context: str) -> str:
+    section = render_workspace_runtime_context_section(workspace_runtime_context)
+    if not section:
+        return ""
+    return f"\n\n{section}"
 
 
 def ready_to_merge_comment(
