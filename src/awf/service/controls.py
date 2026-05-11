@@ -1579,6 +1579,7 @@ class WorkspaceControlService:
             payload=operation_payload,
             idempotency_key=prepared.idempotency_key,
         )
+        operation_id = operation.id
         secret_lease_summary = await self._revoke_destroy_secret_leases(workspace)
         if current == WorkspaceStatus.destroyed:
             await ResourceReservationRepository(self._session).release_active_for_workspace(
@@ -1634,6 +1635,7 @@ class WorkspaceControlService:
                 to=WorkspaceStatus.cancelled,
                 reason_code=_OPERATOR_DESTROY_REASON_CODE,
                 payload=event_payload,
+                allow_active_operation_id=operation_id,
             )
             current = WorkspaceStatus.cancelled
         if WorkspaceStateMachine.can_transition(current, WorkspaceStatus.destroying):
@@ -1643,6 +1645,7 @@ class WorkspaceControlService:
                 to=WorkspaceStatus.destroying,
                 reason_code=_OPERATOR_DESTROY_REASON_CODE,
                 payload=event_payload,
+                allow_active_operation_id=operation_id,
             )
 
         await self._session.flush()
@@ -1740,6 +1743,7 @@ class WorkspaceControlService:
                     to=WorkspaceStatus.failed,
                     reason_code="CLEANUP_FAILED",
                     payload=cleanup_event_payload,
+                    allow_active_operation_id=operation_id,
                 )
             operation_result = _with_secret_lease_result(
                 {"status": workspace.status, "cleanup": cleanup_payload},
@@ -1785,6 +1789,7 @@ class WorkspaceControlService:
                     to=WorkspaceStatus.destroyed,
                     reason_code="DESTROYED",
                     payload=cleanup_event_payload,
+                    allow_active_operation_id=operation_id,
                 )
             operation_result = _with_secret_lease_result(
                 {"status": workspace.status, "cleanup": cleanup_payload},
