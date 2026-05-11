@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -41,6 +42,7 @@ from awf.service.scheduler import SchedulerOrderCursor, scheduler_score_from_wor
 from tests.postgres import (
     create_postgres_test_engine,
     postgres_empty_test_url,
+    postgres_test_engine,
     postgres_test_session,
 )
 
@@ -2161,6 +2163,84 @@ class TestOwnedPathOverlapLookup:
         assert overlaps[0].workspace_id == existing.id
         assert overlaps[0].existing_path == existing_path
         assert overlaps[0].requested_path == requested_path
+
+
+@pytest.mark.unit
+async def test_claim_execution_if_available_serializes_with_teardown_creation() -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        async with factory() as setup_session:
+            workspace = await WorkspaceRepository(setup_session).create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await setup_session.commit()
+            workspace_id = workspace.id
+
+        teardown_lock_held = asyncio.Event()
+        release_teardown = asyncio.Event()
+        claim_started = asyncio.Event()
+        claim_task: asyncio.Task[Workspace | None] | None = None
+
+        async def create_teardown_operation_under_lock() -> str:
+            async with factory() as teardown_session, teardown_session.begin():
+                operation = await OperationRepository(teardown_session).create(
+                    workspace_id=workspace_id,
+                    operation_type=OperationType.stop,
+                    status=OperationStatus.running,
+                    payload={"source": "operator_api"},
+                )
+                teardown_lock_held.set()
+                await asyncio.wait_for(release_teardown.wait(), timeout=2)
+                return operation.id
+
+        async def claim_execution() -> Workspace | None:
+            async with factory() as claim_session, claim_session.begin():
+                claim_started.set()
+                return await WorkspaceRepository(claim_session).claim_execution_if_available(
+                    workspace_id,
+                    owner_id="execution-worker",
+                    lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                    statuses=(WorkspaceStatus.requested,),
+                    block_active_teardown_operation=True,
+                )
+
+        teardown_task = asyncio.create_task(create_teardown_operation_under_lock())
+        try:
+            await asyncio.wait_for(teardown_lock_held.wait(), timeout=2)
+            claim_task = asyncio.create_task(claim_execution())
+            await asyncio.wait_for(claim_started.wait(), timeout=2)
+            await asyncio.sleep(0.05)
+
+            assert not claim_task.done()
+
+            release_teardown.set()
+            operation_id, claimed = await asyncio.wait_for(
+                asyncio.gather(teardown_task, claim_task),
+                timeout=2,
+            )
+        finally:
+            release_teardown.set()
+            pending_tasks = [teardown_task]
+            if claim_task is not None:
+                pending_tasks.append(claim_task)
+            for task in pending_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+        assert claimed is None
+        async with factory() as verify_session:
+            refreshed = await WorkspaceRepository(verify_session).get(workspace_id)
+            assert refreshed is not None
+            assert refreshed.execution_claimed_by is None
+            operation = await OperationRepository(verify_session).get(operation_id)
+            assert operation is not None
+            assert operation.status == OperationStatus.running.value
 
 
 class TestTransition:

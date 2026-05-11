@@ -3689,6 +3689,12 @@ class WorkspaceRepository:
         )
         teardown_conditions: tuple[ColumnElement[bool], ...] = ()
         if block_active_teardown_operation:
+            with self._session.no_autoflush:
+                await _lock_workspace_for_external_runtime_teardown_serialization(
+                    self._session,
+                    workspace_id,
+                    dialect_name=self._dialect_name,
+                )
             teardown_conditions = (
                 ~_active_external_runtime_teardown_operation_exists(
                     workspace_id,
