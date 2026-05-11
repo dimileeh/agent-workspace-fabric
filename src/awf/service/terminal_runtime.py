@@ -67,6 +67,12 @@ class TerminalRuntimeCleaner(Protocol):
     ) -> WorkspaceCleanupResult: ...  # pragma: no cover - Protocol declaration only.
 
 
+class TerminalRuntimeCleanerQuiescence(Protocol):
+    async def wait_for_cleanup_quiescence(
+        self,
+    ) -> None: ...  # pragma: no cover - Protocol declaration only.
+
+
 class TerminalRuntimeReleaserProtocol(Protocol):
     async def release(
         self,
@@ -191,6 +197,7 @@ class TerminalRuntimeReleaser:
             name=f"awf-terminal-runtime-release-claim-{workspace_id}",
         )
         cleanup_task: asyncio.Task[WorkspaceCleanupResult] | None = None
+        cleaner: TerminalRuntimeCleaner | None = None
         try:
             cleaner = self._cleaner_factory()
             cleanup_task = asyncio.create_task(
@@ -259,13 +266,22 @@ class TerminalRuntimeReleaser:
             if cleanup_task is not None:
                 with suppress(asyncio.CancelledError):
                     await cleanup_task
+            quiescence_error: BaseException | None = None
+            if cleaner is not None:
+                try:
+                    await _wait_for_terminal_runtime_cleaner_quiescence(cleaner)
+                except BaseException as exc:
+                    quiescence_error = exc
             claim_refresh_task.cancel()
             with suppress(asyncio.CancelledError):
                 await claim_refresh_task
-            await self._release_terminal_runtime_claim(
-                workspace_id,
-                owner_id=claim.owner_id,
-            )
+            if quiescence_error is None:
+                await self._release_terminal_runtime_claim(
+                    workspace_id,
+                    owner_id=claim.owner_id,
+                )
+            else:
+                raise quiescence_error
 
     async def _await_release_step_or_claim_failure(
         self,
@@ -577,6 +593,14 @@ class TerminalRuntimeReleaser:
 
     def _terminal_runtime_claim_expires_at(self) -> datetime:
         return datetime.now(UTC) + timedelta(seconds=TERMINAL_RUNTIME_RELEASE_CLAIM_TTL_SECONDS)
+
+
+async def _wait_for_terminal_runtime_cleaner_quiescence(
+    cleaner: TerminalRuntimeCleaner,
+) -> None:
+    if getattr(cleaner, "wait_for_cleanup_quiescence", None) is None:
+        return
+    await cast(TerminalRuntimeCleanerQuiescence, cleaner).wait_for_cleanup_quiescence()
 
 
 def _terminal_runtime_release_claim_failure_result(

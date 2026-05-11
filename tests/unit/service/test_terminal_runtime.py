@@ -650,6 +650,25 @@ class _ClaimReleaseObservingTerminalRuntimeReleaser(TerminalRuntimeReleaser):
         )
 
 
+class _QuiescenceObservingTerminalRuntimeReleaser(TerminalRuntimeReleaser):
+    def __init__(self, *, cleaner: Any, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._cleaner = cleaner
+        self.cleanup_quiesced_before_claim_release: bool | None = None
+
+    async def _release_terminal_runtime_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> None:
+        self.cleanup_quiesced_before_claim_release = self._cleaner.quiesced
+        await super()._release_terminal_runtime_claim(
+            workspace_id,
+            owner_id=owner_id,
+        )
+
+
 class _ImmediateClaimFailureTerminalRuntimeReleaser(TerminalRuntimeReleaser):
     async def _refresh_terminal_runtime_claim_loop(
         self,
@@ -2004,6 +2023,78 @@ async def test_terminal_runtime_release_cancellation_cancels_cleanup_before_clai
     finally:
         cleaner.release.set()
         await asyncio.sleep(0)
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_cancellation_waits_for_cleanup_quiescence_before_claim_release(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    class _QuiescingCleaner(_BlockingCleaner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_started = asyncio.Event()
+            self.allow_quiescence = asyncio.Event()
+            self.quiesced = False
+
+        async def wait_for_cleanup_quiescence(self) -> None:
+            self.wait_started.set()
+            await self.allow_quiescence.wait()
+            self.quiesced = True
+
+    worktrees_root = tmp_path / "git" / "worktrees"
+    workspace_id = await _seed_failed_workspace(
+        session_factory,
+        worktree=worktrees_root / "ws-placeholder",
+    )
+    cleaner = _QuiescingCleaner()
+    releaser = _QuiescenceObservingTerminalRuntimeReleaser(
+        session_factory=session_factory,
+        cleaner_factory=lambda: cleaner,
+        worktrees_root=worktrees_root,
+        cleaner=cleaner,
+    )
+
+    release_task = asyncio.create_task(
+        releaser.release(
+            workspace_id,
+            source="test",
+            expected_status=WorkspaceStatus.failed,
+        )
+    )
+    await asyncio.wait_for(
+        cleaner.started.wait(),
+        timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+    )
+
+    release_task.cancel()
+    await asyncio.wait_for(
+        cleaner.wait_started.wait(),
+        timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+    )
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.execution_claimed_by is not None
+        assert workspace.execution_claimed_by.startswith(
+            TERMINAL_RUNTIME_RELEASE_CLAIM_OWNER_PREFIX
+        )
+
+    cleaner.allow_quiescence.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(
+            release_task,
+            timeout=TERMINAL_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
+
+    assert cleaner.cancelled
+    assert cleaner.quiesced
+    assert releaser.cleanup_quiesced_before_claim_release is True
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.execution_claimed_by is None
+        assert workspace.execution_claim_expires_at is None
 
 
 @pytest.mark.unit

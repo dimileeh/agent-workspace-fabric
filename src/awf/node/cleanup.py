@@ -253,6 +253,12 @@ class WorkspaceCleaner:
 
         return WorkspaceCleanupResult.from_steps(steps)
 
+    async def wait_for_cleanup_quiescence(self) -> None:
+        """Wait until cleanup dependencies have no active child work."""
+        wait_for_quiescence = getattr(self._compose, "wait_for_quiescence", None)
+        if wait_for_quiescence is not None:
+            await wait_for_quiescence()
+
 
 def _operation_error_detail(exc: ComposeOperationError | GitOperationError) -> str:
     return exc.stderr.strip() or exc.stdout.strip() or str(exc)

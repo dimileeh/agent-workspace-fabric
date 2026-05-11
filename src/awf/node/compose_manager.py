@@ -34,21 +34,15 @@ _log = get_logger(__name__)
 
 DOCKER_CAPTURE_TIMEOUT_SECONDS = 30.0
 COMPOSE_CAPTURE_TIMEOUT_SECONDS = 360.0
-_DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
 
 
 async def _kill_and_wait_process(
     proc: asyncio.subprocess.Process,
-    *,
-    wait_timeout: float | None,
 ) -> None:
     with contextlib.suppress(ProcessLookupError):
         proc.kill()
-    if wait_timeout is None:
+    with contextlib.suppress(ProcessLookupError):
         await proc.wait()
-        return
-    with contextlib.suppress(ProcessLookupError, TimeoutError):
-        await asyncio.wait_for(proc.wait(), timeout=wait_timeout)
 
 
 class ComposeOperationError(Exception):
@@ -213,6 +207,7 @@ class ComposeManager:
             keep_trailing_newline=True,
         )
         self._template_name = template_path.name
+        self._active_processes: set[asyncio.subprocess.Process] = set()
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -402,6 +397,17 @@ class ComposeManager:
             volumes=len(volume_names),
         )
 
+    async def wait_for_quiescence(self) -> None:
+        """Wait until all subprocess handles this manager spawned have exited."""
+        while self._active_processes:
+            processes = tuple(self._active_processes)
+            await asyncio.gather(
+                *(process.wait() for process in processes),
+                return_exceptions=True,
+            )
+            for process in processes:
+                self._active_processes.discard(process)
+
     # ── Internals ──────────────────────────────────────────────────────────
 
     def _paths_for(self, spec: WorkspaceComposeSpec) -> ComposeProjectPaths:
@@ -425,7 +431,7 @@ class ComposeManager:
         }
         _log.debug("compose.exec", operation=operation, cmd=cmd)
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await self._create_tracked_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -441,28 +447,28 @@ class ComposeManager:
             ) from e
 
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=COMPOSE_CAPTURE_TIMEOUT_SECONDS,
-            )
-        except TimeoutError as e:
-            await _kill_and_wait_process(
-                proc,
-                wait_timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
-            )
-            raise ComposeOperationError(
-                operation=operation,
-                returncode=124,
-                stdout="",
-                stderr=(
-                    f"docker compose {operation} exceeded "
-                    f"{COMPOSE_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
-                ),
-                reason_code="DOCKER_COMMAND_TIMEOUT",
-            ) from e
-        except asyncio.CancelledError:
-            await _kill_and_wait_process(proc, wait_timeout=None)
-            raise
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=COMPOSE_CAPTURE_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as e:
+                await _kill_and_wait_process(proc)
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=124,
+                    stdout="",
+                    stderr=(
+                        f"docker compose {operation} exceeded "
+                        f"{COMPOSE_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
+                    ),
+                    reason_code="DOCKER_COMMAND_TIMEOUT",
+                ) from e
+            except asyncio.CancelledError:
+                await _kill_and_wait_process(proc)
+                raise
+        finally:
+            self._active_processes.discard(proc)
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -497,7 +503,7 @@ class ComposeManager:
         cmd = ["docker", *args]
         _log.debug("docker.exec", operation=operation, cmd=cmd)
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await self._create_tracked_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -512,25 +518,27 @@ class ComposeManager:
             ) from e
 
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=DOCKER_CAPTURE_TIMEOUT_SECONDS,
-            )
-        except TimeoutError as e:
-            await _kill_and_wait_process(
-                proc,
-                wait_timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
-            )
-            raise ComposeOperationError(
-                operation=operation,
-                returncode=124,
-                stdout="",
-                stderr=(f"docker {operation} exceeded {DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"),
-                reason_code="DOCKER_COMMAND_TIMEOUT",
-            ) from e
-        except asyncio.CancelledError:
-            await _kill_and_wait_process(proc, wait_timeout=None)
-            raise
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=DOCKER_CAPTURE_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as e:
+                await _kill_and_wait_process(proc)
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=124,
+                    stdout="",
+                    stderr=(
+                        f"docker {operation} exceeded {DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
+                    ),
+                    reason_code="DOCKER_COMMAND_TIMEOUT",
+                ) from e
+            except asyncio.CancelledError:
+                await _kill_and_wait_process(proc)
+                raise
+        finally:
+            self._active_processes.discard(proc)
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -552,6 +560,44 @@ class ComposeManager:
                 reason_code=reason_code,
             )
         return stdout
+
+    async def _create_tracked_subprocess_exec(
+        self,
+        *cmd: str,
+        stdout: int,
+        stderr: int,
+        env: dict[str, str] | None = None,
+    ) -> asyncio.subprocess.Process:
+        create_task = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=stdout,
+                stderr=stderr,
+                env=env,
+            )
+        )
+        try:
+            proc = await asyncio.shield(create_task)
+        except asyncio.CancelledError:
+            created_proc = await self._kill_created_process_after_spawn_cancellation(create_task)
+            if created_proc is not None:
+                self._active_processes.add(created_proc)
+                try:
+                    await _kill_and_wait_process(created_proc)
+                finally:
+                    self._active_processes.discard(created_proc)
+            raise
+        self._active_processes.add(proc)
+        return proc
+
+    async def _kill_created_process_after_spawn_cancellation(
+        self,
+        create_task: asyncio.Task[asyncio.subprocess.Process],
+    ) -> asyncio.subprocess.Process | None:
+        try:
+            return await asyncio.shield(create_task)
+        except (Exception, asyncio.CancelledError):
+            return None
 
     def _services_for(self, spec: WorkspaceComposeSpec) -> list[ComposeService]:
         services = list(spec.services)

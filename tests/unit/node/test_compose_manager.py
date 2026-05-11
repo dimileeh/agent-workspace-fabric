@@ -952,3 +952,32 @@ class TestRender:
 
         assert process.kill_called is True
         assert process.wait_called is True
+
+    @pytest.mark.unit
+    async def test_docker_capture_cancellation_during_spawn_kills_created_subprocess(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        process = _CancellationHangingProcess()
+        spawn_started = asyncio.Event()
+        allow_return = asyncio.Event()
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _CancellationHangingProcess:
+            spawn_started.set()
+            await allow_return.wait()
+            return process
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+        task = asyncio.create_task(
+            manager._docker_capture(["ps", "-aq"], operation="ps")  # noqa: SLF001
+        )
+        await asyncio.wait_for(spawn_started.wait(), timeout=1)
+
+        task.cancel()
+        allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        assert process.kill_called is True
+        assert process.wait_called is True
