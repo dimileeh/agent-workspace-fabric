@@ -4328,7 +4328,10 @@ async def test_monitor_terminal_callbacks_ignore_active_runtime_teardown_operati
         ]
 
     assert workspace.status == WorkspaceStatus.monitoring_pr.value
-    assert workspace.pr_merge_sha is None
+    if callback == "completed":
+        assert workspace.pr_merge_sha == "blocked-merge-sha"
+    else:
+        assert workspace.pr_merge_sha is None
     assert workspace.failure_reason is None
     assert workspace.failure_message is None
     assert cmd.calls == []
@@ -4346,6 +4349,8 @@ async def test_monitor_terminal_callbacks_ignore_active_runtime_teardown_operati
     if callback == "failed":
         expected_payload["failure_message"] = failure_message
         expected_payload["failure_reason"] = FailureReason.infrastructure_failure.value
+    else:
+        expected_payload["pr_merge_sha"] = "blocked-merge-sha"
     assert ignored_events[-1].payload == expected_payload
 
     async with factory() as s:
@@ -4367,7 +4372,10 @@ async def test_monitor_terminal_callbacks_ignore_active_runtime_teardown_operati
         assert workspace is not None
 
     assert workspace.status == WorkspaceStatus.cancelled.value
-    assert workspace.pr_merge_sha is None
+    if callback == "completed":
+        assert workspace.pr_merge_sha == "blocked-merge-sha"
+    else:
+        assert workspace.pr_merge_sha is None
     assert workspace.failure_reason is None
     assert workspace.failure_message is None
 

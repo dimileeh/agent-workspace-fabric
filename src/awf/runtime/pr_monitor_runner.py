@@ -5029,6 +5029,7 @@ class PullRequestMonitorRunner:
                     requested_status=WorkspaceStatus.completed,
                     reason_code="MONITOR_DONE",
                     operation_id=operation_id,
+                    pr_merge_sha=pr_merge_sha,
                 )
                 return
             except WorkspaceTransitionStaleError:
@@ -5398,6 +5399,7 @@ async def _record_ignored_monitor_terminal_callback(
     requested_status: WorkspaceStatus,
     reason_code: str,
     operation_id: str | None = None,
+    pr_merge_sha: str | None = None,
     failure_reason: str | None = None,
     failure_message: str | None = None,
 ) -> None:
@@ -5414,8 +5416,10 @@ async def _record_ignored_monitor_terminal_callback(
         operation_id=operation_id,
         reason_code=reason_code,
     )
-    if failure_reason is not None or failure_message is not None:
+    if pr_merge_sha is not None or failure_reason is not None or failure_message is not None:
         payload = dict(event.payload or {})
+        if pr_merge_sha is not None:
+            payload["pr_merge_sha"] = pr_merge_sha
         if failure_reason is not None:
             payload["failure_reason"] = failure_reason
         if failure_message is not None:
@@ -5462,6 +5466,7 @@ async def _record_blocked_monitor_terminal_callback(
     requested_status: WorkspaceStatus,
     reason_code: str,
     operation_id: str | None,
+    pr_merge_sha: str | None = None,
     failure_reason: str | None = None,
     failure_message: str | None = None,
 ) -> None:
@@ -5469,12 +5474,19 @@ async def _record_blocked_monitor_terminal_callback(
     workspace = await repo.get(workspace_id)
     if workspace is None:
         return
+    if (
+        requested_status == WorkspaceStatus.completed
+        and pr_merge_sha
+        and not workspace.pr_merge_sha
+    ):
+        workspace.pr_merge_sha = pr_merge_sha
     await _record_ignored_monitor_terminal_callback(
         repo,
         workspace,
         requested_status=requested_status,
         reason_code=reason_code,
         operation_id=operation_id,
+        pr_merge_sha=(pr_merge_sha if requested_status == WorkspaceStatus.completed else None),
         failure_reason=failure_reason,
         failure_message=failure_message,
     )
