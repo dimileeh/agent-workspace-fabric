@@ -946,9 +946,36 @@ class GitHubClient:
                     name=run.get("name") or f"run/{run_id}",
                     conclusion=conclusion.upper(),
                     log_excerpt=_tail(log_text, log_tail_chars),
+                    run_id=run_id,
                 )
             )
         return tuple(failures)
+
+    async def rerun_failed_workflow_jobs(self, *, repo: RepoRef, run_id: str) -> None:
+        """Rerun only failed jobs for a workflow run.
+
+        Used by the PR monitor before involving a coding agent when the
+        failure evidence points at GitHub/runner/package-download
+        infrastructure rather than repository code.
+        """
+
+        result = await self._runner.run(
+            [
+                "gh",
+                "run",
+                "rerun",
+                run_id,
+                "--repo",
+                repo.slug(),
+                "--failed",
+            ]
+        )
+        if not result.ok:
+            raise GitHubClientError(
+                operation="rerun_failed_workflow_jobs",
+                returncode=result.returncode,
+                stderr=result.stderr,
+            )
 
     async def resolve_thread(self, *, thread_id: str) -> None:
         await self._graphql(

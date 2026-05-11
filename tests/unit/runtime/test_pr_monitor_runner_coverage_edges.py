@@ -1706,6 +1706,8 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
         ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
         ["gh", "api", "graphql"],
     ]
+    assert cmd.calls[1].args[3] == "push"
+    assert cmd.calls[2].args[3:5] == ["rev-parse", "HEAD"]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -2413,6 +2415,7 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
     adapter.queue(stdout="partial CI fix")
     workspace_id = await seed_monitoring_workspace(factory)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(
         returncode=128,
@@ -3393,6 +3396,171 @@ async def test_git_push_result_blocks_existing_supply_chain_finding_before_git_p
     assert push_result.pushed is False
     assert "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION" in push_result.stderr
     assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed locally.")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="ci", conclusion="FAILURE", log_excerpt="failing check"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert ".github/workflows/ci.yml" in push_result.stderr
+    assert [call.args for call in cmd.calls] == [
+        ["git", "-C", str(worktree), "status", "--porcelain"],
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "diff",
+            "--name-only",
+            f"origin/awf/{workspace_id}..HEAD",
+            "--",
+        ]
+    ]
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.monitor_protected_scope_push_blocked",
+            limit=10,
+        )
+    assert len(events) == 1
+    assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert events[0].payload is not None
+    assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+
+
+@pytest.mark.unit
+async def test_protected_scope_push_check_skips_missing_worktree_without_git_diff(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    message = await runner._protected_scope_push_block_message(
+        workspace_id="ws_missing_worktree",
+        worktree_path=tmp_path / "worktrees" / "ws_missing_worktree",
+        remote_branch="awf/ws_missing_worktree",
+    )
+
+    assert message is None
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_protected_scope_unpushed_commit_check_skips_missing_workspace_before_git_diff(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / "ws_missing_row"
+    worktree.mkdir(parents=True)
+
+    assert (
+        await runner._protected_scope_violations_for_unpushed_commits(
+            workspace_id="ws_missing_row",
+            worktree_path=worktree,
+            remote_branch="awf/ws_missing_row",
+        )
+        == []
+    )
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_changed_paths_since_remote_branch_falls_back_to_upstream_ref(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="unknown revision")
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n\n tests/test_fix.py \n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    paths = await runner._changed_paths_since_remote_branch(
+        worktree_path=tmp_path / "worktree",
+        remote_branch="awf/ws_remote_missing",
+    )
+
+    assert paths == ("src/fix.py", "tests/test_fix.py")
+    assert cmd.calls[0].args[3:6] == ["diff", "--name-only", "origin/awf/ws_remote_missing..HEAD"]
+    assert cmd.calls[1].args[3:6] == ["diff", "--name-only", "@{upstream}..HEAD"]
+
+
+@pytest.mark.unit
+async def test_changed_paths_since_remote_branch_returns_empty_when_refs_are_unavailable(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="unknown remote ref")
+    cmd.queue_result(returncode=128, stderr="no upstream")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    paths = await runner._changed_paths_since_remote_branch(
+        worktree_path=tmp_path / "worktree",
+        remote_branch="awf/ws_remote_missing",
+    )
+
+    assert paths == ()
 
 
 @pytest.mark.unit

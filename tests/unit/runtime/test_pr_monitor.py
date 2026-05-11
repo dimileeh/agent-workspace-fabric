@@ -20,14 +20,17 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     PRStatus,
     ReportCiFailure,
+    RerunTransientCI,
     ReviewComment,
     ReviewThread,
     ReviewThreadComment,
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    _ci_transient_rerun_state_key,
     _mark_review_thread_addressed,
     _review_thread_needs_attention,
+    _should_rerun_transient_ci,
     decide,
 )
 
@@ -395,6 +398,127 @@ class TestAddressComments:
 
 
 class TestCiFailure:
+    @pytest.mark.unit
+    def test_transient_failure_dispatches_rerun_before_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Set up Python\n"
+                "error: Failed to download cpython-3.12.9\n"
+                "HTTP status server error (502 Bad Gateway)"
+            ),
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_failure_falls_back_to_agent_after_rerun_budget(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="curl: (56) Recv failure: Connection reset by peer",
+            run_id="25655330295",
+        )
+        status = _status(check_state=CheckState.FAILURE, ci_failures=(failure,))
+        state = MonitorState()
+        state.threads_addressed_ids[
+            _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+        ] = "2"
+
+        action = decide(status, state, MonitorConfig(ci_transient_rerun_max_attempts=2))
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_failure_with_disabled_rerun_budget_dispatches_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="HTTP status server error (503 Service Unavailable)",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(ci_transient_rerun_max_attempts=0),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_failure_corrupt_rerun_count_is_treated_as_zero(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="curl: (56) Recv failure: Connection reset by peer",
+            run_id="25655330295",
+        )
+        status = _status(check_state=CheckState.FAILURE, ci_failures=(failure,))
+        state = MonitorState()
+        state.threads_addressed_ids[
+            _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+        ] = "not-an-int"
+
+        action = decide(status, state, MonitorConfig())
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_rerun_helper_rejects_empty_failure_snapshot(self) -> None:
+        assert not _should_rerun_transient_ci(
+            _status(check_state=CheckState.FAILURE, ci_failures=()),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+    @pytest.mark.unit
+    def test_transient_failure_without_run_id_dispatches_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="HTTP status server error (502 Bad Gateway)",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_code_like_failure_still_dispatches_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt="FAILED tests/unit/test_thing.py::test_case - AssertionError",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
     @pytest.mark.unit
     def test_failure_with_per_check_details(self) -> None:
         failure = CheckFailure(

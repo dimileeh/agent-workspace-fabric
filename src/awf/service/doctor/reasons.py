@@ -199,6 +199,22 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace remonitor <workspace_id>",
         "docs/REASON_CATALOG.md#git_base_fetch_transient_retry_exhausted",
     ),
+    "CI_TRANSIENT_RERUN_FAILED": _ReasonText(
+        (
+            "AWF could not request a GitHub rerun for CI failures classified "
+            "as transient infrastructure failures."
+        ),
+        (
+            "Verify `gh run rerun <run_id> --failed` works with the AWF "
+            "GitHub token, then remonitor the workspace if the failure was transient."
+        ),
+        (
+            "GitHub rejected the rerun request, the workflow run no longer "
+            "exists, or the token lacks permission to rerun workflow jobs."
+        ),
+        "gh run rerun <run_id> --failed",
+        "docs/REASON_CATALOG.md#ci_transient_rerun_failed",
+    ),
     "CODEX_AUTH_MISSING": _ReasonText(
         "No Codex auth signal was visible.",
         "Mount ~/.codex or set OPENAI_API_KEY, OPENAI_API_TOKEN, CODEX_API_KEY, or CODEX_AUTH_TOKEN.",

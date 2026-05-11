@@ -9,6 +9,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs`
 **Docs Link:** [docs/REASON_CATALOG.md#api_unreachable](#api_unreachable)
 
+### CI_TRANSIENT_RERUN_FAILED
+**Problem:** AWF could not request a GitHub rerun for CI failures classified as transient infrastructure failures.
+**Likely Cause:** GitHub rejected the rerun request, the workflow run no longer exists, or the token lacks permission to rerun workflow jobs.
+**Operator Fix:** Verify `gh run rerun <run_id> --failed` works with the AWF GitHub token, then remonitor the workspace if the failure was transient.
+**Related Command:** `gh run rerun <run_id> --failed`
+**Docs Link:** [docs/REASON_CATALOG.md#ci_transient_rerun_failed](#ci_transient_rerun_failed)
+
 ### CLAUDE_AUTH_MISSING
 **Problem:** No Claude Code auth signal was visible.
 **Likely Cause:** Missing Claude API credentials.
