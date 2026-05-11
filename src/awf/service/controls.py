@@ -1648,184 +1648,211 @@ class WorkspaceControlService:
                 allow_active_operation_id=operation_id,
             )
 
-        await self._session.flush()
-        cleaner = self._cleaner_factory()
-        cleanup_result = _normalize_cleanup_result(
-            await cleaner.cleanup(
-                workspace_id=workspace_id,
-                repo_url=workspace.repo_url,
-                compose_project_name=workspace.compose_project_name,
-                compose_file_path=(
-                    Path(workspace.compose_file_path) if workspace.compose_file_path else None
-                ),
-                worktree_host_path=None,
-                remove_volumes=remove_volumes,
-                remove_worktree=remove_worktree,
+        await self._commit_before_external_runtime_io()
+        response: WorkspaceControlResponse | None = None
+        try:
+            cleaner = self._cleaner_factory()
+            cleanup_result = _normalize_cleanup_result(
+                await self._run_with_teardown_operation_heartbeat(
+                    operation_id,
+                    cleaner.cleanup(
+                        workspace_id=workspace_id,
+                        repo_url=workspace.repo_url,
+                        compose_project_name=workspace.compose_project_name,
+                        compose_file_path=(
+                            Path(workspace.compose_file_path)
+                            if workspace.compose_file_path
+                            else None
+                        ),
+                        worktree_host_path=None,
+                        remove_volumes=remove_volumes,
+                        remove_worktree=remove_worktree,
+                    ),
+                )
             )
-        )
-        cleanup_payload = cleanup_result.to_dict()
-        await self._session.refresh(workspace)
-        requested_status = (
-            WorkspaceStatus.failed if not cleanup_result.ok else WorkspaceStatus.destroyed
-        )
-        if (
-            workspace.status != WorkspaceStatus.destroying.value
-            and WorkspaceStateMachine.is_callback_terminal(WorkspaceStatus(workspace.status))
-        ):
-            ignored_event = await repo.record_ignored_stale_callback(
-                workspace,
-                callback_source="service.controls",
-                callback_action="destroy_cleanup",
-                expected_status=WorkspaceStatus.destroying,
-                requested_status=requested_status,
-                operation_id=operation.id,
-                reason_code="STALE_CALLBACK_IGNORED",
+            cleanup_payload = cleanup_result.to_dict()
+            await self._session.refresh(workspace)
+            requested_status = (
+                WorkspaceStatus.failed if not cleanup_result.ok else WorkspaceStatus.destroyed
             )
-            ignored_payload = dict(ignored_event.payload or {})
-            operation_result = _with_secret_lease_result(
+            if (
+                workspace.status != WorkspaceStatus.destroying.value
+                and WorkspaceStateMachine.is_callback_terminal(WorkspaceStatus(workspace.status))
+            ):
+                ignored_event = await repo.record_ignored_stale_callback(
+                    workspace,
+                    callback_source="service.controls",
+                    callback_action="destroy_cleanup",
+                    expected_status=WorkspaceStatus.destroying,
+                    requested_status=requested_status,
+                    operation_id=operation.id,
+                    reason_code="STALE_CALLBACK_IGNORED",
+                )
+                ignored_payload = dict(ignored_event.payload or {})
+                operation_result = _with_secret_lease_result(
+                    {
+                        "status": workspace.status,
+                        "cleanup": cleanup_payload,
+                        "ignored_callback": ignored_payload,
+                    },
+                    secret_lease_summary,
+                )
+                await operations.finish(
+                    operation,
+                    status=OperationStatus.cancelled,
+                    result=operation_result,
+                )
+                audit_evidence = _with_secret_lease_evidence(
+                    {
+                        "cleanup": cleanup_payload,
+                        "ignored_callback": ignored_payload,
+                    },
+                    secret_lease_summary,
+                )
+                await _add_control_audit_event(
+                    repo,
+                    workspace,
+                    operation=operation,
+                    action=OperationType.destroy.value,
+                    outcome="skipped",
+                    reason_code="STALE_CALLBACK_IGNORED",
+                    extra={
+                        "force": force,
+                        "remove_volumes": remove_volumes,
+                        "remove_worktree": remove_worktree,
+                        "expected_version": expected_version,
+                    },
+                    evidence=audit_evidence,
+                )
+                response = _control_response(
+                    workspace=workspace,
+                    operation=operation,
+                    message="workspace destroy callback ignored",
+                )
+                await self._session.commit()
+                return response
+            cleanup_event_payload = _event_payload(
                 {
-                    "status": workspace.status,
+                    **event_payload,
                     "cleanup": cleanup_payload,
-                    "ignored_callback": ignored_payload,
                 },
-                secret_lease_summary,
+                expected_version=None,
             )
-            await operations.finish(
-                operation,
-                status=OperationStatus.cancelled,
-                result=operation_result,
-            )
-            audit_evidence = _with_secret_lease_evidence(
-                {
-                    "cleanup": cleanup_payload,
-                    "ignored_callback": ignored_payload,
-                },
-                secret_lease_summary,
-            )
-            await _add_control_audit_event(
-                repo,
-                workspace,
-                operation=operation,
-                action=OperationType.destroy.value,
-                outcome="skipped",
-                reason_code="STALE_CALLBACK_IGNORED",
-                extra={
-                    "force": force,
-                    "remove_volumes": remove_volumes,
-                    "remove_worktree": remove_worktree,
-                    "expected_version": expected_version,
-                },
-                evidence=audit_evidence,
-            )
-            return _control_response(
+            if not cleanup_result.ok:
+                cleanup_message = _cleanup_failure_message(cleanup_result)
+                bounded_cleanup_message = _bounded_operation_error_message(cleanup_message)
+                workspace.failure_reason = "cleanup_failure"
+                workspace.failure_message = bounded_cleanup_message
+                if WorkspaceStateMachine.can_transition(
+                    WorkspaceStatus(workspace.status), WorkspaceStatus.failed
+                ):
+                    await _transition_workspace_for_control(
+                        repo,
+                        workspace,
+                        to=WorkspaceStatus.failed,
+                        reason_code="CLEANUP_FAILED",
+                        payload=cleanup_event_payload,
+                        allow_active_operation_id=operation_id,
+                    )
+                operation_result = _with_secret_lease_result(
+                    {"status": workspace.status, "cleanup": cleanup_payload},
+                    secret_lease_summary,
+                )
+                await operations.finish(
+                    operation,
+                    status=OperationStatus.failed,
+                    error_code="CLEANUP_FAILED",
+                    error_message=bounded_cleanup_message,
+                    result=operation_result,
+                )
+                audit_evidence = _with_secret_lease_evidence(
+                    {
+                        "cleanup": cleanup_payload,
+                        "error_message": bounded_cleanup_message,
+                    },
+                    secret_lease_summary,
+                )
+                await _add_control_audit_event(
+                    repo,
+                    workspace,
+                    operation=operation,
+                    action=OperationType.destroy.value,
+                    outcome="failed",
+                    reason_code="CLEANUP_FAILED",
+                    extra={
+                        "force": force,
+                        "remove_volumes": remove_volumes,
+                        "remove_worktree": remove_worktree,
+                        "expected_version": expected_version,
+                    },
+                    evidence=audit_evidence,
+                )
+                message = "workspace cleanup failed"
+            else:
+                if WorkspaceStateMachine.can_transition(
+                    WorkspaceStatus(workspace.status), WorkspaceStatus.destroyed
+                ):
+                    await _transition_workspace_for_control(
+                        repo,
+                        workspace,
+                        to=WorkspaceStatus.destroyed,
+                        reason_code="DESTROYED",
+                        payload=cleanup_event_payload,
+                        allow_active_operation_id=operation_id,
+                    )
+                operation_result = _with_secret_lease_result(
+                    {"status": workspace.status, "cleanup": cleanup_payload},
+                    secret_lease_summary,
+                )
+                await operations.finish(
+                    operation,
+                    status=OperationStatus.succeeded,
+                    result=operation_result,
+                )
+                audit_evidence = _with_secret_lease_evidence(
+                    {"cleanup": cleanup_payload},
+                    secret_lease_summary,
+                )
+                await _add_control_audit_event(
+                    repo,
+                    workspace,
+                    operation=operation,
+                    action=OperationType.destroy.value,
+                    outcome="succeeded",
+                    reason_code=_OPERATOR_DESTROY_REASON_CODE,
+                    extra={
+                        "force": force,
+                        "remove_volumes": remove_volumes,
+                        "remove_worktree": remove_worktree,
+                        "expected_version": expected_version,
+                    },
+                    evidence=audit_evidence,
+                )
+                message = "workspace destroyed"
+
+            response = _control_response(
                 workspace=workspace,
                 operation=operation,
-                message="workspace destroy callback ignored",
+                message=message,
             )
-        cleanup_event_payload = _event_payload(
-            {
-                **event_payload,
-                "cleanup": cleanup_payload,
-            },
-            expected_version=None,
-        )
-        if not cleanup_result.ok:
-            cleanup_message = _cleanup_failure_message(cleanup_result)
-            bounded_cleanup_message = _bounded_operation_error_message(cleanup_message)
-            workspace.failure_reason = "cleanup_failure"
-            workspace.failure_message = bounded_cleanup_message
-            if WorkspaceStateMachine.can_transition(
-                WorkspaceStatus(workspace.status), WorkspaceStatus.failed
-            ):
-                await _transition_workspace_for_control(
-                    repo,
-                    workspace,
-                    to=WorkspaceStatus.failed,
-                    reason_code="CLEANUP_FAILED",
-                    payload=cleanup_event_payload,
-                    allow_active_operation_id=operation_id,
-                )
-            operation_result = _with_secret_lease_result(
-                {"status": workspace.status, "cleanup": cleanup_payload},
-                secret_lease_summary,
+            await self._session.commit()
+        except asyncio.CancelledError as exc:
+            await self._finish_precommitted_cancelled_control_operation_failed(
+                operation_id=operation_id,
+                workspace_id=workspace_id,
+                exc=exc,
             )
-            await operations.finish(
-                operation,
-                status=OperationStatus.failed,
-                error_code="CLEANUP_FAILED",
-                error_message=bounded_cleanup_message,
-                result=operation_result,
+            raise
+        except Exception as exc:
+            await _finish_precommitted_control_operation_failed(
+                self._session,
+                operation_id=operation_id,
+                workspace_id=workspace_id,
+                exc=exc,
             )
-            audit_evidence = _with_secret_lease_evidence(
-                {
-                    "cleanup": cleanup_payload,
-                    "error_message": bounded_cleanup_message,
-                },
-                secret_lease_summary,
-            )
-            await _add_control_audit_event(
-                repo,
-                workspace,
-                operation=operation,
-                action=OperationType.destroy.value,
-                outcome="failed",
-                reason_code="CLEANUP_FAILED",
-                extra={
-                    "force": force,
-                    "remove_volumes": remove_volumes,
-                    "remove_worktree": remove_worktree,
-                    "expected_version": expected_version,
-                },
-                evidence=audit_evidence,
-            )
-            message = "workspace cleanup failed"
-        else:
-            if WorkspaceStateMachine.can_transition(
-                WorkspaceStatus(workspace.status), WorkspaceStatus.destroyed
-            ):
-                await _transition_workspace_for_control(
-                    repo,
-                    workspace,
-                    to=WorkspaceStatus.destroyed,
-                    reason_code="DESTROYED",
-                    payload=cleanup_event_payload,
-                    allow_active_operation_id=operation_id,
-                )
-            operation_result = _with_secret_lease_result(
-                {"status": workspace.status, "cleanup": cleanup_payload},
-                secret_lease_summary,
-            )
-            await operations.finish(
-                operation,
-                status=OperationStatus.succeeded,
-                result=operation_result,
-            )
-            audit_evidence = _with_secret_lease_evidence(
-                {"cleanup": cleanup_payload},
-                secret_lease_summary,
-            )
-            await _add_control_audit_event(
-                repo,
-                workspace,
-                operation=operation,
-                action=OperationType.destroy.value,
-                outcome="succeeded",
-                reason_code=_OPERATOR_DESTROY_REASON_CODE,
-                extra={
-                    "force": force,
-                    "remove_volumes": remove_volumes,
-                    "remove_worktree": remove_worktree,
-                    "expected_version": expected_version,
-                },
-                evidence=audit_evidence,
-            )
-            message = "workspace destroyed"
-
-        return _control_response(
-            workspace=workspace,
-            operation=operation,
-            message=message,
-        )
+            raise
+        assert response is not None
+        return response
 
     async def _require_workspace(
         self,

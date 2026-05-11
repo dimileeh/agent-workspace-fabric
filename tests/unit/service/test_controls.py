@@ -1226,6 +1226,7 @@ async def test_destroy_workspace_force_cleans_resources_and_marks_destroyed(
             session,
             project_stopper=_RecordingStopper(),
             cleaner_factory=lambda: cleaner,
+            session_factory=factory,
         )
 
         response = await service.destroy_workspace(
@@ -1253,6 +1254,87 @@ async def test_destroy_workspace_force_cleans_resources_and_marks_destroyed(
 
 
 @pytest.mark.unit
+async def test_destroy_workspace_renews_teardown_operation_while_cleanup_runs(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = make_session_factory(engine)
+    monkeypatch.setattr(
+        controls,
+        "_RUNTIME_TEARDOWN_OPERATION_HEARTBEAT_INTERVAL_SECONDS",
+        0.001,
+    )
+
+    class _LeaseObservingCleaner:
+        def __init__(self) -> None:
+            self.lease_seen_at: datetime | None = None
+
+        async def cleanup(
+            self,
+            *,
+            workspace_id: str,
+            repo_url: str,
+            compose_project_name: str | None = None,
+            compose_file_path: Path | None = None,
+            worktree_host_path: Path | None = None,
+            remove_volumes: bool = True,
+            remove_worktree: bool = True,
+        ) -> list[str]:
+            del (
+                repo_url,
+                compose_project_name,
+                compose_file_path,
+                worktree_host_path,
+                remove_volumes,
+                remove_worktree,
+            )
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 1
+            while loop.time() < deadline:
+                async with factory() as observe_session:
+                    operations = await OperationRepository(observe_session).list_for_workspace(
+                        workspace_id,
+                        operation_type=OperationType.destroy,
+                    )
+                    running_destroy = next(
+                        (
+                            operation
+                            for operation in operations
+                            if operation.status == OperationStatus.running.value
+                        ),
+                        None,
+                    )
+                    if running_destroy is not None and running_destroy.lease_renewed_at is not None:
+                        self.lease_seen_at = running_destroy.lease_renewed_at
+                        return []
+                await asyncio.sleep(0.005)
+            raise AssertionError(
+                "destroy cleanup never observed a renewed teardown operation lease"
+            )
+
+    cleaner = _LeaseObservingCleaner()
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.ready)
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: cleaner,
+            session_factory=factory,
+        )
+
+        response = await service.destroy_workspace(
+            workspace.id,
+            force=True,
+            remove_volumes=True,
+            remove_worktree=True,
+            idempotency_key="destroy-renews-teardown-lease",
+        )
+
+    assert response.status == WorkspaceStatus.destroyed
+    assert cleaner.lease_seen_at is not None
+
+
+@pytest.mark.unit
 async def test_destroy_workspace_records_cleanup_failures(
     engine: AsyncEngine,
 ) -> None:
@@ -1264,6 +1346,7 @@ async def test_destroy_workspace_records_cleanup_failures(
             session,
             project_stopper=_RecordingStopper(),
             cleaner_factory=lambda: cleaner,
+            session_factory=factory,
         )
 
         response = await service.destroy_workspace(
@@ -1360,6 +1443,7 @@ async def test_destroy_workspace_records_structured_partial_cleanup_and_retry(
             session,
             project_stopper=_RecordingStopper(),
             cleaner_factory=lambda: cleaner,
+            session_factory=factory,
         )
 
         failed_response = await service.destroy_workspace(
