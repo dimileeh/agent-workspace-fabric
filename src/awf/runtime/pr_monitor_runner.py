@@ -1588,11 +1588,83 @@ class PullRequestMonitorRunner:
             )
             event_payload["attempt"] = recorded_attempt
             await self._persist_state(workspace_id, state)
+            accepted_run_ids: list[str] = []
+            failed_run_id: str | None = None
             try:
                 for run_id in run_ids:
-                    await self._deps.gh.rerun_failed_workflow_jobs(repo=repo, run_id=run_id)
+                    try:
+                        await self._deps.gh.rerun_failed_workflow_jobs(repo=repo, run_id=run_id)
+                    except GitHubClientError:
+                        failed_run_id = run_id
+                        raise
+                    accepted_run_ids.append(run_id)
             except GitHubClientError as exc:
                 error_message = _redact_and_truncate_github_error(str(exc))
+                if accepted_run_ids:
+                    partial_event_payload = {
+                        **event_payload,
+                        "accepted_run_ids": accepted_run_ids,
+                        "failed_run_id": failed_run_id,
+                        "error": error_message,
+                    }
+                    await self._finish_monitor_operation(
+                        operation,
+                        status=OperationStatus.succeeded,
+                        result={
+                            "status": "succeeded",
+                            "outcome": "ci_transient_rerun_partially_requested",
+                            "reason_code": _CI_TRANSIENT_RERUN_REASON,
+                            **partial_event_payload,
+                        },
+                    )
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.ci_transient_rerun_partially_requested",
+                            "workspace_id": workspace_id,
+                            "pr_number": pr_number,
+                            "reason_code": _CI_TRANSIENT_RERUN_REASON,
+                            **partial_event_payload,
+                        },
+                    )
+                    await self._append_workspace_events(
+                        workspace_id=workspace_id,
+                        events=[
+                            WorkspaceEventCreate(
+                                event_type=(
+                                    "workspace.monitor_ci_transient_rerun_partially_requested"
+                                ),
+                                reason_code=_CI_TRANSIENT_RERUN_REASON,
+                                payload=partial_event_payload,
+                            )
+                        ],
+                    )
+                    await self._sleep_with_monitor_state_operation(
+                        workspace_id=workspace_id,
+                        action="ci_transient_rerun_wait",
+                        requested_action="wait_for_rerun_rollup",
+                        reason=(
+                            "GitHub accepted at least one failed-job rerun; "
+                            "waiting before the next PR status poll so the "
+                            "rollup can leave its stale failure snapshot."
+                        ),
+                        reason_code=_CI_TRANSIENT_RERUN_REASON,
+                        pr_number=pr_number,
+                        status=status,
+                        base_branch=base_branch,
+                        remote_branch=remote_branch,
+                        wait_seconds=self._config.poll_interval_seconds,
+                        monitor_log=monitor_log,
+                        extra_payload=partial_event_payload,
+                        extra_identity=(
+                            rerun_signature,
+                            attempt,
+                            *accepted_run_ids,
+                            "partial_wait",
+                        ),
+                    )
+                    state.iter_count += 1
+                    return False
                 await self._finish_monitor_operation(
                     operation,
                     status=OperationStatus.failed,

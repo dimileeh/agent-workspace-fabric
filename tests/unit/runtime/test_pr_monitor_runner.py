@@ -587,6 +587,94 @@ async def test_rerun_transient_ci_action_records_failed_rerun_request(
 
 
 @pytest.mark.unit
+async def test_rerun_transient_ci_waits_after_partial_rerun_acceptance(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1, stderr="HTTP 502: try again")
+    adapter = FakeAdapter()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    first_failure = CheckFailure(
+        name="python-full-coverage",
+        conclusion="FAILURE",
+        log_excerpt="HTTP status server error (502 Bad Gateway)",
+        run_id="25655330295",
+    )
+    second_failure = CheckFailure(
+        name="console-build",
+        conclusion="FAILURE",
+        log_excerpt="HTTP status server error (502 Bad Gateway)",
+        run_id="25655330301",
+    )
+    status = _status(
+        check_state=CheckState.FAILURE,
+        ci_failures=(first_failure, second_failure),
+        head_sha="abc1234567890def",
+    )
+    state_key = _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=RerunTransientCI(failures=(first_failure, second_failure)),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert adapter.calls == []
+    assert state.iter_count == 1
+    assert state.threads_addressed_ids[state_key] == "1"
+    assert [call.args[3] for call in cmd.calls] == ["25655330295", "25655330301"]
+    assert sleep_fn.calls == [60]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        partial_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.monitor_ci_transient_rerun_partially_requested"
+        ]
+        assert len(partial_events) == 1
+        assert partial_events[0].reason_code == "CI_TRANSIENT_RERUN"
+        assert partial_events[0].payload is not None
+        assert partial_events[0].payload["run_ids"] == ["25655330295", "25655330301"]
+        assert partial_events[0].payload["accepted_run_ids"] == ["25655330295"]
+        assert partial_events[0].payload["failed_run_id"] == "25655330301"
+        assert "try again" in partial_events[0].payload["error"]
+        failed_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.monitor_ci_transient_rerun_failed"
+        ]
+        assert failed_events == []
+        operations = list((await session.execute(select(Operation))).scalars())
+        rerun_operations = [
+            op for op in operations if (op.payload or {}).get("action") == "ci_transient_rerun"
+        ]
+        assert len(rerun_operations) == 1
+        assert rerun_operations[0].status == OperationStatus.succeeded.value
+
+
+@pytest.mark.unit
 async def test_rerun_transient_ci_without_run_ids_dispatches_agent_repair(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
