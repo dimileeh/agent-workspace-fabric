@@ -1021,22 +1021,32 @@ class ControlWorker:
             "workspace_status": candidate.status.value,
             "cleanup": cleanup.to_dict(),
         }
-        async with self._session_factory() as session:
+
+        async def _operation(session: AsyncSession) -> bool:
             repo = WorkspaceRepository(session)
             ws = await repo.get(candidate.workspace_id)
             if ws is None:
-                return
+                return False
             if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
-                return
+                return False
             if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
-                return
+                return False
             await repo.add_event(
                 ws,
                 event_type=_TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
                 reason_code=_TERMINAL_RUNTIME_RELEASE_REASON_CODE,
                 payload=payload,
             )
-            await session.commit()
+            return True
+
+        recorded = await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            on_retry=self._log_transient_db_retry,
+        )
+        if not recorded:
+            return
 
         _log.info(
             _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
@@ -1061,26 +1071,35 @@ class ControlWorker:
         if cleanup is not None:
             payload["cleanup"] = cleanup.to_dict()
 
-        async with self._session_factory() as session:
+        async def _operation(session: AsyncSession) -> bool:
             repo = WorkspaceRepository(session)
             ws = await repo.get(candidate.workspace_id)
             if ws is None:
-                return
+                return False
             if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
-                return
+                return False
             if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
-                return
+                return False
             if await self._has_terminal_runtime_release_failure_event(
                 session, candidate.workspace_id
             ):
-                return
+                return False
             await repo.add_event(
                 ws,
                 event_type=_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
                 reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
                 payload=payload,
             )
-            await session.commit()
+            return True
+
+        recorded = await run_db_operation_with_retry(
+            self._session_factory,
+            _operation,
+            commit=True,
+            on_retry=self._log_transient_db_retry,
+        )
+        if not recorded:
+            return
 
         _log.error(
             _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
