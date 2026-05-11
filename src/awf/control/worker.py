@@ -840,19 +840,21 @@ class ControlWorker:
             await self._release_terminal_runtime_resources()
         except Exception as exc:
             if _worker_exception_is_transient_db_connection(exc):
-                interval = max(
-                    0.0,
-                    self._config.terminal_runtime_release_scan_interval_seconds,
-                )
-                self._next_terminal_runtime_release_scan_at = monotonic() + interval
                 _log.warning(
                     "worker.terminal_runtime_release_db_connection_closed",
                     reason_code=DB_CONNECTION_CLOSED_REASON,
                     error_type=type(exc).__name__,
                     error=str(exc)[:240],
                 )
-                return
-            raise
+            else:
+                _log.exception(
+                    "worker.terminal_runtime_release_failed",
+                    reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+                    error_type=type(exc).__name__,
+                )
+            interval = max(0.0, self._config.terminal_runtime_release_scan_interval_seconds)
+            self._next_terminal_runtime_release_scan_at = monotonic() + interval
+            return
 
         interval = max(0.0, self._config.terminal_runtime_release_scan_interval_seconds)
         self._next_terminal_runtime_release_scan_at = monotonic() + interval
