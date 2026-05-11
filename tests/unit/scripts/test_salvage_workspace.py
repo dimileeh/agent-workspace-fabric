@@ -66,7 +66,7 @@ class TestClosureCapture:
             default_effort=None,
             log_store=None,
             agent_wall_timeout_seconds=7200,
-            agent_idle_timeout_seconds=1800,
+            agent_idle_timeout_seconds=3600,
         )
 
         assert adapter.name == AgentRuntime.codex

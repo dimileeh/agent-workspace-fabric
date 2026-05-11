@@ -757,7 +757,7 @@ class ExecutorConfig:
     """Maximum wall-clock seconds for one agent CLI run. Default: 7200 seconds."""
 
     agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
-    """Maximum seconds with no agent stdout/stderr. Default: 1800 seconds."""
+    """Maximum seconds with no agent stdout/stderr. Default: 3600 seconds."""
 
     max_validation_fix_passes: int = 5
     """Maximum fix attempts on validation failure. After the initial agent

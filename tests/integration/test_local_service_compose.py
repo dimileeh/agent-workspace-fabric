@@ -79,7 +79,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["OLLAMA_HOST"] == "${OLLAMA_HOST:-}"
         assert environment["OLLAMA_API_KEY"] == "${OLLAMA_API_KEY:-}"
         assert environment["AWF_AGENT_IDLE_TIMEOUT_SECONDS"] == (
-            "${AWF_AGENT_IDLE_TIMEOUT_SECONDS:-1800}"
+            "${AWF_AGENT_IDLE_TIMEOUT_SECONDS:-3600}"
         )
         assert environment["AWF_WORKSPACE_STEADY_CPU"] == "${AWF_WORKSPACE_STEADY_CPU:-3}"
         assert environment["AWF_WORKSPACE_STEADY_MEMORY_GB"] == (
