@@ -138,6 +138,9 @@ _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE = "workspace.terminal_runtime_released"
 _TERMINAL_RUNTIME_RELEASE_REASON_CODE = "TERMINAL_RUNTIME_RELEASED"
 _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "workspace.terminal_runtime_release_failed"
 _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_FAILED"
+# `destroyed` is included as a safety net so leaked runtime survives if
+# `destroy_workspace` left a container or network behind (partial failure
+# mid-cleanup); `compose down` is idempotent on already-cleaned projects.
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
