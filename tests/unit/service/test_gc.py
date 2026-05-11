@@ -44,6 +44,7 @@ from awf.service.gc import (
     _delete_gc_path,
     _estimate_bytes,
     _failed_terminal_workspace_has_no_work,
+    _needs_failed_terminal_workspace_no_work_inspection,
     _snapshot_has_no_work,
     plan_terminal_workspace_gc,
     run_terminal_workspace_gc,
@@ -2437,6 +2438,21 @@ def test_classify_workspace_failed_has_work_but_expired_no_default_policy():
             cleanup_enabled=True,
         )
         assert isinstance(res, WorkspaceGCPreserved)
+
+
+@pytest.mark.unit
+def test_explicit_failed_gc_filter_still_inspects_terminal_runtime():
+    ws = Workspace(
+        id="ws_1",
+        status=WorkspaceStatus.failed.value,
+        compose_project_name="proj",
+    )
+
+    assert _needs_failed_terminal_workspace_no_work_inspection(
+        ws,
+        default_policy=False,
+        cleanup_enabled=True,
+    )
 
 
 @pytest.mark.unit

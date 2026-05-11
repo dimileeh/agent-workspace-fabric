@@ -434,20 +434,29 @@ async def test_create_v2_overlap_stays_advisory_with_resource_summary(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("control_action", ["cancel", "stop"])
 async def test_terminal_workspace_control_releases_active_reservation(
     factory: async_sessionmaker[AsyncSession],
+    control_action: str,
 ) -> None:
     async def noop_stopper(_compose_project_name: str | None) -> None:
         return None
 
-    service = WorkspaceService(factory, project_stopper=noop_stopper)
+    service = WorkspaceService(
+        factory,
+        project_stopper=noop_stopper,
+        cleaner_factory=_NoopCleaner,
+    )
     created = await service.create_v2(_request())
 
-    await service.cancel_workspace(
-        created.id,
-        reason="operator cancellation",
-        stop_stack=False,
-    )
+    if control_action == "cancel":
+        await service.cancel_workspace(
+            created.id,
+            reason="operator cancellation",
+            stop_stack=False,
+        )
+    else:
+        await service.stop_workspace(created.id, reason="operator stop")
 
     async with factory() as session:
         reservation = (await ResourceReservationRepository(session).list_for_workspace(created.id))[

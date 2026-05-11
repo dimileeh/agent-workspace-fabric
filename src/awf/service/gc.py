@@ -1256,8 +1256,8 @@ def _needs_failed_terminal_workspace_no_work_inspection(
         return False
     if _compose_project_name_for_workspace(workspace) is None:
         return False
-    if default_policy:
-        return True
+    # Explicit status filters still inspect terminal runtime so live work is preserved.
+    del default_policy
     return True
 
 
