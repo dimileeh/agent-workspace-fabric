@@ -356,7 +356,9 @@ async def test_rerun_transient_ci_action_requests_failed_job_rerun_and_records_a
         assert events[0].payload is not None
         assert events[0].payload["run_ids"] == ["25655330295"]
         operations = list((await session.execute(select(Operation))).scalars())
-        rerun_operations = [op for op in operations if op.payload["action"] == "ci_transient_rerun"]
+        rerun_operations = [
+            op for op in operations if (op.payload or {}).get("action") == "ci_transient_rerun"
+        ]
         assert len(rerun_operations) == 1
         assert rerun_operations[0].status == OperationStatus.succeeded.value
 
@@ -495,7 +497,9 @@ async def test_rerun_transient_ci_action_records_failed_rerun_request(
         assert events[0].payload["run_ids"] == ["25655330295"]
         assert "workflow scope required" in events[0].payload["error"]
         operations = list((await session.execute(select(Operation))).scalars())
-        rerun_operations = [op for op in operations if op.payload["action"] == "ci_transient_rerun"]
+        rerun_operations = [
+            op for op in operations if (op.payload or {}).get("action") == "ci_transient_rerun"
+        ]
         assert len(rerun_operations) == 1
         assert rerun_operations[0].status == OperationStatus.failed.value
         assert rerun_operations[0].error_code == "CI_TRANSIENT_RERUN_FAILED"
@@ -558,7 +562,7 @@ async def test_rerun_transient_ci_without_run_ids_dispatches_agent_repair(
     assert state_key not in state.threads_addressed_ids
     async with factory() as session:
         operations = list((await session.execute(select(Operation))).scalars())
-    assert [op.payload["action"] for op in operations] == ["ci_repair"]
+    assert [(op.payload or {}).get("action") for op in operations] == ["ci_repair"]
     assert operations[0].status == OperationStatus.succeeded.value
 
 
