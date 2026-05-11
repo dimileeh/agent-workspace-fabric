@@ -1623,7 +1623,15 @@ class ControlWorker:
                     candidate,
                 )
             ):
-                await session.commit()
+                source = "control_worker.stale_active_execution"
+                await self._record_stale_active_execution_release_and_commit(
+                    session,
+                    workspace_id=candidate.workspace_id,
+                    cleanup=cleanup,
+                    source=source,
+                    cleanup_owner=cleanup_owner,
+                    allow_non_terminal=True,
+                )
                 return
             extra_conditions = (
                 (Workspace.execution_claimed_by == cleanup_owner,)

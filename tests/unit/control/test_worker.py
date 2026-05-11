@@ -6115,11 +6115,20 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert ws.execution_claim_expires_at is None
             assert ws.failure_reason is None
             events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+            release_events = [
+                event
+                for event in events
+                if event.event_type == "workspace.terminal_runtime_released"
+            ]
         assert any(
             event.event_type == "workspace.refresh_requested"
             and event.reason_code == "OPERATOR_REFRESH"
             for event in events
         )
+        assert len(release_events) == 1
+        assert release_events[0].payload["source"] == "control_worker.stale_active_execution"
+        assert release_events[0].payload["workspace_status"] == WorkspaceStatus.running.value
+        assert release_events[0].payload["cleanup"]["reason_code"] == "CLEANUP_SUCCEEDED"
         assert not any(
             event.event_type == "workspace.state_changed"
             and event.new_state == WorkspaceStatus.failed.value
