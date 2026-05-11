@@ -79,6 +79,7 @@ from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
     VerdictResult,
     _as_utc,
+    _ci_transient_rerun_attempt,
     _collect_defer_items,
     _drop_stale_review_comment_addressed_state,
     _drop_stale_review_thread_addressed_state,
@@ -121,6 +122,29 @@ from tests.unit.runtime.test_pr_monitor import _status
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
+
+
+class PersistCheckingSleep(RecordedSleep):
+    def __init__(
+        self,
+        *,
+        factory: async_sessionmaker[AsyncSession],
+        workspace_id: str,
+        state_key: str,
+        expected_value: str,
+    ) -> None:
+        super().__init__()
+        self._factory = factory
+        self._workspace_id = workspace_id
+        self._state_key = state_key
+        self._expected_value = expected_value
+
+    async def __call__(self, seconds: float) -> None:
+        async with self._factory() as session:
+            workspace = await WorkspaceRepository(session).get(self._workspace_id)
+            assert workspace is not None
+            assert workspace.monitor_threads_addressed[self._state_key] == self._expected_value
+        await super().__call__(seconds)
 
 
 def _monitor_runner(
@@ -231,15 +255,7 @@ async def test_rerun_transient_ci_action_requests_failed_job_rerun_and_records_a
 ) -> None:
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
-    sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=adapter,
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-    )
     failure = CheckFailure(
         name="python-full-coverage",
         conclusion="FAILURE",
@@ -250,6 +266,20 @@ async def test_rerun_transient_ci_action_requests_failed_job_rerun_and_records_a
         check_state=CheckState.FAILURE,
         ci_failures=(failure,),
         head_sha="abc1234567890def",
+    )
+    state_key = _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+    sleep_fn = PersistCheckingSleep(
+        factory=factory,
+        workspace_id=workspace_id,
+        state_key=state_key,
+        expected_value="1",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
     )
     state = MonitorState()
 
@@ -279,15 +309,12 @@ async def test_rerun_transient_ci_action_requests_failed_job_rerun_and_records_a
         "dimileeh/aira-web",
         "--failed",
     ]
-    assert (
-        state.threads_addressed_ids[
-            _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
-        ]
-        == "1"
-    )
+    assert sleep_fn.calls == [60]
+    assert state.threads_addressed_ids[state_key] == "1"
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
+        assert workspace.monitor_threads_addressed[state_key] == "1"
         events = [
             event
             for event in workspace.events
@@ -350,6 +377,16 @@ async def test_rerun_transient_ci_action_records_failed_rerun_request(
     assert terminal is False
     assert adapter.calls == []
     assert state.iter_count == 1
+    assert state.threads_addressed_ids == {}
+    assert cmd.calls[0].args == [
+        "gh",
+        "run",
+        "rerun",
+        "25655330295",
+        "--repo",
+        "dimileeh/aira-web",
+        "--failed",
+    ]
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
@@ -368,6 +405,27 @@ async def test_rerun_transient_ci_action_records_failed_rerun_request(
         assert len(rerun_operations) == 1
         assert rerun_operations[0].status == OperationStatus.failed.value
         assert rerun_operations[0].error_code == "CI_TRANSIENT_RERUN_FAILED"
+
+
+@pytest.mark.unit
+def test_ci_transient_rerun_attempt_treats_corrupt_count_as_zero() -> None:
+    failure = CheckFailure(
+        name="python-full-coverage",
+        conclusion="FAILURE",
+        log_excerpt="HTTP status server error (502 Bad Gateway)",
+        run_id="25655330295",
+    )
+    state = MonitorState()
+    state.threads_addressed_ids[_ci_transient_rerun_state_key("head", (failure,))] = "corrupt"
+
+    attempt = _ci_transient_rerun_attempt(
+        state,
+        head_sha="head",
+        failures=(failure,),
+    )
+
+    assert attempt == 1
+    assert state.threads_addressed_ids[_ci_transient_rerun_state_key("head", (failure,))] == "1"
 
 
 def _provider_recovery_policy(

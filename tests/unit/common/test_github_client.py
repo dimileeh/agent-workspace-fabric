@@ -1789,6 +1789,33 @@ class TestFetchFailingCheckLogs:
         assert failures[0].log_excerpt == ""
 
     @pytest.mark.unit
+    async def test_missing_run_database_id_stays_nullable(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": None,
+                        "name": "lint-and-type",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
+        )
+
+        assert len(failures) == 1
+        assert failures[0].run_id is None
+        assert failures[0].log_excerpt == ""
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
     async def test_ignores_non_failure_runs(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

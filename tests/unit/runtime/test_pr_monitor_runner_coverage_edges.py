@@ -49,6 +49,7 @@ from awf.runtime.pr_monitor_runner import (
     BaseBehindCountError,
     BaseFetchError,
     MonitorRunnerConfig,
+    ProtectedScopeDiffError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
@@ -2416,7 +2417,8 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
     workspace_id = await seed_monitoring_workspace(factory)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="")  # committed diff has no protected paths
     cmd.queue_result(
         returncode=128,
         stderr=("fatal: unable to access https://user:ghp_should_not_persist@github.com/org/repo"),
@@ -3226,13 +3228,15 @@ async def test_ci_fix_records_agent_failure_but_commits_and_pushes_changes(
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="format failed")
-    workspace_id = "ws_ci_fix"
+    workspace_id = await seed_monitoring_workspace(factory)
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
     for result in [
         (0, " M tests/test_app.py\n", ""),
         (0, "", ""),
         (1, "", ""),
         (0, "", ""),
+        (0, "", ""),  # fetch remote branch for committed diff
+        (0, "tests/test_app.py\n", ""),  # committed diff is inside ordinary test files
         (0, "", ""),
     ]:
         cmd.queue_result(returncode=result[0], stdout=result[1], stderr=result[2])
@@ -3251,12 +3255,12 @@ async def test_ci_fix_records_agent_failure_but_commits_and_pushes_changes(
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         workspace_id=workspace_id,
-        remote_branch="awf/ws_ci_fix",
+        remote_branch=f"awf/{workspace_id}",
     )
 
     assert len(adapter.calls) == 1
     assert "assert 1 == 2" in adapter.calls[0]
-    assert cmd.calls[-1].args[-2:] == ["origin", "HEAD:refs/heads/awf/ws_ci_fix"]
+    assert cmd.calls[-1].args[-2:] == ["origin", f"HEAD:refs/heads/awf/{workspace_id}"]
 
 
 @pytest.mark.unit
@@ -3412,6 +3416,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
@@ -3437,6 +3442,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
 
     assert push_result.failed is True
     assert push_result.pushed is False
+    assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert ".github/workflows/ci.yml" in push_result.stderr
     assert [call.args for call in cmd.calls] == [
         ["git", "-C", str(worktree), "status", "--porcelain"],
@@ -3444,11 +3450,19 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
             "git",
             "-C",
             str(worktree),
+            "fetch",
+            "origin",
+            f"refs/heads/awf/{workspace_id}",
+        ],
+        [
+            "git",
+            "-C",
+            str(worktree),
             "diff",
             "--name-only",
-            f"origin/awf/{workspace_id}..HEAD",
+            "FETCH_HEAD..HEAD",
             "--",
-        ]
+        ],
     ]
     async with factory() as s:
         events = await WorkspaceEventRepository(s).list(
@@ -3460,6 +3474,76 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
     assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+
+
+@pytest.mark.unit
+async def test_execute_ci_fix_protected_scope_block_is_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed locally.")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=ReportCiFailure(
+            failures=(CheckFailure(name="ci", conclusion="FAILURE", log_excerpt="failing check"),)
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
+    assert ci_operation.status == OperationStatus.failed.value
+    assert ci_operation.error_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert push_events[0].payload is not None
+    assert push_events[0].payload["action"] == "ci_repair_push"
+    assert push_events[0].payload["outcome"] == "failed"
 
 
 @pytest.mark.unit
@@ -3487,7 +3571,7 @@ async def test_protected_scope_push_check_skips_missing_worktree_without_git_dif
 
 
 @pytest.mark.unit
-async def test_protected_scope_unpushed_commit_check_skips_missing_workspace_before_git_diff(
+async def test_protected_scope_unpushed_commit_check_fails_closed_for_missing_workspace(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -3502,24 +3586,22 @@ async def test_protected_scope_unpushed_commit_check_skips_missing_workspace_bef
     worktree = tmp_path / "worktrees" / "ws_missing_row"
     worktree.mkdir(parents=True)
 
-    assert (
+    with pytest.raises(ProtectedScopeDiffError, match="Workspace row ws_missing_row"):
         await runner._protected_scope_violations_for_unpushed_commits(
             workspace_id="ws_missing_row",
             worktree_path=worktree,
             remote_branch="awf/ws_missing_row",
         )
-        == []
-    )
     assert cmd.calls == []
 
 
 @pytest.mark.unit
-async def test_changed_paths_since_remote_branch_falls_back_to_upstream_ref(
+async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=128, stderr="unknown revision")
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="src/fix.py\n\n tests/test_fix.py \n")
     runner = make_runner(
         factory=factory,
@@ -3532,21 +3614,28 @@ async def test_changed_paths_since_remote_branch_falls_back_to_upstream_ref(
     paths = await runner._changed_paths_since_remote_branch(
         worktree_path=tmp_path / "worktree",
         remote_branch="awf/ws_remote_missing",
+        remote_push_url="https://github.com/org/fork.git",
     )
 
     assert paths == ("src/fix.py", "tests/test_fix.py")
-    assert cmd.calls[0].args[3:6] == ["diff", "--name-only", "origin/awf/ws_remote_missing..HEAD"]
-    assert cmd.calls[1].args[3:6] == ["diff", "--name-only", "@{upstream}..HEAD"]
+    assert cmd.calls[0].args == [
+        "git",
+        "-C",
+        str(tmp_path / "worktree"),
+        "fetch",
+        "https://github.com/org/fork.git",
+        "refs/heads/awf/ws_remote_missing",
+    ]
+    assert cmd.calls[1].args[3:6] == ["diff", "--name-only", "FETCH_HEAD..HEAD"]
 
 
 @pytest.mark.unit
-async def test_changed_paths_since_remote_branch_returns_empty_when_refs_are_unavailable(
+async def test_changed_paths_since_remote_branch_fails_closed_when_refs_are_unavailable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=128, stderr="unknown remote ref")
-    cmd.queue_result(returncode=128, stderr="no upstream")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -3555,12 +3644,81 @@ async def test_changed_paths_since_remote_branch_returns_empty_when_refs_are_una
         worktrees_root=tmp_path / "worktrees",
     )
 
-    paths = await runner._changed_paths_since_remote_branch(
-        worktree_path=tmp_path / "worktree",
-        remote_branch="awf/ws_remote_missing",
+    with pytest.raises(ProtectedScopeDiffError) as exc_info:
+        await runner._changed_paths_since_remote_branch(
+            worktree_path=tmp_path / "worktree",
+            remote_branch="awf/ws_remote_missing",
+        )
+
+    message = str(exc_info.value)
+    assert "fetch refs/heads/awf/ws_remote_missing" in message
+    assert "unknown remote ref" in message
+
+
+@pytest.mark.unit
+async def test_changed_paths_since_remote_branch_fails_closed_when_diff_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=128, stderr="bad revision FETCH_HEAD")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
     )
 
-    assert paths == ()
+    with pytest.raises(ProtectedScopeDiffError) as exc_info:
+        await runner._changed_paths_since_remote_branch(
+            worktree_path=tmp_path / "worktree",
+            remote_branch="awf/ws_remote_missing",
+        )
+
+    message = str(exc_info.value)
+    assert "diff FETCH_HEAD..HEAD" in message
+    assert "bad revision FETCH_HEAD" in message
+
+
+@pytest.mark.unit
+async def test_protected_scope_push_check_blocks_when_diff_baseline_cannot_be_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="unknown remote ref")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    message = await runner._protected_scope_push_block_message(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert message is not None
+    assert "could not verify protected-scope changes before push" in message
+    assert "unknown remote ref" in message
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.monitor_protected_scope_push_blocked",
+            limit=10,
+        )
+    assert len(events) == 1
+    assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert events[0].payload is not None
+    assert events[0].payload["reason"] == "diff_baseline_unavailable"
 
 
 @pytest.mark.unit

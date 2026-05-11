@@ -926,19 +926,24 @@ class GitHubClient:
             conclusion = run.get("conclusion") or ""
             if conclusion.upper() not in {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
                 continue
-            run_id = str(run["databaseId"])
-            log = await self._run_gh(
-                [
-                    "gh",
-                    "run",
-                    "view",
-                    run_id,
-                    "--repo",
-                    repo.slug(),
-                    "--log-failed",
-                ],
-                operation="view_run_log",
-                strict=False,  # logs may be purged; don't fail the monitor
+            database_id = run.get("databaseId")
+            run_id = str(database_id) if database_id is not None else None
+            log = (
+                await self._run_gh(
+                    [
+                        "gh",
+                        "run",
+                        "view",
+                        run_id,
+                        "--repo",
+                        repo.slug(),
+                        "--log-failed",
+                    ],
+                    operation="view_run_log",
+                    strict=False,  # logs may be purged; don't fail the monitor
+                )
+                if run_id is not None
+                else None
             )
             log_text = log.stdout if log is not None else ""
             failures.append(

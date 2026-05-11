@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -518,13 +519,19 @@ _CI_CODE_FAILURE_MARKERS = (
     "assert ",
     "coverage failure",
     "fail-under",
-    "ruff",
-    "mypy",
-    "eslint",
     "typecheck",
     "type check",
+    "would reformat:",
+    "found lint errors",
+    "found type errors",
     "syntaxerror",
     "traceback (most recent call last)",
+)
+
+_CI_CODE_FAILURE_PATTERNS = (
+    re.compile(r"(?m)^[^\n:]+:\d+:\d+:\s+[A-Z]\d{3}\b"),
+    re.compile(r"(?m)^[^\n:]+:\d+:\s+error:\s+.+\[[a-z0-9-]+\]"),
+    re.compile(r"\b(?:ruff|mypy|eslint)\b[^\n]*\b(?:failed|found|would reformat|errors?)\b"),
 )
 
 _CI_TRANSIENT_FAILURE_MARKERS = (
@@ -568,12 +575,15 @@ def _ci_transient_rerun_state_key(
     same failing workflow run on the same PR head.
     """
 
-    signature = "|".join(
-        f"{failure.run_id or ''}:{failure.name}:{failure.conclusion}"
-        for failure in sorted(
-            failures,
-            key=lambda item: (item.run_id or "", item.name, item.conclusion),
-        )
+    signature = json.dumps(
+        [
+            (failure.run_id or "", failure.name, failure.conclusion)
+            for failure in sorted(
+                failures,
+                key=lambda item: (item.run_id or "", item.name, item.conclusion),
+            )
+        ],
+        separators=(",", ":"),
     )
     digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
     return f"{_CI_TRANSIENT_RERUN_KEY_PREFIX}{head_sha}:{digest}"
@@ -598,6 +608,8 @@ def _ci_transient_rerun_count(
 def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     text = f"{failure.name}\n{failure.conclusion}\n{failure.log_excerpt}".lower()
     if any(marker in text for marker in _CI_CODE_FAILURE_MARKERS):
+        return False
+    if any(pattern.search(text) for pattern in _CI_CODE_FAILURE_PATTERNS):
         return False
     return any(marker in text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
 

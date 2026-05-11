@@ -421,6 +421,73 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Install tools\n"
+                "Failed to download ruff from PyPI\n"
+                "curl: (56) Recv failure: Connection reset by peer"
+            ),
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_tool_diagnostics_still_dispatch_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Would reformat: src/awf/runtime/pr_monitor_runner.py\n"
+                "src/awf/runtime/pr_monitor.py:12: error: Incompatible types [assignment]"
+            ),
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_rerun_state_key_uses_structured_failure_signature(self) -> None:
+        left = (
+            CheckFailure(
+                name="lint:type",
+                conclusion="FAILURE",
+                log_excerpt="HTTP 502",
+                run_id="run",
+            ),
+        )
+        right = (
+            CheckFailure(
+                name="type",
+                conclusion="FAILURE",
+                log_excerpt="HTTP 502",
+                run_id="run:lint",
+            ),
+        )
+
+        assert _ci_transient_rerun_state_key("head", left) != _ci_transient_rerun_state_key(
+            "head",
+            right,
+        )
+
+    @pytest.mark.unit
     def test_transient_failure_falls_back_to_agent_after_rerun_budget(self) -> None:
         failure = CheckFailure(
             name="CI",
