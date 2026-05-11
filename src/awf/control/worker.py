@@ -1668,15 +1668,16 @@ class ControlWorker:
                 )
                 if cleanup is not None:
                     source = "control_worker.stale_active_execution"
-                    await session.flush()
-                    await self._record_terminal_runtime_release_event_in_session(
+                    await self._record_stale_active_execution_release_and_commit(
                         session,
                         workspace_id=candidate.workspace_id,
                         cleanup=cleanup,
                         source=source,
+                        cleanup_owner=cleanup_owner,
                         allow_non_terminal=True,
                     )
-                await session.commit()
+                else:
+                    await session.commit()
                 return
             if ws is None:
                 if cleanup is not None:
@@ -1692,14 +1693,15 @@ class ControlWorker:
             ws.failure_message = message[:2048]
             if cleanup is not None:
                 source = "control_worker.stale_active_execution"
-                await session.flush()
-                await self._record_terminal_runtime_release_event_in_session(
+                await self._record_stale_active_execution_release_and_commit(
                     session,
                     workspace_id=candidate.workspace_id,
                     cleanup=cleanup,
                     source=source,
+                    cleanup_owner=cleanup_owner,
                 )
-            await session.commit()
+            else:
+                await session.commit()
 
         _log.error(
             "worker.stale_active_execution_failed",
@@ -1710,6 +1712,39 @@ class ControlWorker:
             runtime_reason=snapshot.reason,
             reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
         )
+
+    async def _record_stale_active_execution_release_and_commit(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        cleanup: WorkspaceCleanupResult,
+        source: str,
+        cleanup_owner: str,
+        allow_non_terminal: bool = False,
+    ) -> None:
+        try:
+            await session.flush()
+            await self._record_terminal_runtime_release_event_in_session(
+                session,
+                workspace_id=workspace_id,
+                cleanup=cleanup,
+                source=source,
+                allow_non_terminal=allow_non_terminal,
+            )
+            await session.commit()
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                await session.rollback()
+            _log.warning(
+                "worker.stale_active_execution_release_commit_failed",
+                workspace_id=workspace_id,
+                source=source,
+                owner_id=cleanup_owner,
+                error=redact_audit_text(repr(exc), limit=400),
+            )
+            await self._release_execution_claim(workspace_id, owner_id=cleanup_owner)
+            raise
 
     async def _record_terminal_runtime_release_event_in_session(
         self,

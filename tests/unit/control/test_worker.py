@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy import event, select, update
@@ -568,6 +570,29 @@ def _closed_connection_error() -> InterfaceError:
         RuntimeError("connection is closed"),
         connection_invalidated=True,
     )
+
+
+def _fail_stale_active_execution_worker_flush(
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    original_flush = AsyncSession.flush
+    failing_callers = {
+        "_fail_stale_active_execution",
+        "_record_stale_active_execution_release_and_commit",
+    }
+
+    async def _flush(
+        self: AsyncSession,
+        objects: Sequence[Any] | None = None,
+    ) -> None:
+        frame = inspect.currentframe()
+        caller = frame.f_back if frame is not None else None
+        if caller is not None and caller.f_code.co_name in failing_callers:
+            raise RuntimeError(message)
+        await original_flush(self, objects)
+
+    monkeypatch.setattr(AsyncSession, "flush", _flush)
 
 
 class _HealthyRuntimeInspector:
@@ -5754,6 +5779,60 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
 
     @pytest.mark.unit
+    async def test_stale_active_execution_flush_failure_releases_cleanup_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-running-flush-fail",
+            WorkspaceStatus.running,
+            compose_project_name="awf_stale_flush_fail",
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_stale_flush_fail",
+            repo_url=str(origin_repo),
+        )
+        snapshot = RuntimeSnapshot(stack_state="running", reason="lost worker task")
+        assert await worker._record_stale_active_execution_detected(candidate, snapshot)
+        _fail_stale_active_execution_worker_flush(
+            monkeypatch,
+            "synthetic stale cleanup flush failure",
+        )
+
+        with pytest.raises(RuntimeError, match="synthetic stale cleanup flush failure"):
+            await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)
+
+        assert len(cleaner.calls) == 1
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+        assert ws.failure_reason is None
+        assert not any(
+            event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+            for event in events
+        )
+
+    @pytest.mark.unit
     async def test_stale_active_execution_release_omits_missing_worktree_path(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -6052,6 +6131,95 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert release_events[0].payload["source"] == "control_worker.stale_active_execution"
         assert release_events[0].payload["workspace_status"] == WorkspaceStatus.running.value
         assert release_events[0].payload["cleanup"]["reason_code"] == "CLEANUP_SUCCEEDED"
+        assert not any(
+            event.event_type == "workspace.state_changed"
+            and event.new_state == WorkspaceStatus.failed.value
+            for event in events
+        )
+
+    @pytest.mark.unit
+    async def test_blocked_stale_active_execution_flush_failure_releases_cleanup_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-cleanup-blocked-flush-fail",
+            WorkspaceStatus.running,
+            compose_project_name="awf_stale_cleanup_blocked_flush_fail",
+        )
+
+        class _TeardownRaceCleaner(_RecordingRuntimeCleaner):
+            async def cleanup(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                compose_project_name: str | None = None,
+                compose_file_path: Path | None = None,
+                worktree_host_path: Path | None = None,
+                remove_volumes: bool = True,
+                remove_worktree: bool = True,
+            ) -> WorkspaceCleanupResult:
+                result = await super().cleanup(
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    compose_project_name=compose_project_name,
+                    compose_file_path=compose_file_path,
+                    worktree_host_path=worktree_host_path,
+                    remove_volumes=remove_volumes,
+                    remove_worktree=remove_worktree,
+                )
+                async with session_factory() as s:
+                    await OperationRepository(s).create(
+                        workspace_id=workspace_id,
+                        operation_type=OperationType.stop,
+                        status=OperationStatus.running,
+                        payload={"requested_action": OperationType.stop.value},
+                    )
+                    await s.commit()
+                return result
+
+        cleaner = _TeardownRaceCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_stale_cleanup_blocked_flush_fail",
+            repo_url=str(origin_repo),
+        )
+        snapshot = RuntimeSnapshot(stack_state="running", reason="lost worker task")
+        assert await worker._record_stale_active_execution_detected(candidate, snapshot)
+        _fail_stale_active_execution_worker_flush(
+            monkeypatch,
+            "synthetic blocked stale cleanup flush failure",
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="synthetic blocked stale cleanup flush failure",
+        ):
+            await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)
+
+        assert len(cleaner.calls) == 1
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+        assert ws.failure_reason is None
         assert not any(
             event.event_type == "workspace.state_changed"
             and event.new_state == WorkspaceStatus.failed.value
