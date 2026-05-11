@@ -405,10 +405,17 @@ class ComposeManager:
         """Wait until all subprocess handles this manager spawned have exited."""
         while self._active_processes:
             processes = tuple(self._active_processes)
-            await asyncio.gather(
+            wait_for_exit = asyncio.gather(
                 *(process.wait() for process in processes),
                 return_exceptions=True,
             )
+            while True:
+                try:
+                    await asyncio.shield(wait_for_exit)
+                    break
+                except asyncio.CancelledError:
+                    if wait_for_exit.done():
+                        break
             for process in processes:
                 self._active_processes.discard(process)
 
@@ -604,10 +611,19 @@ class ComposeManager:
         self,
         create_task: asyncio.Task[asyncio.subprocess.Process],
     ) -> asyncio.subprocess.Process | None:
-        try:
-            return await asyncio.shield(create_task)
-        except (Exception, asyncio.CancelledError):
-            return None
+        while True:
+            try:
+                return await asyncio.shield(create_task)
+            except asyncio.CancelledError:
+                if create_task.cancelled():
+                    return None
+                if create_task.done():
+                    try:
+                        return create_task.result()
+                    except Exception:
+                        return None
+            except Exception:
+                return None
 
     def _services_for(self, spec: WorkspaceComposeSpec) -> list[ComposeService]:
         services = list(spec.services)

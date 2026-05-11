@@ -92,6 +92,18 @@ class _CancellationHangingProcess(_HangingProcess):
         return await super().wait()
 
 
+class _QuiescenceProcess:
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.wait_started = asyncio.Event()
+        self.allow_exit = asyncio.Event()
+
+    async def wait(self) -> int | None:
+        self.wait_started.set()
+        await self.allow_exit.wait()
+        return self.returncode
+
+
 @pytest.mark.unit
 def test_compose_project_paths_secret_metadata_cannot_be_mutated() -> None:
     paths = ComposeProjectPaths(
@@ -981,3 +993,57 @@ class TestRender:
 
         assert process.kill_called is True
         assert process.wait_called is True
+
+    @pytest.mark.unit
+    async def test_docker_capture_repeated_cancellation_during_spawn_kills_created_subprocess(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        process = _CancellationHangingProcess()
+        spawn_started = asyncio.Event()
+        allow_return = asyncio.Event()
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _CancellationHangingProcess:
+            spawn_started.set()
+            await allow_return.wait()
+            return process
+
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+        task = asyncio.create_task(
+            manager._docker_capture(["ps", "-aq"], operation="ps")  # noqa: SLF001
+        )
+        await asyncio.wait_for(spawn_started.wait(), timeout=1)
+
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        assert process.kill_called is True
+        assert process.wait_called is True
+
+    @pytest.mark.unit
+    async def test_wait_for_quiescence_drains_active_processes_after_cancellation(
+        self,
+        manager: ComposeManager,
+    ) -> None:
+        process = _QuiescenceProcess()
+        manager._active_processes.add(process)  # noqa: SLF001
+        task = asyncio.create_task(manager.wait_for_quiescence())
+        await asyncio.wait_for(process.wait_started.wait(), timeout=1)
+
+        task.cancel()
+        await asyncio.sleep(0)
+
+        assert task.done() is False
+        assert process in manager._active_processes  # noqa: SLF001
+
+        process.returncode = 0
+        process.allow_exit.set()
+        await asyncio.wait_for(task, timeout=1)
+
+        assert process not in manager._active_processes  # noqa: SLF001
