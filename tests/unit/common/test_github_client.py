@@ -1753,6 +1753,7 @@ class TestFetchFailingCheckLogs:
         assert len(failures) == 2
         names = {f.name for f in failures}
         assert names == {"playwright", "unit-tests"}
+        assert {f.run_id for f in failures} == {"2", "3"}
         for f in failures:
             if f.name == "playwright":
                 # Truncated to ~200 chars + prefix marker.
@@ -1788,6 +1789,61 @@ class TestFetchFailingCheckLogs:
         assert failures[0].log_excerpt == ""
 
     @pytest.mark.unit
+    async def test_missing_run_database_id_stays_nullable(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": None,
+                        "name": "lint-and-type",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
+        )
+
+        assert len(failures) == 1
+        assert failures[0].run_id is None
+        assert failures[0].log_excerpt == ""
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
+    async def test_missing_run_database_id_and_name_uses_unknown_fallback(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": None,
+                        "name": None,
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
+        )
+
+        assert len(failures) == 1
+        assert failures[0].name == "run/unknown"
+        assert failures[0].run_id is None
+        assert failures[0].log_excerpt == ""
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
     async def test_ignores_non_failure_runs(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
@@ -1818,6 +1874,41 @@ class TestFetchFailingCheckLogs:
 
         assert failures == ()
         assert len(fake.calls) == 1
+
+    @pytest.mark.unit
+    async def test_reruns_failed_jobs_for_workflow_run(self) -> None:
+        fake = FakeCommandRunner()
+        client = GitHubClient(fake)
+
+        await client.rerun_failed_workflow_jobs(
+            repo=RepoRef(owner="o", name="r"),
+            run_id="25655330295",
+        )
+
+        assert fake.calls[0].args == [
+            "gh",
+            "run",
+            "rerun",
+            "25655330295",
+            "--repo",
+            "o/r",
+            "--failed",
+        ]
+
+    @pytest.mark.unit
+    async def test_rerun_failed_jobs_raises_client_error_on_gh_failure(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="HTTP 403")
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError) as exc_info:
+            await client.rerun_failed_workflow_jobs(
+                repo=RepoRef(owner="o", name="r"),
+                run_id="25655330295",
+            )
+
+        assert exc_info.value.operation == "rerun_failed_workflow_jobs"
+        assert exc_info.value.stderr == "HTTP 403"
 
 
 # ── resolve_thread / post_comment / merge_pr ───────────────────────────────

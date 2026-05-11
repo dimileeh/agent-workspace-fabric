@@ -20,14 +20,17 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     PRStatus,
     ReportCiFailure,
+    RerunTransientCI,
     ReviewComment,
     ReviewThread,
     ReviewThreadComment,
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    _ci_transient_rerun_state_key,
     _mark_review_thread_addressed,
     _review_thread_needs_attention,
+    _should_rerun_transient_ci,
     decide,
 )
 
@@ -395,6 +398,293 @@ class TestAddressComments:
 
 
 class TestCiFailure:
+    @pytest.mark.unit
+    def test_transient_failure_dispatches_rerun_before_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Set up Python\n"
+                "error: Failed to download cpython-3.12.9\n"
+                "HTTP status server error (502 Bad Gateway)"
+            ),
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_tool_download_failure_dispatches_rerun(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Install tools\n"
+                "Failed to download ruff from PyPI\n"
+                "curl: (56) Recv failure: Connection reset by peer"
+            ),
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_failure_with_code_like_check_name_dispatches_rerun(self) -> None:
+        failure = CheckFailure(
+            name="TypeCheck / ubuntu-latest",
+            conclusion="FAILURE",
+            log_excerpt="runner has received a shutdown signal",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_timed_out_failure_without_logs_dispatches_rerun(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="TIMED_OUT",
+            log_excerpt="",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_timed_out_failure_without_logs_or_run_id_dispatches_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="TIMED_OUT",
+            log_excerpt="",
+            run_id=None,
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("conclusion", ["CANCELLED", "ACTION_REQUIRED"])
+    def test_transient_non_failed_job_conclusions_dispatch_agent_repair(
+        self,
+        conclusion: str,
+    ) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion=conclusion,
+            log_excerpt="runner has received a shutdown signal",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_tool_diagnostics_still_dispatch_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="lint-and-type",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Would reformat: src/awf/runtime/pr_monitor_runner.py\n"
+                "src/awf/runtime/pr_monitor.py:12: error: Incompatible types [assignment]"
+            ),
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_rerun_state_key_uses_structured_failure_signature(self) -> None:
+        left = (
+            CheckFailure(
+                name="lint:type",
+                conclusion="FAILURE",
+                log_excerpt="HTTP 502",
+                run_id="run",
+            ),
+        )
+        right = (
+            CheckFailure(
+                name="type",
+                conclusion="FAILURE",
+                log_excerpt="HTTP 502",
+                run_id="run:lint",
+            ),
+        )
+
+        assert _ci_transient_rerun_state_key("head", left) != _ci_transient_rerun_state_key(
+            "head",
+            right,
+        )
+
+    @pytest.mark.unit
+    def test_transient_failure_falls_back_to_agent_after_rerun_budget(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="curl: (56) Recv failure: Connection reset by peer",
+            run_id="25655330295",
+        )
+        status = _status(check_state=CheckState.FAILURE, ci_failures=(failure,))
+        state = MonitorState()
+        state.threads_addressed_ids[
+            _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+        ] = "2"
+
+        action = decide(status, state, MonitorConfig(ci_transient_rerun_max_attempts=2))
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_failure_with_disabled_rerun_budget_dispatches_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="HTTP status server error (503 Service Unavailable)",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(ci_transient_rerun_max_attempts=0),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_failure_corrupt_rerun_count_is_treated_as_zero(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="curl: (56) Recv failure: Connection reset by peer",
+            run_id="25655330295",
+        )
+        status = _status(check_state=CheckState.FAILURE, ci_failures=(failure,))
+        state = MonitorState()
+        state.threads_addressed_ids[
+            _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+        ] = "not-an-int"
+
+        action = decide(status, state, MonitorConfig())
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_infra_assert_log_does_not_mask_transient_ci_rerun(self) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="assert passed while reconnecting runner\nHTTP 502 Bad Gateway",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_transient_rerun_helper_rejects_empty_failure_snapshot(self) -> None:
+        assert not _should_rerun_transient_ci(
+            _status(check_state=CheckState.FAILURE, ci_failures=()),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("run_id", [None, ""])
+    def test_transient_failure_without_run_id_dispatches_agent_repair(
+        self,
+        run_id: str | None,
+    ) -> None:
+        failure = CheckFailure(
+            name="CI",
+            conclusion="FAILURE",
+            log_excerpt="HTTP status server error (502 Bad Gateway)",
+            run_id=run_id,
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_code_like_failure_still_dispatches_agent_repair(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt="FAILED tests/unit/test_thing.py::test_case - AssertionError",
+            run_id="25655330295",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
     @pytest.mark.unit
     def test_failure_with_per_check_details(self) -> None:
         failure = CheckFailure(

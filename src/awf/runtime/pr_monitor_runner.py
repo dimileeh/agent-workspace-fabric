@@ -88,12 +88,15 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     PRStatus,
     ReportCiFailure,
+    RerunTransientCI,
     ReviewComment,
     ReviewThread,
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
     _agent_can_triage_review_comment,
+    _ci_transient_rerun_count,
+    _ci_transient_rerun_state_key,
     _is_bot_author,
     _is_bot_review_thread,
     _mark_review_thread_addressed,
@@ -233,7 +236,11 @@ _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON = "GIT_BASE_FETCH_TRANSIENT_RET
 _GIT_BASE_BEHIND_FAILED_REASON = "GIT_BASE_BEHIND_FAILED"
 _GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
+_CI_TRANSIENT_RERUN_REASON = "CI_TRANSIENT_RERUN"
+_CI_TRANSIENT_RERUN_FAILED_REASON = "CI_TRANSIENT_RERUN_FAILED"
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
+_PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
+_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 _VALIDATION_INSUFFICIENT_STALE_REASON = "validation_insufficient_tier"
 _RECOVERY_SNAPSHOT_ALREADY_HANDLED_REASON = "RECOVERY_SNAPSHOT_ALREADY_HANDLED"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
@@ -330,6 +337,10 @@ class BaseBehindCountError(Exception):
     """Base-behind calculation failed; PR monitor must not assume zero."""
 
 
+class ProtectedScopeDiffError(Exception):
+    """Committed diff against the remote PR branch could not be verified."""
+
+
 @dataclass
 class _RunnerDeps:
     """All side-effect collaborators in one bag — easy to fake in tests."""
@@ -359,6 +370,7 @@ class _GitPushResult:
     stdout: str = ""
     stderr: str = ""
     recovered_by_resync: bool = False
+    reason_code: str = _GIT_PUSH_FAILED_REASON
 
     @property
     def error_message(self) -> str | None:
@@ -366,15 +378,41 @@ class _GitPushResult:
             return None
         return self.stderr.strip() or "<no output>"
 
+    @property
+    def protected_scope_blocked(self) -> bool:
+        return self.failed and self.reason_code in {
+            _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+            _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+        }
+
+    @property
+    def protected_scope_diff_unavailable(self) -> bool:
+        return self.failed and self.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
+
     def failure_evidence(self) -> dict[str, object]:
         evidence: dict[str, object] = {
             "operation": "git push",
             "returncode": self.returncode,
             "error_message": self.error_message or "<no output>",
+            "reason_code": self.reason_code,
         }
         if self.recovered_by_resync:
             evidence["recovered_by_resync"] = True
         return evidence
+
+
+@dataclass(frozen=True)
+class _ProtectedScopePushBlock:
+    message: str
+    reason_code: str
+
+
+def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
+    if push_result.protected_scope_diff_unavailable:
+        return "protected_scope_diff_unavailable"
+    if push_result.protected_scope_blocked:
+        return "protected_scope_push_blocked"
+    return "git_push_failed"
 
 
 @dataclass(frozen=True)
@@ -1411,16 +1449,18 @@ class PullRequestMonitorRunner:
                 )
                 return True
             if push_result.failed:
+                reason_code = push_result.reason_code
+                outcome = _git_push_failure_outcome(push_result)
                 await self._finish_monitor_operation(
                     operation,
                     status=OperationStatus.failed,
                     result={
                         "status": "failed",
-                        "outcome": "git_push_failed",
-                        "reason_code": _GIT_PUSH_FAILED_REASON,
+                        "outcome": outcome,
+                        "reason_code": reason_code,
                         "pushed": False,
                     },
-                    error_code=_GIT_PUSH_FAILED_REASON,
+                    error_code=reason_code,
                     error_message=push_result.error_message,
                 )
                 await self._record_pr_monitor_audit_event(
@@ -1428,7 +1468,7 @@ class PullRequestMonitorRunner:
                     event_type=_AUDIT_GIT_PUSH_EVENT,
                     action="sync_base_push",
                     outcome="failed",
-                    reason_code=_GIT_PUSH_FAILED_REASON,
+                    reason_code=reason_code,
                     pr_number=pr_number,
                     status=status,
                     base_branch=base_branch,
@@ -1438,6 +1478,13 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
+                if push_result.protected_scope_blocked:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 self._record_sync_base_progress(
                     state=state,
                     status=status,
@@ -1472,6 +1519,236 @@ class PullRequestMonitorRunner:
                 operation_id=operation.operation_id if operation is not None else None,
                 operation_type=OperationType.sync_base.value,
                 monitor_log=monitor_log,
+            )
+            state.iter_count += 1
+            return False
+
+        if isinstance(action, RerunTransientCI):
+            attempt = (
+                _ci_transient_rerun_count(
+                    state,
+                    head_sha=status.head_sha,
+                    failures=action.failures,
+                )
+                + 1
+            )
+            run_ids = tuple(
+                dict.fromkeys(failure.run_id for failure in action.failures if failure.run_id)
+            )
+            if not run_ids:
+                return await self._execute(
+                    action=ReportCiFailure(failures=action.failures),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                    remote_push_url=remote_push_url,
+                )
+            failures_payload = [_ci_failure_payload(failure) for failure in action.failures]
+            rerun_signature = _ci_transient_rerun_state_key(status.head_sha, action.failures)
+            operation = await self._begin_monitor_operation(
+                workspace_id=workspace_id,
+                operation_type=OperationType.ci_repair,
+                action="ci_transient_rerun",
+                requested_action="rerun_failed_ci",
+                reason=(
+                    "CI failure logs matched transient infrastructure signatures; "
+                    "rerunning failed GitHub jobs before invoking an agent."
+                ),
+                reason_code=_CI_TRANSIENT_RERUN_REASON,
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                monitor_log=monitor_log,
+                extra_payload={
+                    "attempt": attempt,
+                    "failures": failures_payload,
+                    "run_ids": list(run_ids),
+                },
+                extra_identity=(rerun_signature, attempt, *run_ids),
+            )
+            event_payload: dict[str, object] = {
+                "attempt": attempt,
+                "failures": failures_payload,
+                "run_ids": list(run_ids),
+                "head_sha": status.head_sha,
+            }
+            recorded_attempt = _ci_transient_rerun_attempt(
+                state,
+                head_sha=status.head_sha,
+                failures=action.failures,
+            )
+            event_payload["attempt"] = recorded_attempt
+            await self._persist_state(workspace_id, state)
+            accepted_run_ids: list[str] = []
+            failed_run_id: str | None = None
+            try:
+                for run_id in run_ids:
+                    try:
+                        await self._deps.gh.rerun_failed_workflow_jobs(repo=repo, run_id=run_id)
+                    except GitHubClientError:
+                        failed_run_id = run_id
+                        raise
+                    accepted_run_ids.append(run_id)
+            except GitHubClientError as exc:
+                error_message = _redact_and_truncate_github_error(str(exc))
+                if accepted_run_ids:
+                    partial_event_payload = {
+                        **event_payload,
+                        "accepted_run_ids": accepted_run_ids,
+                        "failed_run_id": failed_run_id,
+                        "error": error_message,
+                    }
+                    await self._finish_monitor_operation(
+                        operation,
+                        status=OperationStatus.succeeded,
+                        result={
+                            "status": "succeeded",
+                            "outcome": "ci_transient_rerun_partially_requested",
+                            "reason_code": _CI_TRANSIENT_RERUN_REASON,
+                            **partial_event_payload,
+                        },
+                    )
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.ci_transient_rerun_partially_requested",
+                            "workspace_id": workspace_id,
+                            "pr_number": pr_number,
+                            "reason_code": _CI_TRANSIENT_RERUN_REASON,
+                            **partial_event_payload,
+                        },
+                    )
+                    await self._append_workspace_events(
+                        workspace_id=workspace_id,
+                        events=[
+                            WorkspaceEventCreate(
+                                event_type=(
+                                    "workspace.monitor_ci_transient_rerun_partially_requested"
+                                ),
+                                reason_code=_CI_TRANSIENT_RERUN_REASON,
+                                payload=partial_event_payload,
+                            )
+                        ],
+                    )
+                    await self._sleep_with_monitor_state_operation(
+                        workspace_id=workspace_id,
+                        action="ci_transient_rerun_wait",
+                        requested_action="wait_for_rerun_rollup",
+                        reason=(
+                            "GitHub accepted at least one failed-job rerun; "
+                            "waiting before the next PR status poll so the "
+                            "rollup can leave its stale failure snapshot."
+                        ),
+                        reason_code=_CI_TRANSIENT_RERUN_REASON,
+                        pr_number=pr_number,
+                        status=status,
+                        base_branch=base_branch,
+                        remote_branch=remote_branch,
+                        wait_seconds=self._config.poll_interval_seconds,
+                        monitor_log=monitor_log,
+                        extra_payload=partial_event_payload,
+                        extra_identity=(
+                            rerun_signature,
+                            attempt,
+                            *accepted_run_ids,
+                            "partial_wait",
+                        ),
+                    )
+                    state.iter_count += 1
+                    return False
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "ci_transient_rerun_failed",
+                        "reason_code": _CI_TRANSIENT_RERUN_FAILED_REASON,
+                        **event_payload,
+                    },
+                    error_code=_CI_TRANSIENT_RERUN_FAILED_REASON,
+                    error_message=error_message,
+                )
+                await self._write_monitor_log(
+                    monitor_log,
+                    {
+                        "event": "monitor.ci_transient_rerun_failed",
+                        "workspace_id": workspace_id,
+                        "pr_number": pr_number,
+                        "reason_code": _CI_TRANSIENT_RERUN_FAILED_REASON,
+                        "error": error_message,
+                        **event_payload,
+                    },
+                )
+                await self._append_workspace_events(
+                    workspace_id=workspace_id,
+                    events=[
+                        WorkspaceEventCreate(
+                            event_type="workspace.monitor_ci_transient_rerun_failed",
+                            reason_code=_CI_TRANSIENT_RERUN_FAILED_REASON,
+                            payload={**event_payload, "error": error_message},
+                        )
+                    ],
+                )
+                state.iter_count += 1
+                return False
+
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "status": "succeeded",
+                    "outcome": "ci_transient_rerun_requested",
+                    "reason_code": _CI_TRANSIENT_RERUN_REASON,
+                    **event_payload,
+                },
+            )
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.ci_transient_rerun_requested",
+                    "workspace_id": workspace_id,
+                    "pr_number": pr_number,
+                    "reason_code": _CI_TRANSIENT_RERUN_REASON,
+                    **event_payload,
+                },
+            )
+            await self._append_workspace_events(
+                workspace_id=workspace_id,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="workspace.monitor_ci_transient_rerun_requested",
+                        reason_code=_CI_TRANSIENT_RERUN_REASON,
+                        payload=event_payload,
+                    )
+                ],
+            )
+            await self._sleep_with_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="ci_transient_rerun_wait",
+                requested_action="wait_for_rerun_rollup",
+                reason=(
+                    "GitHub accepted the failed-job rerun; waiting before the "
+                    "next PR status poll so the rollup can leave its stale "
+                    "failure snapshot."
+                ),
+                reason_code=_CI_TRANSIENT_RERUN_REASON,
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                wait_seconds=self._config.poll_interval_seconds,
+                monitor_log=monitor_log,
+                extra_payload=event_payload,
+                extra_identity=(rerun_signature, attempt, *run_ids, "wait"),
             )
             state.iter_count += 1
             return False
@@ -1559,17 +1836,19 @@ class PullRequestMonitorRunner:
                 )
                 return True
             if push_result.failed:
+                reason_code = push_result.reason_code
+                outcome = _git_push_failure_outcome(push_result)
                 await self._finish_monitor_operation(
                     operation,
                     status=OperationStatus.failed,
                     result={
                         "status": "failed",
-                        "outcome": "git_push_failed",
-                        "reason_code": _GIT_PUSH_FAILED_REASON,
+                        "outcome": outcome,
+                        "reason_code": reason_code,
                         "failure_count": len(action.failures),
                         "pushed": False,
                     },
-                    error_code=_GIT_PUSH_FAILED_REASON,
+                    error_code=reason_code,
                     error_message=push_result.error_message,
                 )
                 await self._record_pr_monitor_audit_event(
@@ -1577,7 +1856,7 @@ class PullRequestMonitorRunner:
                     event_type=_AUDIT_GIT_PUSH_EVENT,
                     action="ci_repair_push",
                     outcome="failed",
-                    reason_code=_GIT_PUSH_FAILED_REASON,
+                    reason_code=reason_code,
                     pr_number=pr_number,
                     status=status,
                     base_branch=base_branch,
@@ -1587,6 +1866,13 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                     evidence=push_result.failure_evidence(),
                 )
+                if push_result.protected_scope_blocked:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 state.iter_count += 1
                 return False
             await self._finish_monitor_operation(
@@ -1706,20 +1992,29 @@ class PullRequestMonitorRunner:
                 )
                 return True
             if push_result.failed:
+                reason_code = push_result.reason_code
+                outcome = _git_push_failure_outcome(push_result)
                 await self._finish_monitor_operation(
                     operation,
                     status=OperationStatus.failed,
                     result={
                         "status": "failed",
-                        "outcome": "git_push_failed",
-                        "reason_code": _GIT_PUSH_FAILED_REASON,
+                        "outcome": outcome,
+                        "reason_code": reason_code,
                         "thread_count": len(action.threads),
                         "review_comment_count": len(action.review_comments),
                         "pushed": False,
                     },
-                    error_code=_GIT_PUSH_FAILED_REASON,
+                    error_code=reason_code,
                     error_message=push_result.error_message,
                 )
+                if push_result.protected_scope_blocked:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=push_result.error_message or push_result.reason_code,
+                        reason_code=push_result.reason_code,
+                    )
+                    return True
                 state.iter_count += 1
                 return False
             await self._finish_monitor_operation(
@@ -3480,13 +3775,30 @@ class PullRequestMonitorRunner:
 
         # 3) Push everything we committed.
         worktree_path = self._worktrees_root / workspace_id
-        push_result = await self._git_push_result(
+        protected_scope_block = await self._protected_scope_push_block(
+            workspace_id=workspace_id,
             worktree_path=worktree_path,
             remote_branch=remote_branch,
-            remote_url=remote_push_url,
+            remote_push_url=remote_push_url,
+        )
+        push_result = (
+            _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=protected_scope_block.message,
+                reason_code=protected_scope_block.reason_code,
+            )
+            if protected_scope_block is not None
+            else await self._git_push_result(
+                worktree_path=worktree_path,
+                remote_branch=remote_branch,
+                remote_url=remote_push_url,
+            )
         )
         pushed_head_sha: str | None = None
         if push_result.failed:
+            reason_code = push_result.reason_code
             for item_id in publish_dependent_ids:
                 _clear_addressed_state_by_id(state, item_id)
             await self._record_pr_monitor_audit_event(
@@ -3494,7 +3806,7 @@ class PullRequestMonitorRunner:
                 event_type=_AUDIT_GIT_PUSH_EVENT,
                 action="comment_repair_push",
                 outcome="failed",
-                reason_code=_GIT_PUSH_FAILED_REASON,
+                reason_code=reason_code,
                 pr_number=pr_number,
                 status=None,
                 base_branch=base_branch or "",
@@ -3890,6 +4202,21 @@ class PullRequestMonitorRunner:
                 )
 
         # Whether or not we hit conflicts, push what we have.
+        protected_scope_block = await self._protected_scope_push_block(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            base_branch=base_branch,
+        )
+        if protected_scope_block is not None:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=protected_scope_block.message,
+                reason_code=protected_scope_block.reason_code,
+            )
         return await self._git_push_result(
             worktree_path=worktree_path,
             remote_branch=remote_branch,
@@ -3961,6 +4288,20 @@ class PullRequestMonitorRunner:
                 "monitor.ci_fix_cli_failed",
                 workspace_id=workspace_id,
                 stderr=agent_run_err.result.stderr[:400],
+            )
+        protected_scope_block = await self._protected_scope_push_block(
+            workspace_id=workspace_id,
+            worktree_path=self._worktrees_root / workspace_id,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+        if protected_scope_block is not None:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=protected_scope_block.message,
+                reason_code=protected_scope_block.reason_code,
             )
         return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
@@ -4159,6 +4500,251 @@ class PullRequestMonitorRunner:
         return find_protected_quality_gate_changes(
             changed_paths=changed_paths,
             owned_paths=owned_paths,
+        )
+
+    async def _protected_scope_violations_for_unpushed_commits(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        remote_branch: str,
+        remote_push_url: str | None = None,
+    ) -> list[QualityGateViolation]:
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None:
+                raise ProtectedScopeDiffError(
+                    f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
+                    "for protected-scope validation."
+                )
+            owned_paths = list(workspace.owned_paths)
+
+        changed_paths = await self._changed_paths_since_remote_branch(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+        if not changed_paths:
+            return []
+        return find_protected_quality_gate_changes(
+            changed_paths=changed_paths,
+            owned_paths=owned_paths,
+        )
+
+    async def _changed_paths_since_remote_branch(
+        self,
+        *,
+        worktree_path: Path,
+        remote_branch: str,
+        remote_push_url: str | None = None,
+    ) -> tuple[str, ...]:
+        remote = remote_push_url or "origin"
+        fetch_result = await self._deps.runner.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "fetch",
+                remote,
+                f"refs/heads/{remote_branch}",
+            ]
+        )
+        if not fetch_result.ok:
+            raise ProtectedScopeDiffError(
+                "Could not resolve committed diff against the remote PR branch "
+                "for protected-scope validation: "
+                f"fetch refs/heads/{remote_branch} exit={fetch_result.returncode} "
+                f"stdout={fetch_result.stdout.strip() or '<empty>'} "
+                f"stderr={fetch_result.stderr.strip() or '<empty>'}"
+            )
+        local_base = await self._merge_base_with_head(
+            worktree_path=worktree_path,
+            ref="FETCH_HEAD",
+            error_context="against the remote PR branch",
+        )
+        return await self._changed_paths_between_ref_and_head(
+            worktree_path=worktree_path,
+            ref=local_base,
+            error_context="against the remote PR branch",
+        )
+
+    async def _merge_base_with_head(
+        self,
+        *,
+        worktree_path: Path,
+        ref: str,
+        error_context: str,
+    ) -> str:
+        merge_base_result = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "merge-base", ref, "HEAD"]
+        )
+        merge_base = merge_base_result.stdout.strip()
+        if not merge_base_result.ok or not merge_base:
+            raise ProtectedScopeDiffError(
+                f"Could not resolve committed diff {error_context} "
+                "for protected-scope validation: "
+                f"merge-base {ref} HEAD exit={merge_base_result.returncode} "
+                f"stdout={merge_base or '<empty>'} "
+                f"stderr={merge_base_result.stderr.strip() or '<empty>'}"
+            )
+        return merge_base
+
+    async def _changed_paths_between_ref_and_head(
+        self,
+        *,
+        worktree_path: Path,
+        ref: str,
+        error_context: str,
+    ) -> tuple[str, ...]:
+        diff_spec = f"{ref}..HEAD"
+        diff_result = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "diff", "--name-only", diff_spec, "--"]
+        )
+        if not diff_result.ok:
+            raise ProtectedScopeDiffError(
+                f"Could not resolve committed diff {error_context} "
+                "for protected-scope validation: "
+                f"diff {diff_spec} exit={diff_result.returncode} "
+                f"stdout={diff_result.stdout.strip() or '<empty>'} "
+                f"stderr={diff_result.stderr.strip() or '<empty>'}"
+            )
+        return tuple(line.strip() for line in diff_result.stdout.splitlines() if line.strip())
+
+    async def _protected_scope_violations_for_sync_base_push(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        remote_branch: str,
+        base_branch: str,
+        remote_push_url: str | None = None,
+    ) -> list[QualityGateViolation]:
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None:
+                raise ProtectedScopeDiffError(
+                    f"Workspace row {workspace_id} disappeared; cannot load owned_paths "
+                    "for protected-scope validation."
+                )
+            owned_paths = list(workspace.owned_paths)
+
+        changed_from_remote = await self._changed_paths_since_remote_branch(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+        if not changed_from_remote:
+            return []
+
+        try:
+            await self._fetch_base(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_branch=base_branch,
+            )
+        except BaseFetchError as exc:
+            raise ProtectedScopeDiffError(
+                f"Could not refresh the base branch for protected-scope validation: {exc}"
+            ) from exc
+
+        merged_base = await self._merge_base_with_head(
+            worktree_path=worktree_path,
+            ref=f"origin/{base_branch}",
+            error_context="against the merged base branch",
+        )
+        changed_from_base = await self._changed_paths_between_ref_and_head(
+            worktree_path=worktree_path,
+            ref=merged_base,
+            error_context="against the merged base commit",
+        )
+        if not changed_from_base:
+            return []
+
+        changed_from_base_set = set(changed_from_base)
+        sync_base_authored_paths = tuple(
+            path for path in changed_from_remote if path in changed_from_base_set
+        )
+        if not sync_base_authored_paths:
+            return []
+        return find_protected_quality_gate_changes(
+            changed_paths=sync_base_authored_paths,
+            owned_paths=owned_paths,
+        )
+
+    async def _protected_scope_push_block(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        remote_branch: str,
+        remote_push_url: str | None = None,
+        base_branch: str | None = None,
+    ) -> _ProtectedScopePushBlock | None:
+        if not worktree_path.exists():
+            return None
+        try:
+            if base_branch is None:
+                violations = await self._protected_scope_violations_for_unpushed_commits(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                )
+            else:
+                violations = await self._protected_scope_violations_for_sync_base_push(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    remote_branch=remote_branch,
+                    base_branch=base_branch,
+                    remote_push_url=remote_push_url,
+                )
+        except ProtectedScopeDiffError as exc:
+            redacted_error = redact_audit_text(str(exc), limit=1000)
+            message = (
+                "AWF could not verify protected-scope changes before push; "
+                "refusing to push this repair until the PR branch diff baseline "
+                f"is available. {redacted_error}"
+            )
+            await self._append_workspace_events(
+                workspace_id=workspace_id,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="workspace.monitor_protected_scope_push_blocked",
+                        reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                        payload={
+                            "reason": "diff_baseline_unavailable",
+                            "remote_branch": remote_branch,
+                            "error": redacted_error,
+                        },
+                    )
+                ],
+            )
+            return _ProtectedScopePushBlock(
+                message=message,
+                reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+            )
+        if not violations:
+            return None
+        message = quality_gate_violation_message(violations)
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="workspace.monitor_protected_scope_push_blocked",
+                    reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+                    payload={
+                        "paths": [violation.path for violation in violations],
+                        "protected_patterns": [
+                            violation.protected_pattern for violation in violations
+                        ],
+                        "message": message,
+                    },
+                )
+            ],
+        )
+        return _ProtectedScopePushBlock(
+            message=message,
+            reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
         )
 
     async def _protected_scope_repair_prompt(
@@ -5637,6 +6223,31 @@ def _increment_base_fetch_retry_count(state: MonitorState, context: str) -> int:
 def _clear_transient_base_fetch_retry_state(state: MonitorState, *, context: str) -> bool:
     key = _base_fetch_retry_count_key(context)
     return state.threads_addressed_ids.pop(key, None) is not None
+
+
+def _ci_transient_rerun_attempt(
+    state: MonitorState,
+    *,
+    head_sha: str,
+    failures: tuple[CheckFailure, ...],
+) -> int:
+    key = _ci_transient_rerun_state_key(head_sha, failures)
+    raw_count = state.threads_addressed_ids.get(key, "0")
+    try:
+        current = int(raw_count)
+    except ValueError:
+        current = 0
+    attempt = current + 1
+    state.threads_addressed_ids[key] = str(attempt)
+    return attempt
+
+
+def _ci_failure_payload(failure: CheckFailure) -> dict[str, str | None]:
+    return {
+        "name": failure.name,
+        "conclusion": failure.conclusion,
+        "run_id": failure.run_id,
+    }
 
 
 def _base_fetch_retry_wait_seconds(

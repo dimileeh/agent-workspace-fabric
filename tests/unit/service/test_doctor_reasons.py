@@ -7,6 +7,24 @@ import pytest
 from awf.service.doctor.reasons import _REASON_TEXT
 
 
+@pytest.mark.unit
+def test_protected_scope_terminal_reasons_have_doctor_guidance() -> None:
+    expected_codes = {
+        "PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        "PROTECTED_SCOPE_PUSH_BLOCKED",
+    }
+
+    missing_codes = expected_codes - set(_REASON_TEXT)
+
+    assert not missing_codes
+    for code in expected_codes:
+        reason = _REASON_TEXT[code]
+        assert reason.message
+        assert reason.likely_cause
+        assert reason.action
+        assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
 def generate_expected_catalog(existing_content: str = "") -> str:
     lines = [
         "# AWF Reason and Error Code Catalog\n",
