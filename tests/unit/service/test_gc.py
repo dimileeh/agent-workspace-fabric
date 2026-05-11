@@ -91,7 +91,7 @@ def test_workspace_gc_preserved_retention_class_maps_known_reason_codes(
 
 
 @pytest.mark.unit
-def test_workspace_gc_preserved_retention_class_rejects_unknown_reason_code() -> None:
+def test_workspace_gc_preserved_retention_class_falls_back_for_unknown_reason_code() -> None:
     preserved = WorkspaceGCPreserved(
         workspace_id="ws_1",
         status=WorkspaceStatus.completed.value,
@@ -100,8 +100,8 @@ def test_workspace_gc_preserved_retention_class_rejects_unknown_reason_code() ->
         reason_code="NEW_UNMAPPED_REASON",
     )
 
-    with pytest.raises(ValueError, match="NEW_UNMAPPED_REASON"):
-        _ = preserved.retention_class
+    assert preserved.retention_class == "unknown"
+    assert preserved.to_dict()["retention_class"] == "unknown"
 
 
 @pytest.fixture(autouse=True)

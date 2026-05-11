@@ -148,12 +148,7 @@ class WorkspaceGCPreserved:
 
     @property
     def retention_class(self) -> str:
-        try:
-            return _RETENTION_CLASS_BY_REASON_CODE[self.reason_code]
-        except KeyError as exc:
-            raise ValueError(
-                f"Unknown workspace GC preserved reason code: {self.reason_code}"
-            ) from exc
+        return _RETENTION_CLASS_BY_REASON_CODE.get(self.reason_code, "unknown")
 
     def to_dict(self) -> dict[str, object]:
         return {
