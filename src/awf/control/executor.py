@@ -5382,6 +5382,7 @@ class WorkspaceExecutor:
                 "dev",
                 "ruff",
                 "format",
+                "--",
                 *repair_paths,
             ],
             cwd=str(worktree_path),
