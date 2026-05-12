@@ -32,6 +32,10 @@ The long-term model is:
 - `README.md` explains the current implementation and local service setup.
 - `docs/awf_prd_v2.2.md` is the product contract. When behavior is ambiguous,
   prefer the PRD unless the code has a clearly documented newer decision.
+- `TODO/pre-gke-industrial-readiness.md` is the backlog of completed,
+  in-progress, and to-do tasks towards completing the open source
+  version and before we can start building an AWF version ready for
+  deploying into GKE (Google Kubernetes Engine)
 - `.awf/workspace.yml` is this repository's own AWF profile. Keep it generic
   and project-local; do not hard-code Aira-specific assumptions into AWF core.
 
@@ -50,6 +54,15 @@ The long-term model is:
 - Prefer existing patterns in `src/awf` over new abstractions.
 - Do not hide failures behind retries. Retries must preserve reason codes,
   logs, and events.
+
+## Plan-and-Validate Workflow (Mandatory)
+For non-trivial work, always follow `plans/PLAN_EXECUTION_PROTOCOL.md`.
+
+Required:
+- Save implementation plan to `plans/<TOPIC>_PLAN.md` before coding.
+- Execute work against that saved plan.
+- Validate implementation against the original plan in `plans/<TOPIC>_VALIDATION.md`.
+- If gaps are found, run another iteration focused on the highest-impact gap and update the validation doc
 
 ## Validation Commands
 
