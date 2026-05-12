@@ -39,6 +39,7 @@ from awf.control.executor import (
     POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
     POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
     POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+    POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
     POST_AGENT_GIT_ADD_FAILED_REASON_CODE,
     ExecutorConfig,
     WorkspaceExecutor,
@@ -278,6 +279,63 @@ async def test_post_agent_commit_format_repair_retry_still_fails_marks_precommit
     assert event.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
     assert event.payload is not None
     assert event.payload["details"]["post_agent_commit"]["format_repair_attempted"] is True
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_format_repair_ruff_subprocess_failure_marks_repair_failed(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/foo.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1, stdout=_precommit_format_only_output("src/foo.py")
+    )  # initial commit fails (format only)
+    fake.queue_result(
+        returncode=127, stderr="uv: command not found"
+    )  # ruff format subprocess itself crashes
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    # The repair event must record the subprocess crash so dashboards can
+    # distinguish it from the skipped/succeeded/failed outcomes.
+    assert len(repair_events) == 1
+    repair_payload = repair_events[0].payload
+    assert isinstance(repair_payload, dict)
+    assert repair_payload["repaired_paths"] == ["src/foo.py"]
+    assert repair_payload["retry_outcome"] == "error"
+
+    event = await _failed_state_event(factory, ws_id)
+    # The terminal reason code MUST be the dedicated repair-failed code,
+    # not POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED (whose catalog entry
+    # describes only the empty-intersection skip case).
+    assert event.reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert event.payload is not None
+    assert event.payload["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    commit_details = event.payload["details"]["post_agent_commit"]
+    assert commit_details["stage"] == "ruff format"
+    assert commit_details["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert commit_details["format_repair_attempted"] is True
+
+    # No retry commit was attempted — ruff format failed before the
+    # second commit could run.
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
 
 
 @pytest.mark.unit

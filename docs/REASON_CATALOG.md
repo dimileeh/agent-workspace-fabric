@@ -219,6 +219,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `uv run --python 3.12 --extra dev pre-commit run --all-files`
 **Docs Link:** [docs/REASON_CATALOG.md#post_agent_commit_precommit_failed](#post_agent_commit_precommit_failed)
 
+### POST_AGENT_FORMAT_REPAIR_FAILED
+**Problem:** AWF detected a format-only post-agent commit failure and attempted a scoped ``ruff format`` repair, but the ``ruff format`` subprocess itself exited non-zero (e.g. ``uv``/``ruff`` not on PATH, runtime crash) before the retry commit could run.
+**Likely Cause:** The workspace image is missing ``uv`` or the ``dev`` extras, the pinned Python version is unavailable, or ``ruff`` crashed on the flagged paths. The corresponding ``workspace.post_agent_commit_format_repair`` event records ``retry_outcome="error"``.
+**Operator Fix:** Inspect the workspace logs for the ``ruff format`` stderr, fix the toolchain (e.g. rebuild the workspace image so ``uv run --python 3.12 --extra dev ruff format`` succeeds), and remonitor.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#post_agent_format_repair_failed](#post_agent_format_repair_failed)
+
 ### POST_AGENT_GIT_ADD_FAILED
 **Problem:** ``git add -A`` failed during post-agent salvage (e.g. exit 128 with ``fatal: not a git repository``).
 **Likely Cause:** The agent damaged the worktree's git metadata or removed ``.git``; no commit could be attempted to capture work.

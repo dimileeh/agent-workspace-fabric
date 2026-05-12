@@ -203,6 +203,7 @@ POST_AGENT_GIT_ADD_FAILED_REASON_CODE = "POST_AGENT_GIT_ADD_FAILED"
 POST_AGENT_COMMIT_FAILED_REASON_CODE = "POST_AGENT_COMMIT_FAILED"
 POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE = "POST_AGENT_COMMIT_PRECOMMIT_FAILED"
 POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE = "POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED"
+POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE = "POST_AGENT_FORMAT_REPAIR_FAILED"
 POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE = "workspace.post_agent_commit_format_repair"
 _PR_MONITOR_ADOPTED_EVENT = "workspace.pr_monitor_adopted"
 _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
@@ -331,7 +332,10 @@ class _PostAgentCommitStepError(RuntimeError):
     ``INFRASTRUCTURE_FAILURE``. The ``stage`` field distinguishes
     ``git add`` failures from ``git commit`` failures; the
     ``classification`` field is ``None`` for ``git add`` failures (we
-    only classify commit output).
+    only classify commit output). ``reason_code_override`` lets the
+    format-repair path surface a distinct code (e.g. when
+    ``ruff format`` itself crashed) without mutating the parsed
+    classification.
     """
 
     def __init__(
@@ -341,11 +345,13 @@ class _PostAgentCommitStepError(RuntimeError):
         result: CommandResult,
         classification: _PostAgentCommitClassification | None,
         format_repair_attempted: bool = False,
+        reason_code_override: str | None = None,
     ) -> None:
         self.stage = stage
         self.result = result
         self.classification = classification
         self.format_repair_attempted = format_repair_attempted
+        self.reason_code_override = reason_code_override
         output = (result.stderr or result.stdout or "").strip()
         super().__init__(f"post-agent {stage} failed (exit={result.returncode}): {output}")
 
@@ -5270,8 +5276,10 @@ class WorkspaceExecutor:
 
         ``retry_outcome`` is one of ``"succeeded"`` (repair fixed it, retry
         commit passed), ``"failed"`` (repair ran, retry commit still failed
-        with a non-format hook), or ``"skipped"`` (no agent-owned paths in
-        the format set, so no repair was attempted).
+        with a non-format hook), ``"skipped"`` (no agent-owned paths in
+        the format set, so no repair was attempted), or ``"error"``
+        (``ruff format`` itself exited non-zero — see
+        ``POST_AGENT_FORMAT_REPAIR_FAILED``).
         """
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -5349,11 +5357,24 @@ class WorkspaceExecutor:
             cwd=str(worktree_path),
         )
         if not format_result.ok:
+            # The classifier saw a format-only commit failure, but the
+            # repair subprocess itself crashed (binary missing, runtime
+            # error, ...). Emit the repair event with ``retry_outcome="error"``
+            # and surface a dedicated reason code so the REASON_CATALOG
+            # entry for ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED`` (which
+            # only describes the empty-intersection skip) does not mislead
+            # operators reading dashboards.
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=repair_paths,
+                retry_outcome="error",
+            )
             raise _PostAgentCommitStepError(
                 stage="ruff format",
                 result=format_result,
                 classification=classification,
                 format_repair_attempted=True,
+                reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
             )
         add_again = await git_in_worktree(["add", "--", *repair_paths])
         await self._repair_agent_git_ownership(
@@ -5416,11 +5437,12 @@ class WorkspaceExecutor:
         overwriting the original classification.
         """
         classification = error.classification
-        commit_reason_code = (
-            classification.reason_code
-            if classification is not None
-            else POST_AGENT_GIT_ADD_FAILED_REASON_CODE
-        )
+        if error.reason_code_override is not None:
+            commit_reason_code = error.reason_code_override
+        elif classification is not None:
+            commit_reason_code = classification.reason_code
+        else:
+            commit_reason_code = POST_AGENT_GIT_ADD_FAILED_REASON_CODE
         commit_details: dict[str, Any] = {
             "stage": error.stage,
             "reason_code": commit_reason_code,
