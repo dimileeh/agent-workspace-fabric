@@ -5553,11 +5553,15 @@ class WorkspaceExecutor:
             returncode=error.result.returncode,
             format_repair_attempted=error.format_repair_attempted,
         )
+        base_message = f"post-agent {error.stage} failed (exit={error.result.returncode})"
+        summary_text = commit_details.get("summary")
+        if summary_text:
+            base_message = f"{base_message}: {summary_text}"
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
             failure_reason=FailureReason.infrastructure_failure,
-            message=str(error)[:2000],
+            message=base_message[:2000],
             reason_code=commit_reason_code,
             details={"post_agent_commit": commit_details},
         )
