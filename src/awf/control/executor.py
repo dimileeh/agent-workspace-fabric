@@ -5668,7 +5668,7 @@ class WorkspaceExecutor:
                 stderr=exc.result.stderr,
             )
 
-        add_again = await git_in_worktree(["add", "-u"])
+        add_again = await git_in_worktree(["add", "-A"])
         await self._repair_agent_git_ownership(
             workspace_id=workspace_id,
             worktree_path=worktree_path,

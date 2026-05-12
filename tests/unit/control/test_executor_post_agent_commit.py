@@ -228,7 +228,7 @@ async def test_post_agent_commit_precommit_failure_uses_precommit_reason_code(
     fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff
     fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # git commit fails
     fake.queue_result(returncode=1, stderr="repair failed")  # targeted agent repair fails
-    fake.queue_result(returncode=0)  # git add -u salvages partial repair edits
+    fake.queue_result(returncode=0)  # git add -A stages repair edits
     fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff after salvage
     fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # retry still fails
 
@@ -589,7 +589,7 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
         stdout=_precommit_ruff_check_and_format_output("run_debug.py"),
     )  # semantic pre-commit failure: must not auto-format-only
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted agent repair
-    fake.queue_result(returncode=0)  # git add -u after repair
+    fake.queue_result(returncode=0)  # git add -A after repair
     fake.queue_result(returncode=0, stdout="src/awf/mcp.py\n")  # cached diff after repair
     fake.queue_result(returncode=0)  # git commit retry ok
     fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
@@ -632,9 +632,57 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
     assert not ruff_calls
     add_calls = [call.args for call in fake.calls if "add" in call.args]
     post_repair_add = add_calls[1]
-    assert post_repair_add[post_repair_add.index("add") :] == ["add", "-u"]
+    assert post_repair_add[post_repair_add.index("add") :] == ["add", "-A"]
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_repair_stages_new_files_before_policy_checks(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("src/awf/foo.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted agent repair
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(
+        returncode=0,
+        stdout="src/awf/foo.py\ntests/unit/control/test_foo.py\n",
+    )  # cached diff includes file created by repair
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    add_calls = [call.args for call in fake.calls if "add" in call.args]
+    post_repair_add = add_calls[1]
+    assert post_repair_add[post_repair_add.index("add") :] == ["add", "-A"]
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "agent"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["restaged_paths"] == [
+        "src/awf/foo.py",
+        "tests/unit/control/test_foo.py",
+    ]
 
 
 @pytest.mark.unit
@@ -653,7 +701,7 @@ async def test_post_agent_commit_semantic_agent_repair_failure_salvages_partial_
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=1, stderr="repair failed")  # targeted repair fails
-    fake.queue_result(returncode=0)  # git add -u salvages partial repair edits
+    fake.queue_result(returncode=0)  # git add -A stages repair edits
     fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff after salvage
     fake.queue_result(returncode=0)  # git commit retry ok
     fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
@@ -738,7 +786,7 @@ async def test_post_agent_commit_semantic_agent_repair_protected_gate_change_is_
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
-    fake.queue_result(returncode=0)  # git add -u after repair
+    fake.queue_result(returncode=0)  # git add -A after repair
     fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # repair changed gate file
 
     executor = _make_executor(fake, factory, tmp_path)
@@ -787,7 +835,7 @@ async def test_post_agent_commit_semantic_agent_repair_supply_chain_change_is_bl
         returncode=0,
         stdout="$ npm install left-pad\n",
     )  # targeted repair adds supply-chain evidence
-    fake.queue_result(returncode=0)  # git add -u after repair
+    fake.queue_result(returncode=0)  # git add -A after repair
     fake.queue_result(
         returncode=0,
         stdout="src/awf/mcp.py\npackage-lock.json\n",
@@ -837,7 +885,7 @@ async def test_post_agent_commit_semantic_agent_repair_cached_diff_failure_abort
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
-    fake.queue_result(returncode=0)  # git add -u after repair
+    fake.queue_result(returncode=0)  # git add -A after repair
     fake.queue_result(returncode=128, stderr="fatal: index unreadable")  # cached diff fails
 
     executor = _make_executor(fake, factory, tmp_path)
@@ -879,7 +927,7 @@ async def test_post_agent_commit_semantic_agent_repair_plan_only_change_is_block
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
-    fake.queue_result(returncode=0)  # git add -u after repair
+    fake.queue_result(returncode=0)  # git add -A after repair
     fake.queue_result(
         returncode=0,
         stdout="docs/awf-plans/ws_semantic_repair.md\n",
@@ -926,7 +974,7 @@ async def test_post_agent_commit_semantic_agent_repair_retry_failure_remains_vis
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
-    fake.queue_result(returncode=0)  # git add -u after repair
+    fake.queue_result(returncode=0)  # git add -A after repair
     fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff after repair
     fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # retry still fails
 
@@ -965,7 +1013,7 @@ async def test_post_agent_commit_semantic_agent_repair_records_final_determinist
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
-    fake.queue_result(returncode=0)  # git add -u after repair
+    fake.queue_result(returncode=0)  # git add -A after repair
     fake.queue_result(returncode=0, stdout="docs/awf-plans/ws_89.conformance.json\n")
     fake.queue_result(
         returncode=1,
