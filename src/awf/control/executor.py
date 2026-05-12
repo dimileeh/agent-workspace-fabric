@@ -5289,6 +5289,7 @@ class WorkspaceExecutor:
         workspace_id: str,
         repaired_paths: Sequence[str],
         retry_outcome: str,
+        reason_code: str = POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
     ) -> None:
         """Emit the structured event describing a format-repair attempt.
 
@@ -5300,6 +5301,15 @@ class WorkspaceExecutor:
         commit could run — either ``ruff format`` itself (see
         ``POST_AGENT_FORMAT_REPAIR_FAILED``) or the ``git add`` re-stage
         of the reformatted paths).
+
+        ``reason_code`` defaults to
+        ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE`` so the
+        ``succeeded``/``failed``/``skipped`` outcomes keep the original
+        classification. Callers in the ``"error"`` branches MUST pass
+        ``POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE`` so the event
+        stream surfaces the distinct repair-failure signal — otherwise
+        a repair-pipeline crash is indistinguishable from the original
+        rewrite-needed classification.
         """
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -5309,7 +5319,7 @@ class WorkspaceExecutor:
             await repo.add_event(
                 ws,
                 event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
-                reason_code=POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
+                reason_code=reason_code,
                 payload={
                     "repaired_paths": list(repaired_paths),
                     "retry_outcome": retry_outcome,
@@ -5388,6 +5398,7 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 repaired_paths=repair_paths,
                 retry_outcome="error",
+                reason_code=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
             )
             raise _PostAgentCommitStepError(
                 stage="ruff format",
@@ -5414,6 +5425,7 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 repaired_paths=repair_paths,
                 retry_outcome="error",
+                reason_code=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
             )
             raise _PostAgentCommitStepError(
                 stage="git add",

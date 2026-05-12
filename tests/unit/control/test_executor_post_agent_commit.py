@@ -223,6 +223,10 @@ async def test_post_agent_commit_format_only_failure_repairs_and_retries(
     assert isinstance(payload, dict)
     assert payload["repaired_paths"] == ["src/foo.py"]
     assert payload["retry_outcome"] == "succeeded"
+    # A successful repair keeps the original rewrite-needed reason
+    # code — the dedicated repair-failed code is reserved for "error"
+    # outcomes.
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
 
     ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
     assert ruff_calls, "expected a ruff format invocation"
@@ -274,6 +278,11 @@ async def test_post_agent_commit_format_repair_retry_still_fails_marks_precommit
     assert isinstance(repair_payload, dict)
     assert repair_payload["repaired_paths"] == ["src/foo.py"]
     assert repair_payload["retry_outcome"] == "failed"
+    # A "failed" outcome (repair ran, retry commit hit a non-format
+    # hook) is not a repair-pipeline failure — keep the rewrite-needed
+    # reason code so the dedicated repair-failed code stays reserved
+    # for "error" outcomes only.
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
 
     event = await _failed_state_event(factory, ws_id)
     assert event.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
@@ -319,6 +328,11 @@ async def test_post_agent_commit_format_repair_ruff_subprocess_failure_marks_rep
     assert isinstance(repair_payload, dict)
     assert repair_payload["repaired_paths"] == ["src/foo.py"]
     assert repair_payload["retry_outcome"] == "error"
+    # The repair event itself must surface the dedicated repair-failed
+    # reason code — sharing POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED would
+    # make the event stream indistinguishable from the original
+    # rewrite-needed classification.
+    assert repair_events[0].reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
 
     event = await _failed_state_event(factory, ws_id)
     # The terminal reason code MUST be the dedicated repair-failed code,
@@ -385,6 +399,10 @@ async def test_post_agent_commit_format_repair_re_stage_failure_emits_repair_eve
     assert isinstance(repair_payload, dict)
     assert repair_payload["repaired_paths"] == ["src/foo.py"]
     assert repair_payload["retry_outcome"] == "error"
+    # The repair event itself must surface the dedicated repair-failed
+    # reason code so dashboards can distinguish a re-stage failure from
+    # the original rewrite-needed classification.
+    assert repair_events[0].reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
 
     event = await _failed_state_event(factory, ws_id)
     # The terminal reason code MUST be the dedicated repair-failed code,
