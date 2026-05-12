@@ -73,10 +73,11 @@ Status values:
 
 ### Active Slices
 
-No active slices currently recorded.
+Active first-wave slices are currently recorded below.
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | TODO§P1-artifact-download: add bounded MCP artifact content/download tool | `ws_01349ca4ecca408baff1d446` | OpenCode/Ollama / `ollama/kimi-k2.6:cloud` | running | First-wave launch on 2026-05-12 after local AWF rebuild/restart and green provider preflight; auto-merge enabled; expected overlap with operation-read parity docs/tests. |
 
 ### Reschedule Required Slices
 
@@ -88,6 +89,9 @@ not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
+| P0 Operation And Recovery Truth | Preserve primary failure causality across stale callbacks and recovery paths | `ws_89f9bcd01ae747d6b4a251b5` | branch `awf/ws_89f9bcd01ae747d6b4a251b5`, no PR | reschedule_required | Failed 2026-05-12 after conformance during AWF post-agent commit. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported `end-of-file-fixer`, `awf-ruff-check`, and `awf-ruff-format-check`; temporary `fix_test*.py` files were present, and the conformance artifact was modified by the EOF hook. Provider preflight was ready and terminal runtime cleanup succeeded. Do not reschedule until the P0 deterministic post-agent pre-commit repair/retry gate below is fixed. |
+| P1 MCP And Project Onboarding Client Parity | TODO§P1-operation-read-auth: close REST auth parity for operation read endpoints | `ws_06ee567d44eb479bb0f68478` | branch `awf/ws_06ee567d44eb479bb0f68478`, no PR | reschedule_required | Failed 2026-05-12 after useful agent work and a local commit, during AWF post-agent commit of plan/conformance evidence. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported only `end-of-file-fixer` modifying `docs/awf-plans/ws_06ee567d44eb479bb0f68478.md` and `.conformance.json`; focused pytest, ruff, and mypy evidence passed in logs. Provider preflight was ready and terminal runtime cleanup succeeded. Do not reschedule until the P0 deterministic post-agent pre-commit repair/retry gate below is fixed. |
+| P1 MCP And Project Onboarding Client Parity | TODO§P1-mcp-global-events: add MCP parity for global events | `ws_7614d1ea986841bb9612d59f` | branch `awf/ws_7614d1ea986841bb9612d59f`, no PR | reschedule_required | Failed 2026-05-12 after conformance reported `CONFORMANCE_OK`, during AWF post-agent commit. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported `trailing-whitespace`, `end-of-file-fixer`, and `awf-ruff-format-check`; hooks modified AWF plan/conformance artifacts and ruff wanted `tests/unit/mcp/test_mcp_server.py` formatted. Focused validation evidence in logs showed 84 tests, ruff, and mypy passing before conformance. Provider preflight was ready and terminal runtime cleanup succeeded. Do not reschedule until the P0 deterministic post-agent pre-commit repair/retry gate below is fixed. |
 | P1 Developer Experience And Public Core Surface | First-run troubleshooting guide by symptom | `ws_4f44c108a58f46d092f4e411` | branch `awf/ws_4f44c108a58f46d092f4e411`, no PR | reschedule_required | Attempt produced local docs commits, but final coverage hit `13` pytest/xdist errors despite 99.02% coverage; AWF then misclassified the terminal state as `STALE_ACTIVE_EXECUTION` after repeated asyncpg `connection is closed` worker failures. Do not count this slice as done; DB connection resilience and active-execution adoption have landed, but this should wait for validation failure-causality preservation before retry. |
 
 ### Completed Slices
@@ -429,6 +433,28 @@ not listed here.
 - [x] Add integration tests for Alembic multi-head detection and automatic merge revision generation.
 - [x] Add integration tests for Dockerized project profiles with sidecar services.
 - [x] Forbid empty tests, fake assertions, and broad monkeypatching that skips behavior under test.
+- [ ] Repair deterministic post-agent pre-commit hook rewrites before failing
+  otherwise-valid workspaces. Regression source: the 2026-05-12 first wave
+  failed `ws_06ee567d44eb479bb0f68478`,
+  `ws_7614d1ea986841bb9612d59f`, and
+  `ws_89f9bcd01ae747d6b4a251b5` after agent/conformance work reached the
+  post-agent commit step. All three had provider readiness OK and terminal
+  runtime cleanup OK, but AWF emitted `POST_AGENT_COMMIT_PRECOMMIT_FAILED` and
+  `infrastructure_failure` because pre-commit hooks modified files or reported
+  formatting drift: `end-of-file-fixer` and `trailing-whitespace` touched
+  AWF-generated `docs/awf-plans/*.md` / `.conformance.json` artifacts, and
+  `awf-ruff-format-check` reported Python files needing formatting. Acceptance:
+  pre-normalize AWF-generated plan/conformance artifacts before commit; classify
+  deterministic modifying hooks separately from semantic hook failures; accept
+  pre-commit's whitespace/EOF modifications once, re-stage only the original
+  staged set plus AWF-owned plan/conformance artifacts touched by hooks, run
+  scoped `uv run --python 3.12 --extra dev ruff format -- <paths>` when the
+  ruff-format hook reports paths, retry the commit once, record a structured
+  repair event/outcome, and fail only if semantic hooks such as ruff check,
+  mypy, tests, large-file, private-key, or merge-conflict hooks still fail.
+  Add TDD coverage for the exact hook combinations from the three failed
+  workspaces and keep terminal runtime cleanup/readiness behavior intact. Do
+  not reschedule those failed slices from scratch until this P0 is fixed.
 - [ ] Make AWF self-dogfood parallel final coverage deterministic inside the
   workspace runtime. Regression source: `ws_4f44c108a58f46d092f4e411` ran
   `pytest -n 3 --dist=loadscope --cov=awf --cov-report=term-missing`, reached

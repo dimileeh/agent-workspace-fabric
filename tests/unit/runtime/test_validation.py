@@ -459,6 +459,39 @@ async def test_profile_tool_preflight_blocks_before_agent_for_missing_dev_scope(
 
 
 @pytest.mark.unit
+async def test_profile_tool_preflight_writes_log_stream_for_missing_dev_scope(
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-dev-tool-profile",
+            "phases": {
+                "setup": ["uv sync --extra dev"],
+                "validate": ["uv run pytest tests/unit -q"],
+            },
+        }
+    )
+    log_store = _CountingLogStore(root=tmp_path / "logs")
+    validation = ValidationRunner(
+        runner=FakeCommandRunner(),
+        artifacts_dir=tmp_path / "artifacts",
+        log_store=log_store,
+    )
+
+    result = await validation.run_profile_tool_preflight(
+        workspace_id="ws_bad_profile",
+        profile=profile,
+    )
+
+    assert not result.all_passed
+    assert log_store.open_command_stream_calls == ["validation.01_profile_preflight"]
+    logged_stderr = (
+        tmp_path / "logs" / "ws_bad_profile" / "validation.01_profile_preflight.stderr.log"
+    ).read_text(encoding="utf-8")
+    assert "uv run pytest tests/unit -q" in logged_stderr
+
+
+@pytest.mark.unit
 def test_awf_self_profile_validation_commands_preserve_dev_dependency_scope() -> None:
     profile_path = Path(__file__).resolve().parents[3] / ".awf" / "workspace.yml"
     profile = WorkspaceProfile.model_validate(
@@ -466,6 +499,78 @@ def test_awf_self_profile_validation_commands_preserve_dev_dependency_scope() ->
     )
 
     assert profile_validation_tool_preflight_findings(profile) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("not a valid ' shell", None),
+        ("uv", None),
+        ("uv sync", None),
+        ("uv run", None),
+        ("uv run --python 3.12 -- ruff check src", {"tool": "ruff", "has_dev_scope": False}),
+        ("uv run --python 3.12 --dev ruff check src", {"tool": "ruff", "has_dev_scope": True}),
+        (
+            "uv run --python 3.12 --extra=dev ruff check src",
+            {"tool": "ruff", "has_dev_scope": True},
+        ),
+        ("uv run --python 3.12 --group=dev mypy src/awf", {"tool": "mypy", "has_dev_scope": True}),
+        (
+            "uv run --python 3.12 --extra docs ruff check src",
+            {"tool": "ruff", "has_dev_scope": False},
+        ),
+        ("uv run --python 3.12 --extra", None),
+    ],
+)
+def test_uv_run_metadata_handles_dev_scope_variants(
+    command: str,
+    expected: dict[str, object] | None,
+) -> None:
+    assert validation_module._uv_run_metadata(command) == expected  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("bad ' shell", False),
+        ("python -m pytest", False),
+        ("uv run --python 3.12 ruff check src", False),
+        ("uv run --python 3.12 --group dev pytest tests/unit -q", True),
+        ("uv sync --extra=dev", True),
+        ("uv sync --group docs", False),
+        ("uv sync --all-extras", True),
+    ],
+)
+def test_uv_command_has_dev_scope_for_sync_and_run_variants(
+    command: str,
+    expected: bool,
+) -> None:
+    assert validation_module._uv_command_has_dev_scope(command) is expected  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_profile_tool_preflight_ignores_non_dev_tools_and_scoped_dev_tools() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "mixed-dev-tool-profile",
+            "phases": {
+                "setup": ["uv sync --group dev"],
+                "validate": [
+                    "python -m pytest tests/unit -q",
+                    "uv run --python 3.12 --group dev ruff check src tests",
+                    "uv run --python 3.12 node scripts/check-docs.js",
+                    "uv run --python 3.12 pytest tests/unit -q",
+                ],
+            },
+        }
+    )
+
+    findings = profile_validation_tool_preflight_findings(profile)
+
+    assert [finding.tool for finding in findings] == ["pytest"]
+    assert findings[0].command == "uv run --python 3.12 pytest tests/unit -q"
 
 
 @pytest.mark.unit

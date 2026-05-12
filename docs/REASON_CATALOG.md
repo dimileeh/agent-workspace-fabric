@@ -207,22 +207,22 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED
 **Problem:** The post-agent ``git commit`` was rejected because ``awf-ruff-format-check`` reported files would be reformatted, but AWF could not locate any agent-staged paths to repair (intersection with ``Would reformat:`` was empty).
-**Likely Cause:** The format check flagged files outside the agent's owned diff (e.g. legacy files reformatted by an unrelated change in the worktree), so AWF refused to silently mutate them.
-**Operator Fix:** Run ``uv run --python 3.12 --extra dev ruff format <flagged_path_1> <flagged_path_2> ...`` locally on the flagged paths, commit, and remonitor; or scope the format hook to the agent's diff in ``.pre-commit-config.yaml``.
+**Likely Cause:** The format check flagged files outside the agent's staged diff (e.g. legacy files reformatted by an unrelated change in the worktree), so AWF refused to silently mutate them.
+**Operator Fix:** Inspect the ``workspace.post_agent_commit_repair`` event. If the flagged path is intentionally part of the workspace change, run ``uv run --python 3.12 --extra dev ruff format <flagged_path_1> <flagged_path_2> ...`` locally on the flagged paths, commit, and remonitor.
 **Related Command:** `uv run --python 3.12 --extra dev ruff format <flagged_paths...>`
 **Docs Link:** [docs/REASON_CATALOG.md#post_agent_commit_format_rewrite_needed](#post_agent_commit_format_rewrite_needed)
 
 ### POST_AGENT_COMMIT_PRECOMMIT_FAILED
-**Problem:** A pre-commit hook (``awf-ruff-check``, ``awf-mypy``, ``trailing-whitespace``, etc.) rejected the post-agent commit, or a format-repair retry still failed because another hook fired.
-**Likely Cause:** The agent's diff trips a lint/type/format invariant that the pre-commit pipeline enforces; deterministic format-only repair is insufficient.
-**Operator Fix:** Run ``uv run --python 3.12 --extra dev pre-commit run --all-files`` locally against the workspace branch, fix the reported issues, push, and remonitor.
+**Problem:** A pre-commit hook rejected the post-agent commit after AWF exhausted bounded repair. Deterministic normalizer/formatter hooks are retried once by AWF; semantic hooks such as ``awf-ruff-check``, ``awf-mypy``, security, large-file, merge-conflict, or unknown hooks are routed through one targeted agent repair pass when the original agent run was healthy.
+**Likely Cause:** The agent's diff trips a semantic lint/type/security invariant, or a deterministic repair/targeted repair retry still left pre-commit failing.
+**Operator Fix:** Inspect ``details.post_agent_commit`` and the ``workspace.post_agent_commit_repair`` event for ``repair_strategy``, ``failed_hooks``, ``restaged_paths``, and ``retry_outcome``. Run ``uv run --python 3.12 --extra dev pre-commit run --all-files`` locally against the workspace branch, fix the reported issues, push, and remonitor.
 **Related Command:** `uv run --python 3.12 --extra dev pre-commit run --all-files`
 **Docs Link:** [docs/REASON_CATALOG.md#post_agent_commit_precommit_failed](#post_agent_commit_precommit_failed)
 
 ### POST_AGENT_FORMAT_REPAIR_FAILED
-**Problem:** AWF detected a format-only post-agent commit failure and attempted a scoped ``ruff format`` repair, but the ``ruff format`` subprocess itself exited non-zero (e.g. ``uv``/``ruff`` not on PATH, runtime crash) before the retry commit could run.
-**Likely Cause:** The workspace image is missing ``uv`` or the ``dev`` extras, the pinned Python version is unavailable, or ``ruff`` crashed on the flagged paths. The corresponding ``workspace.post_agent_commit_format_repair`` event records ``retry_outcome="error"``.
-**Operator Fix:** Inspect the workspace logs for the ``ruff format`` stderr, fix the toolchain (e.g. rebuild the workspace image so ``uv run --python 3.12 --extra dev ruff format`` succeeds), and remonitor.
+**Problem:** AWF detected a repairable post-agent pre-commit failure but the repair pipeline itself exited non-zero before the retry commit could run.
+**Likely Cause:** The workspace image is missing ``uv`` or the ``dev`` extras, the pinned Python version is unavailable, ``ruff`` crashed on flagged paths, or the post-repair ``git add`` failed. The corresponding ``workspace.post_agent_commit_repair`` event records ``retry_outcome="error"``.
+**Operator Fix:** Inspect the workspace logs for the repair sub-step stderr, fix the toolchain or git state, and remonitor.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#post_agent_format_repair_failed](#post_agent_format_repair_failed)
 

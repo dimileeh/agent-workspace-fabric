@@ -128,6 +128,69 @@ def _precommit_mypy_output() -> str:
     )
 
 
+def _precommit_eof_only_output(*paths: str) -> str:
+    lines = [
+        "fix end of files.......................................................Failed",
+        "- hook id: end-of-file-fixer",
+        "- exit code: 1",
+        "- files were modified by this hook",
+        "",
+    ]
+    for path in paths:
+        lines.append(f"Fixing {path}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _precommit_whitespace_eof_and_format_output(*format_paths: str) -> str:
+    lines = [
+        "trim trailing whitespace.................................................Failed",
+        "- hook id: trailing-whitespace",
+        "- exit code: 1",
+        "- files were modified by this hook",
+        "",
+        "Fixing docs/awf-plans/ws_761.md",
+        "fix end of files.......................................................Failed",
+        "- hook id: end-of-file-fixer",
+        "- exit code: 1",
+        "- files were modified by this hook",
+        "",
+        "Fixing docs/awf-plans/ws_761.conformance.json",
+        "ruff format --check.....................................................Failed",
+        "- hook id: awf-ruff-format-check",
+        "- exit code: 1",
+        "",
+    ]
+    for path in format_paths:
+        lines.append(f"Would reformat: {path}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _precommit_ruff_check_and_format_output(*format_paths: str) -> str:
+    lines = [
+        "fix end of files.......................................................Failed",
+        "- hook id: end-of-file-fixer",
+        "- exit code: 1",
+        "- files were modified by this hook",
+        "",
+        "Fixing docs/awf-plans/ws_89.conformance.json",
+        "ruff check..............................................................Failed",
+        "- hook id: awf-ruff-check",
+        "- exit code: 1",
+        "",
+        "F401 fix_test.py imported but unused",
+        "ruff format --check.....................................................Failed",
+        "- hook id: awf-ruff-format-check",
+        "- exit code: 1",
+        "",
+    ]
+    for path in format_paths:
+        lines.append(f"Would reformat: {path}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 async def _failed_state_event(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -159,6 +222,7 @@ async def test_post_agent_commit_precommit_failure_uses_precommit_reason_code(
     fake.queue_result(returncode=0)  # git add
     fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff
     fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # git commit fails
+    fake.queue_result(returncode=1, stderr="repair failed")  # targeted agent repair fails
 
     executor = _make_executor(fake, factory, tmp_path)
     await executor.execute(ws_id)
@@ -177,9 +241,12 @@ async def test_post_agent_commit_precommit_failure_uses_precommit_reason_code(
     assert isinstance(details, dict)
     commit_details = details["post_agent_commit"]
     assert commit_details["reason_code"] == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert commit_details["repair_strategy"] == "agent"
+    assert commit_details["precommit_repair_attempted"] is True
     assert "awf-mypy" in commit_details["failed_hooks"]
 
-    # Only one git commit was queued/consumed — no repair retry happened.
+    # Only one git commit was queued/consumed — the targeted repair agent failed
+    # before AWF could retry the commit.
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 1
 
@@ -358,6 +425,369 @@ async def test_post_agent_commit_format_repair_retry_same_format_hook_marks_repa
     # Two git commit invocations: the initial failing attempt + the retry.
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_eof_only_hook_modification_restages_and_retries(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(
+        returncode=0,
+        stdout=("docs/awf-plans/ws_06.md\ndocs/awf-plans/ws_06.conformance.json\nsrc/awf/api.py\n"),
+    )  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_eof_only_output(
+            "docs/awf-plans/ws_06.conformance.json",
+        ),
+    )  # git commit fails after EOF hook rewrote an AWF artifact
+    fake.queue_result(returncode=0)  # git add -- original staged paths
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "deterministic"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["failed_hooks"] == ["end-of-file-fixer"]
+    assert payload["restaged_paths"] == [
+        "docs/awf-plans/ws_06.md",
+        "docs/awf-plans/ws_06.conformance.json",
+        "src/awf/api.py",
+    ]
+    assert payload["repaired_paths"] == []
+
+    ruff_calls = [call for call in fake.calls if "ruff" in call.args]
+    assert not ruff_calls
+    restage_calls = [
+        call
+        for call in fake.calls
+        if "add" in call.args and "--" in call.args and "src/awf/api.py" in call.args
+    ]
+    assert restage_calls
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_mixed_deterministic_hooks_formats_restages_and_retries(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(
+        returncode=0,
+        stdout=(
+            "docs/awf-plans/ws_761.md\n"
+            "docs/awf-plans/ws_761.conformance.json\n"
+            "tests/unit/mcp/test_mcp_server.py\n"
+        ),
+    )  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_whitespace_eof_and_format_output(
+            "tests/unit/mcp/test_mcp_server.py",
+        ),
+    )
+    fake.queue_result(returncode=0)  # ruff format tests/unit/mcp/test_mcp_server.py
+    fake.queue_result(returncode=0)  # git add -- original staged paths + formatter path
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "deterministic"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["failed_hooks"] == [
+        "trailing-whitespace",
+        "end-of-file-fixer",
+        "awf-ruff-format-check",
+    ]
+    assert payload["formatter_paths"] == ["tests/unit/mcp/test_mcp_server.py"]
+    assert payload["repaired_paths"] == ["tests/unit/mcp/test_mcp_server.py"]
+    assert payload["restaged_paths"] == [
+        "docs/awf-plans/ws_761.md",
+        "docs/awf-plans/ws_761.conformance.json",
+        "tests/unit/mcp/test_mcp_server.py",
+    ]
+
+    ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
+    assert len(ruff_calls) == 1
+    assert "tests/unit/mcp/test_mcp_server.py" in ruff_calls[0].args
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_agent_repair(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(
+        returncode=0,
+        stdout="fix_test.py\nrun_debug.py\nsrc/awf/mcp.py\n",
+    )  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("run_debug.py"),
+    )  # semantic pre-commit failure: must not auto-format-only
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted agent repair
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0, stdout="src/awf/mcp.py\n")  # cached diff after repair
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "agent"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["failed_hooks"] == [
+        "end-of-file-fixer",
+        "awf-ruff-check",
+        "awf-ruff-format-check",
+    ]
+
+    agent_repair_calls = [
+        call
+        for call in fake.calls
+        if call.input_bytes is not None and b"post-agent pre-commit repair" in call.input_bytes
+    ]
+    assert len(agent_repair_calls) == 1
+    prompt = agent_repair_calls[0].input_bytes.decode()
+    assert "awf-ruff-check" in prompt
+    assert "Do not bypass pre-commit" in prompt
+    assert "run_debug.py" in prompt
+
+    ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
+    assert not ruff_calls
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_failure_remains_precommit_failure(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=1, stderr="repair failed")  # targeted repair fails
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["repair_strategy"] == "agent"
+    assert details["precommit_repair_attempted"] is True
+    assert "awf-ruff-check" in details["failed_hooks"]
+
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_git_add_failure_marks_repair_failed(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
+    fake.queue_result(returncode=128, stderr="fatal: not a git repository")  # git add fails
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["stage"] == "git add"
+    assert details["repair_strategy"] == "agent"
+    assert details["precommit_repair_attempted"] is True
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+    assert repair_events[-1].reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert repair_events[-1].payload["retry_outcome"] == "error"  # type: ignore[index]
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_protected_gate_change_is_blocked(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory, owned_paths=["src/awf/**"])
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # repair changed gate file
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == "QUALITY_GATE_POLICY_CHANGED"
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["stage"] == "post-agent pre-commit repair policy"
+    assert details["repair_strategy"] == "agent"
+    assert "protected quality-gate" in details["summary"]
+
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_retry_failure_remains_visible(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff after repair
+    fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # retry still fails
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["repair_strategy"] == "agent"
+    assert details["precommit_repair_attempted"] is True
+    assert "awf-mypy" in details["failed_hooks"]
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+    assert repair_events[-1].payload["retry_outcome"] == "failed"  # type: ignore[index]
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_allows_final_deterministic_repair(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0, stdout="docs/awf-plans/ws_89.conformance.json\n")
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_eof_only_output("docs/awf-plans/ws_89.conformance.json"),
+    )  # retry now only needs deterministic EOF repair
+    fake.queue_result(returncode=0)  # git add -- deterministic repair paths
+    fake.queue_result(returncode=0)  # final commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    assert repair_events[0].payload["repair_strategy"] == "deterministic"  # type: ignore[index]
+    assert repair_events[0].payload["retry_outcome"] == "succeeded"  # type: ignore[index]
 
 
 @pytest.mark.unit
@@ -637,6 +1067,29 @@ async def test_post_agent_git_add_failure_uses_git_add_reason_code(
     assert not commit_calls
     ruff_calls = [call for call in fake.calls if "ruff" in call.args]
     assert not ruff_calls
+
+
+@pytest.mark.unit
+async def test_post_agent_git_add_failure_with_empty_output_keeps_structured_reason(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=128)  # git add -A FAILS with no output
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == POST_AGENT_GIT_ADD_FAILED_REASON_CODE
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["stage"] == "git add"
+    assert "summary" not in details
+    assert details["precommit_repair_attempted"] is False
 
 
 @pytest.mark.unit

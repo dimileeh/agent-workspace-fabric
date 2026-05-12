@@ -21,6 +21,7 @@ from awf.control.executor import (
     POST_AGENT_COMMIT_FAILED_REASON_CODE,
     POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
     POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+    _build_post_agent_precommit_repair_prompt,
     _classify_post_agent_commit_failure,
 )
 
@@ -67,6 +68,72 @@ def test_precommit_format_only_failure_uses_format_reason_code_and_parses_paths(
         "src/awf/control/executor.py",
         "src/awf/control/quality_gates.py",
     )
+    assert classification.repair_strategy == "deterministic"
+    assert classification.deterministic_hooks == ("awf-ruff-format-check",)
+    assert classification.semantic_hooks == ()
+
+
+@pytest.mark.unit
+def test_precommit_eof_only_failure_is_deterministic_repairable() -> None:
+    stdout = (
+        "fix end of files.......................................................Failed\n"
+        "- hook id: end-of-file-fixer\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n"
+        "\n"
+        "Fixing docs/awf-plans/ws_06.conformance.json\n"
+    )
+    classification = _classify_post_agent_commit_failure(_commit_result(stdout=stdout))
+
+    assert classification.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert classification.failed_hooks == ("end-of-file-fixer",)
+    assert classification.deterministic_hooks == ("end-of-file-fixer",)
+    assert classification.semantic_hooks == ()
+    assert classification.repair_strategy == "deterministic"
+    assert classification.normalizer_repair_files == ("docs/awf-plans/ws_06.conformance.json",)
+
+
+@pytest.mark.unit
+def test_precommit_whitespace_eof_and_ruff_format_are_deterministic_repairable() -> None:
+    stdout = (
+        "trim trailing whitespace.................................................Failed\n"
+        "- hook id: trailing-whitespace\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n"
+        "\n"
+        "Fixing docs/awf-plans/ws_761.md\n"
+        "fix end of files.......................................................Failed\n"
+        "- hook id: end-of-file-fixer\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n"
+        "\n"
+        "Fixing docs/awf-plans/ws_761.conformance.json\n"
+        "ruff format --check.....................................................Failed\n"
+        "- hook id: awf-ruff-format-check\n"
+        "- exit code: 1\n"
+        "\n"
+        "Would reformat: tests/unit/mcp/test_mcp_server.py\n"
+    )
+    classification = _classify_post_agent_commit_failure(_commit_result(stdout=stdout))
+
+    assert classification.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert classification.failed_hooks == (
+        "trailing-whitespace",
+        "end-of-file-fixer",
+        "awf-ruff-format-check",
+    )
+    assert classification.deterministic_hooks == (
+        "trailing-whitespace",
+        "end-of-file-fixer",
+        "awf-ruff-format-check",
+    )
+    assert classification.semantic_hooks == ()
+    assert classification.repair_strategy == "deterministic"
+    assert classification.format_repair_files == ("tests/unit/mcp/test_mcp_server.py",)
+    assert classification.normalizer_repair_files == (
+        "docs/awf-plans/ws_761.md",
+        "docs/awf-plans/ws_761.conformance.json",
+    )
 
 
 @pytest.mark.unit
@@ -109,9 +176,52 @@ def test_format_plus_other_hook_failure_falls_through_to_precommit_reason() -> N
     assert classification.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
     assert "awf-mypy" in classification.failed_hooks
     assert "awf-ruff-format-check" in classification.failed_hooks
+    assert classification.repair_strategy == "agent"
+    assert classification.deterministic_hooks == ("awf-ruff-format-check",)
+    assert classification.semantic_hooks == ("awf-mypy",)
     # Format repair files are still parsed; the executor will decide not to
     # repair because the failure set is wider than format only.
     assert classification.format_repair_files == ("src/awf/control/executor.py",)
+
+
+@pytest.mark.unit
+def test_ruff_check_plus_ruff_format_uses_agent_repair_not_blind_auto_format() -> None:
+    stdout = (
+        "ruff check..............................................................Failed\n"
+        "- hook id: awf-ruff-check\n"
+        "- exit code: 1\n"
+        "\n"
+        "F401 fix_test.py imported but unused\n"
+        "ruff format --check.....................................................Failed\n"
+        "- hook id: awf-ruff-format-check\n"
+        "- exit code: 1\n"
+        "\n"
+        "Would reformat: run_debug.py\n"
+    )
+    classification = _classify_post_agent_commit_failure(_commit_result(stdout=stdout))
+
+    assert classification.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert classification.repair_strategy == "agent"
+    assert classification.deterministic_hooks == ("awf-ruff-format-check",)
+    assert classification.semantic_hooks == ("awf-ruff-check",)
+    assert classification.format_repair_files == ("run_debug.py",)
+
+
+@pytest.mark.unit
+def test_unknown_hook_uses_agent_repair_not_deterministic_repair() -> None:
+    stdout = (
+        "custom security scan....................................................Failed\n"
+        "- hook id: custom-security-scan\n"
+        "- exit code: 1\n"
+        "\n"
+        "blocked\n"
+    )
+    classification = _classify_post_agent_commit_failure(_commit_result(stdout=stdout))
+
+    assert classification.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert classification.repair_strategy == "agent"
+    assert classification.deterministic_hooks == ()
+    assert classification.semantic_hooks == ("custom-security-scan",)
 
 
 @pytest.mark.unit
@@ -132,3 +242,30 @@ def test_format_paths_preserved_verbatim_for_executor_intersection() -> None:
         "legacy/untouched.py",
         "src/awf/control/executor.py",
     )
+
+
+@pytest.mark.unit
+def test_precommit_repair_prompt_summarizes_large_path_sets() -> None:
+    stdout = (
+        "ruff check..............................................................Failed\n"
+        "- hook id: awf-ruff-check\n"
+        "- exit code: 1\n"
+        "\n"
+        "F401 generated.py imported but unused\n"
+        "ruff format --check.....................................................Failed\n"
+        "- hook id: awf-ruff-format-check\n"
+        "- exit code: 1\n"
+        "\n" + "".join(f"Would reformat: src/generated/file_{i}.py\n" for i in range(45))
+    )
+    classification = _classify_post_agent_commit_failure(_commit_result(stdout=stdout))
+    staged_paths = [f"src/generated/file_{i}.py" for i in range(85)]
+
+    prompt = _build_post_agent_precommit_repair_prompt(
+        classification=classification,
+        staged_paths=staged_paths,
+    )
+
+    assert "Do not bypass pre-commit" in prompt
+    assert "Failed hooks: awf-ruff-check, awf-ruff-format-check" in prompt
+    assert prompt.count("- ... and 5 more") == 2
+    assert "src/generated/file_80.py" not in prompt

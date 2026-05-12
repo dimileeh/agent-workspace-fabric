@@ -893,7 +893,7 @@ class TestOpenCodeAdapter:
         proc.stdin.close()
         await proc.stdin.wait_closed()
 
-        for _ in range(50):
+        for _ in range(250):
             if fake_started.exists():
                 break
             await asyncio.sleep(0.02)

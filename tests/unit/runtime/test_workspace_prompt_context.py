@@ -162,6 +162,52 @@ def test_workspace_runtime_context_includes_generated_app_endpoint_env() -> None
 
 
 @pytest.mark.unit
+def test_workspace_runtime_context_redacts_sensitive_generated_connection_env() -> None:
+    profile = WorkspaceProfile(
+        name="tokenized-app",
+        runtime=ProfileRuntime(
+            environment={
+                "SERVICE_TOKEN_URL": "https://token-service:8443/api?token=secret-token-value",
+                "QUEUE_URL": "redis://queue",
+                "BROKEN_DATABASE_URL": "postgresql://db.example.com:bad/awf",
+                "INVALID_DATABASE_URL": "postgresql://[bad",
+            }
+        ),
+        services=[
+            ProfileService(name="token-service", image="example/token-service:latest"),
+            ProfileService(name="queue", image="redis:7-alpine"),
+        ],
+    )
+
+    context = render_workspace_runtime_context(profile)
+
+    assert "$SERVICE_TOKEN_URL" in context
+    assert "$SERVICE_TOKEN_URL` is set." in context
+    assert "secret-token-value" not in context
+    assert "token-service" in context
+    assert "queue" in context
+    assert "$QUEUE_URL" in context
+    assert "`redis://queue`" in context
+    assert "$BROKEN_DATABASE_URL" not in context
+    assert "$INVALID_DATABASE_URL" not in context
+
+
+@pytest.mark.unit
+def test_workspace_runtime_context_describes_default_docker_mode_without_ports() -> None:
+    profile = WorkspaceProfile(
+        name="sidecar-only",
+        docker=ProfileDocker(mode=DockerMode.dind),
+        services=[ProfileService(name="queue", image="redis:7-alpine")],
+    )
+
+    context = render_workspace_runtime_context(profile)
+
+    assert "Service `queue` is already started by AWF; Compose DNS: `queue`." in context
+    assert "do not start duplicate copies" in context
+    assert "Docker may be unavailable" not in context
+
+
+@pytest.mark.unit
 def test_workspace_runtime_context_is_empty_without_services_or_runtime_env() -> None:
     assert render_workspace_runtime_context(WorkspaceProfile(name="plain")) == ""
 
