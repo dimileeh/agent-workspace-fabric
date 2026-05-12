@@ -814,7 +814,7 @@ def build_mcp_server(
         # embed secrets; binary artifacts cannot meaningfully contain secret
         # strings and a byte-level replacement would silently corrupt them.
         base_type = content_type.split(";")[0].strip().lower()
-        if content_type.startswith("text/") or base_type in {
+        if base_type.startswith("text/") or base_type in {
             "application/json",
             "application/xml",
             "application/javascript",
