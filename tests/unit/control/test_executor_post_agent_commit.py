@@ -227,6 +227,9 @@ async def test_post_agent_commit_precommit_failure_uses_precommit_reason_code(
     fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff
     fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # git commit fails
     fake.queue_result(returncode=1, stderr="repair failed")  # targeted agent repair fails
+    fake.queue_result(returncode=0)  # git add -u salvages partial repair edits
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff after salvage
+    fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # retry still fails
 
     executor = _make_executor(fake, factory, tmp_path)
     await executor.execute(ws_id)
@@ -249,10 +252,19 @@ async def test_post_agent_commit_precommit_failure_uses_precommit_reason_code(
     assert commit_details["precommit_repair_attempted"] is True
     assert "awf-mypy" in commit_details["failed_hooks"]
 
-    # Only one git commit was queued/consumed — the targeted repair agent failed
-    # before AWF could retry the commit.
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+    assert repair_events[-1].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert repair_events[-1].payload["retry_outcome"] == "error"  # type: ignore[index]
+    assert repair_events[-1].payload["restaged_paths"] == ["src/awf/foo.py"]  # type: ignore[index]
+
+    # The failed repair-agent run may still have edited files; AWF stages those
+    # partial edits and retries the commit once before giving up.
     commit_calls = [call for call in fake.calls if "commit" in call.args]
-    assert len(commit_calls) == 1
+    assert len(commit_calls) == 2
 
 
 @pytest.mark.unit
@@ -623,7 +635,7 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
 
 
 @pytest.mark.unit
-async def test_post_agent_commit_semantic_agent_repair_failure_remains_precommit_failure(
+async def test_post_agent_commit_semantic_agent_repair_failure_salvages_partial_edits(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -638,20 +650,35 @@ async def test_post_agent_commit_semantic_agent_repair_failure_remains_precommit
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=1, stderr="repair failed")  # targeted repair fails
+    fake.queue_result(returncode=0)  # git add -u salvages partial repair edits
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff after salvage
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
 
-    executor = _make_executor(fake, factory, tmp_path)
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
     await executor.execute(ws_id)
 
-    event = await _failed_state_event(factory, ws_id)
-    assert event.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
-    assert event.payload is not None
-    details = event.payload["details"]["post_agent_commit"]
-    assert details["repair_strategy"] == "agent"
-    assert details["precommit_repair_attempted"] is True
-    assert "awf-ruff-check" in details["failed_hooks"]
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "agent"
+    assert payload["retry_outcome"] == "error"
+    assert payload["failed_hooks"] == [
+        "end-of-file-fixer",
+        "awf-ruff-check",
+        "awf-ruff-format-check",
+    ]
+    assert payload["restaged_paths"] == ["src/awf/foo.py"]
 
     commit_calls = [call for call in fake.calls if "commit" in call.args]
-    assert len(commit_calls) == 1
+    assert len(commit_calls) == 2
 
 
 @pytest.mark.unit

@@ -5634,6 +5634,7 @@ class WorkspaceExecutor:
             classification=classification,
             staged_paths=staged_paths,
         )
+        repair_error: AgentRunError | None = None
         try:
             repair_result = await adapter.run(
                 compose_project=compose_project,
@@ -5649,30 +5650,12 @@ class WorkspaceExecutor:
                 stderr=repair_result.stderr,
             )
         except AgentRunError as exc:
+            repair_error = exc
             append_command_evidence(
                 command_evidence,
                 stdout=exc.result.stdout,
                 stderr=exc.result.stderr,
             )
-            await self._record_post_agent_commit_format_repair(
-                workspace_id=workspace_id,
-                repaired_paths=[],
-                restaged_paths=[],
-                formatter_paths=classification.format_repair_files,
-                normalizer_paths=classification.normalizer_repair_files,
-                failed_hooks=classification.failed_hooks,
-                repair_strategy="agent",
-                retry_outcome="error",
-                reason_code=POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
-            )
-            raise _PostAgentCommitStepError(
-                stage="post-agent pre-commit repair",
-                result=exc.result,
-                classification=classification,
-                precommit_repair_attempted=True,
-                repair_strategy="agent",
-                reason_code_override=POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
-            ) from exc
 
         add_again = await git_in_worktree(["add", "-u"])
         await self._repair_agent_git_ownership(
@@ -5780,12 +5763,17 @@ class WorkspaceExecutor:
                 normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="agent",
-                retry_outcome="succeeded",
+                retry_outcome="error" if repair_error is not None else "succeeded",
+                reason_code=(
+                    POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+                    if repair_error is not None
+                    else POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+                ),
             )
             return
 
         retry_classification = _classify_post_agent_commit_failure(retry_result)
-        if retry_classification.repair_strategy == "deterministic":
+        if retry_classification.repair_strategy == "deterministic" and repair_error is None:
             await self._run_post_agent_deterministic_precommit_repair(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
@@ -5805,8 +5793,22 @@ class WorkspaceExecutor:
             normalizer_paths=classification.normalizer_repair_files,
             failed_hooks=classification.failed_hooks,
             repair_strategy="agent",
-            retry_outcome="failed",
+            retry_outcome="error" if repair_error is not None else "failed",
+            reason_code=(
+                POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+                if repair_error is not None
+                else POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+            ),
         )
+        if repair_error is not None:
+            raise _PostAgentCommitStepError(
+                stage="post-agent pre-commit repair",
+                result=repair_error.result,
+                classification=classification,
+                precommit_repair_attempted=True,
+                repair_strategy="agent",
+                reason_code_override=POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+            ) from repair_error
         raise _PostAgentCommitStepError(
             stage="git commit",
             result=retry_result,
