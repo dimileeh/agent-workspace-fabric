@@ -5539,7 +5539,7 @@ class WorkspaceExecutor:
                     reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
                 )
 
-        restage_paths = list(dict.fromkeys([*staged_paths, *repair_paths]))
+        restage_paths = list(staged_paths)
         add_again = await git_in_worktree(["add", "--", *restage_paths])
         await self._repair_agent_git_ownership(
             workspace_id=workspace_id,
