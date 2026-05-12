@@ -5674,7 +5674,7 @@ class WorkspaceExecutor:
                 reason_code_override=POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
             ) from exc
 
-        add_again = await git_in_worktree(["add", "-A"])
+        add_again = await git_in_worktree(["add", "-u"])
         await self._repair_agent_git_ownership(
             workspace_id=workspace_id,
             worktree_path=worktree_path,

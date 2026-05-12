@@ -574,7 +574,7 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
         stdout=_precommit_ruff_check_and_format_output("run_debug.py"),
     )  # semantic pre-commit failure: must not auto-format-only
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted agent repair
-    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0)  # git add -u after repair
     fake.queue_result(returncode=0, stdout="src/awf/mcp.py\n")  # cached diff after repair
     fake.queue_result(returncode=0)  # git commit retry ok
     fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
@@ -615,6 +615,9 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
 
     ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
     assert not ruff_calls
+    add_calls = [call.args for call in fake.calls if "add" in call.args]
+    post_repair_add = add_calls[1]
+    assert post_repair_add[post_repair_add.index("add") :] == ["add", "-u"]
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 2
 
@@ -705,7 +708,7 @@ async def test_post_agent_commit_semantic_agent_repair_protected_gate_change_is_
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
-    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0)  # git add -u after repair
     fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # repair changed gate file
 
     executor = _make_executor(fake, factory, tmp_path)
@@ -754,7 +757,7 @@ async def test_post_agent_commit_semantic_agent_repair_supply_chain_change_is_bl
         returncode=0,
         stdout="$ npm install left-pad\n",
     )  # targeted repair adds supply-chain evidence
-    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0)  # git add -u after repair
     fake.queue_result(
         returncode=0,
         stdout="src/awf/mcp.py\npackage-lock.json\n",
@@ -804,7 +807,7 @@ async def test_post_agent_commit_semantic_agent_repair_retry_failure_remains_vis
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
-    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0)  # git add -u after repair
     fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff after repair
     fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # retry still fails
 
@@ -843,7 +846,7 @@ async def test_post_agent_commit_semantic_agent_repair_allows_final_deterministi
         stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
     )  # semantic pre-commit failure
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
-    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0)  # git add -u after repair
     fake.queue_result(returncode=0, stdout="docs/awf-plans/ws_89.conformance.json\n")
     fake.queue_result(
         returncode=1,
