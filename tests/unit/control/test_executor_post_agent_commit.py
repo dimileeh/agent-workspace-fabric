@@ -478,6 +478,7 @@ async def test_post_agent_commit_eof_only_hook_modification_restages_and_retries
         )
 
     assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
     payload = repair_events[0].payload
     assert isinstance(payload, dict)
     assert payload["repair_strategy"] == "deterministic"
@@ -540,6 +541,7 @@ async def test_post_agent_commit_mixed_deterministic_hooks_formats_restages_and_
         )
 
     assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
     payload = repair_events[0].payload
     assert isinstance(payload, dict)
     assert payload["repair_strategy"] == "deterministic"

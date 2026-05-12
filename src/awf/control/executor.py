@@ -5387,7 +5387,7 @@ class WorkspaceExecutor:
         formatter_paths: Sequence[str] = (),
         normalizer_paths: Sequence[str] = (),
         restaged_paths: Sequence[str] = (),
-        reason_code: str = POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
+        reason_code: str,
     ) -> None:
         """Emit the structured event describing a post-agent commit repair."""
         async with self._session_factory() as session:
@@ -5499,6 +5499,7 @@ class WorkspaceExecutor:
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="deterministic",
                 retry_outcome="skipped",
+                reason_code=classification.reason_code,
             )
             raise _PostAgentCommitStepError(
                 stage="git commit",
@@ -5591,6 +5592,7 @@ class WorkspaceExecutor:
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="deterministic",
                 retry_outcome="succeeded",
+                reason_code=classification.reason_code,
             )
             return
 
@@ -5604,6 +5606,7 @@ class WorkspaceExecutor:
             failed_hooks=classification.failed_hooks,
             repair_strategy="deterministic",
             retry_outcome="failed",
+            reason_code=classification.reason_code,
         )
         raise _PostAgentCommitStepError(
             stage="git commit",

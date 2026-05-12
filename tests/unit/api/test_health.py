@@ -542,7 +542,7 @@ async def test_reset_egress_audit_summary_counts_task_consumes_completed_task() 
 
     health_route.reset_egress_audit_summary_counts_task(state)
 
-    assert getattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR) is None
+    assert getattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None) is None
 
 
 @pytest.mark.unit
@@ -557,7 +557,7 @@ async def test_pending_egress_audit_summary_counts_task_clears_completed_task() 
     setattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, task)
 
     assert health_route._pending_egress_audit_summary_counts_task(state) is None
-    assert getattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR) is None
+    assert getattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None) is None
 
 
 @pytest.mark.unit
