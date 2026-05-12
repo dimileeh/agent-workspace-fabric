@@ -38,6 +38,7 @@ FORBIDDEN_MCP_INPUTS = {
     "container_id",
     "docker_command",
     "host_path",
+    "path",
     "secret_name",
     "shell",
     "token",

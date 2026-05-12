@@ -760,8 +760,8 @@ _CAPABILITIES += (
         error_codes=frozenset({"INVALID_ARTIFACT_PATH", "NOT_FOUND", "ARTIFACT_OVERSIZED"}),
         rest_path_fields=frozenset({"workspace_id"}),
         rest_query_fields=frozenset({"path"}),
-        mcp_request_fields=frozenset({"workspace_id", "path", "limit_bytes"}),
-        mcp_required_fields=frozenset({"workspace_id", "path"}),
+        mcp_request_fields=frozenset({"workspace_id", "relative_path", "limit_bytes"}),
+        mcp_required_fields=frozenset({"workspace_id", "relative_path"}),
         response_fields=frozenset(
             {"workspace_id", "relative_path", "name", "content_type", "size_bytes", "content"}
         ),

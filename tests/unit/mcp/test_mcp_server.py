@@ -2360,7 +2360,7 @@ class TestReadWorkspaceArtifact:
         schema = tools["awf_read_workspace_artifact"].inputSchema
         props = schema["properties"]
         assert "workspace_id" in schema.get("required", [])
-        assert "path" in schema.get("required", [])
+        assert "relative_path" in schema.get("required", [])
         assert "limit_bytes" not in schema.get("required", [])
         assert props["limit_bytes"]["default"] == 65_536
         assert props["limit_bytes"]["minimum"] == 1
@@ -2393,7 +2393,7 @@ class TestReadWorkspaceArtifact:
         result = await _call(
             mcp,
             "awf_read_workspace_artifact",
-            {"workspace_id": workspace.id, "path": "report.txt"},
+            {"workspace_id": workspace.id, "relative_path": "report.txt"},
         )
 
         assert isinstance(result, dict)
@@ -2411,7 +2411,7 @@ class TestReadWorkspaceArtifact:
     ) -> None:  # type: ignore[no-untyped-def]
         result = await mcp.call_tool(
             "awf_read_workspace_artifact",
-            {"workspace_id": "ws_missing", "path": "report.txt"},
+            {"workspace_id": "ws_missing", "relative_path": "report.txt"},
         )
         assert isinstance(result, CallToolResult)
         assert result.isError is True
@@ -2442,7 +2442,7 @@ class TestReadWorkspaceArtifact:
 
         result = await mcp.call_tool(
             "awf_read_workspace_artifact",
-            {"workspace_id": workspace.id, "path": "missing.txt"},
+            {"workspace_id": workspace.id, "relative_path": "missing.txt"},
         )
         assert isinstance(result, CallToolResult)
         assert result.isError is True
@@ -2479,7 +2479,7 @@ class TestReadWorkspaceArtifact:
 
         result = await mcp.call_tool(
             "awf_read_workspace_artifact",
-            {"workspace_id": workspace.id, "path": "link.txt"},
+            {"workspace_id": workspace.id, "relative_path": "link.txt"},
         )
         assert isinstance(result, CallToolResult)
         assert result.isError is True
@@ -2520,7 +2520,7 @@ class TestReadWorkspaceArtifact:
 
         result = await mcp.call_tool(
             "awf_read_workspace_artifact",
-            {"workspace_id": workspace.id, "path": bad_path},
+            {"workspace_id": workspace.id, "relative_path": bad_path},
         )
         assert isinstance(result, CallToolResult)
         assert result.isError is True
@@ -2552,7 +2552,7 @@ class TestReadWorkspaceArtifact:
 
         result = await mcp.call_tool(
             "awf_read_workspace_artifact",
-            {"workspace_id": workspace.id, "path": "big.bin", "limit_bytes": 100},
+            {"workspace_id": workspace.id, "relative_path": "big.bin", "limit_bytes": 100},
         )
         assert isinstance(result, CallToolResult)
         assert result.isError is True
@@ -2589,7 +2589,11 @@ class TestReadWorkspaceArtifact:
         with pytest.raises(ToolError):
             await mcp.call_tool(
                 "awf_read_workspace_artifact",
-                {"workspace_id": workspace.id, "path": "small.bin", "limit_bytes": 2_000_000},
+                {
+                    "workspace_id": workspace.id,
+                    "relative_path": "small.bin",
+                    "limit_bytes": 2_000_000,
+                },
             )
 
     @pytest.mark.unit
@@ -2619,7 +2623,7 @@ class TestReadWorkspaceArtifact:
         result = await _call(
             mcp,
             "awf_read_workspace_artifact",
-            {"workspace_id": workspace.id, "path": "medium.bin", "limit_bytes": 100},
+            {"workspace_id": workspace.id, "relative_path": "medium.bin", "limit_bytes": 100},
         )
         assert isinstance(result, dict)
         assert result["size_bytes"] == len(payload)

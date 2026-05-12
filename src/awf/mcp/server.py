@@ -777,7 +777,7 @@ def build_mcp_server(
     @mcp.tool(name="awf_read_workspace_artifact")
     async def awf_read_workspace_artifact(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
-        path: str = Field(..., description="Relative POSIX artifact path to read."),
+        relative_path: str = Field(..., description="Relative POSIX artifact path to read."),
         limit_bytes: int = Field(
             default=65_536,
             ge=1,
@@ -798,20 +798,20 @@ def build_mcp_server(
                 get_workspace_artifact_content,
                 workspace_id=workspace_id,
                 artifact_dir=artifact_dir,
-                relative_path=path,
+                relative_path=relative_path,
                 limit_bytes=limit_bytes,
             )
         except ArtifactPathError as exc:
             return _error_result("INVALID_ARTIFACT_PATH", str(exc))
         except ArtifactNotFoundError:
-            return _error_result("NOT_FOUND", f"No artifact at path {path}")
+            return _error_result("NOT_FOUND", f"No artifact at path {relative_path}")
         except ArtifactOversizedError as exc:
             return _error_result(
                 error_code="ARTIFACT_OVERSIZED", message=str(exc), detail=exc.detail
             )
         response = WorkspaceArtifactReadResponse(
             workspace_id=workspace_id,
-            relative_path=path,
+            relative_path=relative_path,
             name=name,
             content_type=content_type,
             size_bytes=size_bytes,
