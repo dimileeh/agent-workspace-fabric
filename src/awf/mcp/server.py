@@ -809,16 +809,49 @@ def build_mcp_server(
             )
         # Redact known secrets from raw artifact bytes before base64-encoding,
         # so secrets cannot leak past the MCP safety boundary inside the
-        # encoded content field.  Apply text redaction to text/* MIME types
-        # and to other common textual types (e.g. application/json) that may
-        # embed secrets; binary artifacts cannot meaningfully contain secret
-        # strings and a byte-level replacement would silently corrupt them.
+        # encoded content field.  Apply text redaction to text/* MIME types,
+        # to other common textual types (e.g. application/json) that may
+        # embed secrets, and to any file that decodes cleanly as text without
+        # null bytes (covers .env, .log, .yaml, extensionless text files, etc).
+        # Binary artifacts cannot meaningfully contain secret strings and a
+        # byte-level replacement would silently corrupt them.
         base_type = content_type.split(";")[0].strip().lower()
-        if base_type.startswith("text/") or base_type in {
-            "application/json",
-            "application/xml",
-            "application/javascript",
-        }:
+        is_likely_binary_type = base_type.startswith(
+            (
+                "image/",
+                "audio/",
+                "video/",
+                "font/",
+                "application/pdf",
+                "application/zip",
+                "application/gzip",
+                "application/x-tar",
+                "application/java-archive",
+                "application/vnd.ms-",
+                "application/vnd.openxmlformats-",
+                "application/vnd.oasis.opendocument",
+            )
+        ) or base_type in {
+            "application/wasm",
+            "application/postscript",
+            "application/epub+zip",
+            "application/rtf",
+            "application/x-msdos-program",
+            "application/java-vm",
+            "application/vnd.sqlite3",
+        }
+        is_likely_text = not is_likely_binary_type and b"\x00" not in content
+        if (
+            is_likely_text
+            or base_type.startswith("text/")
+            or base_type
+            in {
+                "application/json",
+                "application/xml",
+                "application/javascript",
+                "application/yaml",
+            }
+        ):
             text = content.decode("latin-1")
             _service_settings = service_config.resolve_service_settings(settings_value)
             redacted_text = _redact_sensitive_text(
