@@ -2701,11 +2701,21 @@ class WorkspaceRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def get_for_update(self, workspace_id: str) -> Workspace | None:
-        """Load one workspace with a row lock when the database supports it."""
+    async def get_for_update(
+        self,
+        workspace_id: str,
+        *,
+        skip_locked: bool = False,
+    ) -> Workspace | None:
+        """Load one workspace with a row lock when the database supports it.
+
+        When ``skip_locked=True`` and the row is currently locked by another
+        transaction, returns ``None`` instead of waiting (Postgres
+        ``SELECT FOR UPDATE SKIP LOCKED``).
+        """
         stmt = select(Workspace).where(Workspace.id == workspace_id)
         if self._dialect_name == "postgresql":
-            stmt = stmt.with_for_update(of=Workspace)
+            stmt = stmt.with_for_update(of=Workspace, skip_locked=skip_locked)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def exists(self, workspace_id: str) -> bool:

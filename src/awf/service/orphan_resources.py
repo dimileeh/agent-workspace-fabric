@@ -840,13 +840,24 @@ def _classify(resource: DetectedResource, *, workspace_view: WorkspaceIdView) ->
             classification="expected",
             reason="WORKSPACE_ACTIVE",
         )
-    if resource.workspace_id in workspace_view.retained_ids:
-        return ClassifiedResource(
-            resource=resource,
-            classification="expected",
-            reason="WORKSPACE_TERMINAL_WITHIN_RETENTION",
-        )
     if resource.workspace_id in workspace_view.terminal_ids:
+        # Live containers and networks for a terminal workspace are leaked
+        # runtime, not salvage evidence — surface them even within retention so
+        # operators see the leak and the worker sweep can release them. Volumes
+        # and worktrees ARE the salvage evidence; keep them expected while
+        # within retention.
+        if resource.kind in {"container", "network"}:
+            return ClassifiedResource(
+                resource=resource,
+                classification="terminal",
+                reason="WORKSPACE_TERMINAL_LIVE_RUNTIME",
+            )
+        if resource.workspace_id in workspace_view.retained_ids:
+            return ClassifiedResource(
+                resource=resource,
+                classification="expected",
+                reason="WORKSPACE_TERMINAL_WITHIN_RETENTION",
+            )
         return ClassifiedResource(
             resource=resource,
             classification="terminal",

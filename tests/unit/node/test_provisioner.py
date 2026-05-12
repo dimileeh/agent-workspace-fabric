@@ -865,6 +865,11 @@ class TestFailureHandling:
             assert reloaded.failure_message is not None
             assert "docker compose up failed" in reloaded.failure_message
             assert "pull access denied for awf-agent-runtime:test" in reloaded.failure_message
+            # Stack launch may have created Docker resources on this node before
+            # raising. ``_mark_failed`` must attribute the failed row to this
+            # node so the terminal runtime release sweep targets only the
+            # Docker daemon that could hold those resources.
+            assert reloaded.node_id == "test-node-01"
 
     @pytest.mark.unit
     async def test_stack_startup_failure_records_computed_egress_audit(

@@ -618,10 +618,9 @@ def test_unknown_workspace_status_and_naive_retention_timestamp(tmp_path: Path) 
             )
         ),
         run_subprocess=_run_with(
-            containers=[
+            volumes=[
                 {
-                    "id": "def",
-                    "name": "awf_ws_naive-agent-1",
+                    "name": "awf_ws_naive_postgres_data",
                     "project": "awf_ws_naive",
                 }
             ]
@@ -634,7 +633,9 @@ def test_unknown_workspace_status_and_naive_retention_timestamp(tmp_path: Path) 
     assert retained["retained_count"] == 1
 
 
-def test_completed_workspace_within_retention_not_flagged(tmp_path: Path) -> None:
+def test_completed_workspace_within_retention_partitions_runtime_and_salvage(
+    tmp_path: Path,
+) -> None:
     now = datetime(2026, 4, 28, tzinfo=UTC)
     (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
 
@@ -653,8 +654,8 @@ def test_completed_workspace_within_retention_not_flagged(tmp_path: Path) -> Non
                 {
                     "id": "abc",
                     "name": "awf_ws_done-agent-1",
-                    "state": "exited",
-                    "status": "Exited",
+                    "state": "running",
+                    "status": "Up",
                     "project": "awf_ws_done",
                     "service": "agent",
                 }
@@ -676,17 +677,97 @@ def test_completed_workspace_within_retention_not_flagged(tmp_path: Path) -> Non
         now=now,
     ).to_check_payload()
 
+    assert summary["ok"] is False
+    assert summary["reason"] == "ORPHANS_PRESENT"
+    assert summary["orphan_count"] == 2
+    assert summary["orphan_counts_by_kind"] == {"container": 1, "network": 1}
+    assert summary["retained_count"] == 2
+    assert summary["retained_counts_by_kind"] == {"volume": 1, "worktree": 1}
+    leak_reasons = {example["resource_kind"]: example["reason"] for example in summary["examples"]}
+    assert leak_reasons == {
+        "container": "WORKSPACE_TERMINAL_LIVE_RUNTIME",
+        "network": "WORKSPACE_TERMINAL_LIVE_RUNTIME",
+    }
+    assert all(example["classification"] == "cleanup_ready" for example in summary["examples"])
+
+
+def test_completed_workspace_volume_and_worktree_within_retention_remain_retained(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 28, tzinfo=UTC)
+    (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
+
+    summary = detect_orphan_resources(
+        work_dir=tmp_path,
+        docker_host="unix:///var/run/docker.sock",
+        workspace_view=_view(
+            _snapshot(
+                "ws_done",
+                status=WorkspaceStatus.completed,
+                updated_at=now - timedelta(hours=DEFAULT_MIN_AGE_HOURS - 1),
+            )
+        ),
+        run_subprocess=_run_with(
+            volumes=[
+                {
+                    "name": "awf_ws_done_postgres_data",
+                    "project": "awf_ws_done",
+                }
+            ]
+        ),
+        now=now,
+    ).to_check_payload()
+
     assert summary["ok"] is True
     assert summary["reason"] == "NO_ORPHANS"
-    assert summary["retained_count"] == 4
-    assert summary["retained_counts_by_kind"] == {
-        "container": 1,
-        "network": 1,
-        "volume": 1,
-        "worktree": 1,
-    }
+    assert summary["retained_count"] == 2
+    assert summary["retained_counts_by_kind"] == {"volume": 1, "worktree": 1}
     assert summary["orphan_count"] == 0
     assert summary["examples"] == []
+
+
+def test_completed_workspace_live_runtime_is_leak_within_retention(tmp_path: Path) -> None:
+    now = datetime(2026, 4, 28, tzinfo=UTC)
+    summary = detect_orphan_resources(
+        work_dir=tmp_path,
+        docker_host="unix:///var/run/docker.sock",
+        workspace_view=_view(
+            _snapshot(
+                "ws_zombie",
+                status=WorkspaceStatus.completed,
+                updated_at=now - timedelta(hours=DEFAULT_MIN_AGE_HOURS - 1),
+            )
+        ),
+        run_subprocess=_run_with(
+            containers=[
+                {
+                    "id": "abc",
+                    "name": "awf_ws_zombie-agent-1",
+                    "state": "running",
+                    "status": "Up 5 minutes",
+                    "project": "awf_ws_zombie",
+                    "service": "agent",
+                }
+            ],
+            networks=[
+                {
+                    "id": "net",
+                    "name": "awf_ws_zombie_default",
+                    "project": "awf_ws_zombie",
+                }
+            ],
+        ),
+        now=now,
+    ).to_check_payload()
+
+    assert summary["ok"] is False
+    assert summary["reason"] == "ORPHANS_PRESENT"
+    assert summary["orphan_count"] == 2
+    assert summary["orphan_counts_by_kind"] == {"container": 1, "network": 1}
+    assert summary["retained_count"] == 0
+    reasons = {example["reason"] for example in summary["examples"]}
+    assert reasons == {"WORKSPACE_TERMINAL_LIVE_RUNTIME"}
+    assert all(example["classification"] == "cleanup_ready" for example in summary["examples"])
 
 
 def test_completed_workspace_past_retention_is_cleanup_ready(tmp_path: Path) -> None:
@@ -702,14 +783,10 @@ def test_completed_workspace_past_retention_is_cleanup_ready(tmp_path: Path) -> 
             )
         ),
         run_subprocess=_run_with(
-            containers=[
+            volumes=[
                 {
-                    "id": "abc",
-                    "name": "awf_ws_old-agent-1",
-                    "state": "exited",
-                    "status": "Exited",
+                    "name": "awf_ws_old_postgres_data",
                     "project": "awf_ws_old",
-                    "service": "agent",
                 }
             ]
         ),
@@ -719,7 +796,7 @@ def test_completed_workspace_past_retention_is_cleanup_ready(tmp_path: Path) -> 
     assert summary["ok"] is False
     assert summary["orphan_count"] == 1
     example = summary["examples"][0]
-    assert example["resource_kind"] == "container"
+    assert example["resource_kind"] == "volume"
     assert example["workspace_id"] == "ws_old"
     assert example["reason"] == "WORKSPACE_TERMINAL_RETENTION_EXPIRED"
     assert example["classification"] == "cleanup_ready"

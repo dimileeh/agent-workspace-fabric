@@ -40,6 +40,7 @@ from awf.control.worker import (
     _scheduler_items_are_workspace_ids,
     _scheduler_items_are_workspaces,
     _stale_active_execution_failure_message,
+    _TerminalRuntimeCandidate,
     _utc_datetime,
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
@@ -8064,3 +8065,1194 @@ async def test_missing_monitoring_pr_workspace_cannot_be_claimed(
     worker: ControlWorker,
 ) -> None:
     assert await worker._claim_monitoring_pr("ws_missing") is False  # noqa: SLF001
+
+
+class TestTerminalRuntimeRelease:
+    @pytest.mark.unit
+    async def test_release_stops_terminal_failed_workspace_runtime_preserving_volumes_and_worktree(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-failed",
+            WorkspaceStatus.failed,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert cleaner.calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": str(origin_repo),
+                "compose_project_name": f"awf_{workspace_id}",
+                "compose_file_path": Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+                "worktree_host_path": None,
+                "remove_volumes": False,
+                "remove_worktree": False,
+            }
+        ]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message == "seed failure"
+            released_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+            assert len(released_events) == 1
+            assert released_events[0].reason_code == "TERMINAL_RUNTIME_RELEASED"
+            assert released_events[0].payload is not None
+            assert released_events[0].payload["cleanup"]["status"] == "succeeded"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        [
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+            WorkspaceStatus.completed,
+            WorkspaceStatus.destroyed,
+        ],
+    )
+    async def test_release_runs_for_all_terminal_states(
+        self,
+        status: WorkspaceStatus,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            f"terminal-release-{status.value}",
+            status,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert len(cleaner.calls) == 1
+        assert cleaner.calls[0]["workspace_id"] == workspace_id
+        assert cleaner.calls[0]["remove_volumes"] is False
+        assert cleaner.calls[0]["remove_worktree"] is False
+        async with session_factory() as s:
+            released_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(released_events) == 1
+
+    @pytest.mark.unit
+    async def test_release_is_idempotent_with_repeat_calls(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-idempotent",
+            WorkspaceStatus.failed,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert len(cleaner.calls) == 1
+        async with session_factory() as s:
+            released_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(released_events) == 1
+
+    @pytest.mark.unit
+    async def test_release_records_failure_event_and_preserves_original_failure_reason(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-cleanup-fail",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.failure_reason = "agent_failure"
+            ws.failure_message = "original agent diagnostics"
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert ws.failure_message == "original agent diagnostics"
+            release_failure_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_release_failed",
+            )
+            release_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(release_failure_events) == 1
+        assert release_failure_events[0].reason_code == "TERMINAL_RUNTIME_RELEASE_FAILED"
+        assert release_failure_events[0].payload is not None
+        assert release_failure_events[0].payload["cleanup"]["reason_code"] == CLEANUP_PARTIAL
+        assert release_events == []
+
+    @pytest.mark.unit
+    async def test_release_does_not_record_failure_event_when_success_event_already_exists(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-success-then-failure",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.add_event(
+                ws,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+                payload={
+                    "compose_project_name": ws.compose_project_name,
+                    "workspace_status": ws.status,
+                    "cleanup": {"status": "succeeded"},
+                },
+            )
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._record_terminal_runtime_release_failed(  # noqa: SLF001
+            _TerminalRuntimeCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.failed,
+                repo_url=str(origin_repo),
+                compose_project_name=f"awf_{workspace_id}",
+                compose_file_path=f"/tmp/awf/{workspace_id}/compose.yml",
+            ),
+            cleanup=cleaner.result,
+            message="should not be recorded",
+        )
+
+        async with session_factory() as s:
+            release_failure_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_release_failed",
+            )
+            release_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert release_failure_events == []
+        assert len(release_events) == 1
+
+    @pytest.mark.unit
+    async def test_release_does_not_record_duplicate_failure_event_on_repeated_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-repeated-failure",
+            WorkspaceStatus.failed,
+        )
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert len(cleaner.calls) == 3
+        async with session_factory() as s:
+            release_failure_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_release_failed",
+            )
+            release_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(release_failure_events) == 1
+        assert release_failure_events[0].reason_code == "TERMINAL_RUNTIME_RELEASE_FAILED"
+        assert release_events == []
+
+    @pytest.mark.unit
+    async def test_release_rotates_past_persistent_failures_to_drain_backlog(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_ids: list[str] = []
+        for i in range(3):
+            workspace_ids.append(
+                await _create_terminal_execution(
+                    session_factory,
+                    origin_repo,
+                    f"terminal-release-rotation-{i}",
+                    WorkspaceStatus.failed,
+                )
+            )
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+                terminal_runtime_release_max_per_scan=2,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        first_scan_ids = {call["workspace_id"] for call in cleaner.calls}
+        assert len(first_scan_ids) == 2
+        assert workspace_ids[2] not in first_scan_ids
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        all_scanned_ids = {call["workspace_id"] for call in cleaner.calls}
+        assert all_scanned_ids == set(workspace_ids), (
+            "second scan must rotate past failed candidates so the third "
+            "workspace receives a cleanup attempt"
+        )
+
+    @pytest.mark.unit
+    async def test_release_retry_marker_does_not_advance_updated_at(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        # Workspace.updated_at is the retention cutoff used by service/gc.py and
+        # service/orphan_resources.py. Persistently-failing terminal releases
+        # MUST NOT keep advancing it on every retry, or volumes/worktrees for
+        # those workspaces would never age out. The rotation marker
+        # (terminal_release_retry_at) is bumped instead so the candidate scan
+        # still rotates past stuck rows.
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-retry-marker",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            initial_updated_at = ws.updated_at
+            assert ws.terminal_release_retry_at is None
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            first_retry_marker = ws.terminal_release_retry_at
+            assert first_retry_marker is not None
+            assert ws.updated_at == initial_updated_at, (
+                "updated_at must not advance on a failed release retry — it is "
+                "the retention cutoff used by GC and orphan retention paths"
+            )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.terminal_release_retry_at is not None
+            assert ws.terminal_release_retry_at >= first_retry_marker, (
+                "retry marker must advance on each retry so the candidate scan "
+                "rotates past persistently-failing rows"
+            )
+            assert ws.updated_at == initial_updated_at, (
+                "updated_at must remain pinned across repeated failed retries "
+                "so the retention timer keeps ticking"
+            )
+
+    @pytest.mark.unit
+    async def test_release_runs_for_legacy_workspace_with_only_compose_file_path(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-no-compose-project",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.compose_project_name = None
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert cleaner.calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": str(origin_repo),
+                "compose_project_name": None,
+                "compose_file_path": Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+                "worktree_host_path": None,
+                "remove_volumes": False,
+                "remove_worktree": False,
+            }
+        ]
+        async with session_factory() as s:
+            released_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(released_events) == 1
+
+    @pytest.mark.unit
+    async def test_release_runs_for_legacy_workspace_with_no_persisted_runtime_state(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-no-runtime-signal",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.compose_project_name = None
+            ws.compose_file_path = None
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert cleaner.calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": str(origin_repo),
+                "compose_project_name": None,
+                "compose_file_path": None,
+                "worktree_host_path": None,
+                "remove_volumes": False,
+                "remove_worktree": False,
+            }
+        ]
+        async with session_factory() as s:
+            released_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(released_events) == 1
+
+    @pytest.mark.unit
+    async def test_release_runs_for_failed_provisioning_with_null_node_id(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        # ``Provisioner._mark_failed`` now stamps ``node_id`` on the failure
+        # path, but legacy rows persisted before that fix may still have NULL
+        # ``node_id``. The sweep must still pick those legacy rows up so a
+        # single-node deployment can tear down the leaked ``awf_<workspace_id>``
+        # project; multi-node deployments need an ownership claim before this
+        # path is safe (see worker.py comment on the NULL ``node_id`` branch).
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-null-node-id",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.node_id = None
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+                node_id="worker-node-a",
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert len(cleaner.calls) == 1
+        assert cleaner.calls[0]["workspace_id"] == workspace_id
+        async with session_factory() as s:
+            released_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(released_events) == 1
+
+    @pytest.mark.unit
+    async def test_release_skips_terminal_workspace_owned_by_other_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-other-node",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.node_id = "worker-node-b"
+            await s.commit()
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+                node_id="worker-node-a",
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert cleaner.calls == []
+        async with session_factory() as s:
+            released_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert released_events == []
+
+    @pytest.mark.unit
+    async def test_release_runs_for_destroyed_workspace_with_leaked_runtime(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-destroyed",
+            WorkspaceStatus.destroyed,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert len(cleaner.calls) == 1
+        assert cleaner.calls[0]["workspace_id"] == workspace_id
+        assert cleaner.calls[0]["remove_volumes"] is False
+        assert cleaner.calls[0]["remove_worktree"] is False
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.destroyed.value
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(events) == 1
+
+    @pytest.mark.unit
+    async def test_release_does_not_run_when_runtime_cleaner_not_configured(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-no-cleaner",
+            WorkspaceStatus.failed,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=None,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        async with session_factory() as s:
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+            release_events = [
+                event
+                for event in events
+                if event.event_type
+                in {
+                    "workspace.terminal_runtime_released",
+                    "workspace.terminal_runtime_release_failed",
+                }
+            ]
+        assert release_events == []
+
+    @pytest.mark.unit
+    async def test_release_scan_skips_transient_closed_connection(
+        self,
+        worker: ControlWorker,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        current_time = 1_000.0
+        monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+        release_attempts = 0
+
+        async def _raise_release_failure() -> None:
+            nonlocal release_attempts
+            release_attempts += 1
+            raise _closed_connection_error()
+
+        worker._next_terminal_runtime_release_scan_at = 0.0  # noqa: SLF001
+        worker._release_terminal_runtime_resources = _raise_release_failure  # type: ignore[method-assign]
+        scan_interval = max(
+            0.0,
+            worker._config.terminal_runtime_release_scan_interval_seconds,  # noqa: SLF001
+        )
+
+        await worker._maybe_release_terminal_runtime()  # noqa: SLF001
+
+        expected_next_scan_at = current_time + scan_interval
+        actual_next_scan_at = worker._next_terminal_runtime_release_scan_at  # noqa: SLF001
+        assert actual_next_scan_at == expected_next_scan_at
+
+        await worker._maybe_release_terminal_runtime()  # noqa: SLF001
+
+        assert release_attempts == 1
+
+    @pytest.mark.unit
+    async def test_release_does_not_hold_db_lock_during_cleanup_io(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-no-lock-held",
+            WorkspaceStatus.failed,
+        )
+        cleaner_blocked = asyncio.Event()
+        cleaner_released = asyncio.Event()
+        second_read_done = asyncio.Event()
+
+        class _BlockingCleaner:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self.result = WorkspaceCleanupResult.from_steps(
+                    [
+                        WorkspaceCleanupStepResult(
+                            name="compose_down",
+                            status="succeeded",
+                            reason_code=COMPOSE_DOWN_SUCCEEDED,
+                        )
+                    ]
+                )
+
+            async def cleanup(self, **kwargs: object) -> WorkspaceCleanupResult:
+                self.calls.append(kwargs)
+                cleaner_blocked.set()
+                await cleaner_released.wait()
+                return self.result
+
+        cleaner = _BlockingCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        release_task = asyncio.create_task(
+            worker._release_terminal_runtime_resources()  # noqa: SLF001
+        )
+        try:
+            await asyncio.wait_for(cleaner_blocked.wait(), timeout=10.0)
+
+            async def _read_during_io() -> None:
+                async with session_factory() as session:
+                    locked = await session.execute(
+                        select(Workspace)
+                        .where(Workspace.id == workspace_id)
+                        .with_for_update(nowait=True)
+                    )
+                    ws = locked.scalar_one()
+                    assert ws.status == WorkspaceStatus.failed.value
+                second_read_done.set()
+
+            await asyncio.wait_for(_read_during_io(), timeout=10.0)
+            assert second_read_done.is_set()
+        finally:
+            cleaner_released.set()
+            await release_task
+
+        async with session_factory() as s:
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(events) == 1
+
+    @pytest.mark.unit
+    async def test_record_release_skips_when_workspace_row_already_locked(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-row-locked",
+            WorkspaceStatus.failed,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+        candidate = _TerminalRuntimeCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.failed,
+            repo_url=str(origin_repo),
+            compose_project_name=f"awf_{workspace_id}",
+            compose_file_path=f"/tmp/awf/{workspace_id}/compose.yml",
+        )
+
+        async with session_factory() as locking_session:
+            await locking_session.execute(
+                select(Workspace).where(Workspace.id == workspace_id).with_for_update()
+            )
+            await worker._record_terminal_runtime_released(  # noqa: SLF001
+                candidate,
+                cleaner.result,
+            )
+            async with session_factory() as s:
+                release_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.terminal_runtime_released",
+                )
+            assert release_events == []
+
+        await worker._record_terminal_runtime_released(  # noqa: SLF001
+            candidate,
+            cleaner.result,
+        )
+        async with session_factory() as s:
+            release_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert len(release_events) == 1
+
+    @pytest.mark.unit
+    async def test_record_release_failed_skips_when_workspace_row_already_locked(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-failed-row-locked",
+            WorkspaceStatus.failed,
+        )
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+        candidate = _TerminalRuntimeCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.failed,
+            repo_url=str(origin_repo),
+            compose_project_name=f"awf_{workspace_id}",
+            compose_file_path=f"/tmp/awf/{workspace_id}/compose.yml",
+        )
+
+        async with session_factory() as locking_session:
+            await locking_session.execute(
+                select(Workspace).where(Workspace.id == workspace_id).with_for_update()
+            )
+            await worker._record_terminal_runtime_release_failed(  # noqa: SLF001
+                candidate,
+                cleanup=cleaner.result,
+                message="cleanup failed",
+            )
+            async with session_factory() as s:
+                failure_events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.terminal_runtime_release_failed",
+                )
+            assert failure_events == []
+
+        await worker._record_terminal_runtime_release_failed(  # noqa: SLF001
+            candidate,
+            cleanup=cleaner.result,
+            message="cleanup failed",
+        )
+        async with session_factory() as s:
+            failure_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_release_failed",
+            )
+        assert len(failure_events) == 1
+
+    @pytest.mark.unit
+    async def test_release_cancellation_during_cleanup_leaves_no_success_event(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-cancellation",
+            WorkspaceStatus.failed,
+        )
+        cleaner_blocked = asyncio.Event()
+
+        class _BlockingCleaner:
+            async def cleanup(self, **_kwargs: object) -> WorkspaceCleanupResult:
+                cleaner_blocked.set()
+                await asyncio.Event().wait()
+                raise AssertionError("blocked cleaner should never complete")
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=_BlockingCleaner(),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        release_task = asyncio.create_task(
+            worker._release_terminal_runtime_resources()  # noqa: SLF001
+        )
+        await asyncio.wait_for(cleaner_blocked.wait(), timeout=10.0)
+        release_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await release_task
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message == "seed failure"
+            release_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+            failure_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_release_failed",
+            )
+        assert release_events == []
+        assert failure_events == []
+
+    @pytest.mark.unit
+    async def test_release_skips_active_workspaces(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "release-skip-active",
+            WorkspaceStatus.running,
+            compose_project_name="awf_active_release",
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        assert cleaner.calls == []
+        async with session_factory() as s:
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_released",
+            )
+        assert events == []
+
+    @pytest.mark.unit
+    async def test_release_bounds_work_per_scan_and_drains_backlog_across_scans(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_ids: list[str] = []
+        for i in range(5):
+            workspace_ids.append(
+                await _create_terminal_execution(
+                    session_factory,
+                    origin_repo,
+                    f"terminal-release-batch-{i}",
+                    WorkspaceStatus.failed,
+                )
+            )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+                terminal_runtime_release_max_per_scan=2,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        assert len(cleaner.calls) == 2
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        assert len(cleaner.calls) == 4
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        assert len(cleaner.calls) == 5
+
+        cleaned_workspace_ids = {call["workspace_id"] for call in cleaner.calls}
+        assert cleaned_workspace_ids == set(workspace_ids)
+
+        async with session_factory() as s:
+            repo = WorkspaceEventRepository(s)
+            released_counts = [
+                len(
+                    await repo.list(
+                        workspace_id=ws_id,
+                        event_type="workspace.terminal_runtime_released",
+                    )
+                )
+                for ws_id in workspace_ids
+            ]
+        assert released_counts == [1, 1, 1, 1, 1]
+
+    @pytest.mark.unit
+    async def test_release_continues_batch_when_per_candidate_recording_raises(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_ids: list[str] = []
+        for i in range(3):
+            workspace_ids.append(
+                await _create_terminal_execution(
+                    session_factory,
+                    origin_repo,
+                    f"terminal-release-per-candidate-error-{i}",
+                    WorkspaceStatus.failed,
+                )
+            )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        failing_workspace_id = workspace_ids[1]
+        original_record = worker._record_terminal_runtime_released  # noqa: SLF001
+
+        async def _record_with_one_failure(
+            candidate: _TerminalRuntimeCandidate,
+            cleanup: WorkspaceCleanupResult,
+        ) -> None:
+            if candidate.workspace_id == failing_workspace_id:
+                raise RuntimeError("simulated event recording failure")
+            await original_record(candidate, cleanup)
+
+        worker._record_terminal_runtime_released = _record_with_one_failure  # type: ignore[method-assign]  # noqa: SLF001
+
+        with pytest.raises(RuntimeError, match="simulated event recording failure"):
+            await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+        cleaned_workspace_ids = [call["workspace_id"] for call in cleaner.calls]
+        assert set(cleaned_workspace_ids) == set(workspace_ids)
+        async with session_factory() as s:
+            repo = WorkspaceEventRepository(s)
+            released_counts = {
+                ws_id: len(
+                    await repo.list(
+                        workspace_id=ws_id,
+                        event_type="workspace.terminal_runtime_released",
+                    )
+                )
+                for ws_id in workspace_ids
+            }
+        assert released_counts[failing_workspace_id] == 0
+        for ws_id, count in released_counts.items():
+            if ws_id == failing_workspace_id:
+                continue
+            assert count == 1

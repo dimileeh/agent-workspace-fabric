@@ -208,6 +208,240 @@ def test_retained_terminal_workspace_resources_are_not_orphans(tmp_path: Path) -
 
 
 @pytest.mark.unit
+def test_terminal_workspace_live_container_is_leak_within_retention(tmp_path: Path) -> None:
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_zombie-agent-1",
+                    "project": "awf_ws_zombie",
+                    "service": "agent",
+                    "state": "running",
+                    "status": "Up 5 minutes",
+                }
+            )
+        ),
+    )
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_zombie"}, retained={"ws_zombie"}),
+    )
+    payload = summary.to_dict()
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert payload["orphan_count"] == 1
+    assert summary.records[0].classification == "terminal"
+    assert summary.records[0].reason == "WORKSPACE_TERMINAL_LIVE_RUNTIME"
+    assert payload["cleanup_readiness"]["ready"] is False
+
+
+@pytest.mark.unit
+def test_terminal_workspace_live_network_is_leak_within_retention(tmp_path: Path) -> None:
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            networks=_jsonl(
+                {
+                    "id": "n1",
+                    "name": "awf_ws_zombie_default",
+                    "project": "awf_ws_zombie",
+                    "driver": "bridge",
+                    "scope": "local",
+                }
+            )
+        ),
+    )
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_zombie"}, retained={"ws_zombie"}),
+    )
+    payload = summary.to_dict()
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert payload["orphan_count"] == 1
+    assert summary.records[0].classification == "terminal"
+    assert summary.records[0].reason == "WORKSPACE_TERMINAL_LIVE_RUNTIME"
+    assert payload["cleanup_readiness"]["ready"] is False
+
+
+@pytest.mark.unit
+def test_terminal_workspace_volume_and_worktree_within_retention_remain_expected(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            volumes=_jsonl(
+                {
+                    "name": "awf_ws_done_pgdata",
+                    "project": "awf_ws_done",
+                    "driver": "local",
+                    "scope": "local",
+                }
+            )
+        ),
+    )
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_done"}, retained={"ws_done"}),
+    )
+    payload = summary.to_dict()
+
+    assert payload["ok"] is True
+    assert payload["reason"] == "NO_ORPHANS"
+    assert payload["resource_count"] == 2
+    assert payload["expected_count"] == 2
+    assert payload["orphan_count"] == 0
+    classifications = {
+        (record.kind, record.classification, record.reason) for record in summary.records
+    }
+    assert classifications == {
+        ("volume", "expected", "WORKSPACE_TERMINAL_WITHIN_RETENTION"),
+        ("worktree", "expected", "WORKSPACE_TERMINAL_WITHIN_RETENTION"),
+    }
+
+
+@pytest.mark.unit
+def test_terminal_workspace_mixed_runtime_and_salvage_partitions_correctly(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "git" / "worktrees" / "ws_partial").mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_partial-agent-1",
+                    "project": "awf_ws_partial",
+                    "service": "agent",
+                    "state": "running",
+                    "status": "Up",
+                }
+            ),
+            networks=_jsonl(
+                {
+                    "id": "n1",
+                    "name": "awf_ws_partial_default",
+                    "project": "awf_ws_partial",
+                    "driver": "bridge",
+                    "scope": "local",
+                }
+            ),
+            volumes=_jsonl(
+                {
+                    "name": "awf_ws_partial_pgdata",
+                    "project": "awf_ws_partial",
+                    "driver": "local",
+                    "scope": "local",
+                }
+            ),
+        ),
+    )
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_partial"}, retained={"ws_partial"}),
+    )
+    payload = summary.to_dict()
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert payload["resource_count"] == 4
+    assert payload["orphan_count"] == 2
+    assert payload["expected_count"] == 2
+    assert payload["orphan_counts_by_kind"] == {
+        "container": 1,
+        "network": 1,
+        "volume": 0,
+        "worktree": 0,
+    }
+    assert payload["expected_counts_by_kind"] == {
+        "container": 0,
+        "network": 0,
+        "volume": 1,
+        "worktree": 1,
+    }
+    leak_reasons = {
+        record.kind: record.reason
+        for record in summary.records
+        if record.classification == "terminal"
+    }
+    salvage_reasons = {
+        record.kind: record.reason
+        for record in summary.records
+        if record.classification == "expected"
+    }
+    assert leak_reasons == {
+        "container": "WORKSPACE_TERMINAL_LIVE_RUNTIME",
+        "network": "WORKSPACE_TERMINAL_LIVE_RUNTIME",
+    }
+    assert salvage_reasons == {
+        "volume": "WORKSPACE_TERMINAL_WITHIN_RETENTION",
+        "worktree": "WORKSPACE_TERMINAL_WITHIN_RETENTION",
+    }
+
+
+@pytest.mark.unit
+def test_past_retention_terminal_keeps_existing_behaviour(tmp_path: Path) -> None:
+    (tmp_path / "git" / "worktrees" / "ws_old").mkdir(parents=True)
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_run_for(
+            containers=_jsonl(
+                {
+                    "id": "c1",
+                    "name": "awf_ws_old-agent-1",
+                    "project": "awf_ws_old",
+                    "service": "agent",
+                    "state": "exited",
+                    "status": "Exited",
+                }
+            ),
+            volumes=_jsonl(
+                {
+                    "name": "awf_ws_old_pgdata",
+                    "project": "awf_ws_old",
+                    "driver": "local",
+                    "scope": "local",
+                }
+            ),
+        ),
+    )
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker,
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=_ok_view(terminal={"ws_old"}),
+    )
+    payload = summary.to_dict()
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert payload["resource_count"] == 3
+    assert payload["orphan_count"] == 3
+    assert all(record.classification == "terminal" for record in summary.records)
+    reasons_by_kind = {record.kind: record.reason for record in summary.records}
+    assert reasons_by_kind == {
+        "container": "WORKSPACE_TERMINAL_LIVE_RUNTIME",
+        "volume": "WORKSPACE_TERMINAL",
+        "worktree": "WORKSPACE_TERMINAL",
+    }
+
+
+@pytest.mark.unit
 def test_missing_workspace_resources_are_orphans(tmp_path: Path) -> None:
     docker = scan_docker_resources(
         docker_host="unix:///var/run/docker.sock",

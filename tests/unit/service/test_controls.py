@@ -719,6 +719,68 @@ async def test_destroy_workspace_records_structured_partial_cleanup_and_retry(
 
 
 @pytest.mark.unit
+async def test_destroy_workspace_remains_authoritative_after_terminal_release_event(
+    engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    cleaner = _RecordingCleaner()
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.failed,
+            compose_project_name="awf_ws_destroy_after_release",
+            compose_file_path=str(compose_file),
+        )
+        workspace.failure_reason = "agent_failure"
+        workspace.failure_message = "agent crashed mid-run"
+        await WorkspaceRepository(session).add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
+            payload={
+                "cleanup": {
+                    "status": "succeeded",
+                    "reason_code": "CLEANUP_SUCCEEDED",
+                    "steps": [],
+                    "failed_steps": [],
+                    "completed_steps": [],
+                },
+            },
+        )
+        await session.flush()
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: cleaner,
+        )
+
+        response = await service.destroy_workspace(
+            workspace.id,
+            force=True,
+            remove_volumes=True,
+            remove_worktree=True,
+            idempotency_key="destroy-after-release",
+        )
+
+    assert response.status == WorkspaceStatus.destroyed
+    assert response.operation_status == OperationStatus.succeeded.value
+    assert cleaner.calls == [
+        {
+            "workspace_id": workspace.id,
+            "repo_url": workspace.repo_url,
+            "compose_project_name": "awf_ws_destroy_after_release",
+            "compose_file_path": compose_file,
+            "worktree_host_path": None,
+            "remove_volumes": True,
+            "remove_worktree": True,
+        }
+    ]
+
+
+@pytest.mark.unit
 async def test_destroy_already_destroyed_workspace_records_skipped_cleanup_detail(
     engine: AsyncEngine,
 ) -> None:

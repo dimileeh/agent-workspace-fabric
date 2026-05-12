@@ -228,6 +228,17 @@ class Workspace(Base):
     # Idempotency
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
+    # Terminal-runtime-release retry rotation marker (see ControlWorker)
+    terminal_release_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """Bumped by the terminal-runtime release sweep on every retry of a failing
+    workspace so the candidate scan can rotate past stuck rows. Kept separate
+    from ``updated_at`` because retention paths (``service/gc.py`` cutoff and
+    ``service/orphan_resources.py`` retained-id calculation) use
+    ``updated_at`` as the age cutoff, and bumping it on every retry would
+    indefinitely defer cleanup of persistently-failing workspaces."""
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
