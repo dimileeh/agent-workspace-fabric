@@ -5308,7 +5308,9 @@ class WorkspaceExecutor:
         sub-step fails or when no agent-staged paths overlap the format set
         (the latter is recorded as a ``skipped`` repair).
         """
-        staged_set = {path for path in staged_paths if path.endswith(".py")}
+        staged_set = {
+            path for path in staged_paths if path.endswith(".py") or path.endswith(".pyi")
+        }
         repair_paths = [path for path in classification.format_repair_files if path in staged_set]
         if not repair_paths:
             await self._record_post_agent_commit_format_repair(
