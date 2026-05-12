@@ -136,7 +136,14 @@ async def _failed_state_event(
             workspace_id=workspace_id,
             event_type="workspace.state_changed",
         )
-    return next(event for event in reversed(events) if event.new_state == "failed")
+    failed_event = next(
+        (event for event in reversed(events) if event.new_state == "failed"),
+        None,
+    )
+    assert failed_event is not None, (
+        f"no failed workspace.state_changed event found for workspace {workspace_id}"
+    )
+    return failed_event
 
 
 @pytest.mark.unit
