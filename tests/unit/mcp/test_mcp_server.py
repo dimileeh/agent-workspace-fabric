@@ -15,7 +15,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -2364,7 +2363,7 @@ class TestReadWorkspaceArtifact:
         assert "limit_bytes" not in schema.get("required", [])
         assert props["limit_bytes"]["default"] == 65_536
         assert props["limit_bytes"]["minimum"] == 1
-        assert props["limit_bytes"]["maximum"] == 1_048_576
+        assert "maximum" not in props["limit_bytes"]
 
     @pytest.mark.unit
     async def test_reads_safe_small_file_and_returns_base64_content(
@@ -2586,15 +2585,18 @@ class TestReadWorkspaceArtifact:
         artifact_dir.mkdir(parents=True)
         (artifact_dir / "small.bin").write_bytes(b"x")
 
-        with pytest.raises(ToolError):
-            await mcp.call_tool(
-                "awf_read_workspace_artifact",
-                {
-                    "workspace_id": workspace.id,
-                    "relative_path": "small.bin",
-                    "limit_bytes": 2_000_000,
-                },
-            )
+        result = await mcp.call_tool(
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "small.bin",
+                "limit_bytes": 2_000_000,
+            },
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "ARTIFACT_OVERSIZED"
 
     @pytest.mark.unit
     async def test_respects_explicit_limit_bytes_within_ceiling(

@@ -49,7 +49,6 @@ from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
 from awf.service.artifacts import (
     DEFAULT_ARTIFACT_LIST_LIMIT,
-    MAX_ARTIFACT_CONTENT_BYTES,
     MAX_ARTIFACT_LIST_LIMIT,
     ArtifactNotFoundError,
     ArtifactOversizedError,
@@ -781,7 +780,6 @@ def build_mcp_server(
         limit_bytes: int = Field(
             default=65_536,
             ge=1,
-            le=MAX_ARTIFACT_CONTENT_BYTES,
             description="Maximum bytes to read.",
         ),
     ) -> StructuredToolResult:
