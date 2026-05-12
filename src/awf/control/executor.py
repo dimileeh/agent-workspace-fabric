@@ -2018,106 +2018,25 @@ class WorkspaceExecutor:
                     )
                     if not commit_result.ok:
                         classification = _classify_post_agent_commit_failure(commit_result)
-                        format_repair_attempted = False
                         if (
                             classification.reason_code
                             == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
                         ):
-                            staged_set = {path for path in staged_paths if path.endswith(".py")}
-                            repair_paths = [
-                                path
-                                for path in classification.format_repair_files
-                                if path in staged_set
-                            ]
-                            if repair_paths:
-                                # ``repair_paths`` come from pre-commit's
-                                # ``Would reformat:`` lines (worktree-relative).
-                                # The surrounding git steps use ``-C worktree_path``;
-                                # ``uv`` does not, so we must pin ``cwd`` or
-                                # ruff resolves the paths against the executor
-                                # process directory and the retry commit re-fails
-                                # on the same unformatted staged content.
-                                format_result = await self._runner.run(
-                                    [
-                                        "uv",
-                                        "run",
-                                        "--python",
-                                        "3.12",
-                                        "--extra",
-                                        "dev",
-                                        "ruff",
-                                        "format",
-                                        *repair_paths,
-                                    ],
-                                    cwd=str(worktree_path),
-                                )
-                                if not format_result.ok:
-                                    raise _PostAgentCommitStepError(
-                                        stage="ruff format",
-                                        result=format_result,
-                                        classification=classification,
-                                        format_repair_attempted=True,
-                                    )
-                                add_again = await _git_in_worktree(
-                                    ["add", "--", *repair_paths],
-                                )
-                                await self._repair_agent_git_ownership(
-                                    workspace_id=workspace_id,
-                                    worktree_path=worktree_path,
-                                    reason="post_agent_format_repair_add",
-                                )
-                                if not add_again.ok:
-                                    raise _PostAgentCommitStepError(
-                                        stage="git add",
-                                        result=add_again,
-                                        classification=classification,
-                                        format_repair_attempted=True,
-                                    )
-                                retry_result = await _run_commit()
-                                await self._repair_agent_git_ownership(
-                                    workspace_id=workspace_id,
-                                    worktree_path=worktree_path,
-                                    reason="post_agent_format_repair_commit",
-                                )
-                                if retry_result.ok:
-                                    await self._record_post_agent_commit_format_repair(
-                                        workspace_id=workspace_id,
-                                        repaired_paths=repair_paths,
-                                        retry_outcome="succeeded",
-                                    )
-                                else:
-                                    retry_classification = _classify_post_agent_commit_failure(
-                                        retry_result
-                                    )
-                                    await self._record_post_agent_commit_format_repair(
-                                        workspace_id=workspace_id,
-                                        repaired_paths=repair_paths,
-                                        retry_outcome="failed",
-                                    )
-                                    raise _PostAgentCommitStepError(
-                                        stage="git commit",
-                                        result=retry_result,
-                                        classification=retry_classification,
-                                        format_repair_attempted=True,
-                                    )
-                            else:
-                                await self._record_post_agent_commit_format_repair(
-                                    workspace_id=workspace_id,
-                                    repaired_paths=[],
-                                    retry_outcome="skipped",
-                                )
-                                raise _PostAgentCommitStepError(
-                                    stage="git commit",
-                                    result=commit_result,
-                                    classification=classification,
-                                    format_repair_attempted=format_repair_attempted,
-                                )
+                            await self._run_post_agent_format_repair(
+                                workspace_id=workspace_id,
+                                worktree_path=worktree_path,
+                                commit_result=commit_result,
+                                classification=classification,
+                                staged_paths=staged_paths,
+                                run_commit=_run_commit,
+                                git_in_worktree=_git_in_worktree,
+                            )
                         else:
                             raise _PostAgentCommitStepError(
                                 stage="git commit",
                                 result=commit_result,
                                 classification=classification,
-                                format_repair_attempted=format_repair_attempted,
+                                format_repair_attempted=False,
                             )
                 # Regardless of whether we just committed, verify HEAD has advanced
                 # past the base commit. If not, the agent produced no change.
@@ -5369,6 +5288,107 @@ class WorkspaceExecutor:
                 },
             )
             await session.commit()
+
+    async def _run_post_agent_format_repair(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        commit_result: CommandResult,
+        classification: _PostAgentCommitClassification,
+        staged_paths: Sequence[str],
+        run_commit: Callable[[], Awaitable[CommandResult]],
+        git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
+    ) -> None:
+        """Attempt a scoped ``ruff format`` + commit retry for a format-only failure.
+
+        Preconditions: ``classification.reason_code`` is
+        ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED``. Returns normally when the
+        retry commit succeeds. Raises ``_PostAgentCommitStepError`` when any
+        sub-step fails or when no agent-staged paths overlap the format set
+        (the latter is recorded as a ``skipped`` repair).
+        """
+        staged_set = {path for path in staged_paths if path.endswith(".py")}
+        repair_paths = [path for path in classification.format_repair_files if path in staged_set]
+        if not repair_paths:
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=[],
+                retry_outcome="skipped",
+            )
+            raise _PostAgentCommitStepError(
+                stage="git commit",
+                result=commit_result,
+                classification=classification,
+                format_repair_attempted=False,
+            )
+
+        # ``repair_paths`` come from pre-commit's ``Would reformat:`` lines
+        # (worktree-relative). The surrounding git steps use
+        # ``-C worktree_path``; ``uv`` does not, so we must pin ``cwd`` or
+        # ruff resolves the paths against the executor process directory
+        # and the retry commit re-fails on the same unformatted staged
+        # content.
+        format_result = await self._runner.run(
+            [
+                "uv",
+                "run",
+                "--python",
+                "3.12",
+                "--extra",
+                "dev",
+                "ruff",
+                "format",
+                *repair_paths,
+            ],
+            cwd=str(worktree_path),
+        )
+        if not format_result.ok:
+            raise _PostAgentCommitStepError(
+                stage="ruff format",
+                result=format_result,
+                classification=classification,
+                format_repair_attempted=True,
+            )
+        add_again = await git_in_worktree(["add", "--", *repair_paths])
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_agent_format_repair_add",
+        )
+        if not add_again.ok:
+            raise _PostAgentCommitStepError(
+                stage="git add",
+                result=add_again,
+                classification=classification,
+                format_repair_attempted=True,
+            )
+        retry_result = await run_commit()
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_agent_format_repair_commit",
+        )
+        if retry_result.ok:
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=repair_paths,
+                retry_outcome="succeeded",
+            )
+            return
+
+        retry_classification = _classify_post_agent_commit_failure(retry_result)
+        await self._record_post_agent_commit_format_repair(
+            workspace_id=workspace_id,
+            repaired_paths=repair_paths,
+            retry_outcome="failed",
+        )
+        raise _PostAgentCommitStepError(
+            stage="git commit",
+            result=retry_result,
+            classification=retry_classification,
+            format_repair_attempted=True,
+        )
 
     async def _mark_post_agent_commit_failed(
         self,
