@@ -325,8 +325,10 @@ class _PostAgentCommitClassification:
     formatters). ``semantic_hooks`` require agent repair or human/operator
     attention. ``format_repair_files`` holds ``Would reformat:`` paths
     verbatim; the executor intersects them with the agent's staged diff before
-    invoking the formatter. ``summary`` is a truncated, human blurb safe for
-    the workspace ``failure_message``.
+    invoking the formatter. ``normalizer_repair_files`` holds ``Fixing ...``
+    paths from pre-commit normalizer hooks for repair prompts and event
+    provenance. ``summary`` is a truncated, human blurb safe for the workspace
+    ``failure_message``.
     """
 
     reason_code: str
@@ -467,6 +469,11 @@ def _build_post_agent_precommit_repair_prompt(
     staged_preview = "\n".join(f"- {path}" for path in staged_paths[:80])
     if len(staged_paths) > 80:
         staged_preview += f"\n- ... and {len(staged_paths) - 80} more"
+    normalizer_preview = "\n".join(
+        f"- {path}" for path in classification.normalizer_repair_files[:40]
+    )
+    if len(classification.normalizer_repair_files) > 40:
+        normalizer_preview += f"\n- ... and {len(classification.normalizer_repair_files) - 40} more"
     formatter_preview = "\n".join(f"- {path}" for path in classification.format_repair_files[:40])
     if len(classification.format_repair_files) > 40:
         formatter_preview += f"\n- ... and {len(classification.format_repair_files) - 40} more"
@@ -482,6 +489,8 @@ def _build_post_agent_precommit_repair_prompt(
         f"Semantic hooks that require code/test repair: {semantic_hooks}\n\n"
         "Currently staged paths:\n"
         f"{staged_preview or '- <none>'}\n\n"
+        "Normalizer-rewritten paths, if any:\n"
+        f"{normalizer_preview or '- <none>'}\n\n"
         "Formatter-reported paths, if any:\n"
         f"{formatter_preview or '- <none>'}\n\n"
         "Pre-commit output tail:\n"
@@ -5373,6 +5382,7 @@ class WorkspaceExecutor:
         repair_strategy: str = "deterministic",
         failed_hooks: Sequence[str] = (),
         formatter_paths: Sequence[str] = (),
+        normalizer_paths: Sequence[str] = (),
         restaged_paths: Sequence[str] = (),
         reason_code: str = POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
     ) -> None:
@@ -5390,6 +5400,7 @@ class WorkspaceExecutor:
                     "repaired_paths": list(repaired_paths),
                     "restaged_paths": list(restaged_paths),
                     "formatter_paths": list(formatter_paths),
+                    "normalizer_paths": list(normalizer_paths),
                     "failed_hooks": list(failed_hooks),
                     "repair_strategy": repair_strategy,
                     "retry_outcome": retry_outcome,
@@ -5476,6 +5487,7 @@ class WorkspaceExecutor:
                 repaired_paths=[],
                 restaged_paths=[],
                 formatter_paths=list(classification.format_repair_files),
+                normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="deterministic",
                 retry_outcome="skipped",
@@ -5511,6 +5523,7 @@ class WorkspaceExecutor:
                     repaired_paths=repair_paths,
                     restaged_paths=[],
                     formatter_paths=repair_paths,
+                    normalizer_paths=classification.normalizer_repair_files,
                     failed_hooks=classification.failed_hooks,
                     repair_strategy="deterministic",
                     retry_outcome="error",
@@ -5539,6 +5552,7 @@ class WorkspaceExecutor:
                 repaired_paths=repair_paths,
                 restaged_paths=restage_paths,
                 formatter_paths=repair_paths,
+                normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="deterministic",
                 retry_outcome="error",
@@ -5565,6 +5579,7 @@ class WorkspaceExecutor:
                 repaired_paths=repair_paths,
                 restaged_paths=restage_paths,
                 formatter_paths=repair_paths,
+                normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="deterministic",
                 retry_outcome="succeeded",
@@ -5577,6 +5592,7 @@ class WorkspaceExecutor:
             repaired_paths=repair_paths,
             restaged_paths=restage_paths,
             formatter_paths=repair_paths,
+            normalizer_paths=classification.normalizer_repair_files,
             failed_hooks=classification.failed_hooks,
             repair_strategy="deterministic",
             retry_outcome="failed",
@@ -5643,6 +5659,7 @@ class WorkspaceExecutor:
                 repaired_paths=[],
                 restaged_paths=[],
                 formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="agent",
                 retry_outcome="error",
@@ -5669,6 +5686,7 @@ class WorkspaceExecutor:
                 repaired_paths=[],
                 restaged_paths=[],
                 formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="agent",
                 retry_outcome="error",
@@ -5701,6 +5719,7 @@ class WorkspaceExecutor:
                 repaired_paths=[],
                 restaged_paths=repair_staged_paths,
                 formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="agent",
                 retry_outcome="error",
@@ -5730,6 +5749,7 @@ class WorkspaceExecutor:
                 repaired_paths=[],
                 restaged_paths=repair_staged_paths,
                 formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="agent",
                 retry_outcome="error",
@@ -5757,6 +5777,7 @@ class WorkspaceExecutor:
                 repaired_paths=[],
                 restaged_paths=repair_staged_paths,
                 formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="agent",
                 retry_outcome="succeeded",
@@ -5781,6 +5802,7 @@ class WorkspaceExecutor:
             repaired_paths=[],
             restaged_paths=repair_staged_paths,
             formatter_paths=classification.format_repair_files,
+            normalizer_paths=classification.normalizer_repair_files,
             failed_hooks=classification.failed_hooks,
             repair_strategy="agent",
             retry_outcome="failed",
@@ -5843,6 +5865,10 @@ class WorkspaceExecutor:
                 commit_details["failed_hooks"] = list(classification.failed_hooks)
             if classification.format_repair_files:
                 commit_details["format_repair_files"] = list(classification.format_repair_files)
+            if classification.normalizer_repair_files:
+                commit_details["normalizer_repair_files"] = list(
+                    classification.normalizer_repair_files
+                )
             if classification.deterministic_hooks:
                 commit_details["deterministic_hooks"] = list(classification.deterministic_hooks)
             if classification.semantic_hooks:

@@ -247,7 +247,13 @@ def test_format_paths_preserved_verbatim_for_executor_intersection() -> None:
 @pytest.mark.unit
 def test_precommit_repair_prompt_summarizes_large_path_sets() -> None:
     stdout = (
-        "ruff check..............................................................Failed\n"
+        "fix end of files.......................................................Failed\n"
+        "- hook id: end-of-file-fixer\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n"
+        "\n"
+        + "".join(f"Fixing docs/generated/file_{i}.md\n" for i in range(45))
+        + "ruff check..............................................................Failed\n"
         "- hook id: awf-ruff-check\n"
         "- exit code: 1\n"
         "\n"
@@ -266,6 +272,9 @@ def test_precommit_repair_prompt_summarizes_large_path_sets() -> None:
     )
 
     assert "Do not bypass pre-commit" in prompt
-    assert "Failed hooks: awf-ruff-check, awf-ruff-format-check" in prompt
-    assert prompt.count("- ... and 5 more") == 2
+    assert "Failed hooks: end-of-file-fixer, awf-ruff-check, awf-ruff-format-check" in prompt
+    assert "Normalizer-rewritten paths, if any:" in prompt
+    assert "docs/generated/file_0.md" in prompt
+    assert "- docs/generated/file_40.md" not in prompt
+    assert prompt.count("- ... and 5 more") == 3
     assert "src/generated/file_80.py" not in prompt

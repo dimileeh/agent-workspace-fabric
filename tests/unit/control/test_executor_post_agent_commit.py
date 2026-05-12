@@ -476,6 +476,7 @@ async def test_post_agent_commit_eof_only_hook_modification_restages_and_retries
         "src/awf/api.py",
     ]
     assert payload["repaired_paths"] == []
+    assert payload["normalizer_paths"] == ["docs/awf-plans/ws_06.conformance.json"]
 
     ruff_calls = [call for call in fake.calls if "ruff" in call.args]
     assert not ruff_calls
@@ -537,6 +538,10 @@ async def test_post_agent_commit_mixed_deterministic_hooks_formats_restages_and_
     ]
     assert payload["formatter_paths"] == ["tests/unit/mcp/test_mcp_server.py"]
     assert payload["repaired_paths"] == ["tests/unit/mcp/test_mcp_server.py"]
+    assert payload["normalizer_paths"] == [
+        "docs/awf-plans/ws_761.md",
+        "docs/awf-plans/ws_761.conformance.json",
+    ]
     assert payload["restaged_paths"] == [
         "docs/awf-plans/ws_761.md",
         "docs/awf-plans/ws_761.conformance.json",
@@ -593,6 +598,7 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
         "awf-ruff-check",
         "awf-ruff-format-check",
     ]
+    assert payload["normalizer_paths"] == ["docs/awf-plans/ws_89.conformance.json"]
 
     agent_repair_calls = [
         call
@@ -604,6 +610,8 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
     assert "awf-ruff-check" in prompt
     assert "Do not bypass pre-commit" in prompt
     assert "run_debug.py" in prompt
+    assert "Normalizer-rewritten paths, if any:" in prompt
+    assert "docs/awf-plans/ws_89.conformance.json" in prompt
 
     ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
     assert not ruff_calls
