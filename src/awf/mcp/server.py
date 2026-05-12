@@ -806,7 +806,9 @@ def build_mcp_server(
         except ArtifactNotFoundError:
             return _error_result("NOT_FOUND", f"No artifact at path {path}")
         except ArtifactOversizedError as exc:
-            return _error_result(error_code="ARTIFACT_OVERSIZED", message=str(exc))
+            return _error_result(
+                error_code="ARTIFACT_OVERSIZED", message=str(exc), detail=exc.detail
+            )
         response = WorkspaceArtifactReadResponse(
             workspace_id=workspace_id,
             relative_path=path,
@@ -1477,8 +1479,10 @@ def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
-def _error_result(error_code: str, message: str) -> CallToolResult:
-    error = ErrorResponse(error_code=error_code, message=message)
+def _error_result(
+    error_code: str, message: str, *, detail: dict[str, Any] | None = None
+) -> CallToolResult:
+    error = ErrorResponse(error_code=error_code, message=message, detail=detail)
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 

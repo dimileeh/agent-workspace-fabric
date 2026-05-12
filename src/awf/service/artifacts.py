@@ -12,6 +12,7 @@ from heapq import heappop, heappush
 from itertools import count
 from os import stat_result
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +36,10 @@ class ArtifactNotFoundError(FileNotFoundError):
 
 class ArtifactOversizedError(ValueError):
     """Raised when an artifact exceeds the requested or absolute byte-size limit."""
+
+    def __init__(self, message: str, *, detail: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.detail = detail
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,13 +258,21 @@ def get_workspace_artifact_content(
     )
     if artifact.size_bytes > limit_bytes:
         raise ArtifactOversizedError(
-            f"artifact size {artifact.size_bytes} bytes exceeds limit {limit_bytes}"
+            f"artifact size {artifact.size_bytes} bytes exceeds limit {limit_bytes}",
+            detail={
+                "limit_bytes": limit_bytes,
+                "actual_bytes": artifact.size_bytes,
+            },
         )
     with artifact.path.open("rb") as f:
         content = f.read(limit_bytes + 1)
     if len(content) > limit_bytes:
         raise ArtifactOversizedError(
-            f"artifact read {len(content)} bytes exceeds limit {limit_bytes}"
+            f"artifact read {len(content)} bytes exceeds limit {limit_bytes}",
+            detail={
+                "limit_bytes": limit_bytes,
+                "actual_bytes": len(content),
+            },
         )
     return (artifact.name, artifact.content_type, artifact.size_bytes, content)
 

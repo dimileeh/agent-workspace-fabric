@@ -2558,6 +2558,10 @@ class TestReadWorkspaceArtifact:
         assert result.isError is True
         assert result.structuredContent is not None
         assert result.structuredContent["error_code"] == "ARTIFACT_OVERSIZED"
+        assert result.structuredContent.get("detail") is not None
+        assert isinstance(result.structuredContent["detail"], dict)
+        assert result.structuredContent["detail"]["limit_bytes"] == 100
+        assert result.structuredContent["detail"]["actual_bytes"] == 200
 
     @pytest.mark.unit
     async def test_rejects_limit_bytes_above_ceiling(
