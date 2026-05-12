@@ -339,6 +339,67 @@ async def test_post_agent_commit_format_repair_ruff_subprocess_failure_marks_rep
 
 
 @pytest.mark.unit
+async def test_post_agent_commit_format_repair_re_stage_failure_emits_repair_event(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """``ruff format`` succeeds but the re-stage ``git add`` fails.
+
+    The repair attempt must still be recorded as a
+    ``workspace.post_agent_commit_format_repair`` event so the event
+    stream is consistent with
+    ``details["post_agent_commit"]["format_repair_attempted"]`` —
+    otherwise the attempt dies silently between ruff and the retry
+    commit and dashboards see no record of what happened.
+    """
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/foo.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1, stdout=_precommit_format_only_output("src/foo.py")
+    )  # initial commit fails (format only)
+    fake.queue_result(returncode=0)  # ruff format src/foo.py succeeds
+    fake.queue_result(
+        returncode=128, stderr="fatal: not a git repository"
+    )  # git add -- src/foo.py FAILS
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    # Exactly one repair event with ``retry_outcome="error"`` — the
+    # re-stage sub-step failed before the retry commit could run.
+    assert len(repair_events) == 1
+    repair_payload = repair_events[0].payload
+    assert isinstance(repair_payload, dict)
+    assert repair_payload["repaired_paths"] == ["src/foo.py"]
+    assert repair_payload["retry_outcome"] == "error"
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.payload is not None
+    commit_details = event.payload["details"]["post_agent_commit"]
+    assert commit_details["stage"] == "git add"
+    # ``format_repair_attempted`` agrees with the emitted event.
+    assert commit_details["format_repair_attempted"] is True
+
+    # No retry commit was attempted — the re-stage failed before the
+    # second commit could run.
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+
+
+@pytest.mark.unit
 async def test_post_agent_commit_format_only_skips_files_outside_diff(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

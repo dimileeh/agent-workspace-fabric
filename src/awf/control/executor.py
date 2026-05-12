@@ -5277,9 +5277,11 @@ class WorkspaceExecutor:
         ``retry_outcome`` is one of ``"succeeded"`` (repair fixed it, retry
         commit passed), ``"failed"`` (repair ran, retry commit still failed
         with a non-format hook), ``"skipped"`` (no agent-owned paths in
-        the format set, so no repair was attempted), or ``"error"``
-        (``ruff format`` itself exited non-zero — see
-        ``POST_AGENT_FORMAT_REPAIR_FAILED``).
+        the format set, so no repair was attempted), or ``"error"`` (a
+        sub-step of the repair pipeline exited non-zero before the retry
+        commit could run — either ``ruff format`` itself (see
+        ``POST_AGENT_FORMAT_REPAIR_FAILED``) or the ``git add`` re-stage
+        of the reformatted paths).
         """
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -5383,6 +5385,18 @@ class WorkspaceExecutor:
             reason="post_agent_format_repair_add",
         )
         if not add_again.ok:
+            # ``ruff format`` succeeded but the re-stage step failed
+            # (damaged ``.git`` metadata, fs error, ...). Emit the repair
+            # event with ``retry_outcome="error"`` so the stream is
+            # consistent with
+            # ``details["post_agent_commit"]["format_repair_attempted"]``
+            # — without this the retry commit never ran and no event
+            # would be recorded for this repair attempt.
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=repair_paths,
+                retry_outcome="error",
+            )
             raise _PostAgentCommitStepError(
                 stage="git add",
                 result=add_again,
