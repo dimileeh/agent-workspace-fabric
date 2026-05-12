@@ -17,15 +17,16 @@ test("dashboard displays llm usage correctly when available", async ({ page }) =
   const usageBlock = page.locator("section").filter({ hasText: "LLM usage" }).first();
   await expect(usageBlock).toBeVisible();
 
-  // Verify the metrics are displayed
-  await expect(page.getByText("Input")).toBeVisible();
-  await expect(page.getByText("10")).toBeVisible();
-  await expect(page.getByText("Output")).toBeVisible();
-  await expect(page.getByText("20")).toBeVisible();
-  await expect(page.getByText("Total")).toBeVisible();
-  await expect(page.getByText("30")).toBeVisible();
-  await expect(page.getByText("Cost")).toBeVisible();
-  await expect(page.getByText("$0.05", { exact: false })).toBeVisible();
+  // Scope metric assertions to the usage block: a relative timestamp elsewhere
+  // on the page (e.g. "generated 10 days ago") trips strict-mode on a bare getByText("10").
+  await expect(usageBlock.getByText("Input", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("10", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("Output", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("20", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("Total", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("30", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("Cost", { exact: true })).toBeVisible();
+  await expect(usageBlock.getByText("$0.05", { exact: false })).toBeVisible();
 });
 
 test("dashboard hides llm usage metrics when unavailable", async ({ page }) => {
