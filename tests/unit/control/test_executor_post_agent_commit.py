@@ -291,6 +291,76 @@ async def test_post_agent_commit_format_repair_retry_still_fails_marks_precommit
 
 
 @pytest.mark.unit
+async def test_post_agent_commit_format_repair_retry_same_format_hook_marks_repair_failed(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Retry commit re-fails with the same ``awf-ruff-format-check`` hook.
+
+    When ``ruff format`` ran but the retry commit is rejected by the same
+    format hook (e.g. ruff couldn't normalize a file), the terminal reason
+    code MUST be the dedicated repair-failed code — NOT
+    ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED``, whose REASON_CATALOG
+    entry only describes the empty-intersection skip. Pairing the
+    rewrite-needed code with ``format_repair_attempted=True`` would be
+    self-contradictory on operator dashboards.
+    """
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/foo.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1, stdout=_precommit_format_only_output("src/foo.py")
+    )  # initial commit fails (format only)
+    fake.queue_result(returncode=0)  # ruff format src/foo.py
+    fake.queue_result(returncode=0)  # git add -- src/foo.py
+    fake.queue_result(
+        returncode=1, stdout=_precommit_format_only_output("src/foo.py")
+    )  # retry fails with the SAME format hook
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    repair_payload = repair_events[0].payload
+    assert isinstance(repair_payload, dict)
+    assert repair_payload["repaired_paths"] == ["src/foo.py"]
+    assert repair_payload["retry_outcome"] == "failed"
+    # The repair event itself keeps the rewrite-needed reason code — the
+    # dedicated repair-failed code is reserved for "error" outcomes, and
+    # ``retry_outcome="failed"`` is not an error outcome.
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+
+    event = await _failed_state_event(factory, ws_id)
+    # Terminal reason code MUST be the dedicated repair-failed code, not
+    # POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED — the REASON_CATALOG entry
+    # for that code describes only the empty-intersection skip, which is
+    # self-contradictory once ``format_repair_attempted=True``.
+    assert event.reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert event.payload is not None
+    assert event.payload["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    commit_details = event.payload["details"]["post_agent_commit"]
+    assert commit_details["stage"] == "git commit"
+    assert commit_details["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert commit_details["format_repair_attempted"] is True
+
+    # Two git commit invocations: the initial failing attempt + the retry.
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
 async def test_post_agent_commit_format_repair_ruff_subprocess_failure_marks_repair_failed(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

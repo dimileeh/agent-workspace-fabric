@@ -5454,11 +5454,24 @@ class WorkspaceExecutor:
             repaired_paths=repair_paths,
             retry_outcome="failed",
         )
+        # If the retry commit fails with the same format-only classification
+        # (ruff ran but the hook still rejects the commit), surface the
+        # dedicated repair-failed reason code. The REASON_CATALOG entry for
+        # POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED describes only the
+        # empty-intersection skip, so pairing it with
+        # ``format_repair_attempted=True`` would be self-contradictory on
+        # operator dashboards.
         raise _PostAgentCommitStepError(
             stage="git commit",
             result=retry_result,
             classification=retry_classification,
             format_repair_attempted=True,
+            reason_code_override=(
+                POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+                if retry_classification.reason_code
+                == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+                else None
+            ),
         )
 
     async def _mark_post_agent_commit_failed(
