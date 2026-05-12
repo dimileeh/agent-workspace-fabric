@@ -5161,9 +5161,12 @@ class WorkspaceExecutor:
         workspace_id: str,
         changed_paths: list[str] | tuple[str, ...],
         expected_status: WorkspaceStatus,
+        mark_workspace_failed: bool = True,
     ) -> bool:
         if not changed_paths_are_only_internal_plan_artifacts(changed_paths):
             return False
+        if not mark_workspace_failed:
+            return True
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=expected_status,
@@ -5685,6 +5688,26 @@ class WorkspaceExecutor:
             )
 
         cached = await git_in_worktree(["diff", "--cached", "--name-only"])
+        if not cached.ok:
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=[],
+                restaged_paths=[],
+                formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
+                failed_hooks=classification.failed_hooks,
+                repair_strategy="agent",
+                retry_outcome="error",
+                reason_code=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
+            raise _PostAgentCommitStepError(
+                stage="git diff --cached",
+                result=cached,
+                classification=classification,
+                precommit_repair_attempted=True,
+                repair_strategy="agent",
+                reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
         repair_staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
         supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
             workspace_id=workspace_id,
@@ -5716,6 +5739,43 @@ class WorkspaceExecutor:
                 repair_strategy="agent",
                 reason_code_override="SUPPLY_CHAIN_POLICY_BLOCKED",
                 failure_reason_override=FailureReason.policy_failure,
+            )
+        # Normalizer-only plan artifacts are hook output; agent-added
+        # plan-only staged paths still need the ordinary output gate.
+        normalizer_repair_paths = set(classification.normalizer_repair_files)
+        has_non_normalizer_repair_path = any(
+            path not in normalizer_repair_paths for path in repair_staged_paths
+        )
+        if has_non_normalizer_repair_path and await self._fail_if_plan_only_paths(
+            workspace_id=workspace_id,
+            changed_paths=repair_staged_paths,
+            expected_status=WorkspaceStatus.running,
+            mark_workspace_failed=False,
+        ):
+            result = CommandResult(
+                returncode=1,
+                stdout="",
+                stderr=plan_only_output_message(repair_staged_paths),
+            )
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=[],
+                restaged_paths=repair_staged_paths,
+                formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
+                failed_hooks=classification.failed_hooks,
+                repair_strategy="agent",
+                retry_outcome="error",
+                reason_code=PLAN_ONLY_OUTPUT_REASON_CODE,
+            )
+            raise _PostAgentCommitStepError(
+                stage="post-agent pre-commit repair policy",
+                result=result,
+                classification=classification,
+                precommit_repair_attempted=True,
+                repair_strategy="agent",
+                reason_code_override=PLAN_ONLY_OUTPUT_REASON_CODE,
+                failure_reason_override=FailureReason.agent_failure,
             )
         violations = find_protected_quality_gate_changes(
             changed_paths=repair_staged_paths,

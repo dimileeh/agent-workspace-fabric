@@ -35,6 +35,7 @@ from awf.adapters import base as adapter_base
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
+    PLAN_ONLY_OUTPUT_REASON_CODE,
     POST_AGENT_COMMIT_FAILED_REASON_CODE,
     POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
     POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
@@ -813,6 +814,95 @@ async def test_post_agent_commit_semantic_agent_repair_supply_chain_change_is_bl
         "SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS",
     }
     assert all(finding.severity == "blocking" for finding in findings)
+
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_cached_diff_failure_aborts_retry(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
+    fake.queue_result(returncode=0)  # git add -u after repair
+    fake.queue_result(returncode=128, stderr="fatal: index unreadable")  # cached diff fails
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["stage"] == "git diff --cached"
+    assert details["repair_strategy"] == "agent"
+    assert "fatal: index unreadable" in details["summary"]
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+    assert repair_events[-1].reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert repair_events[-1].payload["retry_outcome"] == "error"  # type: ignore[index]
+
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_plan_only_change_is_blocked(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
+    fake.queue_result(returncode=0)  # git add -u after repair
+    fake.queue_result(
+        returncode=0,
+        stdout="docs/awf-plans/ws_semantic_repair.md\n",
+    )  # repair changed only plan output
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == PLAN_ONLY_OUTPUT_REASON_CODE
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["stage"] == "post-agent pre-commit repair policy"
+    assert details["repair_strategy"] == "agent"
+    assert "only AWF plan/conformance artifact changes" in details["summary"]
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+    assert repair_events[-1].reason_code == PLAN_ONLY_OUTPUT_REASON_CODE
+    assert repair_events[-1].payload["restaged_paths"] == [  # type: ignore[index]
+        "docs/awf-plans/ws_semantic_repair.md"
+    ]
 
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 1
