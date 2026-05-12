@@ -5831,7 +5831,9 @@ class WorkspaceExecutor:
                 normalizer_paths=classification.normalizer_repair_files,
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="agent",
-                retry_outcome="error" if repair_error is not None else "succeeded",
+                retry_outcome=(
+                    "agent_error_partial_commit" if repair_error is not None else "succeeded"
+                ),
                 reason_code=classification.reason_code,
             )
             return

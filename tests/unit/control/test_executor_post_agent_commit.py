@@ -688,7 +688,7 @@ async def test_post_agent_commit_semantic_repair_stages_new_files_before_policy_
 
 
 @pytest.mark.unit
-async def test_post_agent_commit_semantic_agent_repair_failure_salvages_partial_edits(
+async def test_post_agent_commit_semantic_agent_repair_failure_records_partial_commit(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -722,7 +722,7 @@ async def test_post_agent_commit_semantic_agent_repair_failure_salvages_partial_
     payload = repair_events[0].payload
     assert isinstance(payload, dict)
     assert payload["repair_strategy"] == "agent"
-    assert payload["retry_outcome"] == "error"
+    assert payload["retry_outcome"] == "agent_error_partial_commit"
     assert payload["failed_hooks"] == [
         "end-of-file-fixer",
         "awf-ruff-check",
