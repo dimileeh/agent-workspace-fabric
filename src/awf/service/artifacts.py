@@ -284,7 +284,7 @@ def get_workspace_artifact_content(
                 "actual_bytes": len(content),
             },
         )
-    return (artifact.name, artifact.content_type, artifact.size_bytes, content)
+    return (artifact.name, artifact.content_type, len(content), content)
 
 
 def artifact_id(workspace_id: str, relative_path: str) -> str:
