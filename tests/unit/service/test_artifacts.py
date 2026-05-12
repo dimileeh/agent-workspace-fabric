@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from builtins import open as builtins_open
 from pathlib import Path
 from typing import Any
 
@@ -856,6 +857,56 @@ class TestArtifactService:
                 relative_path="link.txt",
                 limit_bytes=MAX_ARTIFACT_CONTENT_BYTES,
             )
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_race_growth_after_stat(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "grow.bin"
+        # Start small so stat check passes
+        report.write_bytes(b"x" * 10)
+
+        original_open = Path.open
+
+        def racing_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self.resolve() == report.resolve():
+                # Grow the file just before the actual read using builtin open
+                # to avoid recursion through Path.write_bytes -> Path.open
+                with builtins_open(str(report), "wb") as f:  # noqa: PTH123
+                    f.write(b"x" * 200)
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", racing_open)
+
+        with pytest.raises(ArtifactOversizedError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="grow.bin",
+                limit_bytes=50,
+            )
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_bounded_read_exact_limit(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "exact.bin"
+        payload = b"x" * 50
+        report.write_bytes(payload)
+
+        name, content_type, size_bytes, content = get_workspace_artifact_content(
+            workspace_id="ws_artifacts",
+            artifact_dir=artifact_dir,
+            relative_path="exact.bin",
+            limit_bytes=50,
+        )
+
+        assert content == payload
+        assert len(content) == 50
 
     @pytest.mark.unit
     def test_listing_skips_file_that_disappears_during_resolve(

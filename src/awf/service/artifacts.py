@@ -255,7 +255,12 @@ def get_workspace_artifact_content(
         raise ArtifactOversizedError(
             f"artifact size {artifact.size_bytes} bytes exceeds limit {limit_bytes}"
         )
-    content = artifact.path.read_bytes()
+    with artifact.path.open("rb") as f:
+        content = f.read(limit_bytes + 1)
+    if len(content) > limit_bytes:
+        raise ArtifactOversizedError(
+            f"artifact read {len(content)} bytes exceeds limit {limit_bytes}"
+        )
     return (artifact.name, artifact.content_type, artifact.size_bytes, content)
 
 
