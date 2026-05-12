@@ -56,6 +56,7 @@ READ_RESPONSE_CAPABILITY_NAMES = tuple(
     and capability.is_mcp_implemented
     and capability.mcp_tool is not None
     and capability.response_fields
+    and capability.name != "workspace_artifact_download"
 )
 
 
