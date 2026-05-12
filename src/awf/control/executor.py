@@ -5496,11 +5496,22 @@ class WorkspaceExecutor:
                 commit_details["failed_hooks"] = list(classification.failed_hooks)
             if classification.format_repair_files:
                 commit_details["format_repair_files"] = list(classification.format_repair_files)
-            commit_details["summary"] = classification.summary[:1000]
+        # ``classification`` is parsed from the FIRST ``git commit`` output. For
+        # repair sub-steps (``ruff format`` crash, post-format ``git add``
+        # failure) it stays stale and would surface "Would reformat..." as the
+        # summary even though the real failure is elsewhere. Trust the
+        # classification summary only when this is a commit-stage failure with
+        # no override; otherwise prefer the actual failing sub-step output.
+        if (
+            classification is not None
+            and error.stage == "git commit"
+            and error.reason_code_override is None
+        ):
+            summary = classification.summary
         else:
             summary = (error.result.stderr or error.result.stdout or "").strip()
-            if summary:
-                commit_details["summary"] = summary[:1000]
+        if summary:
+            commit_details["summary"] = summary[:1000]
 
         if upstream_failure_reason == FailureReason.agent_failure:
             details: dict[str, Any] = dict(agent_run_details or {})
