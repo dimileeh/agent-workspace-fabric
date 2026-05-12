@@ -366,6 +366,10 @@ async def test_post_agent_commit_failure_preserves_agent_idle_timeout_reason(
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
+        # The agent's classification wins: the workspace mirrors the
+        # no-commit agent-failure path rather than mis-classifying the
+        # upstream agent timeout as infrastructure.
+        assert ws.failure_reason == "agent_failure"
 
     event = await _failed_state_event(factory, ws_id)
     # The agent's original reason wins on the terminal event.

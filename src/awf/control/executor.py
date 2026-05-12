@@ -5384,9 +5384,11 @@ class WorkspaceExecutor:
 
         When the agent already failed upstream (e.g.
         ``AgentRunError(reason_code=AGENT_IDLE_TIMEOUT)``), the agent's
-        reason code wins on the terminal event. The commit-step diagnostics
-        live under ``details["post_agent_commit"]`` for observability
-        without overwriting the original classification.
+        reason code AND ``FailureReason.agent_failure`` classification
+        win on the terminal event so the workspace mirrors the no-commit
+        agent failure path. The commit-step diagnostics live under
+        ``details["post_agent_commit"]`` for observability without
+        overwriting the original classification.
         """
         classification = error.classification
         commit_reason_code = (
@@ -5423,7 +5425,7 @@ class WorkspaceExecutor:
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
-                failure_reason=FailureReason.infrastructure_failure,
+                failure_reason=FailureReason.agent_failure,
                 message=base_message[:2000],
                 reason_code=agent_run_reason_code,
                 details=details,
