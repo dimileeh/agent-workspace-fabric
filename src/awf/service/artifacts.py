@@ -281,7 +281,7 @@ def get_workspace_artifact_content(
             f"artifact grew during read and exceeds limit {limit_bytes}",
             detail={
                 "limit_bytes": limit_bytes,
-                "actual_bytes": artifact.size_bytes,
+                "actual_bytes": len(content),
             },
         )
     return (artifact.name, artifact.content_type, len(content), content)

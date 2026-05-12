@@ -1208,6 +1208,7 @@ class WorkspaceArtifactReadResponse(BaseModel):
     content_type: str
     size_bytes: int
     content: str
+    """Base64-encoded artifact bytes (standard alphabet, no line breaks)."""
 
 
 class ValidationProvenanceItemResponse(BaseModel):
