@@ -809,6 +809,15 @@ def build_mcp_server(
             return _error_result(
                 error_code="ARTIFACT_OVERSIZED", message=str(exc), detail=exc.detail
             )
+        # Redact known secrets from raw artifact bytes before base64-encoding,
+        # so secrets cannot leak past the MCP safety boundary inside the
+        # encoded content field.
+        text = content.decode("latin-1")
+        _service_settings = service_config.resolve_service_settings(settings_value)
+        redacted_text = _redact_sensitive_text(
+            text, settings_value, service_settings=_service_settings
+        )
+        content = redacted_text.encode("latin-1")
         response = WorkspaceArtifactReadResponse(
             workspace_id=workspace_id,
             relative_path=relative_path,
