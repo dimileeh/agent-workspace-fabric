@@ -42,6 +42,24 @@ def test_pre_commit_runs_project_ruff_commands_that_match_ci() -> None:
 
 
 @pytest.mark.unit
+def test_awf_ruff_format_check_entry_is_stable_for_executor_classifier() -> None:
+    """``WorkspaceExecutor._classify_post_agent_commit_failure`` matches
+    pre-commit output by the ``awf-ruff-format-check`` hook id. If a
+    future PR renames the hook or splits ``ruff format --check`` into
+    multiple entries, the executor's deterministic format-repair path
+    will no longer fire — this test fails fast and forces the change
+    set to revisit ``_classify_post_agent_commit_failure``.
+    """
+    config = _yaml(".pre-commit-config.yaml")
+    local_repos = [repo for repo in config["repos"] if repo.get("repo") == "local"]
+    hooks = {
+        hook["id"]: hook for repo in local_repos for hook in repo["hooks"] if isinstance(hook, dict)
+    }
+    assert "awf-ruff-format-check" in hooks
+    assert hooks["awf-ruff-format-check"]["entry"].endswith("ruff format --check .")
+
+
+@pytest.mark.unit
 def test_pre_commit_does_not_use_isolated_mypy_mirror() -> None:
     config = _yaml(".pre-commit-config.yaml")
 

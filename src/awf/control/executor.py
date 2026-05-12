@@ -199,6 +199,12 @@ POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE = (
     "POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED"
 )
 POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE = "POST_VALIDATION_CONFORMANCE_FAILED"
+POST_AGENT_GIT_ADD_FAILED_REASON_CODE = "POST_AGENT_GIT_ADD_FAILED"
+POST_AGENT_COMMIT_FAILED_REASON_CODE = "POST_AGENT_COMMIT_FAILED"
+POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE = "POST_AGENT_COMMIT_PRECOMMIT_FAILED"
+POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE = "POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED"
+POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE = "POST_AGENT_FORMAT_REPAIR_FAILED"
+POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE = "workspace.post_agent_commit_format_repair"
 _PR_MONITOR_ADOPTED_EVENT = "workspace.pr_monitor_adopted"
 _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
@@ -292,6 +298,118 @@ class _PostValidationConformanceReportWriteError(RuntimeError):
         self.report_path = report_path
         self.error_type = type(error).__name__
         self.errno = error.errno
+
+
+_AWF_RUFF_FORMAT_CHECK_HOOK_ID = "awf-ruff-format-check"
+_PRE_COMMIT_HOOK_ID_PATTERN = re.compile(r"^-\s*hook id:\s*(?P<hook_id>\S+)", re.MULTILINE)
+_PRE_COMMIT_WOULD_REFORMAT_PATTERN = re.compile(r"^Would reformat:\s*(?P<path>\S.*)$", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class _PostAgentCommitClassification:
+    """Structured result of parsing a non-zero ``git commit`` output.
+
+    ``reason_code`` is one of the ``POST_AGENT_COMMIT_*`` constants.
+    ``failed_hooks`` lists the pre-commit hook ids parsed from the output;
+    empty when the failure is not pre-commit related. ``format_repair_files``
+    holds the paths from ``Would reformat:`` lines verbatim — the executor
+    is responsible for intersecting them with the agent's staged diff
+    before invoking ``ruff format``. ``summary`` is a truncated, human
+    blurb safe for the workspace ``failure_message``.
+    """
+
+    reason_code: str
+    failed_hooks: tuple[str, ...]
+    format_repair_files: tuple[str, ...]
+    summary: str
+
+
+class _PostAgentCommitStepError(RuntimeError):
+    """Raised when post-agent ``git add`` / ``git commit`` exits non-zero.
+
+    Carries the structured classification so the outer exception handler
+    can emit a specific reason code instead of falling back to
+    ``INFRASTRUCTURE_FAILURE``. The ``stage`` field distinguishes
+    ``git add`` failures from ``git commit`` failures; the
+    ``classification`` field is ``None`` for ``git add`` failures (we
+    only classify commit output). ``reason_code_override`` lets the
+    format-repair path surface a distinct code (e.g. when
+    ``ruff format`` itself crashed) without mutating the parsed
+    classification.
+    """
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        result: CommandResult,
+        classification: _PostAgentCommitClassification | None,
+        format_repair_attempted: bool = False,
+        reason_code_override: str | None = None,
+    ) -> None:
+        self.stage = stage
+        self.result = result
+        self.classification = classification
+        self.format_repair_attempted = format_repair_attempted
+        self.reason_code_override = reason_code_override
+        output = (result.stderr or result.stdout or "").strip()
+        super().__init__(f"post-agent {stage} failed (exit={result.returncode}): {output}")
+
+
+def _classify_post_agent_commit_failure(
+    result: CommandResult,
+) -> _PostAgentCommitClassification:
+    """Classify a failed ``git commit`` CommandResult.
+
+    The classifier reads only ``result.stdout`` and ``result.stderr``; it
+    does not touch the worktree. When the captured output looks like
+    pre-commit hook framing (``- hook id: <id>``), we treat the failure
+    as pre-commit related. The narrow subcase — sole failing hook is
+    ``awf-ruff-format-check`` AND we can parse ``Would reformat:`` lines —
+    becomes ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED`` so the executor
+    can attempt a scoped repair pass. Any wider hook failure surfaces as
+    ``POST_AGENT_COMMIT_PRECOMMIT_FAILED`` to keep the deterministic-repair
+    blast radius small.
+    """
+
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    combined = f"{stdout}\n{stderr}"
+
+    failed_hooks = tuple(
+        dict.fromkeys(
+            match.group("hook_id") for match in _PRE_COMMIT_HOOK_ID_PATTERN.finditer(combined)
+        )
+    )
+    format_repair_files = tuple(
+        match.group("path").strip()
+        for match in _PRE_COMMIT_WOULD_REFORMAT_PATTERN.finditer(combined)
+    )
+
+    raw_summary = stderr.strip() or stdout.strip()
+    summary = raw_summary[:2000]
+
+    if failed_hooks:
+        if set(failed_hooks) == {_AWF_RUFF_FORMAT_CHECK_HOOK_ID} and format_repair_files:
+            return _PostAgentCommitClassification(
+                reason_code=POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
+                failed_hooks=failed_hooks,
+                format_repair_files=format_repair_files,
+                summary=summary or "ruff format --check reported files would be reformatted",
+            )
+        return _PostAgentCommitClassification(
+            reason_code=POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+            failed_hooks=failed_hooks,
+            format_repair_files=format_repair_files,
+            summary=summary or "pre-commit hooks rejected the post-agent commit",
+        )
+
+    return _PostAgentCommitClassification(
+        reason_code=POST_AGENT_COMMIT_FAILED_REASON_CODE,
+        failed_hooks=(),
+        format_repair_files=(),
+        summary=summary or "git commit exited non-zero with no output",
+    )
 
 
 @dataclass(frozen=True)
@@ -1363,6 +1481,13 @@ class WorkspaceExecutor:
         agent_exit_note: str | None = None
         agent_run_reason_code: str | None = None
         agent_run_details: Mapping[str, Any] | None = None
+        # ``agent_run_failure_reason`` is only set when the upstream cause was
+        # an actual agent/provider failure (``AgentRunError``). Recovered
+        # infrastructure paths (e.g. missing-HEAD recovery) leave this None so
+        # downstream commit failures route through the standard infra path
+        # instead of being mis-classified as agent failures and queueing
+        # provider recovery.
+        agent_run_failure_reason: FailureReason | None = None
         planning_validation_handoff: _PlanningValidationHandoff | None = None
         expected_branch = ws.branch_name or f"awf/{workspace_id}"
         adapter: AgentAdapter | None = None
@@ -1572,6 +1697,7 @@ class WorkspaceExecutor:
             )
             agent_run_reason_code = exc.reason_code
             agent_run_details = getattr(exc, "details", None)
+            agent_run_failure_reason = FailureReason.agent_failure
             _log.warning(
                 "executor.agent_nonzero_exit_salvaging",
                 workspace_id=workspace_id,
@@ -1823,9 +1949,10 @@ class WorkspaceExecutor:
                     reason="post_agent_git_add",
                 )
                 if not add_result.ok:
-                    raise RuntimeError(
-                        f"post-agent git add failed (exit={add_result.returncode}): "
-                        f"{add_result.stderr}"
+                    raise _PostAgentCommitStepError(
+                        stage="git add",
+                        result=add_result,
+                        classification=None,
                     )
                 cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
                 staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
@@ -1880,30 +2007,51 @@ class WorkspaceExecutor:
                         return
                     commit_msg = f"awf: {ws.task_title}"[:72]
                     commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
-                    commit_result = await self._runner.run(
-                        [
-                            "git",
-                            *git_safe_directory_config_args(worktree_path),
-                            "-C",
-                            str(worktree_path),
-                            *git_identity_config_args(),
-                            "commit",
-                            "-m",
-                            commit_msg,
-                            "-m",
-                            commit_body,
-                        ],
-                    )
+
+                    async def _run_commit() -> CommandResult:
+                        return await self._runner.run(
+                            [
+                                "git",
+                                *git_safe_directory_config_args(worktree_path),
+                                "-C",
+                                str(worktree_path),
+                                *git_identity_config_args(),
+                                "commit",
+                                "-m",
+                                commit_msg,
+                                "-m",
+                                commit_body,
+                            ],
+                        )
+
+                    commit_result = await _run_commit()
                     await self._repair_agent_git_ownership(
                         workspace_id=workspace_id,
                         worktree_path=worktree_path,
                         reason="post_agent_git_commit",
                     )
                     if not commit_result.ok:
-                        raise RuntimeError(
-                            f"post-agent commit failed (exit={commit_result.returncode}): "
-                            f"{commit_result.stderr}"
-                        )
+                        classification = _classify_post_agent_commit_failure(commit_result)
+                        if (
+                            classification.reason_code
+                            == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+                        ):
+                            await self._run_post_agent_format_repair(
+                                workspace_id=workspace_id,
+                                worktree_path=worktree_path,
+                                commit_result=commit_result,
+                                classification=classification,
+                                staged_paths=staged_paths,
+                                run_commit=_run_commit,
+                                git_in_worktree=_git_in_worktree,
+                            )
+                        else:
+                            raise _PostAgentCommitStepError(
+                                stage="git commit",
+                                result=commit_result,
+                                classification=classification,
+                                format_repair_attempted=False,
+                            )
                 # Regardless of whether we just committed, verify HEAD has advanced
                 # past the base commit. If not, the agent produced no change.
                 rev_count = await _git_in_worktree(["rev-list", "--count", f"{base_commit}..HEAD"])
@@ -1921,6 +2069,15 @@ class WorkspaceExecutor:
                     # recovery service creates an authorized delayed retry
                     # or fallback workspace and no-ops for ordinary agent
                     # failures.
+                    #
+                    # Gate provider recovery on
+                    # ``agent_run_failure_reason == agent_failure`` rather
+                    # than on ``agent_run_reason_code is not None``. The
+                    # recovered missing-HEAD path also populates
+                    # ``agent_run_reason_code`` (with
+                    # ``GIT_OBJECT_MISSING_RECOVERED``) but its upstream
+                    # cause is infrastructure recovery, not a provider
+                    # failure that warrants a delayed retry.
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -1929,7 +2086,7 @@ class WorkspaceExecutor:
                         reason_code=agent_run_reason_code,
                         details=agent_run_details,
                     )
-                    if agent_run_reason_code is not None:
+                    if agent_run_failure_reason == FailureReason.agent_failure:
                         await self._prepare_provider_recovery(workspace_id)
                     return
 
@@ -2043,6 +2200,16 @@ class WorkspaceExecutor:
                         reason_code="MONITOR_RECOVERY_REBASE_FAILED",
                     )
                     return
+        except _PostAgentCommitStepError as exc:
+            await self._mark_post_agent_commit_failed(
+                workspace_id=workspace_id,
+                error=exc,
+                agent_run_reason_code=agent_run_reason_code,
+                agent_run_details=agent_run_details,
+                agent_exit_note=agent_exit_note,
+                upstream_failure_reason=agent_run_failure_reason,
+            )
+            return
         except Exception as exc:  # unexpected — mark infrastructure
             if _git_error_indicates_missing_head_object(str(exc)):
                 if await self._recover_missing_git_head_or_mark_failed(
@@ -5115,6 +5282,306 @@ class WorkspaceExecutor:
                 },
             )
             await session.commit()
+
+    async def _record_post_agent_commit_format_repair(
+        self,
+        *,
+        workspace_id: str,
+        repaired_paths: Sequence[str],
+        retry_outcome: str,
+        reason_code: str = POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
+    ) -> None:
+        """Emit the structured event describing a format-repair attempt.
+
+        ``retry_outcome`` is one of ``"succeeded"`` (repair fixed it, retry
+        commit passed), ``"failed"`` (repair ran, retry commit still failed
+        with a non-format hook), ``"skipped"`` (no agent-owned paths in
+        the format set, so no repair was attempted), or ``"error"`` (a
+        sub-step of the repair pipeline exited non-zero before the retry
+        commit could run — either ``ruff format`` itself (see
+        ``POST_AGENT_FORMAT_REPAIR_FAILED``) or the ``git add`` re-stage
+        of the reformatted paths).
+
+        ``reason_code`` defaults to
+        ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE`` so the
+        ``succeeded``/``failed``/``skipped`` outcomes keep the original
+        classification. Callers in the ``"error"`` branches MUST pass
+        ``POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE`` so the event
+        stream surfaces the distinct repair-failure signal — otherwise
+        a repair-pipeline crash is indistinguishable from the original
+        rewrite-needed classification.
+        """
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - destroyed mid-flight
+                return
+            await repo.add_event(
+                ws,
+                event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+                reason_code=reason_code,
+                payload={
+                    "repaired_paths": list(repaired_paths),
+                    "retry_outcome": retry_outcome,
+                },
+            )
+            await session.commit()
+
+    async def _run_post_agent_format_repair(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        commit_result: CommandResult,
+        classification: _PostAgentCommitClassification,
+        staged_paths: Sequence[str],
+        run_commit: Callable[[], Awaitable[CommandResult]],
+        git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
+    ) -> None:
+        """Attempt a scoped ``ruff format`` + commit retry for a format-only failure.
+
+        Preconditions: ``classification.reason_code`` is
+        ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED``. Returns normally when the
+        retry commit succeeds. Raises ``_PostAgentCommitStepError`` when any
+        sub-step fails or when no agent-staged paths overlap the format set
+        (the latter is recorded as a ``skipped`` repair).
+        """
+        staged_set = {
+            path for path in staged_paths if path.endswith(".py") or path.endswith(".pyi")
+        }
+        repair_paths = [path for path in classification.format_repair_files if path in staged_set]
+        if not repair_paths:
+            # A "skipped" repair event is still a repair attempt; mirror that on
+            # the error so the emitted event and
+            # ``details["post_agent_commit"]["format_repair_attempted"]`` agree.
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=[],
+                retry_outcome="skipped",
+            )
+            raise _PostAgentCommitStepError(
+                stage="git commit",
+                result=commit_result,
+                classification=classification,
+                format_repair_attempted=True,
+            )
+
+        # ``repair_paths`` come from pre-commit's ``Would reformat:`` lines
+        # (worktree-relative). The surrounding git steps use
+        # ``-C worktree_path``; ``uv`` does not, so we must pin ``cwd`` or
+        # ruff resolves the paths against the executor process directory
+        # and the retry commit re-fails on the same unformatted staged
+        # content.
+        format_result = await self._runner.run(
+            [
+                "uv",
+                "run",
+                "--python",
+                "3.12",
+                "--extra",
+                "dev",
+                "ruff",
+                "format",
+                "--",
+                *repair_paths,
+            ],
+            cwd=str(worktree_path),
+        )
+        if not format_result.ok:
+            # The classifier saw a format-only commit failure, but the
+            # repair subprocess itself crashed (binary missing, runtime
+            # error, ...). Emit the repair event with ``retry_outcome="error"``
+            # and surface a dedicated reason code so the REASON_CATALOG
+            # entry for ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED`` (which
+            # only describes the empty-intersection skip) does not mislead
+            # operators reading dashboards.
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=repair_paths,
+                retry_outcome="error",
+                reason_code=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
+            raise _PostAgentCommitStepError(
+                stage="ruff format",
+                result=format_result,
+                classification=classification,
+                format_repair_attempted=True,
+                reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
+        add_again = await git_in_worktree(["add", "--", *repair_paths])
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_agent_format_repair_add",
+        )
+        if not add_again.ok:
+            # ``ruff format`` succeeded but the re-stage step failed
+            # (damaged ``.git`` metadata, fs error, ...). Emit the repair
+            # event with ``retry_outcome="error"`` so the stream is
+            # consistent with
+            # ``details["post_agent_commit"]["format_repair_attempted"]``
+            # — without this the retry commit never ran and no event
+            # would be recorded for this repair attempt.
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=repair_paths,
+                retry_outcome="error",
+                reason_code=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
+            raise _PostAgentCommitStepError(
+                stage="git add",
+                result=add_again,
+                classification=classification,
+                format_repair_attempted=True,
+                reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
+        retry_result = await run_commit()
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_agent_format_repair_commit",
+        )
+        if retry_result.ok:
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=repair_paths,
+                retry_outcome="succeeded",
+            )
+            return
+
+        retry_classification = _classify_post_agent_commit_failure(retry_result)
+        await self._record_post_agent_commit_format_repair(
+            workspace_id=workspace_id,
+            repaired_paths=repair_paths,
+            retry_outcome="failed",
+        )
+        # If the retry commit fails with the same format-only classification
+        # (ruff ran but the hook still rejects the commit), surface the
+        # dedicated repair-failed reason code. The REASON_CATALOG entry for
+        # POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED describes only the
+        # empty-intersection skip, so pairing it with
+        # ``format_repair_attempted=True`` would be self-contradictory on
+        # operator dashboards.
+        raise _PostAgentCommitStepError(
+            stage="git commit",
+            result=retry_result,
+            classification=retry_classification,
+            format_repair_attempted=True,
+            reason_code_override=(
+                POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+                if retry_classification.reason_code
+                == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+                else None
+            ),
+        )
+
+    async def _mark_post_agent_commit_failed(
+        self,
+        *,
+        workspace_id: str,
+        error: _PostAgentCommitStepError,
+        agent_run_reason_code: str | None,
+        agent_run_details: Mapping[str, Any] | None,
+        agent_exit_note: str | None,
+        upstream_failure_reason: FailureReason | None,
+    ) -> None:
+        """Route a ``_PostAgentCommitStepError`` to ``_mark_failed`` with
+        structured reason codes.
+
+        When the agent already failed upstream (e.g.
+        ``AgentRunError(reason_code=AGENT_IDLE_TIMEOUT)``), the agent's
+        reason code AND ``FailureReason.agent_failure`` classification
+        win on the terminal event so the workspace mirrors the no-commit
+        agent failure path. The commit-step diagnostics live under
+        ``details["post_agent_commit"]`` for observability without
+        overwriting the original classification.
+
+        ``upstream_failure_reason`` is the explicit signal for that
+        branch. ``agent_run_reason_code`` alone is not sufficient: the
+        recovered missing-HEAD path also sets a reason code
+        (``GIT_OBJECT_MISSING_RECOVERED``), but its semantics are
+        git/infrastructure recovery, not an agent/provider failure — so
+        a downstream commit failure must NOT be re-classified as
+        ``agent_failure`` and MUST NOT queue provider recovery.
+        """
+        classification = error.classification
+        if error.reason_code_override is not None:
+            commit_reason_code = error.reason_code_override
+        elif classification is not None:
+            commit_reason_code = classification.reason_code
+        else:
+            commit_reason_code = POST_AGENT_GIT_ADD_FAILED_REASON_CODE
+        commit_details: dict[str, Any] = {
+            "stage": error.stage,
+            "reason_code": commit_reason_code,
+            "returncode": error.result.returncode,
+            "format_repair_attempted": error.format_repair_attempted,
+        }
+        if classification is not None:
+            if classification.failed_hooks:
+                commit_details["failed_hooks"] = list(classification.failed_hooks)
+            if classification.format_repair_files:
+                commit_details["format_repair_files"] = list(classification.format_repair_files)
+        # ``classification`` holds the parsed output for the FAILING commit step:
+        # - for ``ruff format`` crashes and post-format ``git add`` failures it
+        #   is the FIRST ``git commit`` output (and stays stale — "Would
+        #   reformat..." — even though the real failure is elsewhere).
+        # - for retry-commit failures it is ``retry_classification`` (parsed from
+        #   the retry output), so ``failed_hooks`` / ``format_repair_files``
+        #   reflect the retry, not the initial commit.
+        # Trust the classification summary only when this is a commit-stage
+        # failure with no override; otherwise prefer the actual sub-step output.
+        if (
+            classification is not None
+            and error.stage == "git commit"
+            and error.reason_code_override is None
+        ):
+            summary = classification.summary
+        else:
+            summary = (error.result.stderr or error.result.stdout or "").strip()
+        if summary:
+            commit_details["summary"] = redact_audit_text(summary, limit=1000)
+
+        if upstream_failure_reason == FailureReason.agent_failure:
+            details: dict[str, Any] = dict(agent_run_details or {})
+            details["post_agent_commit"] = commit_details
+            base_message = f"post-agent {error.stage} failed (exit={error.result.returncode})"
+            summary_text = commit_details.get("summary")
+            if summary_text:
+                base_message = f"{base_message}: {summary_text}"
+            if agent_exit_note is not None:
+                base_message = f"{base_message}; {agent_exit_note}"
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.agent_failure,
+                message=base_message[:2000],
+                reason_code=agent_run_reason_code,
+                details=details,
+            )
+            await self._prepare_provider_recovery(workspace_id)
+            return
+
+        _log.warning(
+            "executor.post_agent_commit_failed",
+            workspace_id=workspace_id,
+            stage=error.stage,
+            reason_code=commit_reason_code,
+            returncode=error.result.returncode,
+            format_repair_attempted=error.format_repair_attempted,
+        )
+        base_message = f"post-agent {error.stage} failed (exit={error.result.returncode})"
+        summary_text = commit_details.get("summary")
+        if summary_text:
+            base_message = f"{base_message}: {summary_text}"
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=base_message[:2000],
+            reason_code=commit_reason_code,
+            details={"post_agent_commit": commit_details},
+        )
 
     async def _mark_failed(
         self,
