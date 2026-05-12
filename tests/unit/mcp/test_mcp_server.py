@@ -2662,6 +2662,7 @@ class TestReadWorkspaceArtifact:
         assert isinstance(result, dict)
         decoded = base64.b64decode(result["content"])
         assert decoded == b"prefix <redacted> suffix"
+        assert result["size_bytes"] == len(decoded)
 
     @pytest.mark.unit
     async def test_redaction_expansion_triggers_oversized(
