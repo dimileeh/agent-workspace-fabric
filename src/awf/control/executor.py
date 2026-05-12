@@ -5539,7 +5539,7 @@ class WorkspaceExecutor:
         else:
             summary = (error.result.stderr or error.result.stdout or "").strip()
         if summary:
-            commit_details["summary"] = summary[:1000]
+            commit_details["summary"] = redact_audit_text(summary, limit=1000)
 
         if upstream_failure_reason == FailureReason.agent_failure:
             details: dict[str, Any] = dict(agent_run_details or {})
