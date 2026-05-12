@@ -1063,7 +1063,14 @@ class ControlWorker:
 
         async def _operation(session: AsyncSession) -> bool:
             repo = WorkspaceRepository(session)
-            ws = await repo.get(candidate.workspace_id)
+            # ``SELECT FOR UPDATE SKIP LOCKED`` serializes concurrent workers
+            # racing to record the success event for the same workspace, which
+            # the candidate query may surface to multiple workers when
+            # ``Workspace.node_id`` is ``NULL`` (legacy rows in a Phase 2
+            # multi-node deployment). The loser sees ``None`` and exits
+            # without writing a duplicate ``workspace.terminal_runtime_released``
+            # entry. On a single-node deployment this is a no-op.
+            ws = await repo.get_for_update(candidate.workspace_id, skip_locked=True)
             if ws is None:
                 return False
             if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
