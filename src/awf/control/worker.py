@@ -1117,15 +1117,15 @@ class ControlWorker:
         if cleanup is not None:
             payload["cleanup"] = cleanup.to_dict()
 
-        async def _operation(session: AsyncSession) -> bool:
+        async def _operation(session: AsyncSession) -> str:
             repo = WorkspaceRepository(session)
             ws = await repo.get(candidate.workspace_id)
             if ws is None:
-                return False
+                return "skipped"
             if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
-                return False
+                return "skipped"
             if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
-                return False
+                return "skipped"
             # Push the workspace behind newer terminal rows in the next scan: the
             # candidate query orders by ``updated_at.asc()`` and ``add_event``
             # does not touch ``Workspace.updated_at``, so without this bump a
@@ -1135,22 +1135,38 @@ class ControlWorker:
             if await self._has_terminal_runtime_release_failure_event(
                 session, candidate.workspace_id
             ):
-                return False
+                return "duplicate"
             await repo.add_event(
                 ws,
                 event_type=_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
                 reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
                 payload=payload,
             )
-            return True
+            return "recorded"
 
-        recorded = await run_db_operation_with_retry(
+        outcome = await run_db_operation_with_retry(
             self._session_factory,
             _operation,
             commit=True,
             on_retry=self._log_transient_db_retry,
         )
-        if not recorded:
+        if outcome == "skipped":
+            return
+        if outcome == "duplicate":
+            # A prior retry already wrote the failure event; suppressing the
+            # duplicate keeps the event log lean, but we still bump
+            # ``updated_at`` above and the candidate query keeps reselecting the
+            # row because no success event exists. Emit a structured warning so
+            # each retry leaves reason-code evidence in the log even when no
+            # new event row is written.
+            _log.warning(
+                "worker.terminal_runtime_release_failed_retry",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                compose_project_name=candidate.compose_project_name,
+                reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+                message=message,
+            )
             return
 
         _log.error(
