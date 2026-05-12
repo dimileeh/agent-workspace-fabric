@@ -8461,6 +8461,80 @@ class TestTerminalRuntimeRelease:
         )
 
     @pytest.mark.unit
+    async def test_release_retry_marker_does_not_advance_updated_at(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        # Workspace.updated_at is the retention cutoff used by service/gc.py and
+        # service/orphan_resources.py. Persistently-failing terminal releases
+        # MUST NOT keep advancing it on every retry, or volumes/worktrees for
+        # those workspaces would never age out. The rotation marker
+        # (terminal_release_retry_at) is bumped instead so the candidate scan
+        # still rotates past stuck rows.
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-retry-marker",
+            WorkspaceStatus.failed,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            initial_updated_at = ws.updated_at
+            assert ws.terminal_release_retry_at is None
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            first_retry_marker = ws.terminal_release_retry_at
+            assert first_retry_marker is not None
+            assert ws.updated_at == initial_updated_at, (
+                "updated_at must not advance on a failed release retry — it is "
+                "the retention cutoff used by GC and orphan retention paths"
+            )
+
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.terminal_release_retry_at is not None
+            assert ws.terminal_release_retry_at >= first_retry_marker, (
+                "retry marker must advance on each retry so the candidate scan "
+                "rotates past persistently-failing rows"
+            )
+            assert ws.updated_at == initial_updated_at, (
+                "updated_at must remain pinned across repeated failed retries "
+                "so the retention timer keeps ticking"
+            )
+
+    @pytest.mark.unit
     async def test_release_runs_for_legacy_workspace_with_only_compose_file_path(
         self,
         session_factory: async_sessionmaker[AsyncSession],

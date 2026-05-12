@@ -25,9 +25,10 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, TypeGuard
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
@@ -955,7 +956,17 @@ class ControlWorker:
                 )
             )
             .where(~released_event_exists)
-            .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
+            # Order by the retry marker if one has been recorded, falling back
+            # to ``updated_at`` for rows that have never failed a release. The
+            # marker lets persistently-failing workspaces rotate to the back of
+            # the queue without advancing ``Workspace.updated_at`` — both
+            # ``service/gc.py`` and ``service/orphan_resources.py`` use
+            # ``updated_at`` as the retention cutoff, so bumping it on every
+            # retry would indefinitely defer cleanup of stuck rows.
+            .order_by(
+                func.coalesce(Workspace.terminal_release_retry_at, Workspace.updated_at).asc(),
+                Workspace.id.asc(),
+            )
         )
         if limit is not None:
             stmt = stmt.limit(limit)
@@ -1134,8 +1145,9 @@ class ControlWorker:
             if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
                 return "skipped"
             # Push the workspace behind newer terminal rows in the next scan: the
-            # candidate query orders by ``updated_at.asc()`` and ``add_event``
-            # does not touch ``Workspace.updated_at``, so without this bump a
+            # candidate query orders by
+            # ``coalesce(terminal_release_retry_at, updated_at).asc()`` and
+            # ``add_event`` does not touch either column, so without this bump a
             # persistently failing release would re-select the same rows every
             # scan and starve the backlog past ``terminal_runtime_release_max_per_scan``.
             # NOTE: the bump is intentionally applied *before* the idempotency
@@ -1145,7 +1157,19 @@ class ControlWorker:
             # the back of the scan queue on every retry — preventing a single
             # persistently-failing workspace from monopolising the scan limit
             # across consecutive sweeps.
-            ws.updated_at = datetime.now(UTC)
+            #
+            # ``Workspace.updated_at`` is intentionally NOT advanced here: GC
+            # (``service/gc.py``) and orphan retention (``service/orphan_resources.py``)
+            # use ``updated_at`` as the retention cutoff. Bumping it on every
+            # retry would indefinitely defer cleanup of volumes/worktrees for
+            # persistently-failing workspaces. Re-assigning ``ws.updated_at`` to
+            # its prior value and flagging it modified suppresses the
+            # ``onupdate=_now`` column default so the lifecycle timestamp stays
+            # frozen across retries.
+            prior_updated_at = ws.updated_at
+            ws.terminal_release_retry_at = datetime.now(UTC)
+            ws.updated_at = prior_updated_at
+            flag_modified(ws, "updated_at")
             if await self._has_terminal_runtime_release_failure_event(
                 session, candidate.workspace_id
             ):
