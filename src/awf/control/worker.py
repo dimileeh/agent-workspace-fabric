@@ -937,13 +937,17 @@ class ControlWorker:
             # The cleaner derives ``awf_<workspace_id>`` and falls back to
             # label-based removal, so legacy rows that predate persistence of
             # either field can still have a leaked default Compose project torn
-            # down. Also include rows with NULL ``node_id``: the provisioner
-            # only stamps placement on the success path, so a stack-launch
-            # failure (e.g. service startup) that already created Docker
-            # resources transitions to ``failed`` without persisting
-            # ``node_id``. Excluding those would strand the leaked
-            # ``awf_<workspace_id>`` project and keep orphan readiness blocked.
-            # ``~released_event_exists`` keeps each row to a single sweep.
+            # down. Also include rows with NULL ``node_id``: ``Provisioner.
+            # _mark_failed`` now stamps placement on the failure path so new
+            # rows always carry the launching node, but legacy rows persisted
+            # before that fix may still have NULL ``node_id``. In a multi-node
+            # deployment the local cleaner would silently report success when
+            # the resources actually live on a sibling node, so this fallback
+            # is only safe while AWF is single-node (Phase 1 PRD §20.1). When
+            # Phase 2 introduces multi-node, this branch must gain a node
+            # ownership claim or a "found-something" precondition before it
+            # records ``terminal_runtime_released``. ``~released_event_exists``
+            # keeps each row to a single sweep.
             .where(
                 or_(
                     Workspace.node_id == self._config.node_id,

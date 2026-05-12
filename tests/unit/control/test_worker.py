@@ -8567,10 +8567,12 @@ class TestTerminalRuntimeRelease:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        # Models a stack-launch failure where Docker resources were created but
-        # provisioner.py only stamps ``node_id`` on the success path, so
-        # ``_mark_failed`` leaves it NULL. The sweep must still pick the row up
-        # to release the leaked ``awf_<workspace_id>`` project.
+        # ``Provisioner._mark_failed`` now stamps ``node_id`` on the failure
+        # path, but legacy rows persisted before that fix may still have NULL
+        # ``node_id``. The sweep must still pick those legacy rows up so a
+        # single-node deployment can tear down the leaked ``awf_<workspace_id>``
+        # project; multi-node deployments need an ownership claim before this
+        # path is safe (see worker.py comment on the NULL ``node_id`` branch).
         workspace_id = await _create_terminal_execution(
             session_factory,
             origin_repo,

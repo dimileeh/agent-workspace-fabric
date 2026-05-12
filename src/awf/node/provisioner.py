@@ -405,6 +405,16 @@ class Provisioner:
                     now=datetime.now(UTC),
                     reason_code=PROVISIONING_FAILED_REVOKE_REASON,
                 )
+                # Attribute the failed row to this node so the terminal runtime
+                # release sweep targets the only Docker daemon that could hold
+                # leaked resources from this provisioning attempt. Stack launch
+                # may have created containers/networks on this node before
+                # raising, and the success path only persists ``node_id`` at
+                # the end — without this assignment, ``node_id`` would stay
+                # NULL and a sibling control worker in a multi-node deployment
+                # could finalize cleanup against the wrong Docker daemon.
+                if ws.node_id is None:
+                    ws.node_id = self._config.node_id
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
                 await repo.transition(
