@@ -1119,7 +1119,14 @@ class ControlWorker:
 
         async def _operation(session: AsyncSession) -> str:
             repo = WorkspaceRepository(session)
-            ws = await repo.get(candidate.workspace_id)
+            # Mirror the ``SELECT FOR UPDATE SKIP LOCKED`` guard used by the
+            # success path: when two workers surface the same NULL ``node_id``
+            # candidate, both could otherwise pass the failure-event guard
+            # before either commits and append duplicate
+            # ``workspace.terminal_runtime_release_failed`` rows. The loser
+            # sees ``None`` and exits; the winner records the single failure
+            # event and bumps ``updated_at`` for backlog rotation.
+            ws = await repo.get_for_update(candidate.workspace_id, skip_locked=True)
             if ws is None:
                 return "skipped"
             if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
