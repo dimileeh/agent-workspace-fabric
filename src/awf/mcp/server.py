@@ -792,9 +792,7 @@ def build_mcp_server(
         async with service.session_factory() as session:
             if not await WorkspaceRepository(session).exists(workspace_id):
                 return _error_result("NOT_FOUND", f"No workspace with id {workspace_id}")
-        artifact_dir = workspace_artifact_dir(
-            work_dir=settings_value.work_dir, workspace_id=workspace_id
-        )
+        artifact_dir = workspace_artifact_dir(settings_value.work_dir, workspace_id)
         try:
             name, content_type, size_bytes, content = await asyncio.to_thread(
                 get_workspace_artifact_content,
