@@ -1138,6 +1138,13 @@ class ControlWorker:
             # does not touch ``Workspace.updated_at``, so without this bump a
             # persistently failing release would re-select the same rows every
             # scan and starve the backlog past ``terminal_runtime_release_max_per_scan``.
+            # NOTE: the bump is intentionally applied *before* the idempotency
+            # guard below. When a failure event already exists (the "duplicate"
+            # early return), the mutation is still committed by
+            # ``run_db_operation_with_retry`` (commit=True), rotating the row to
+            # the back of the scan queue on every retry — preventing a single
+            # persistently-failing workspace from monopolising the scan limit
+            # across consecutive sweeps.
             ws.updated_at = datetime.now(UTC)
             if await self._has_terminal_runtime_release_failure_event(
                 session, candidate.workspace_id
