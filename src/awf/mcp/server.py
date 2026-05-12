@@ -818,6 +818,15 @@ def build_mcp_server(
             text, settings_value, service_settings=_service_settings
         )
         content = redacted_text.encode("latin-1")
+        if len(content) > limit_bytes:
+            return _error_result(
+                error_code="ARTIFACT_OVERSIZED",
+                message=f"redacted content length {len(content)} bytes exceeds limit {limit_bytes}",
+                detail={
+                    "limit_bytes": limit_bytes,
+                    "actual_bytes": len(content),
+                },
+            )
         response = WorkspaceArtifactReadResponse(
             workspace_id=workspace_id,
             relative_path=relative_path,
