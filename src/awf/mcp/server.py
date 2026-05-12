@@ -13,6 +13,7 @@ cleanly when they show up alongside other MCP servers.
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
 from collections.abc import Awaitable, Callable
@@ -30,6 +31,7 @@ from awf.api.schemas import (
     OwnedPath,
     PullRequestMonitorAdoptionRequest,
     WorkspaceAcceptedResponse,
+    WorkspaceArtifactReadResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
     WorkspaceLockListResponse,
@@ -41,13 +43,19 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
-from awf.db.repositories import TaskExternalIdConflictError
+from awf.db.repositories import TaskExternalIdConflictError, WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
 from awf.service.artifacts import (
     DEFAULT_ARTIFACT_LIST_LIMIT,
+    MAX_ARTIFACT_CONTENT_BYTES,
     MAX_ARTIFACT_LIST_LIMIT,
+    ArtifactNotFoundError,
+    ArtifactOversizedError,
+    ArtifactPathError,
+    _workspace_artifact_dir,
+    get_workspace_artifact_content,
     list_workspace_artifacts_metadata,
 )
 from awf.service.bounded_list import InvalidBoundedListCursorError
@@ -764,6 +772,49 @@ def build_mcp_server(
                 return _error_result("INVALID_CURSOR", "Invalid artifact list cursor.")
             if response is None:
                 return _null_tool_result()
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_read_workspace_artifact")
+    async def awf_read_workspace_artifact(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+        path: str = Field(..., description="Relative POSIX artifact path to read."),
+        limit_bytes: int = Field(
+            default=65_536,
+            ge=1,
+            le=MAX_ARTIFACT_CONTENT_BYTES,
+            description="Maximum bytes to read.",
+        ),
+    ) -> StructuredToolResult:
+        """Read a bounded chunk from a single workspace artifact.
+
+        Returns a JSON envelope with base64-encoded content.
+        """
+        async with service.session_factory() as session:
+            if not await WorkspaceRepository(session).exists(workspace_id):
+                return _error_result("NOT_FOUND", f"No workspace with id {workspace_id}")
+        artifact_dir = _workspace_artifact_dir(workspace_id, work_dir=settings_value.work_dir)
+        try:
+            name, content_type, size_bytes, content = await asyncio.to_thread(
+                get_workspace_artifact_content,
+                workspace_id=workspace_id,
+                artifact_dir=artifact_dir,
+                relative_path=path,
+                limit_bytes=limit_bytes,
+            )
+        except ArtifactPathError as exc:
+            return _error_result("INVALID_ARTIFACT_PATH", str(exc))
+        except ArtifactNotFoundError:
+            return _error_result("NOT_FOUND", f"No artifact at path {path}")
+        except ArtifactOversizedError as exc:
+            return _error_result(error_code="ARTIFACT_OVERSIZED", message=str(exc))
+        response = WorkspaceArtifactReadResponse(
+            workspace_id=workspace_id,
+            relative_path=path,
+            name=name,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            content=base64.b64encode(content).decode("ascii"),
+        )
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_failure_analysis_summary")

@@ -22,6 +22,7 @@ from awf.service.bounded_list import BoundedListPage, paginate_bounded_iterable
 
 DEFAULT_ARTIFACT_LIST_LIMIT = 50
 MAX_ARTIFACT_LIST_LIMIT = 500
+MAX_ARTIFACT_CONTENT_BYTES = 1_048_576
 
 
 class ArtifactPathError(ValueError):
@@ -30,6 +31,10 @@ class ArtifactPathError(ValueError):
 
 class ArtifactNotFoundError(FileNotFoundError):
     """Raised when an artifact cannot be safely read from managed storage."""
+
+
+class ArtifactOversizedError(ValueError):
+    """Raised when an artifact exceeds the requested or absolute byte-size limit."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +227,36 @@ def get_downloadable_artifact(
         content_type=content_type_for(resolved),
         stat_result=stat,
     )
+
+
+def get_workspace_artifact_content(
+    *,
+    workspace_id: str,
+    artifact_dir: Path,
+    relative_path: str,
+    limit_bytes: int,
+) -> tuple[str, str, int, bytes]:
+    """Read validated artifact bytes and return metadata + content.
+
+    Returns ``(name, content_type, size_bytes, content)``.
+    Raises ``ArtifactPathError``, ``ArtifactNotFoundError``, or
+    ``ArtifactOversizedError``.
+    """
+    if limit_bytes > MAX_ARTIFACT_CONTENT_BYTES:
+        raise ArtifactOversizedError(
+            f"limit_bytes exceeds absolute maximum {MAX_ARTIFACT_CONTENT_BYTES}"
+        )
+    artifact = get_downloadable_artifact(
+        workspace_id=workspace_id,
+        artifact_dir=artifact_dir,
+        relative_path=relative_path,
+    )
+    if artifact.size_bytes > limit_bytes:
+        raise ArtifactOversizedError(
+            f"artifact size {artifact.size_bytes} bytes exceeds limit {limit_bytes}"
+        )
+    content = artifact.path.read_bytes()
+    return (artifact.name, artifact.content_type, artifact.size_bytes, content)
 
 
 def artifact_id(workspace_id: str, relative_path: str) -> str:

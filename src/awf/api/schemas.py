@@ -1199,6 +1199,15 @@ class WorkspaceArtifactListResponse(BaseModel):
     cursor: str | None = None
 
 
+class WorkspaceArtifactReadResponse(BaseModel):
+    workspace_id: str
+    relative_path: str
+    name: str
+    content_type: str
+    size_bytes: int
+    content: str
+
+
 class ValidationProvenanceItemResponse(BaseModel):
     validation_run_id: str | None = None
     workspace_id: str

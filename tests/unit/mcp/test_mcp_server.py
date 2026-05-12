@@ -9,11 +9,13 @@ harness) against a throwaway PostgreSQL. This validates:
 
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -243,6 +245,7 @@ class TestToolRegistration:
             "awf_list_workspace_validation",
             "awf_list_workspace_stale_reasons",
             "awf_list_workspace_artifacts",
+            "awf_read_workspace_artifact",
             "awf_get_failure_analysis_summary",
             "awf_get_workspace_reliability_summary",
             "awf_get_resource_saturation_summary",
@@ -2347,3 +2350,273 @@ class TestWorkspaceLogs:
 
         assert missing_workspace is None
         assert missing_stream is None
+
+
+class TestReadWorkspaceArtifact:
+    @pytest.mark.unit
+    async def test_tool_registered_and_bounded(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        assert "awf_read_workspace_artifact" in tools
+        schema = tools["awf_read_workspace_artifact"].inputSchema
+        props = schema["properties"]
+        assert "workspace_id" in schema.get("required", [])
+        assert "path" in schema.get("required", [])
+        assert "limit_bytes" not in schema.get("required", [])
+        assert props["limit_bytes"]["default"] == 65_536
+        assert props["limit_bytes"]["minimum"] == 1
+        assert props["limit_bytes"]["maximum"] == 1_048_576
+
+    @pytest.mark.unit
+    async def test_reads_safe_small_file_and_returns_base64_content(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact read",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = b"hello artifact\n"
+        (artifact_dir / "report.txt").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "path": "report.txt"},
+        )
+
+        assert isinstance(result, dict)
+        assert result["workspace_id"] == workspace.id
+        assert result["relative_path"] == "report.txt"
+        assert result["name"] == "report.txt"
+        assert result["content_type"] == "text/plain"
+        assert result["size_bytes"] == len(payload)
+        assert base64.b64decode(result["content"]) == payload
+
+    @pytest.mark.unit
+    async def test_missing_workspace_returns_not_found(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool(
+            "awf_read_workspace_artifact",
+            {"workspace_id": "ws_missing", "path": "report.txt"},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "NOT_FOUND"
+
+    @pytest.mark.unit
+    async def test_missing_file_returns_not_found(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact read missing",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+
+        result = await mcp.call_tool(
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "path": "missing.txt"},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "NOT_FOUND"
+        assert "missing.txt" in result.structuredContent["message"]
+        # must not leak absolute host path
+        assert str(artifact_dir) not in str(result.structuredContent.get("detail", ""))
+
+    @pytest.mark.unit
+    async def test_symlink_escape_returns_not_found(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact symlink",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret\n", encoding="utf-8")
+        (artifact_dir / "link.txt").symlink_to(outside)
+
+        result = await mcp.call_tool(
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "path": "link.txt"},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "NOT_FOUND"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "bad_path",
+        [
+            "../secret.txt",
+            "/tmp/secret.txt",
+            "",
+            "reports\\summary.json",
+        ],
+    )
+    async def test_invalid_paths_return_invalid_artifact_path(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        bad_path: str,
+    ) -> None:
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact bad path",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+
+        result = await mcp.call_tool(
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "path": bad_path},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_ARTIFACT_PATH"
+
+    @pytest.mark.unit
+    async def test_oversized_file_returns_artifact_oversized(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact oversized",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "big.bin").write_bytes(b"x" * 200)
+
+        result = await mcp.call_tool(
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "path": "big.bin", "limit_bytes": 100},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "ARTIFACT_OVERSIZED"
+
+    @pytest.mark.unit
+    async def test_rejects_limit_bytes_above_ceiling(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact ceiling",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "small.bin").write_bytes(b"x")
+
+        with pytest.raises((ToolError, Exception)):
+            await mcp.call_tool(
+                "awf_read_workspace_artifact",
+                {"workspace_id": workspace.id, "path": "small.bin", "limit_bytes": 2_000_000},
+            )
+
+    @pytest.mark.unit
+    async def test_respects_explicit_limit_bytes_within_ceiling(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact limit ok",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = b"x" * 50
+        (artifact_dir / "medium.bin").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "path": "medium.bin", "limit_bytes": 100},
+        )
+        assert isinstance(result, dict)
+        assert result["size_bytes"] == len(payload)
+        assert base64.b64decode(result["content"]) == payload
