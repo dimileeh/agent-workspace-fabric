@@ -5313,6 +5313,9 @@ class WorkspaceExecutor:
         }
         repair_paths = [path for path in classification.format_repair_files if path in staged_set]
         if not repair_paths:
+            # A "skipped" repair event is still a repair attempt; mirror that on
+            # the error so the emitted event and
+            # ``details["post_agent_commit"]["format_repair_attempted"]`` agree.
             await self._record_post_agent_commit_format_repair(
                 workspace_id=workspace_id,
                 repaired_paths=[],
@@ -5322,7 +5325,7 @@ class WorkspaceExecutor:
                 stage="git commit",
                 result=commit_result,
                 classification=classification,
-                format_repair_attempted=False,
+                format_repair_attempted=True,
             )
 
         # ``repair_paths`` come from pre-commit's ``Would reformat:`` lines

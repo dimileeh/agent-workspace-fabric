@@ -308,6 +308,10 @@ async def test_post_agent_commit_format_only_skips_files_outside_diff(
 
     event = await _failed_state_event(factory, ws_id)
     assert event.reason_code == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+    # A "skipped" repair event was emitted, so the failed-state payload must
+    # agree — both signals describe the same attempt.
+    assert event.payload is not None
+    assert event.payload["details"]["post_agent_commit"]["format_repair_attempted"] is True
 
     # No ruff format invocation should have happened.
     ruff_calls = [call for call in fake.calls if "ruff" in call.args]
