@@ -1481,6 +1481,13 @@ class WorkspaceExecutor:
         agent_exit_note: str | None = None
         agent_run_reason_code: str | None = None
         agent_run_details: Mapping[str, Any] | None = None
+        # ``agent_run_failure_reason`` is only set when the upstream cause was
+        # an actual agent/provider failure (``AgentRunError``). Recovered
+        # infrastructure paths (e.g. missing-HEAD recovery) leave this None so
+        # downstream commit failures route through the standard infra path
+        # instead of being mis-classified as agent failures and queueing
+        # provider recovery.
+        agent_run_failure_reason: FailureReason | None = None
         planning_validation_handoff: _PlanningValidationHandoff | None = None
         expected_branch = ws.branch_name or f"awf/{workspace_id}"
         adapter: AgentAdapter | None = None
@@ -1690,6 +1697,7 @@ class WorkspaceExecutor:
             )
             agent_run_reason_code = exc.reason_code
             agent_run_details = getattr(exc, "details", None)
+            agent_run_failure_reason = FailureReason.agent_failure
             _log.warning(
                 "executor.agent_nonzero_exit_salvaging",
                 workspace_id=workspace_id,
@@ -2061,6 +2069,15 @@ class WorkspaceExecutor:
                     # recovery service creates an authorized delayed retry
                     # or fallback workspace and no-ops for ordinary agent
                     # failures.
+                    #
+                    # Gate provider recovery on
+                    # ``agent_run_failure_reason == agent_failure`` rather
+                    # than on ``agent_run_reason_code is not None``. The
+                    # recovered missing-HEAD path also populates
+                    # ``agent_run_reason_code`` (with
+                    # ``GIT_OBJECT_MISSING_RECOVERED``) but its upstream
+                    # cause is infrastructure recovery, not a provider
+                    # failure that warrants a delayed retry.
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -2069,7 +2086,7 @@ class WorkspaceExecutor:
                         reason_code=agent_run_reason_code,
                         details=agent_run_details,
                     )
-                    if agent_run_reason_code is not None:
+                    if agent_run_failure_reason == FailureReason.agent_failure:
                         await self._prepare_provider_recovery(workspace_id)
                     return
 
@@ -2190,6 +2207,7 @@ class WorkspaceExecutor:
                 agent_run_reason_code=agent_run_reason_code,
                 agent_run_details=agent_run_details,
                 agent_exit_note=agent_exit_note,
+                upstream_failure_reason=agent_run_failure_reason,
             )
             return
         except Exception as exc:  # unexpected — mark infrastructure
@@ -5438,6 +5456,7 @@ class WorkspaceExecutor:
         agent_run_reason_code: str | None,
         agent_run_details: Mapping[str, Any] | None,
         agent_exit_note: str | None,
+        upstream_failure_reason: FailureReason | None,
     ) -> None:
         """Route a ``_PostAgentCommitStepError`` to ``_mark_failed`` with
         structured reason codes.
@@ -5449,6 +5468,14 @@ class WorkspaceExecutor:
         agent failure path. The commit-step diagnostics live under
         ``details["post_agent_commit"]`` for observability without
         overwriting the original classification.
+
+        ``upstream_failure_reason`` is the explicit signal for that
+        branch. ``agent_run_reason_code`` alone is not sufficient: the
+        recovered missing-HEAD path also sets a reason code
+        (``GIT_OBJECT_MISSING_RECOVERED``), but its semantics are
+        git/infrastructure recovery, not an agent/provider failure — so
+        a downstream commit failure must NOT be re-classified as
+        ``agent_failure`` and MUST NOT queue provider recovery.
         """
         classification = error.classification
         if error.reason_code_override is not None:
@@ -5474,7 +5501,7 @@ class WorkspaceExecutor:
             if summary:
                 commit_details["summary"] = summary[:1000]
 
-        if agent_run_reason_code is not None:
+        if upstream_failure_reason == FailureReason.agent_failure:
             details: dict[str, Any] = dict(agent_run_details or {})
             details["post_agent_commit"] = commit_details
             base_message = f"post-agent {error.stage} failed (exit={error.result.returncode})"
