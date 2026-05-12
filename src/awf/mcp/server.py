@@ -794,7 +794,7 @@ def build_mcp_server(
                 return _error_result("NOT_FOUND", f"No workspace with id {workspace_id}")
         artifact_dir = workspace_artifact_dir(settings_value.work_dir, workspace_id)
         try:
-            name, content_type, size_bytes, content = await asyncio.to_thread(
+            name, content_type, _, content = await asyncio.to_thread(
                 get_workspace_artifact_content,
                 workspace_id=workspace_id,
                 artifact_dir=artifact_dir,
