@@ -1367,7 +1367,7 @@ def test_orphan_check_flags_terminal_workspace_with_running_container(tmp_path: 
     assert example["workspace_id"] == "ws_dead"
     assert example["compose_project"] == "awf_ws_dead"
     assert example["classification"] == "cleanup_ready"
-    assert example["reason"] == "WORKSPACE_TERMINAL_RETENTION_EXPIRED"
+    assert example["reason"] == "WORKSPACE_TERMINAL_LIVE_RUNTIME"
     action = orphans.get("action")
     assert isinstance(action, str) and action.strip()
 
@@ -1641,20 +1641,13 @@ def test_orphan_check_extracts_labels_via_docker_template(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_service_status_treats_completed_within_retention_as_retained(
+def test_service_status_treats_completed_within_retention_salvage_as_retained(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path)
     (Path(settings.work_dir) / "git" / "worktrees" / "ws_done").mkdir(parents=True)
-    payload = _docker_ps_payload(
-        _container(
-            id="abc",
-            name="awf_ws_done-agent-1",
-            state="exited",
-            status="Exited",
-            project="awf_ws_done",
-            service="agent",
-        )
+    volume_payload = _docker_ps_payload(
+        {"name": "awf_ws_done_postgres_data", "project": "awf_ws_done"}
     )
 
     async def _ws_lookup(_url: str) -> WorkspaceIdView:
@@ -1677,7 +1670,7 @@ def test_service_status_treats_completed_within_retention_as_retained(
             settings,
             api_get=_api_get,
             db_probe=_db_probe,
-            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            run_subprocess=_make_run_subprocess(volume_payload=volume_payload),
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_ws_lookup,
@@ -1690,6 +1683,65 @@ def test_service_status_treats_completed_within_retention_as_retained(
     assert orphans["reason"] == "NO_ORPHANS"
     assert orphans["retained_count"] == 2
     assert orphans["orphan_count"] == 0
+
+
+@pytest.mark.unit
+def test_service_status_flags_completed_within_retention_live_runtime_as_leak(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_zombie-agent-1",
+            state="running",
+            status="Up 5 minutes",
+            project="awf_ws_zombie",
+            service="agent",
+        )
+    )
+    network_payload = _docker_ps_payload(
+        {"id": "net", "name": "awf_ws_zombie_default", "project": "awf_ws_zombie"}
+    )
+
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset(),
+            terminal_ids=frozenset({"ws_zombie"}),
+            available=True,
+            snapshots=(
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_zombie",
+                    status=WorkspaceStatus.completed.value,
+                    updated_at=datetime.now(UTC),
+                    compose_project_name="awf_ws_zombie",
+                ),
+            ),
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            settings,
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(
+                ps_payload=payload,
+                network_payload=network_payload,
+            ),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    orphans = status["checks"]["orphan_workspaces"]
+    assert orphans["ok"] is False
+    assert orphans["reason"] == "ORPHANS_PRESENT"
+    assert orphans["orphan_count"] == 2
+    assert orphans["orphan_counts_by_kind"] == {"container": 1, "network": 1}
+    reasons = {example["reason"] for example in orphans["examples"]}
+    assert reasons == {"WORKSPACE_TERMINAL_LIVE_RUNTIME"}
 
 
 @pytest.mark.unit

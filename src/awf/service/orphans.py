@@ -637,6 +637,18 @@ def _classify_resource(
         return _finding(resource, classification="expected", reason="WORKSPACE_ACTIVE")
 
     if snapshot.status in TERMINAL_WORKSPACE_STATUSES:
+        # Containers and networks for a terminal workspace are leaked runtime,
+        # not salvage evidence — surface them even within retention so operators
+        # see the leak and the worker sweep can release them. Volumes and
+        # worktrees ARE the salvage evidence; keep them retained while within
+        # retention. Mirrors awf.service.orphan_resources._classify so readyz
+        # and `awf service status` agree on what counts as a runtime leak.
+        if resource.resource_kind in {"container", "network"}:
+            return _finding(
+                resource,
+                classification="cleanup_ready",
+                reason="WORKSPACE_TERMINAL_LIVE_RUNTIME",
+            )
         if _within_retention(snapshot.updated_at, now=now, min_retention_hours=min_retention_hours):
             return _finding(
                 resource,
