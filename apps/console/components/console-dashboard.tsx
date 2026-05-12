@@ -1711,7 +1711,9 @@ function WorkspaceList({
                     <span className="truncate">{coordinationSummary.label}</span>
                   </span>
                 ) : null}
-                {item.pr_url ? <SmallExternalAnchor href={item.pr_url} label="PR" /> : null}
+                {item.pr_url ? (
+                  <SmallExternalAnchor href={item.pr_url} label={formatPrLinkLabel(item.pr_url)} />
+                ) : null}
               </div>
             </div>
             <div className="flex justify-end gap-2">
@@ -1909,7 +1911,9 @@ function WorkspaceSummary({
               Retry
             </button>
           ) : null}
-          {overview.pr_url ? <ExternalAnchor href={overview.pr_url} label="PR" /> : null}
+          {overview.pr_url ? (
+            <ExternalAnchor href={overview.pr_url} label={formatPrLinkLabel(overview.pr_url)} />
+          ) : null}
         </div>
       }
     >
@@ -2610,7 +2614,7 @@ function MergeQueueRow({
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           <Badge value={item.status} />
-          <SmallExternalAnchor href={item.pr_url} label="PR" />
+          <SmallExternalAnchor href={item.pr_url} label={formatPrLinkLabel(item.pr_url)} />
           <button
             type="button"
             onClick={onToggle}
@@ -2813,7 +2817,10 @@ function MergeQueueBlockerDetails({ blockers }: { blockers: MergeQueueItem["queu
           <span className="mono">{blocker.blocker_state}</span>
           <span className="mono">{blocker.status}</span>
           <span className="mono truncate">{blocker.reason_code}</span>
-          <SmallExternalAnchor href={blocker.pr_url} label="PR" />
+          <SmallExternalAnchor
+            href={blocker.pr_url}
+            label={formatPrLinkLabel(blocker.pr_url, blocker.pr_number)}
+          />
         </div>
       ))}
     </div>
@@ -3696,7 +3703,9 @@ function WorkspaceLogColumn({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          {workspace.pr_url ? <SmallExternalAnchor href={workspace.pr_url} label="PR" /> : null}
+          {workspace.pr_url ? (
+            <SmallExternalAnchor href={workspace.pr_url} label={formatPrLinkLabel(workspace.pr_url)} />
+          ) : null}
           <button
             type="button"
             onClick={onRemove}
@@ -4121,6 +4130,20 @@ function Badge({ value }: { value: string }) {
       {value}
     </span>
   );
+}
+
+function formatPrLinkLabel(href: string, prNumber?: number | null) {
+  const number = prNumber ?? extractPrNumberFromHref(href);
+  return number ? `PR #${number}` : "PR";
+}
+
+function extractPrNumberFromHref(href: string): number | null {
+  const match = href.match(/\/pull\/(\d+)(?:[/?#]|$)/);
+  if (!match) {
+    return null;
+  }
+  const number = Number(match[1]);
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
 function ExternalAnchor({ href, label }: { href: string; label: string }) {
@@ -4648,7 +4671,12 @@ function FailureAnalysisPanel({
                          <Td>
                            <div className="flex min-w-0 flex-wrap items-center gap-2">
                              <span className="text-slate-500">{formatDateTime(example.timestamp)}</span>
-                             {example.pr_url ? <SmallExternalAnchor href={example.pr_url} label="PR" /> : null}
+                             {example.pr_url ? (
+                               <SmallExternalAnchor
+                                 href={example.pr_url}
+                                 label={formatPrLinkLabel(example.pr_url)}
+                               />
+                             ) : null}
                            </div>
                          </Td>
                        </tr>
