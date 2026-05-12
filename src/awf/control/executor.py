@@ -5834,6 +5834,17 @@ class WorkspaceExecutor:
 
         retry_classification = _classify_post_agent_commit_failure(retry_result)
         if retry_classification.repair_strategy == "deterministic" and repair_error is None:
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=[],
+                restaged_paths=repair_staged_paths,
+                formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
+                failed_hooks=classification.failed_hooks,
+                repair_strategy="agent",
+                retry_outcome="failed",
+                reason_code=POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
+            )
             await self._run_post_agent_deterministic_precommit_repair(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,

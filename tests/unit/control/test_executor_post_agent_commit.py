@@ -948,7 +948,7 @@ async def test_post_agent_commit_semantic_agent_repair_retry_failure_remains_vis
 
 
 @pytest.mark.unit
-async def test_post_agent_commit_semantic_agent_repair_allows_final_deterministic_repair(
+async def test_post_agent_commit_semantic_agent_repair_records_final_deterministic_cascade(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -981,10 +981,23 @@ async def test_post_agent_commit_semantic_agent_repair_allows_final_deterministi
             workspace_id=ws_id,
             event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
         )
+    repair_events = list(reversed(repair_events))
 
-    assert len(repair_events) == 1
-    assert repair_events[0].payload["repair_strategy"] == "deterministic"  # type: ignore[index]
-    assert repair_events[0].payload["retry_outcome"] == "succeeded"  # type: ignore[index]
+    assert len(repair_events) == 2
+    agent_payload = repair_events[0].payload
+    deterministic_payload = repair_events[1].payload
+    assert isinstance(agent_payload, dict)
+    assert isinstance(deterministic_payload, dict)
+    assert agent_payload["repair_strategy"] == "agent"
+    assert agent_payload["retry_outcome"] == "failed"
+    assert agent_payload["failed_hooks"] == [
+        "end-of-file-fixer",
+        "awf-ruff-check",
+        "awf-ruff-format-check",
+    ]
+    assert agent_payload["restaged_paths"] == ["docs/awf-plans/ws_89.conformance.json"]
+    assert deterministic_payload["repair_strategy"] == "deterministic"
+    assert deterministic_payload["retry_outcome"] == "succeeded"
 
 
 @pytest.mark.unit
