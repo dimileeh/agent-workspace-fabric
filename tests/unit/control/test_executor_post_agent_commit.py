@@ -100,6 +100,10 @@ def _make_executor(
     )
 
 
+def _git_add_suffixes(fake: FakeCommandRunner) -> list[list[str]]:
+    return [call.args[call.args.index("add") :] for call in fake.calls if "add" in call.args]
+
+
 def _precommit_format_only_output(*paths: str) -> str:
     """Mimic ``pre-commit`` framing when only ``awf-ruff-format-check`` fails."""
     lines = [
@@ -258,6 +262,7 @@ async def test_post_agent_commit_precommit_failure_uses_precommit_reason_code(
             workspace_id=ws_id,
             event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
         )
+    assert repair_events
     assert repair_events[-1].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
     assert repair_events[-1].payload["retry_outcome"] == "error"  # type: ignore[index]
     assert repair_events[-1].payload["restaged_paths"] == ["src/awf/foo.py"]  # type: ignore[index]
@@ -631,9 +636,7 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
 
     ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
     assert not ruff_calls
-    add_calls = [call.args for call in fake.calls if "add" in call.args]
-    post_repair_add = add_calls[1]
-    assert post_repair_add[post_repair_add.index("add") :] == ["add", "-A"]
+    assert _git_add_suffixes(fake).count(["add", "-A"]) == 2
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 2
 
@@ -665,9 +668,7 @@ async def test_post_agent_commit_semantic_repair_stages_new_files_before_policy_
     executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
     await executor.execute(ws_id)
 
-    add_calls = [call.args for call in fake.calls if "add" in call.args]
-    post_repair_add = add_calls[1]
-    assert post_repair_add[post_repair_add.index("add") :] == ["add", "-A"]
+    assert _git_add_suffixes(fake).count(["add", "-A"]) == 2
 
     async with factory() as s:
         repair_events = await WorkspaceEventRepository(s).list(
@@ -767,6 +768,7 @@ async def test_post_agent_commit_semantic_agent_repair_git_add_failure_marks_rep
             workspace_id=ws_id,
             event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
         )
+    assert repair_events
     assert repair_events[-1].reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
     assert repair_events[-1].payload["retry_outcome"] == "error"  # type: ignore[index]
 
@@ -905,6 +907,7 @@ async def test_post_agent_commit_semantic_agent_repair_cached_diff_failure_abort
             workspace_id=ws_id,
             event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
         )
+    assert repair_events
     assert repair_events[-1].reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
     assert repair_events[-1].payload["retry_outcome"] == "error"  # type: ignore[index]
 
@@ -950,6 +953,7 @@ async def test_post_agent_commit_semantic_agent_repair_plan_only_change_is_block
             workspace_id=ws_id,
             event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
         )
+    assert repair_events
     assert repair_events[-1].reason_code == PLAN_ONLY_OUTPUT_REASON_CODE
     assert repair_events[-1].payload["restaged_paths"] == [  # type: ignore[index]
         "docs/awf-plans/ws_semantic_repair.md"
@@ -995,6 +999,7 @@ async def test_post_agent_commit_semantic_agent_repair_retry_failure_remains_vis
             workspace_id=ws_id,
             event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
         )
+    assert repair_events
     assert repair_events[-1].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
     assert repair_events[-1].payload["retry_outcome"] == "failed"  # type: ignore[index]
 
@@ -1033,13 +1038,19 @@ async def test_post_agent_commit_semantic_agent_repair_records_final_determinist
             workspace_id=ws_id,
             event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
         )
-    repair_events = list(reversed(repair_events))
 
     assert len(repair_events) == 2
-    agent_payload = repair_events[0].payload
-    deterministic_payload = repair_events[1].payload
-    assert isinstance(agent_payload, dict)
-    assert isinstance(deterministic_payload, dict)
+    payloads = [event.payload for event in repair_events if isinstance(event.payload, dict)]
+    agent_payload = next(
+        (payload for payload in payloads if payload.get("repair_strategy") == "agent"),
+        None,
+    )
+    deterministic_payload = next(
+        (payload for payload in payloads if payload.get("repair_strategy") == "deterministic"),
+        None,
+    )
+    assert agent_payload is not None
+    assert deterministic_payload is not None
     assert agent_payload["repair_strategy"] == "agent"
     assert agent_payload["retry_outcome"] == "failed"
     assert agent_payload["failed_hooks"] == [
