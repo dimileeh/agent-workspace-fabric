@@ -5450,6 +5450,7 @@ class WorkspaceExecutor:
                 reason_code=agent_run_reason_code,
                 details=details,
             )
+            await self._prepare_provider_recovery(workspace_id)
             return
 
         _log.warning(
