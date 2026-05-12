@@ -1200,6 +1200,8 @@ class WorkspaceArtifactListResponse(BaseModel):
 
 
 class WorkspaceArtifactReadResponse(BaseModel):
+    """Bounded artifact bytes + metadata returned by ``awf_read_workspace_artifact``."""
+
     workspace_id: str
     relative_path: str
     name: str

@@ -44,6 +44,8 @@ class ArtifactOversizedError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ArtifactMetadata:
+    """Immutable artifact identity + filesystem metadata."""
+
     artifact_id: str
     workspace_id: str
     name: str
@@ -57,6 +59,8 @@ class ArtifactMetadata:
 
 @dataclass(frozen=True, slots=True)
 class DownloadableArtifact:
+    """Resolved artifact ready for stream/download with its stat snapshot."""
+
     workspace_id: str
     name: str
     relative_path: str
