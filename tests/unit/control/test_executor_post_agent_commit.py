@@ -1246,6 +1246,8 @@ async def test_post_agent_commit_failure_preserves_agent_idle_timeout_reason(
     # NOT overwrite the agent's reason.
     commit_details = details["post_agent_commit"]
     assert commit_details["reason_code"] == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert commit_details["repair_strategy"] == "agent_skipped"
+    assert commit_details["precommit_repair_attempted"] is False
     assert "awf-mypy" in commit_details["failed_hooks"]
 
 

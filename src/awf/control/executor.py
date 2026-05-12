@@ -5460,11 +5460,16 @@ class WorkspaceExecutor:
             )
             return
 
+        reported_repair_strategy = (
+            "agent_skipped"
+            if classification.repair_strategy == "agent" and not allow_agent_repair
+            else classification.repair_strategy
+        )
         raise _PostAgentCommitStepError(
             stage="git commit",
             result=commit_result,
             classification=classification,
-            repair_strategy=classification.repair_strategy,
+            repair_strategy=reported_repair_strategy,
         )
 
     async def _run_post_agent_deterministic_precommit_repair(
