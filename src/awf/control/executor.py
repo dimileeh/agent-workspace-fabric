@@ -5832,11 +5832,7 @@ class WorkspaceExecutor:
                 failed_hooks=classification.failed_hooks,
                 repair_strategy="agent",
                 retry_outcome="error" if repair_error is not None else "succeeded",
-                reason_code=(
-                    POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
-                    if repair_error is not None
-                    else POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
-                ),
+                reason_code=classification.reason_code,
             )
             return
 
@@ -5873,11 +5869,7 @@ class WorkspaceExecutor:
             failed_hooks=classification.failed_hooks,
             repair_strategy="agent",
             retry_outcome="error" if repair_error is not None else "failed",
-            reason_code=(
-                POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
-                if repair_error is not None
-                else POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
-            ),
+            reason_code=classification.reason_code,
         )
         if repair_error is not None:
             raise _PostAgentCommitStepError(

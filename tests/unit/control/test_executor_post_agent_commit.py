@@ -604,6 +604,7 @@ async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_age
         )
 
     assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
     payload = repair_events[0].payload
     assert isinstance(payload, dict)
     assert payload["repair_strategy"] == "agent"
@@ -994,6 +995,7 @@ async def test_post_agent_commit_semantic_agent_repair_retry_failure_remains_vis
             workspace_id=ws_id,
             event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
         )
+    assert repair_events[-1].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
     assert repair_events[-1].payload["retry_outcome"] == "failed"  # type: ignore[index]
 
 
