@@ -198,6 +198,34 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#port_config_invalid](#port_config_invalid)
 
+### POST_AGENT_COMMIT_FAILED
+**Problem:** The post-agent ``git commit`` exited non-zero for a reason unrelated to a pre-commit hook (e.g. missing git identity, detached HEAD, "nothing to commit").
+**Likely Cause:** Git environment misconfiguration in the workspace container or an agent that left the worktree in an unexpected state (orphan HEAD, empty index after stage).
+**Operator Fix:** Inspect the worktree with ``awf workspace logs <workspace_id>`` and re-run the commit inside the worktree to reproduce; fix git identity or repository state and recover.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#post_agent_commit_failed](#post_agent_commit_failed)
+
+### POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED
+**Problem:** The post-agent ``git commit`` was rejected because ``awf-ruff-format-check`` reported files would be reformatted, but AWF could not locate any agent-staged paths to repair (intersection with ``Would reformat:`` was empty).
+**Likely Cause:** The format check flagged files outside the agent's owned diff (e.g. legacy files reformatted by an unrelated change in the worktree), so AWF refused to silently mutate them.
+**Operator Fix:** Run ``uv run --python 3.12 --extra dev ruff format .`` locally on the flagged paths, commit, and remonitor; or scope the format hook to the agent's diff in ``.pre-commit-config.yaml``.
+**Related Command:** `uv run --python 3.12 --extra dev ruff format .`
+**Docs Link:** [docs/REASON_CATALOG.md#post_agent_commit_format_rewrite_needed](#post_agent_commit_format_rewrite_needed)
+
+### POST_AGENT_COMMIT_PRECOMMIT_FAILED
+**Problem:** A pre-commit hook (``awf-ruff-check``, ``awf-mypy``, ``trailing-whitespace``, etc.) rejected the post-agent commit, or a format-repair retry still failed because another hook fired.
+**Likely Cause:** The agent's diff trips a lint/type/format invariant that the pre-commit pipeline enforces; deterministic format-only repair is insufficient.
+**Operator Fix:** Run ``uv run --python 3.12 --extra dev pre-commit run --all-files`` locally against the workspace branch, fix the reported issues, push, and remonitor.
+**Related Command:** `uv run --python 3.12 --extra dev pre-commit run --all-files`
+**Docs Link:** [docs/REASON_CATALOG.md#post_agent_commit_precommit_failed](#post_agent_commit_precommit_failed)
+
+### POST_AGENT_GIT_ADD_FAILED
+**Problem:** ``git add -A`` failed during post-agent salvage (e.g. exit 128 with ``fatal: not a git repository``).
+**Likely Cause:** The agent damaged the worktree's git metadata or removed ``.git``; no commit could be attempted to capture work.
+**Operator Fix:** Inspect the worktree, recover any salvageable files manually, and recreate the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#post_agent_git_add_failed](#post_agent_git_add_failed)
+
 ### PROTECTED_SCOPE_DIFF_UNAVAILABLE
 **Problem:** The PR monitor could not verify protected-scope changes against the remote PR branch before push.
 **Likely Cause:** The PR branch diff baseline could not be fetched because of a GitHub/network failure, a missing remote ref, or delayed ref replication.

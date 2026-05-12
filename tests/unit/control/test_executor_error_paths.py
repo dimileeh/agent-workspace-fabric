@@ -1656,9 +1656,9 @@ class TestCommitStepRuntimeError:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """Lines 227 + 318-326: if ``git commit`` exits non-zero, the
-        post-agent commit block raises a RuntimeError which is caught
-        by the generic except → mark infrastructure_failure."""
+        """A non-pre-commit ``git commit`` failure surfaces with the
+        structured ``POST_AGENT_COMMIT_FAILED`` reason code (not the
+        generic ``INFRASTRUCTURE_FAILURE`` default)."""
         ws_id = await _seed_ready(factory)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
         fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
@@ -1675,7 +1675,14 @@ class TestCommitStepRuntimeError:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
-            assert "commit step failed" in (ws.failure_message or "")
+            assert ws.failure_reason == "infrastructure_failure"
+            failed_event = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            )
+            assert failed_event.reason_code == "POST_AGENT_COMMIT_FAILED"
 
 
 class TestValidationInfrastructureError:
