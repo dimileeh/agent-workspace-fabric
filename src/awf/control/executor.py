@@ -5521,12 +5521,15 @@ class WorkspaceExecutor:
                 commit_details["failed_hooks"] = list(classification.failed_hooks)
             if classification.format_repair_files:
                 commit_details["format_repair_files"] = list(classification.format_repair_files)
-        # ``classification`` is parsed from the FIRST ``git commit`` output. For
-        # repair sub-steps (``ruff format`` crash, post-format ``git add``
-        # failure) it stays stale and would surface "Would reformat..." as the
-        # summary even though the real failure is elsewhere. Trust the
-        # classification summary only when this is a commit-stage failure with
-        # no override; otherwise prefer the actual failing sub-step output.
+        # ``classification`` holds the parsed output for the FAILING commit step:
+        # - for ``ruff format`` crashes and post-format ``git add`` failures it
+        #   is the FIRST ``git commit`` output (and stays stale — "Would
+        #   reformat..." — even though the real failure is elsewhere).
+        # - for retry-commit failures it is ``retry_classification`` (parsed from
+        #   the retry output), so ``failed_hooks`` / ``format_repair_files``
+        #   reflect the retry, not the initial commit.
+        # Trust the classification summary only when this is a commit-stage
+        # failure with no override; otherwise prefer the actual sub-step output.
         if (
             classification is not None
             and error.stage == "git commit"
