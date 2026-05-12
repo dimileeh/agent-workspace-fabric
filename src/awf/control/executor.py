@@ -5420,6 +5420,7 @@ class WorkspaceExecutor:
                 result=add_again,
                 classification=classification,
                 format_repair_attempted=True,
+                reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
             )
         retry_result = await run_commit()
         await self._repair_agent_git_ownership(

@@ -387,9 +387,15 @@ async def test_post_agent_commit_format_repair_re_stage_failure_emits_repair_eve
     assert repair_payload["retry_outcome"] == "error"
 
     event = await _failed_state_event(factory, ws_id)
+    # The terminal reason code MUST be the dedicated repair-failed code,
+    # not POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED — the re-stage step is
+    # part of the repair pipeline once ``format_repair_attempted=True``.
+    assert event.reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
     assert event.payload is not None
+    assert event.payload["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
     commit_details = event.payload["details"]["post_agent_commit"]
     assert commit_details["stage"] == "git add"
+    assert commit_details["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
     # ``format_repair_attempted`` agrees with the emitted event.
     assert commit_details["format_repair_attempted"] is True
 
