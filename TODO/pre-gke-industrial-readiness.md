@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-08
+Last updated: 2026-05-12
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -73,11 +73,10 @@ Status values:
 
 ### Active Slices
 
+No active slices currently recorded.
+
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P0 Reliability, Cleanup, And SLOs | Harden Postgres/asyncpg connection resilience for long-running local control planes | `ws_b9cdd9b1c3474951876ee21d` | Codex `gpt-5.5` / `xhigh` | running | First-wave independent P0 slice. Scope: SQLAlchemy/asyncpg liveness, bounded retry/invalidation in API and worker read paths, worker polling continuity, and service-health diagnostics without terminalizing unrelated workspaces. |
-| P0 Reliability, Cleanup, And SLOs | Stop and release terminal failed runtime resources without destroying salvage evidence | `ws_de86ae75f42943d1830f1b0c` | Codex `gpt-5.5` / `xhigh` | running | First-wave independent P0 slice. Scope: terminal failed/cancelled/completed runtime teardown, reservation release, readiness/orphan-resource distinction between retained evidence and leaked live resources, and salvage-preserving cleanup tests. |
-| P0 Operation And Recovery Truth | Add an AWF-owned conformance-to-validation handoff | `ws_c76512d8b0514eff9a3c8a38` | Codex `gpt-5.5` / `xhigh` | running | First-wave independent P0 slice. Scope: conformance gaps limited to missing/stale AWF validation evidence transition to validation, rerun conformance after persisted validation evidence, and keep real plan/API gaps routed to agent iteration. |
 
 ### Reschedule Required Slices
 
@@ -89,12 +88,15 @@ not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P1 Developer Experience And Public Core Surface | First-run troubleshooting guide by symptom | `ws_4f44c108a58f46d092f4e411` | branch `awf/ws_4f44c108a58f46d092f4e411`, no PR | reschedule_required | Attempt produced local docs commits, but final coverage hit `13` pytest/xdist errors despite 99.02% coverage; AWF then misclassified the terminal state as `STALE_ACTIVE_EXECUTION` after repeated asyncpg `connection is closed` worker failures. Do not count this slice as done; reschedule after DB connection resilience, active-execution adoption, and validation failure-causality fixes land. |
+| P1 Developer Experience And Public Core Surface | First-run troubleshooting guide by symptom | `ws_4f44c108a58f46d092f4e411` | branch `awf/ws_4f44c108a58f46d092f4e411`, no PR | reschedule_required | Attempt produced local docs commits, but final coverage hit `13` pytest/xdist errors despite 99.02% coverage; AWF then misclassified the terminal state as `STALE_ACTIVE_EXECUTION` after repeated asyncpg `connection is closed` worker failures. Do not count this slice as done; DB connection resilience and active-execution adoption have landed, but this should wait for validation failure-causality preservation before retry. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 Reliability, Cleanup, And SLOs | Stop and release terminal failed runtime resources without destroying salvage evidence | `ws_de86ae75f42943d1830f1b0c` | [#236](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/236) | merged | Codex `gpt-5.5`; completed 2026-05-12 and stops terminal failed/cancelled/completed runtime stacks while preserving logs, artifacts, worktree/branch salvage metadata, failure diagnostics, and readiness distinction between retained evidence and leaked live resources. |
+| P0 Reliability, Cleanup, And SLOs | Harden Postgres/asyncpg connection resilience for long-running local control planes | `ws_b9cdd9b1c3474951876ee21d` | [#227](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/227) | merged | Codex `gpt-5.5`; completed 2026-05-10 and adds SQLAlchemy/asyncpg liveness, bounded invalidation/retry behavior, worker polling continuity, and service-health diagnostics for closed DB connections. |
+| P0 Operation And Recovery Truth | Add an AWF-owned conformance-to-validation handoff | `ws_c76512d8b0514eff9a3c8a38` | [#225](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/225) | merged | Codex `gpt-5.5`; completed 2026-05-09 and routes missing/stale AWF validation evidence from conformance into AWF-owned validation/provenance, then reruns conformance while keeping real plan/API gaps routed to agent iteration. |
 | P1 Developer Experience And Public Core Surface | Document and demo existing PR monitor adoption | `ws_e332a1d013c54928863320f0` | [#214](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/214) | merged | Codex `gpt-5.5`; completed 2026-05-08 after rebase on PR #216 and review feedback. Adds the canonical PR monitor adoption runbook and REST/CLI/MCP docs/demo coverage aligned with terminal retry behavior. |
 | P0 Operation And Recovery Truth | PR adoption terminal idempotency hardening | `ws_e5b86a598da842e0aaf50d1f` | [#216](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/216) | merged | Codex `gpt-5.5`; completed 2026-05-08 and prevents terminal adoption rows from satisfying live PR monitor adoption idempotency. Follow-up [#222](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/222) covers fresh adoption after terminal monitors. |
 | P1 API Contract Completion | REST CLI MCP contract parity tests | `ws_3a9bb03983e343e28f462e3e` | [#218](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/218) | merged | Codex `gpt-5.5`; completed 2026-05-08 and extends executable REST/CLI/MCP contract parity across request/response fields, idempotency, auth/error shapes, and intentional partial surfaces. |
@@ -335,7 +337,7 @@ not listed here.
   root cause. Add tests for validation-failed -> stale scan,
   validation-failed -> cleanup failure, and validation-failed -> worker
   reconnect scenarios.
-- [ ] Add an AWF-owned conformance-to-validation handoff. Regression source:
+- [x] Add an AWF-owned conformance-to-validation handoff. Regression source:
   `ws_681eec29b3e44a0daa4a0264` was failed as
   `PLAN_CONFORMANCE_UNSATISFIED` even though conformance reported that the
   implementation appeared complete and only AWF-owned validation evidence was
@@ -347,7 +349,10 @@ not listed here.
   still go back to the agent. Add reason codes and tests for
   `CONFORMANCE_REQUIRES_AWF_VALIDATION`, validation success -> conformance
   success, validation failure -> validation recovery, and real plan gap ->
-  agent iteration.
+  agent iteration. Evidence: `ws_c76512d8b0514eff9a3c8a38` / PR
+  [#225](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/225)
+  completed 2026-05-09 with implementation and regression coverage for the
+  handoff path.
 
 ## P0: Planning Phase Scope Enforcement
 
@@ -374,7 +379,7 @@ not listed here.
 - [x] Make cleanup idempotent and safe after partial Docker failures.
 - [x] Add SLO-style API and console indicators for local AWF health.
 - [x] Keep local disk pressure and admission blocking actionable in service status.
-- [ ] Harden Postgres/asyncpg connection resilience for long-running local
+- [x] Harden Postgres/asyncpg connection resilience for long-running local
   control planes. Regression source: during the `ws_4f44c108a58f46d092f4e411`
   / `ws_681eec29b3e44a0daa4a0264` run, the worker and API repeatedly hit
   `InterfaceError: connection is closed`, while the API/worker containers had
@@ -386,8 +391,12 @@ not listed here.
   reported as service-health diagnostics without turning unrelated workspaces
   terminal. Add regression tests around worker `run_once`, scheduler reads,
   stale-active scans, and API list/detail calls after a simulated closed
-  connection.
-- [ ] Stop and release terminal failed runtime resources without destroying
+  connection. Evidence: `ws_b9cdd9b1c3474951876ee21d` / PR
+  [#227](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/227)
+  completed 2026-05-10 with `src/awf/db/resilience.py`, worker/API resilience
+  handling, health diagnostics, and regression tests for closed-connection
+  paths.
+- [x] Stop and release terminal failed runtime resources without destroying
   salvage evidence. Regression source: `ws_681eec29b3e44a0daa4a0264` reached
   terminal `failed` but its agent container and network remained running,
   leaving `/readyz` blocked by orphan terminal resources. Acceptance: when a
@@ -397,7 +406,12 @@ not listed here.
   failure diagnostics. `/readyz`, orphan-resource status, and cleanup dry-runs
   should explain retained evidence separately from leaked live resources. Add
   tests for conformance failure, validation failure, stale-active failure,
-  cleanup failure, and preserved-worktree salvage paths.
+  cleanup failure, and preserved-worktree salvage paths. Evidence:
+  `ws_de86ae75f42943d1830f1b0c` / PR
+  [#236](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/236)
+  completed 2026-05-12 with terminal runtime teardown, reservation release,
+  retained-evidence readiness behavior, and salvage-preserving regression
+  coverage.
 - [x] Keep readiness and service GC aligned with retained terminal worktree
   policy. Evidence: `ws_e9562a751e4c4cd599a66856` / PR
   [#213](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/213)
