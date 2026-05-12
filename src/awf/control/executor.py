@@ -2030,6 +2030,13 @@ class WorkspaceExecutor:
                                 if path in staged_set
                             ]
                             if repair_paths:
+                                # ``repair_paths`` come from pre-commit's
+                                # ``Would reformat:`` lines (worktree-relative).
+                                # The surrounding git steps use ``-C worktree_path``;
+                                # ``uv`` does not, so we must pin ``cwd`` or
+                                # ruff resolves the paths against the executor
+                                # process directory and the retry commit re-fails
+                                # on the same unformatted staged content.
                                 format_result = await self._runner.run(
                                     [
                                         "uv",
@@ -2042,6 +2049,7 @@ class WorkspaceExecutor:
                                         "format",
                                         *repair_paths,
                                     ],
+                                    cwd=str(worktree_path),
                                 )
                                 if not format_result.ok:
                                     raise _PostAgentCommitStepError(

@@ -216,10 +216,15 @@ async def test_post_agent_commit_format_only_failure_repairs_and_retries(
     assert payload["repaired_paths"] == ["src/foo.py"]
     assert payload["retry_outcome"] == "succeeded"
 
-    ruff_calls = [call.args for call in fake.calls if "ruff" in call.args and "format" in call.args]
+    ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
     assert ruff_calls, "expected a ruff format invocation"
-    assert "src/foo.py" in ruff_calls[0]
-    assert "--check" not in ruff_calls[0]
+    assert "src/foo.py" in ruff_calls[0].args
+    assert "--check" not in ruff_calls[0].args
+    # ``ruff format`` must run inside the workspace worktree — otherwise the
+    # worktree-relative paths from ``Would reformat:`` resolve against the
+    # executor's own cwd and the retry commit re-fails on the same files.
+    assert ruff_calls[0].cwd is not None
+    assert ruff_calls[0].cwd.endswith(ws_id)
 
     # Two git commit invocations: the initial failing attempt + the retry.
     commit_calls = [call for call in fake.calls if "commit" in call.args]
