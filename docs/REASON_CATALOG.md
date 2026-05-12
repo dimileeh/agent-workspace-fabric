@@ -208,8 +208,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 ### POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED
 **Problem:** The post-agent ``git commit`` was rejected because ``awf-ruff-format-check`` reported files would be reformatted, but AWF could not locate any agent-staged paths to repair (intersection with ``Would reformat:`` was empty).
 **Likely Cause:** The format check flagged files outside the agent's owned diff (e.g. legacy files reformatted by an unrelated change in the worktree), so AWF refused to silently mutate them.
-**Operator Fix:** Run ``uv run --python 3.12 --extra dev ruff format .`` locally on the flagged paths, commit, and remonitor; or scope the format hook to the agent's diff in ``.pre-commit-config.yaml``.
-**Related Command:** `uv run --python 3.12 --extra dev ruff format .`
+**Operator Fix:** Run ``uv run --python 3.12 --extra dev ruff format <flagged_path_1> <flagged_path_2> ...`` locally on the flagged paths, commit, and remonitor; or scope the format hook to the agent's diff in ``.pre-commit-config.yaml``.
+**Related Command:** `uv run --python 3.12 --extra dev ruff format <flagged_paths...>`
 **Docs Link:** [docs/REASON_CATALOG.md#post_agent_commit_format_rewrite_needed](#post_agent_commit_format_rewrite_needed)
 
 ### POST_AGENT_COMMIT_PRECOMMIT_FAILED
