@@ -928,3 +928,31 @@ class TestArtifactService:
         monkeypatch.setattr(Path, "resolve", resolve_candidate)
 
         assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_deleted_between_stat_and_open_raises_artifact_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "report.txt"
+        report.write_text("report\n", encoding="utf-8")
+        report_resolved = report.resolve()
+        original_open = Path.open
+
+        def open_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self.resolve() == report_resolved:
+                raise FileNotFoundError(str(self))
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", open_candidate)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="report.txt",
+                limit_bytes=1024,
+            )
