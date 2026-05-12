@@ -2741,3 +2741,39 @@ class TestReadWorkspaceArtifact:
         decoded = base64.b64decode(result["content"])
         assert decoded == payload
         assert result["size_bytes"] == len(payload)
+
+    @pytest.mark.unit
+    async def test_json_artifact_is_redacted(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "test-secret-token-abc"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact JSON redact",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = b'{"token": "' + secret.encode() + b'"}'
+        (artifact_dir / "config.json").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": "config.json", "limit_bytes": 1024},
+        )
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b'{"token": "<redacted>"}'
+        assert result["size_bytes"] == len(decoded)
+        assert result["content_type"] == "application/json"

@@ -811,10 +811,16 @@ def build_mcp_server(
             )
         # Redact known secrets from raw artifact bytes before base64-encoding,
         # so secrets cannot leak past the MCP safety boundary inside the
-        # encoded content field.  Only apply text redaction to text/* MIME
-        # types; binary artifacts cannot meaningfully contain secret strings
-        # and a byte-level replacement would silently corrupt them.
-        if content_type.startswith("text/"):
+        # encoded content field.  Apply text redaction to text/* MIME types
+        # and to other common textual types (e.g. application/json) that may
+        # embed secrets; binary artifacts cannot meaningfully contain secret
+        # strings and a byte-level replacement would silently corrupt them.
+        base_type = content_type.split(";")[0].strip().lower()
+        if content_type.startswith("text/") or base_type in {
+            "application/json",
+            "application/xml",
+            "application/javascript",
+        }:
             text = content.decode("latin-1")
             _service_settings = service_config.resolve_service_settings(settings_value)
             redacted_text = _redact_sensitive_text(
