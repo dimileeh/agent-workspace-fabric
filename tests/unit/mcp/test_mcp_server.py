@@ -2582,7 +2582,7 @@ class TestReadWorkspaceArtifact:
         artifact_dir.mkdir(parents=True)
         (artifact_dir / "small.bin").write_bytes(b"x")
 
-        with pytest.raises((ToolError, Exception)):
+        with pytest.raises(ToolError):
             await mcp.call_tool(
                 "awf_read_workspace_artifact",
                 {"workspace_id": workspace.id, "path": "small.bin", "limit_bytes": 2_000_000},
