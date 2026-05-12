@@ -45,7 +45,11 @@ from awf.control.executor import (
     WorkspaceExecutor,
 )
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
+from awf.db.repositories import (
+    PolicyFindingRepository,
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.runtime.pr_creator import PullRequestCreator
 from tests.postgres import postgres_test_engine
@@ -706,6 +710,71 @@ async def test_post_agent_commit_semantic_agent_repair_protected_gate_change_is_
     assert details["stage"] == "post-agent pre-commit repair policy"
     assert details["repair_strategy"] == "agent"
     assert "protected quality-gate" in details["summary"]
+
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_supply_chain_change_is_blocked(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(
+        factory,
+        owned_paths=["src/awf/**"],
+        resolved_profile={
+            "name": "semantic-repair-supply-chain-block",
+            "security": {
+                "supply_chain": {
+                    "unpinned_dependency_installs": {"mode": "block"},
+                    "lockfile_changes_outside_owned_paths": {"mode": "block"},
+                }
+            },
+        },
+    )
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/awf/mcp.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("src/awf/mcp.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(
+        returncode=0,
+        stdout="$ npm install left-pad\n",
+    )  # targeted repair adds supply-chain evidence
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(
+        returncode=0,
+        stdout="src/awf/mcp.py\npackage-lock.json\n",
+    )  # repair changed dependency files
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == "SUPPLY_CHAIN_POLICY_BLOCKED"
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["stage"] == "post-agent pre-commit repair policy"
+    assert details["repair_strategy"] == "agent"
+    assert "Supply-chain policy blocked workspace output" in details["summary"]
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        findings = await PolicyFindingRepository(s).list_active_for_workspace(ws_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    assert ws.failure_reason == "policy_failure"
+    assert {finding.reason_code for finding in findings} == {
+        "SUPPLY_CHAIN_UNPINNED_DEPENDENCY_INSTALL",
+        "SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS",
+    }
+    assert all(finding.severity == "blocking" for finding in findings)
 
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 1

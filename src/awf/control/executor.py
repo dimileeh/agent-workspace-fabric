@@ -350,7 +350,8 @@ class _PostAgentCommitStepError(RuntimeError):
     only classify commit output). ``reason_code_override`` lets the
     format-repair path surface a distinct code (e.g. when
     ``ruff format`` itself crashed) without mutating the parsed
-    classification.
+    classification. ``failure_reason_override`` lets policy gates retain
+    their terminal failure class when they run inside the repair helper.
     """
 
     def __init__(
@@ -363,6 +364,7 @@ class _PostAgentCommitStepError(RuntimeError):
         precommit_repair_attempted: bool = False,
         repair_strategy: str | None = None,
         reason_code_override: str | None = None,
+        failure_reason_override: FailureReason | None = None,
     ) -> None:
         self.stage = stage
         self.result = result
@@ -371,6 +373,7 @@ class _PostAgentCommitStepError(RuntimeError):
         self.precommit_repair_attempted = precommit_repair_attempted
         self.repair_strategy = repair_strategy
         self.reason_code_override = reason_code_override
+        self.failure_reason_override = failure_reason_override
         output = (result.stderr or result.stdout or "").strip()
         super().__init__(f"post-agent {stage} failed (exit={result.returncode}): {output}")
 
@@ -2121,6 +2124,7 @@ class WorkspaceExecutor:
                                 model=default_model,
                                 allow_agent_repair=agent_run_failure_reason is None,
                                 ws=ws,
+                                command_evidence=agent_command_evidence,
                             )
                         else:
                             raise _PostAgentCommitStepError(
@@ -5409,6 +5413,7 @@ class WorkspaceExecutor:
         model: str | None,
         allow_agent_repair: bool,
         ws: Workspace,
+        command_evidence: list[str],
     ) -> None:
         """Repair a failed post-agent pre-commit run and retry the commit once."""
         if classification.repair_strategy == "deterministic":
@@ -5437,6 +5442,7 @@ class WorkspaceExecutor:
                 compose_file=compose_file,
                 model=model,
                 ws=ws,
+                command_evidence=command_evidence,
             )
             return
 
@@ -5605,6 +5611,7 @@ class WorkspaceExecutor:
         compose_file: Path,
         model: str | None,
         ws: Workspace,
+        command_evidence: list[str],
     ) -> None:
         del commit_result
         prompt = _build_post_agent_precommit_repair_prompt(
@@ -5612,7 +5619,7 @@ class WorkspaceExecutor:
             staged_paths=staged_paths,
         )
         try:
-            await adapter.run(
+            repair_result = await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 prompt=prompt,
@@ -5620,7 +5627,17 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 log_source="post_agent_precommit_repair",
             )
+            append_command_evidence(
+                command_evidence,
+                stdout=repair_result.stdout,
+                stderr=repair_result.stderr,
+            )
         except AgentRunError as exc:
+            append_command_evidence(
+                command_evidence,
+                stdout=exc.result.stdout,
+                stderr=exc.result.stderr,
+            )
             await self._record_post_agent_commit_format_repair(
                 workspace_id=workspace_id,
                 repaired_paths=[],
@@ -5668,6 +5685,36 @@ class WorkspaceExecutor:
 
         cached = await git_in_worktree(["diff", "--cached", "--name-only"])
         repair_staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
+        supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
+            workspace_id=workspace_id,
+            command_evidence=command_evidence,
+            changed_paths=repair_staged_paths,
+        )
+        if supply_chain_result.policy_blocked:
+            result = CommandResult(
+                returncode=1,
+                stdout="",
+                stderr=_supply_chain_block_message(supply_chain_result.findings),
+            )
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=[],
+                restaged_paths=repair_staged_paths,
+                formatter_paths=classification.format_repair_files,
+                failed_hooks=classification.failed_hooks,
+                repair_strategy="agent",
+                retry_outcome="error",
+                reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
+            )
+            raise _PostAgentCommitStepError(
+                stage="post-agent pre-commit repair policy",
+                result=result,
+                classification=classification,
+                precommit_repair_attempted=True,
+                repair_strategy="agent",
+                reason_code_override="SUPPLY_CHAIN_POLICY_BLOCKED",
+                failure_reason_override=FailureReason.policy_failure,
+            )
         violations = find_protected_quality_gate_changes(
             changed_paths=repair_staged_paths,
             owned_paths=list(ws.owned_paths),
@@ -5695,6 +5742,7 @@ class WorkspaceExecutor:
                 precommit_repair_attempted=True,
                 repair_strategy="agent",
                 reason_code_override="QUALITY_GATE_POLICY_CHANGED",
+                failure_reason_override=FailureReason.policy_failure,
             )
 
         retry_result = await run_commit()
@@ -5847,6 +5895,7 @@ class WorkspaceExecutor:
             returncode=error.result.returncode,
             format_repair_attempted=error.format_repair_attempted,
         )
+        failure_reason = error.failure_reason_override or FailureReason.infrastructure_failure
         base_message = f"post-agent {error.stage} failed (exit={error.result.returncode})"
         summary_text = commit_details.get("summary")
         if summary_text:
@@ -5854,7 +5903,7 @@ class WorkspaceExecutor:
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
-            failure_reason=FailureReason.infrastructure_failure,
+            failure_reason=failure_reason,
             message=base_message[:2000],
             reason_code=commit_reason_code,
             details={"post_agent_commit": commit_details},
