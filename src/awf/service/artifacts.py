@@ -278,10 +278,10 @@ def get_workspace_artifact_content(
         ) from exc
     if len(content) > limit_bytes:
         raise ArtifactOversizedError(
-            f"artifact read {len(content)} bytes exceeds limit {limit_bytes}",
+            f"artifact grew during read and exceeds limit {limit_bytes}",
             detail={
                 "limit_bytes": limit_bytes,
-                "actual_bytes": len(content),
+                "actual_bytes": artifact.size_bytes,
             },
         )
     return (artifact.name, artifact.content_type, len(content), content)
