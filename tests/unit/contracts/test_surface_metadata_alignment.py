@@ -26,7 +26,6 @@ FORBIDDEN_MCP_TOOL_PREFIXES = (
     "awf_list_files",
     "awf_read_secret",
     "awf_list_secret",
-    "awf_read_workspace_artifact",
     "awf_download_workspace_artifact",
 )
 
@@ -39,7 +38,6 @@ FORBIDDEN_MCP_INPUTS = {
     "container_id",
     "docker_command",
     "host_path",
-    "path",
     "secret_name",
     "shell",
     "token",
