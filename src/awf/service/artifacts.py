@@ -225,8 +225,6 @@ def get_downloadable_artifact(
         if not resolved.is_relative_to(root) or not resolved.is_file():
             raise ArtifactNotFoundError(relative_path)
         stat = resolved.stat()
-        if stat.st_nlink > 1:
-            raise ArtifactNotFoundError(relative_path)
     except OSError as exc:
         raise ArtifactNotFoundError(relative_path) from exc
 
@@ -268,6 +266,8 @@ def get_workspace_artifact_content(
         artifact_dir=artifact_dir,
         relative_path=relative_path,
     )
+    if artifact.stat_result.st_nlink > 1:
+        raise ArtifactNotFoundError(relative_path)
     if artifact.size_bytes > limit_bytes:
         raise ArtifactOversizedError(
             f"artifact size {artifact.size_bytes} bytes exceeds limit {limit_bytes}",

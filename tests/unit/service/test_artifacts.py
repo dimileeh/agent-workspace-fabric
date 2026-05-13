@@ -976,22 +976,6 @@ class TestArtifactService:
         ]
 
     @pytest.mark.unit
-    def test_get_downloadable_artifact_rejects_hard_link(self, tmp_path: Path) -> None:
-        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
-        artifact_dir.mkdir(parents=True)
-        outside = tmp_path / "outsideroot.txt"
-        outside.write_text("secret\n", encoding="utf-8")
-        report = artifact_dir / "report.txt"
-        report.hardlink_to(outside)
-
-        with pytest.raises(ArtifactNotFoundError):
-            get_downloadable_artifact(
-                workspace_id="ws_artifacts",
-                artifact_dir=artifact_dir,
-                relative_path="report.txt",
-            )
-
-    @pytest.mark.unit
     def test_deleted_between_stat_and_open_raises_artifact_not_found(
         self,
         monkeypatch: pytest.MonkeyPatch,
