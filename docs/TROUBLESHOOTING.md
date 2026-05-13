@@ -228,7 +228,13 @@ export GH_TOKEN="$(gh auth token)"
 export GITHUB_TOKEN="$(gh auth token)"
 ```
 
-3. Confirm service status and workspace operations recover after token update.
+3. Recreate service containers so the refreshed token is injected:
+
+```bash
+awf service bootstrap
+```
+
+4. Confirm service status and workspace operations recover after token update.
 
 ```bash
 awf service status --format pretty
