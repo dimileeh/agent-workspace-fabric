@@ -53,6 +53,12 @@ from awf.db.session import session_scope
 from awf.node.cleanup import WorkspaceCleanupResult
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.service.failure_causality import (
+    attach_primary_failure,
+    build_preserved_failure_payload,
+    load_primary_failure_snapshot,
+    primary_failure_reason_code,
+)
 from awf.service.provider_recovery import (
     provider_cooldown_not_before,
     provider_for_agent_model,
@@ -1193,11 +1199,13 @@ class ControlWorker:
                 session, candidate.workspace_id
             ):
                 return "duplicate"
+            primary_failure = await load_primary_failure_snapshot(session, ws)
+            event_payload = attach_primary_failure(payload, primary_failure)
             await repo.add_event(
                 ws,
                 event_type=_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
                 reason_code=_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
-                payload=payload,
+                payload=event_payload,
             )
             return "recorded"
 
@@ -1504,11 +1512,13 @@ class ControlWorker:
             ):
                 return False
 
+            primary_failure = await load_primary_failure_snapshot(session, ws)
+            event_payload = attach_primary_failure(payload, primary_failure)
             await repo.add_event(
                 ws,
                 event_type=_STALE_ACTIVE_EXECUTION_EVENT_TYPE,
                 reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
-                payload=payload,
+                payload=event_payload,
             )
             await session.commit()
 
@@ -1590,6 +1600,8 @@ class ControlWorker:
                 previous_claim=previous_claim,
                 claim_cleanup=claim_cleanup,
             )
+            primary_failure = await load_primary_failure_snapshot(session, ws)
+            payload = attach_primary_failure(payload, primary_failure)
             operation = await OperationRepository(session).create(
                 workspace_id=candidate.workspace_id,
                 operation_type=OperationType.refresh,
@@ -1892,11 +1904,13 @@ class ControlWorker:
                 return
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return
+            primary_failure = await load_primary_failure_snapshot(session, ws)
+            event_payload = attach_primary_failure(payload, primary_failure)
             await repo.add_event(
                 ws,
                 event_type=_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_EVENT_TYPE,
                 reason_code=_STALE_ACTIVE_EXECUTION_CLEANUP_FAILED_REASON_CODE,
-                payload=payload,
+                payload=event_payload,
             )
             await session.commit()
 
@@ -1917,19 +1931,40 @@ class ControlWorker:
         message = _stale_active_execution_failure_message(candidate, snapshot)
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.transition_if_current(
-                candidate.workspace_id,
-                from_status=candidate.status,
-                to=WorkspaceStatus.failed,
-                reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
-                extra_conditions=(_stale_execution_claim_filter(datetime.now(UTC)),),
-            )
-            if ws is None:
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
                 return
+            if not _execution_claim_is_stale(ws, datetime.now(UTC)):
+                return
+            primary_failure = await load_primary_failure_snapshot(session, ws)
+            secondary_failure = _secondary_stale_active_execution_payload(
+                candidate,
+                snapshot,
+                message=message,
+            )
+            reason_code = primary_failure_reason_code(
+                primary_failure,
+                fallback=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+            )
+            transition_payload = (
+                build_preserved_failure_payload(
+                    primary_failure,
+                    secondary_failure=secondary_failure,
+                )
+                if primary_failure is not None
+                else None
+            )
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.failed,
+                reason_code=reason_code,
+                payload=transition_payload,
+            )
             ws.execution_claimed_by = None
             ws.execution_claim_expires_at = None
-            ws.failure_reason = FailureReason.infrastructure_failure.value
-            ws.failure_message = message[:2048]
+            if primary_failure is None:
+                ws.failure_reason = FailureReason.infrastructure_failure.value
+                ws.failure_message = message[:2048]
             await session.commit()
 
         _log.error(
@@ -1951,26 +1986,52 @@ class ControlWorker:
         message = _runtime_stranding_failure_message(candidate, finding)
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.transition_if_current(
-                candidate.workspace_id,
-                from_status=candidate.status,
-                to=WorkspaceStatus.failed,
-                reason_code=finding.reason_code,
-                extra_conditions=_claim_recheck_conditions(candidate.status),
-            )
-            if ws is None:
+            ws = await repo.get_for_update(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
                 return
+            if not _workspace_claim_recheck_passes(ws, candidate.status, datetime.now(UTC)):
+                return
+            primary_failure = await load_primary_failure_snapshot(session, ws)
+            secondary_failure = _secondary_runtime_stranding_payload(
+                candidate,
+                snapshot,
+                finding,
+                message=message,
+            )
+            reason_code = primary_failure_reason_code(
+                primary_failure,
+                fallback=finding.reason_code,
+            )
+            transition_payload = (
+                build_preserved_failure_payload(
+                    primary_failure,
+                    secondary_failure=secondary_failure,
+                )
+                if primary_failure is not None
+                else None
+            )
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.failed,
+                reason_code=reason_code,
+                payload=transition_payload,
+            )
             ws.execution_claimed_by = None
             ws.execution_claim_expires_at = None
             ws.monitor_claimed_by = None
             ws.monitor_claim_expires_at = None
-            ws.failure_reason = FailureReason.infrastructure_failure.value
-            ws.failure_message = message[:2048]
+            if primary_failure is None:
+                ws.failure_reason = FailureReason.infrastructure_failure.value
+                ws.failure_message = message[:2048]
+            event_payload = attach_primary_failure(
+                _runtime_stranding_event_payload(candidate, snapshot, finding),
+                primary_failure,
+            )
             await repo.add_event(
                 ws,
                 event_type=RUNTIME_STRANDED_EVENT_TYPE,
                 reason_code=finding.reason_code,
-                payload=_runtime_stranding_event_payload(candidate, snapshot, finding),
+                payload=event_payload,
             )
             await session.commit()
 
@@ -2703,6 +2764,18 @@ def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:
     return ()
 
 
+def _workspace_claim_recheck_passes(
+    workspace: Workspace,
+    status: WorkspaceStatus,
+    claim_cutoff: datetime,
+) -> bool:
+    if status in _ACTIVE_EXECUTION_STATUSES:
+        return _execution_claim_is_stale(workspace, claim_cutoff)
+    if status == WorkspaceStatus.monitoring_pr:
+        return _monitor_claim_is_stale(workspace, claim_cutoff)
+    return True
+
+
 def _execution_claim_is_stale(workspace: Workspace, claim_cutoff: datetime) -> bool:
     if workspace.execution_claimed_by is None or workspace.execution_claim_expires_at is None:
         return True
@@ -2968,6 +3041,19 @@ def _runtime_stranding_event_payload(
     }
 
 
+def _secondary_runtime_stranding_payload(
+    candidate: _ActiveExecutionCandidate,
+    snapshot: RuntimeSnapshot,
+    finding: WorkspaceRuntimeFinding,
+    *,
+    message: str,
+) -> dict[str, Any]:
+    payload = _runtime_stranding_event_payload(candidate, snapshot, finding)
+    payload["failure_reason"] = FailureReason.infrastructure_failure.value
+    payload["message"] = message
+    return payload
+
+
 def _runtime_stranding_failure_message(
     candidate: _ActiveExecutionCandidate,
     finding: WorkspaceRuntimeFinding,
@@ -2981,6 +3067,22 @@ def _runtime_stranding_failure_message(
         "preserved for inspection. Inspect the workspace, then retry or redispatch the "
         "task when ready."
     )
+
+
+def _secondary_stale_active_execution_payload(
+    candidate: _ActiveExecutionCandidate,
+    snapshot: RuntimeSnapshot,
+    *,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": _STALE_ACTIVE_EXECUTION_REASON_CODE,
+        "message": message,
+        "compose_project_name": candidate.compose_project_name,
+        "workspace_status": candidate.status.value,
+        "runtime": _runtime_snapshot_payload(snapshot),
+    }
 
 
 def _stale_active_execution_failure_message(

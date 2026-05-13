@@ -34,6 +34,10 @@ from awf.node.cleanup import (
 )
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
+from awf.service.failure_causality import (
+    build_preserved_failure_payload,
+    load_primary_failure_snapshot,
+)
 from awf.service.secret_leases import (
     TERMINAL_CLEANUP_REVOKE_REASON,
     SecretLeaseService,
@@ -1068,21 +1072,46 @@ class WorkspaceControlService:
         if not cleanup_result.ok:
             cleanup_message = _cleanup_failure_message(cleanup_result)
             bounded_cleanup_message = _bounded_operation_error_message(cleanup_message)
-            workspace.failure_reason = "cleanup_failure"
-            workspace.failure_message = bounded_cleanup_message
+            primary_failure = await load_primary_failure_snapshot(self._session, workspace)
+            secondary_failure = {
+                "failure_reason": "cleanup_failure",
+                "reason_code": "CLEANUP_FAILED",
+                "message": bounded_cleanup_message,
+                "cleanup": cleanup_payload,
+            }
+            failed_transition_payload = (
+                build_preserved_failure_payload(
+                    primary_failure,
+                    secondary_failure=secondary_failure,
+                    extra=cleanup_event_payload,
+                )
+                if primary_failure is not None
+                else cleanup_event_payload
+            )
+            if primary_failure is None:
+                workspace.failure_reason = "cleanup_failure"
+                workspace.failure_message = bounded_cleanup_message
             if WorkspaceStateMachine.can_transition(
                 WorkspaceStatus(workspace.status), WorkspaceStatus.failed
             ):
                 await repo.transition(
                     workspace,
                     to=WorkspaceStatus.failed,
-                    reason_code="CLEANUP_FAILED",
-                    payload=cleanup_event_payload,
+                    reason_code=(
+                        str(primary_failure.get("reason_code"))
+                        if primary_failure is not None and primary_failure.get("reason_code")
+                        else "CLEANUP_FAILED"
+                    ),
+                    payload=failed_transition_payload,
                 )
-            operation_result = _with_secret_lease_result(
-                {"status": workspace.status, "cleanup": cleanup_payload},
-                secret_lease_summary,
-            )
+            result_payload: dict[str, Any] = {
+                "status": workspace.status,
+                "cleanup": cleanup_payload,
+            }
+            if primary_failure is not None:
+                result_payload["primary_failure"] = primary_failure
+                result_payload["secondary_failure"] = secondary_failure
+            operation_result = _with_secret_lease_result(result_payload, secret_lease_summary)
             await operations.finish(
                 operation,
                 status=OperationStatus.failed,
@@ -1090,13 +1119,14 @@ class WorkspaceControlService:
                 error_message=bounded_cleanup_message,
                 result=operation_result,
             )
-            audit_evidence = _with_secret_lease_evidence(
-                {
-                    "cleanup": cleanup_payload,
-                    "error_message": bounded_cleanup_message,
-                },
-                secret_lease_summary,
-            )
+            audit_payload: dict[str, Any] = {
+                "cleanup": cleanup_payload,
+                "error_message": bounded_cleanup_message,
+            }
+            if primary_failure is not None:
+                audit_payload["primary_failure"] = primary_failure
+                audit_payload["secondary_failure"] = secondary_failure
+            audit_evidence = _with_secret_lease_evidence(audit_payload, secret_lease_summary)
             await _add_control_audit_event(
                 repo,
                 workspace,
