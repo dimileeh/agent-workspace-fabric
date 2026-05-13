@@ -2671,6 +2671,42 @@ class TestReadWorkspaceArtifact:
         assert result["size_bytes"] == len(decoded)
 
     @pytest.mark.unit
+    async def test_read_workspace_artifact_does_not_redact_base64_content(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Secrets that happen to appear in the base64 encoding must not corrupt content."""
+        secret = "SGVs"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact base64 redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = b"Hello world"
+        (artifact_dir / "hello.txt").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": "hello.txt", "limit_bytes": 1024},
+        )
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == payload
+        assert result["size_bytes"] == len(payload)
+
+    @pytest.mark.unit
     async def test_utf16le_artifact_is_blocked(
         self,
         factory: async_sessionmaker[AsyncSession],

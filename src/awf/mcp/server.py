@@ -884,7 +884,11 @@ def build_mcp_server(
             size_bytes=len(content),
             content=base64.b64encode(content).decode("ascii"),
         )
-        return _safe_result(response.model_dump(mode="json"))
+        payload = response.model_dump(mode="json")
+        encoded_content = payload.pop("content")
+        redacted_payload = _redact_sensitive_payload(payload, settings_value)
+        redacted_payload["content"] = encoded_content
+        return _tool_result(redacted_payload)
 
     @mcp.tool(name="awf_get_failure_analysis_summary")
     async def awf_get_failure_analysis_summary(
