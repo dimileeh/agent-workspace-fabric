@@ -2857,7 +2857,7 @@ class TestReadWorkspaceArtifact:
         assert decoded == b"prefix <redacted> suffix"
 
     @pytest.mark.unit
-    async def test_octet_stream_with_null_bytes_passes_through(
+    async def test_octet_stream_with_null_bytes_and_secret_is_blocked(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
@@ -2878,7 +2878,9 @@ class TestReadWorkspaceArtifact:
             await session.commit()
         artifact_dir = tmp_path / "artifacts" / workspace.id
         artifact_dir.mkdir(parents=True)
-        payload = b"\x00\xff\x01\x02\x03\x04"
+        # Include a null byte + the secret: confirms binary path blocks the artifact
+        # rather than silently passing it through as text-redacted content.
+        payload = b"\x00" + secret.encode() + b"\x00\xff\x01\x02\x03\x04"
         (artifact_dir / "clean.bin").write_bytes(payload)
 
         result = await _call(
@@ -2887,9 +2889,7 @@ class TestReadWorkspaceArtifact:
             {"workspace_id": workspace.id, "relative_path": "clean.bin", "limit_bytes": 1024},
         )
         assert isinstance(result, dict)
-        decoded = base64.b64decode(result["content"])
-        assert decoded == payload
-        assert result["size_bytes"] == len(payload)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"
 
     @pytest.mark.unit
     async def test_binary_artifact_containing_provider_token_pattern_is_blocked(
