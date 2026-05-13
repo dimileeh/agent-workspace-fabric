@@ -360,11 +360,19 @@ awf workspace log <workspace_id> agent.stdout
 
 Service-level logs:
 
-- `awf service logs`
+- `awf service logs` (run from an AWF source checkout)
 - `awf service logs --service api`
 - `awf service logs --service worker`
 - `awf service logs --service migrate`
 - `awf service logs --service postgres`
+
+If you installed `awf` outside the source tree, inspect those containers directly:
+
+```bash
+export AWF_LOCAL_SERVICE_PROJECT="awf-local-service"
+docker ps --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --format "{{.Names}}"
+docker logs -f $(docker ps --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --format "{{.ID}}" | head -n 1)
+```
 
 Workspace-level logs:
 

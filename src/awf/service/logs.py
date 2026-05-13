@@ -14,6 +14,28 @@ LOCAL_SERVICE_COMPOSE_FILE = Path("docker/compose/local-service.yml")
 DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
 _FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
+_LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
+
+
+def _resolve_local_service_compose_file(compose_file: Path) -> Path:
+    if compose_file != LOCAL_SERVICE_COMPOSE_FILE:
+        return compose_file
+    if compose_file.exists():
+        return compose_file
+    for root in (Path.cwd(), *Path.cwd().parents):
+        candidate = root / compose_file
+        if candidate.exists():
+            return candidate
+    return compose_file
+
+
+def _local_service_compose_not_found_message(compose_file: Path) -> str:
+    return (
+        f"Cannot resolve service compose file '{compose_file}'. "
+        "Run awf service logs from an AWF source checkout (where "
+        f"'{compose_file}' exists) or use container-level Docker logs for that project "
+        f"({_LOCAL_SERVICE_PROJECT_NAME}) when running an installed package."
+    )
 
 
 class ServiceLogName(StrEnum):
@@ -93,6 +115,11 @@ def run_service_logs(
 
     runner = run_subprocess or _run_subprocess
     capture_output = not follow
+    compose_file = _resolve_local_service_compose_file(compose_file)
+    if compose_file == LOCAL_SERVICE_COMPOSE_FILE and not compose_file.exists():
+        raise ServiceLogsError(
+            returncode=1, detail=_local_service_compose_not_found_message(compose_file)
+        )
     try:
         result = runner(
             service_logs_command(

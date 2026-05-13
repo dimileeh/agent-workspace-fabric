@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from awf.service.logs import (
+    DEFAULT_LOG_TAIL,
     ServiceLogName,
     ServiceLogsError,
     _run_subprocess,
@@ -203,3 +204,48 @@ def test_service_logs_default_subprocess_runner_executes_command() -> None:
     assert result.returncode == 0
     assert result.stdout is not None
     assert result.stdout.strip() == "logs-ok"
+
+
+@pytest.mark.unit
+def test_service_logs_finds_default_compose_file_from_parent_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}")
+    nested_dir = tmp_path / "nested" / "project"
+    nested_dir.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(nested_dir)
+    run_service_logs(services=[ServiceLogName.api], run_subprocess=_run)
+
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(compose_file),
+            "logs",
+            "--tail",
+            str(DEFAULT_LOG_TAIL),
+            "api",
+        ]
+    ]
+
+
+@pytest.mark.unit
+def test_service_logs_default_file_missing_returns_scoped_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ServiceLogsError) as exc_info:
+        run_service_logs(services=[ServiceLogName.api])
+
+    assert exc_info.value.returncode == 1
+    assert "Run awf service logs from an AWF source checkout" in exc_info.value.detail
