@@ -3102,6 +3102,77 @@ class TestReadWorkspaceArtifact:
         assert result["content_type"] == "application/json"
 
     @pytest.mark.unit
+    async def test_metadata_fields_are_redacted_when_filename_contains_secret(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "ghp_testsecret12345678"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact filename secret",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        relative_path = f"config/{secret}.json"
+        (artifact_dir / "config").mkdir(parents=True)
+        payload = b'{"ok": true}'
+        (artifact_dir / relative_path).write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": relative_path, "limit_bytes": 1024},
+        )
+        assert isinstance(result, dict)
+        assert result["name"] == "<redacted>.json"
+        assert result["relative_path"] == "config/<redacted>.json"
+        assert base64.b64decode(result["content"]) == payload
+
+    @pytest.mark.unit
+    async def test_not_found_error_redacts_secret_in_path(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "sk-proj-testsecret12345678"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact missing secret path",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+
+        result = await mcp.call_tool(
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": f"{secret}.txt"},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "NOT_FOUND"
+        assert secret not in result.structuredContent["message"]
+        assert "<redacted>" in result.structuredContent["message"]
+
+    @pytest.mark.unit
     async def test_text_plain_with_null_bytes_and_secret_is_blocked(
         self,
         factory: async_sessionmaker[AsyncSession],

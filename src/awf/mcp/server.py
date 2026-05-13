@@ -796,6 +796,7 @@ def build_mcp_server(
             if not await WorkspaceRepository(session).exists(workspace_id):
                 return _error_result("NOT_FOUND", f"No workspace with id {workspace_id}")
         artifact_dir = workspace_artifact_dir(settings_value.work_dir, workspace_id)
+        _service_settings = service_config.resolve_service_settings(settings_value)
         try:
             name, content_type, _size_bytes, content = await asyncio.to_thread(
                 get_workspace_artifact_content,
@@ -805,12 +806,30 @@ def build_mcp_server(
                 limit_bytes=limit_bytes,
             )
         except ArtifactPathError as exc:
-            return _error_result("INVALID_ARTIFACT_PATH", str(exc))
+            return _error_result(
+                "INVALID_ARTIFACT_PATH",
+                _redact_sensitive_text(
+                    str(exc), settings_value, service_settings=_service_settings
+                ),
+            )
         except ArtifactNotFoundError:
-            return _error_result("NOT_FOUND", f"No artifact at path {relative_path}")
+            return _error_result(
+                "NOT_FOUND",
+                _redact_sensitive_text(
+                    f"No artifact at path {relative_path}",
+                    settings_value,
+                    service_settings=_service_settings,
+                ),
+            )
         except ArtifactOversizedError as exc:
             return _error_result(
-                error_code="ARTIFACT_OVERSIZED", message=str(exc), detail=exc.detail
+                error_code="ARTIFACT_OVERSIZED",
+                message=_redact_sensitive_text(
+                    str(exc),
+                    settings_value,
+                    service_settings=_service_settings,
+                ),
+                detail=exc.detail,
             )
         # Redact known secrets from raw artifact bytes before base64-encoding,
         # so secrets cannot leak past the MCP safety boundary inside the
@@ -846,7 +865,6 @@ def build_mcp_server(
             "application/vnd.sqlite3",
         }
         is_likely_text = not is_likely_binary_type and b"\x00" not in content
-        _service_settings = service_config.resolve_service_settings(settings_value)
         content, error_result = await asyncio.to_thread(
             _check_and_redact_artifact_content,
             content,
@@ -866,7 +884,7 @@ def build_mcp_server(
             size_bytes=len(content),
             content=base64.b64encode(content).decode("ascii"),
         )
-        return _tool_result(response.model_dump(mode="json"))
+        return _safe_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_failure_analysis_summary")
     async def awf_get_failure_analysis_summary(
