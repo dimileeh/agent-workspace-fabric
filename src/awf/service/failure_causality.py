@@ -33,9 +33,9 @@ async def load_primary_failure_snapshot(
     event_payload = _mapping(latest_failed_event.payload if latest_failed_event else None)
     embedded_primary = _mapping(event_payload.get(PRIMARY_FAILURE_KEY) if event_payload else None)
 
-    has_workspace_evidence = bool(
-        workspace.failure_reason or workspace.failure_message or embedded_primary
-    )
+    # Embedded primary payloads can outlive a resumed workspace after its live
+    # failure fields are cleared, so they may enrich but not bootstrap evidence.
+    has_workspace_evidence = bool(workspace.failure_reason or workspace.failure_message)
     has_validation_evidence = (
         latest_validation_run is not None
         and workspace.failure_reason == FailureReason.validation_failure.value
