@@ -1853,7 +1853,10 @@ def _contains_secret_bytes(
             and value.encode() in content
         ):
             return True
-    return False
+    # Also block binary artifacts that contain recognizable provider token
+    # patterns (e.g. ghp_..., github_pat_..., sk-proj-...) even when the
+    # exact value is not present in current settings or environment.
+    return provider_readiness_service._TOKEN_RE.search(content.decode("latin-1")) is not None
 
 
 def _redact_sensitive_text(

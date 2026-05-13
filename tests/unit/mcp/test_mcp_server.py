@@ -2778,7 +2778,7 @@ class TestReadWorkspaceArtifact:
         assert result["size_bytes"] == len(payload)
 
     @pytest.mark.unit
-    async def test_octet_stream_without_null_bytes_is_blocked(
+    async def test_octet_stream_without_null_bytes_is_redacted(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
@@ -2808,7 +2808,9 @@ class TestReadWorkspaceArtifact:
             {"workspace_id": workspace.id, "relative_path": "secret.bin", "limit_bytes": 1024},
         )
         assert isinstance(result, dict)
-        assert result["error_code"] == "ARTIFACT_BLOCKED"
+        decoded = base64.b64decode(result["content"])
+        assert secret.encode() not in decoded
+        assert decoded == b"prefix <redacted> suffix"
 
     @pytest.mark.unit
     async def test_octet_stream_with_null_bytes_passes_through(
@@ -2844,6 +2846,39 @@ class TestReadWorkspaceArtifact:
         decoded = base64.b64decode(result["content"])
         assert decoded == payload
         assert result["size_bytes"] == len(payload)
+
+    @pytest.mark.unit
+    async def test_binary_artifact_containing_provider_token_pattern_is_blocked(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact binary token pattern blocked",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        # Recognizable provider token not present in settings/env
+        payload = b"\x00" + b"ghp_deadbeef1234567890" + b"\x00\xff"
+        (artifact_dir / "leaked.bin").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": "leaked.bin", "limit_bytes": 1024},
+        )
+        assert isinstance(result, dict)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"
 
     @pytest.mark.unit
     async def test_env_artifact_is_redacted(
