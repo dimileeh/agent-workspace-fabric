@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-12
+Last updated: 2026-05-13
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -439,6 +439,23 @@ not listed here.
   failure with failing node IDs and route it through validation recovery, not
   collapse into infra/stale execution. Add workspace-runtime regression coverage
   for `parallel_workers: 3` and local stress coverage for the self-profile.
+- [ ] Feed GitHub Actions failure evidence into PR-monitor repair turns.
+  Regression source: PR #238 / `ws_01349ca4ecca408baff1d446` repeatedly failed
+  GitHub `python-full-coverage` on one catalog test, but the monitor repair loop
+  asked the agent to rediscover the failure by running broad/full coverage
+  locally. The actual actionable evidence was already in GitHub Actions:
+  `tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage` reported
+  missing `ARTIFACT_BLOCKED` and `ARTIFACT_OVERSIZED` entries in
+  `docs/REASON_CATALOG.md`. Acceptance: for any failed GitHub Actions check,
+  not just AWF's full coverage job, AWF must fetch the failing job/log evidence,
+  extract concise failing commands, test node IDs, assertion snippets, error
+  summaries, and check/job names, redact secrets, and pass that evidence into
+  the PR-monitor repair prompt as quoted external evidence. Agents should run
+  focused repro commands suggested by the failure evidence before broad local
+  suites; AWF must not ask agents to run full coverage locally merely to
+  discover a known CI failure. Add generic tests for single-test failures,
+  multiple-test failures, non-test command failures, unavailable log artifacts,
+  secret redaction, and provider-neutral check names.
 
 ## P1: Validation Runtime Performance
 
