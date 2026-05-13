@@ -252,6 +252,73 @@ async def test_primary_failure_snapshot_ignores_stale_embedded_primary_after_res
 
 
 @pytest.mark.unit
+async def test_primary_failure_snapshot_uses_current_failure_after_remonitor_reset(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, _validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.infrastructure_failure.value,
+        failure_message="cleanup failed after primary validation failure",
+        reason_code="CLEANUP_FAILED",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+        embedded_primary={
+            "failure_reason": FailureReason.validation_failure.value,
+            "message": "pytest failed before cleanup",
+            "reason_code": "PYTEST_TEST_FAILURE",
+            "validation_run": {
+                "id": "vr_stale_remonitor_primary",
+                "status": "failed",
+                "reason_code": "PYTEST_TEST_FAILURE",
+            },
+        },
+    )
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.monitoring_pr.value
+        workspace.failure_reason = None
+        workspace.failure_message = None
+        await repo.add_event(
+            workspace,
+            event_type="workspace.remonitor_requested",
+            reason_code="OPERATOR_REMONITOR",
+            payload={
+                "state_reset": {
+                    "from": WorkspaceStatus.failed.value,
+                    "to": WorkspaceStatus.monitoring_pr.value,
+                },
+            },
+        )
+
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "agent retry failed after remonitor"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="AGENT_AUTH_FAILED",
+            payload={
+                "reason_code": "AGENT_AUTH_FAILED",
+                "message": "agent retry failed after remonitor",
+            },
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.agent_failure.value
+    assert snapshot["message"] == "agent retry failed after remonitor"
+    assert snapshot["reason_code"] == "AGENT_AUTH_FAILED"
+    assert "validation_run" not in snapshot
+
+
+@pytest.mark.unit
 async def test_primary_failure_snapshot_prefers_latest_failed_event_with_preserved_primary(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

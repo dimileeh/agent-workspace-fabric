@@ -14,6 +14,15 @@ from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 
 PRIMARY_FAILURE_KEY = "primary_failure"
 SECONDARY_FAILURE_KEY = "secondary_failure"
+_FAILURE_EPOCH_RESET_STATES = frozenset(
+    {
+        WorkspaceStatus.ready.value,
+        WorkspaceStatus.running.value,
+        WorkspaceStatus.validating.value,
+        WorkspaceStatus.pushing.value,
+        WorkspaceStatus.monitoring_pr.value,
+    }
+)
 
 
 async def load_primary_failure_snapshot(
@@ -22,13 +31,7 @@ async def load_primary_failure_snapshot(
 ) -> dict[str, Any] | None:
     """Return durable primary failure evidence for ``workspace`` when present."""
 
-    latest_failed_event = await _latest_failed_state_event(
-        session,
-        workspace.id,
-        require_primary_failure=True,
-    )
-    if latest_failed_event is None:
-        latest_failed_event = await _latest_failed_state_event(session, workspace.id)
+    latest_failed_event = await _primary_failure_event_for_current_epoch(session, workspace.id)
     latest_validation_run = await _latest_failed_validation_run(session, workspace.id)
     event_payload = _mapping(latest_failed_event.payload if latest_failed_event else None)
     embedded_primary = _mapping(event_payload.get(PRIMARY_FAILURE_KEY) if event_payload else None)
@@ -146,6 +149,35 @@ def attach_primary_failure(
     return updated
 
 
+async def _primary_failure_event_for_current_epoch(
+    session: AsyncSession,
+    workspace_id: str,
+) -> WorkspaceEvent | None:
+    latest_failed_event = await _latest_failed_state_event(session, workspace_id)
+    if latest_failed_event is None:
+        return None
+    if await _has_failure_epoch_reset_after(session, workspace_id, latest_failed_event):
+        return None
+
+    latest_failed_payload = _mapping(latest_failed_event.payload)
+    if (
+        latest_failed_payload is not None
+        and _mapping(latest_failed_payload.get(PRIMARY_FAILURE_KEY)) is not None
+    ):
+        return latest_failed_event
+
+    latest_primary_event = await _latest_failed_state_event(
+        session,
+        workspace_id,
+        require_primary_failure=True,
+    )
+    if latest_primary_event is None:
+        return latest_failed_event
+    if await _has_failure_epoch_reset_after(session, workspace_id, latest_primary_event):
+        return latest_failed_event
+    return latest_primary_event
+
+
 async def _latest_failed_state_event(
     session: AsyncSession,
     workspace_id: str,
@@ -161,6 +193,23 @@ async def _latest_failed_state_event(
         stmt = stmt.where(func.json_typeof(WorkspaceEvent.payload[PRIMARY_FAILURE_KEY]) == "object")
     stmt = stmt.order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc()).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _has_failure_epoch_reset_after(
+    session: AsyncSession,
+    workspace_id: str,
+    event: WorkspaceEvent,
+) -> bool:
+    stmt = (
+        select(WorkspaceEvent.id)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.occurred_at > event.occurred_at,
+            WorkspaceEvent.new_state.in_(_FAILURE_EPOCH_RESET_STATES),
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def _latest_failed_validation_run(
