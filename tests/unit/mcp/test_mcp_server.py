@@ -2778,6 +2778,74 @@ class TestReadWorkspaceArtifact:
         assert result["size_bytes"] == len(payload)
 
     @pytest.mark.unit
+    async def test_octet_stream_without_null_bytes_is_blocked(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "test-secret-token-abc"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact octet-stream blocked",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = f"prefix {secret} suffix".encode()
+        (artifact_dir / "secret.bin").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": "secret.bin", "limit_bytes": 1024},
+        )
+        assert isinstance(result, dict)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"
+
+    @pytest.mark.unit
+    async def test_octet_stream_with_null_bytes_passes_through(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "test-secret-token-abc"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact octet-stream null pass",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = b"\x00\xff\x01\x02\x03\x04"
+        (artifact_dir / "clean.bin").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": "clean.bin", "limit_bytes": 1024},
+        )
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == payload
+        assert result["size_bytes"] == len(payload)
+
+    @pytest.mark.unit
     async def test_env_artifact_is_redacted(
         self,
         factory: async_sessionmaker[AsyncSession],
