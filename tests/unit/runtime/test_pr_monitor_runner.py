@@ -74,6 +74,7 @@ from awf.runtime.pr_monitor_runner import (
     BaseBehindCountError,
     BaseFetchError,
     MonitorRunnerConfig,
+    ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
@@ -3392,11 +3393,69 @@ async def test_provider_agent_error_still_raises_full_fallback_for_non_monitor_r
 
 
 @pytest.mark.unit
+async def test_provider_agent_auth_failure_raises_provider_auth_failed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        agent="codex",
+        model="gpt-5.5",
+        fallback_agent="gemini",
+        fallback_provider="google",
+        fallback_model="gemini-3.1-pro-preview",
+        max_same_provider_retries=3,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Failed to refresh token: Your access token could not be refreshed "
+                "because your refresh token was already used. websocket 401 Unauthorized "
+                "token_expired"
+            ),
+        ),
+        details={"provider": "openai", "model": "gpt-5.5"},
+    )
+
+    with pytest.raises(ProviderRecoveryAuthError):
+        await runner._handle_provider_agent_run_error(workspace_id, exc)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        terminal_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.provider_recovery_terminal"
+        ]
+
+    assert len(terminal_events) == 1
+    assert terminal_events[0].reason_code == "PROVIDER_AUTH_FAILED"
+    assert workspace.task_policy["provider_recovery_state"]["action"] == "terminal"
+    assert workspace.task_policy["provider_recovery_state"]["source_reason_code"] == (
+        "AGENT_AUTH_FAILED"
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("error_cls", "outcome", "reason_code"),
     [
         (ProviderRecoveryRetryError, "provider_retry", "PROVIDER_OUTAGE"),
         (ProviderRecoveryFallbackError, "provider_fallback", "PROVIDER_FALLBACK"),
+        (ProviderRecoveryAuthError, "provider_auth_failed", "PROVIDER_AUTH_FAILED"),
     ],
 )
 async def test_sync_base_provider_recovery_exceptions_finish_operation(
@@ -3457,6 +3516,7 @@ async def test_sync_base_provider_recovery_exceptions_finish_operation(
     [
         (ProviderRecoveryRetryError, "provider_retry", "PROVIDER_OUTAGE"),
         (ProviderRecoveryFallbackError, "provider_fallback", "PROVIDER_FALLBACK"),
+        (ProviderRecoveryAuthError, "provider_auth_failed", "PROVIDER_AUTH_FAILED"),
     ],
 )
 async def test_ci_repair_provider_recovery_exceptions_finish_operation(
@@ -3511,6 +3571,63 @@ async def test_ci_repair_provider_recovery_exceptions_finish_operation(
         "pushed": False,
     }
     assert operation.error_code == reason_code
+
+
+@pytest.mark.unit
+async def test_comment_repair_provider_auth_exception_finishes_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_auth",
+        path="src/app.py",
+        line=12,
+        body_excerpt="please fix",
+        author="reviewer",
+    )
+
+    async def _raise_provider_auth(**_kwargs: object) -> object:
+        raise ProviderRecoveryAuthError()
+
+    mocker.patch.object(runner, "_run_fix_cycle", _raise_provider_auth)
+
+    with pytest.raises(ProviderRecoveryAuthError):
+        await runner._execute(
+            action=AddressComments(threads=(thread,), review_comments=()),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=replace(_green_status(), unresolved_inline_threads=(thread,)),
+            state=MonitorState(started_at=0.0),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    operation = operations[0]
+    assert operation.type == "comment_repair"
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result == {
+        "status": "failed",
+        "outcome": "provider_auth_failed",
+        "reason_code": "PROVIDER_AUTH_FAILED",
+        "pushed": False,
+    }
+    assert operation.error_code == "PROVIDER_AUTH_FAILED"
 
 
 @pytest.mark.unit

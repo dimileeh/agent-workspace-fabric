@@ -13,6 +13,7 @@ from awf.api.schemas import (
     WorkspaceResponse,
 )
 from awf.service.provider_recovery import (
+    PROVIDER_AUTH_FAILED,
     PROVIDER_FALLBACK_SELECTED_REASON,
     PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
     PROVIDER_RECOVERY_NO_LOOP_REASON,
@@ -24,6 +25,7 @@ from awf.service.provider_recovery import (
 def test_provider_recovery_reason_codes_are_stable() -> None:
     expected = frozenset(
         {
+            PROVIDER_AUTH_FAILED,
             "PROVIDER_MODEL_CIRCUIT_OPEN",
             "PROVIDER_RETRY_DELAYED",
             "PROVIDER_FALLBACK_SELECTED",
@@ -36,6 +38,7 @@ def test_provider_recovery_reason_codes_are_stable() -> None:
 
 
 def test_provider_recovery_reason_code_constant_values() -> None:
+    assert PROVIDER_AUTH_FAILED == "PROVIDER_AUTH_FAILED"
     assert PROVIDER_MODEL_CIRCUIT_OPEN_REASON == "PROVIDER_MODEL_CIRCUIT_OPEN"
     assert PROVIDER_RETRY_DELAYED_REASON == "PROVIDER_RETRY_DELAYED"
     assert PROVIDER_FALLBACK_SELECTED_REASON == "PROVIDER_FALLBACK_SELECTED"

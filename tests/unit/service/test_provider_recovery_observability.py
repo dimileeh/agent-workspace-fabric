@@ -11,6 +11,7 @@ from awf.service.metrics import (
     ProviderRecoveryStateSummary,
 )
 from awf.service.provider_recovery import (
+    PROVIDER_AUTH_FAILED,
     PROVIDER_FALLBACK_SELECTED_REASON,
     PROVIDER_RECOVERY_COOLDOWN_EVENT,
     PROVIDER_RECOVERY_REASON_CODES,
@@ -350,6 +351,7 @@ def test_metrics_failure_analysis_includes_provider_recovery_breakdown() -> None
 def test_provider_recovery_reason_codes_includes_all_contract_values() -> None:
     expected = frozenset(
         {
+            PROVIDER_AUTH_FAILED,
             "PROVIDER_MODEL_CIRCUIT_OPEN",
             "PROVIDER_RETRY_DELAYED",
             "PROVIDER_FALLBACK_SELECTED",
