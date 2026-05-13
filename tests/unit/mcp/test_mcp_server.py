@@ -3100,3 +3100,46 @@ class TestReadWorkspaceArtifact:
         assert decoded == b'{"token": "<redacted>"}'
         assert result["size_bytes"] == len(decoded)
         assert result["content_type"] == "application/json"
+
+    @pytest.mark.unit
+    async def test_text_plain_with_null_bytes_and_secret_is_blocked(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Null bytes inside a text/* file force the binary secret-scan path.
+
+        is_likely_text is False when null bytes are present, so the file
+        must not be redacted as latin-1 text (which would corrupt UTF-16-LE
+        and miss secrets). Instead it should run _contains_secret_bytes and
+        be blocked when a configured secret is present.
+        """
+        secret = "test-secret-token-abc"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact text null secret blocked",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        # Null bytes make is_likely_text=False, so the binary secret-scan path
+        # must run. The secret is present as contiguous ASCII bytes so
+        # _contains_secret_bytes can detect it.
+        payload = b"\x00" + f"prefix {secret} suffix".encode() + b"\x00\xff"
+        (artifact_dir / "leak.txt").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": "leak.txt", "limit_bytes": 1024},
+        )
+        assert isinstance(result, dict)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"

@@ -1846,7 +1846,7 @@ def _contains_secret_bytes(
 
 def _check_and_redact_artifact_content(
     content: bytes,
-    content_type: str,
+    content_type: str,  # noqa: ARG001
     limit_bytes: int,
     settings: Settings,
     service_settings: ServiceSettings,
@@ -1858,7 +1858,6 @@ def _check_and_redact_artifact_content(
     Returns ``(content, error_result)`` where ``error_result`` is non-None when
     the artifact must be blocked or is oversized after redaction.
     """
-    base_type = content_type.split(";")[0].strip().lower()
     # Block any artifact that carries a common multibyte text encoding BOM.
     # This must happen before the text-vs-binary dispatch so MIME-less files
     # (e.g. .env, .log, extensionless text) that happen to be UTF-16/UTF-32
@@ -1873,17 +1872,7 @@ def _check_and_redact_artifact_content(
                 message="Artifact uses an unsupported multibyte encoding (UTF-16/UTF-32) and cannot be safely redacted.",
             ),
         )
-    if (
-        is_likely_text
-        or base_type.startswith("text/")
-        or base_type
-        in {
-            "application/json",
-            "application/xml",
-            "application/javascript",
-            "application/yaml",
-        }
-    ):
+    if is_likely_text:
         text = content.decode("latin-1")
         redacted_text = _redact_sensitive_text(text, settings, service_settings=service_settings)
         content = redacted_text.encode("latin-1")
