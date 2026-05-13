@@ -868,7 +868,6 @@ def build_mcp_server(
         content, error_result = await asyncio.to_thread(
             _check_and_redact_artifact_content,
             content,
-            content_type,
             limit_bytes,
             settings_value,
             _service_settings,
@@ -1868,7 +1867,6 @@ def _contains_secret_bytes(
 
 def _check_and_redact_artifact_content(
     content: bytes,
-    content_type: str,  # noqa: ARG001
     limit_bytes: int,
     settings: Settings,
     service_settings: ServiceSettings,
@@ -1884,9 +1882,7 @@ def _check_and_redact_artifact_content(
     # This must happen before the text-vs-binary dispatch so MIME-less files
     # (e.g. .env, .log, extensionless text) that happen to be UTF-16/UTF-32
     # encoded do not bypass the text redaction path.
-    if content.startswith((b"\xff\xfe", b"\xfe\xff")) or content.startswith(
-        (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")
-    ):
+    if content.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
         return (
             b"",
             _error_result(
