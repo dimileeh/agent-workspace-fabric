@@ -258,6 +258,13 @@ Workspace-level logs:
 - `awf workspace logs <workspace_id>`
 - `awf workspace log <workspace_id> <stream_id>`
 - `awf workspace events <workspace_id>`
+
+API evidence endpoints:
+
+- `GET /v1/workspaces/{workspace_id}/logs`
+- `GET /v1/workspaces/{workspace_id}/events`
+- `GET /v1/workspaces/{workspace_id}/operations`
+- `GET /v1/workspaces/{workspace_id}/runtime`
 - `awf workspace operations <workspace_id>`
 - `awf workspace runtime <workspace_id>`
 
