@@ -56,6 +56,10 @@ READ_RESPONSE_CAPABILITY_NAMES = tuple(
     and capability.is_mcp_implemented
     and capability.mcp_tool is not None
     and capability.response_fields
+    # workspace_artifact_download returns a raw base64 `content` field that
+    # cannot be exercised by the generic MCP response-alignment loop; it is
+    # covered by TestReadWorkspaceArtifact in test_mcp_server.py instead.
+    and capability.name != "workspace_artifact_download"
 )
 
 

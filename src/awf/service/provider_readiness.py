@@ -59,7 +59,7 @@ _GEMINI_ENV_KEYS = (
 )
 _OPENCODE_ENV_KEYS = ("OLLAMA_API_KEY",)
 _DOCKER_AUTH_ENV_KEYS = ("DOCKER_AUTH_CONFIG",)
-_KNOWN_SECRET_ENV_KEYS = frozenset(
+KNOWN_SECRET_ENV_KEYS = frozenset(
     (
         *_GITHUB_TOKEN_ENV_KEYS,
         *_CODEX_ENV_KEYS,
@@ -71,7 +71,7 @@ _KNOWN_SECRET_ENV_KEYS = frozenset(
     )
 )
 
-_URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s:@]+(?::[^/\s@]+)?@)")
+URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s:@]+(?::[^/\s@]+)?@)")
 _GITHUB_TOKEN_PATTERNS = (
     r"gh[pousr]_[A-Za-z0-9_]{8,}",
     r"github_pat_[A-Za-z0-9_]{8,}",
@@ -90,7 +90,7 @@ _KNOWN_TOKEN_PATTERNS = (
     *_GOOGLE_TOKEN_PATTERNS,
     *_SLACK_TOKEN_PATTERNS,
 )
-_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(_KNOWN_TOKEN_PATTERNS) + r")(?![A-Za-z0-9])")
+TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(_KNOWN_TOKEN_PATTERNS) + r")(?![A-Za-z0-9])")
 _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
     AgentRuntime.codex: "codex",
     AgentRuntime.claude_code: "claude_code",
@@ -1601,7 +1601,7 @@ def _secret_values(settings: ServiceSettings, environ: Mapping[str, str]) -> fro
     values = {
         value
         for key, value in environ.items()
-        if key.upper() in _KNOWN_SECRET_ENV_KEYS and len(value) >= 4
+        if key.upper() in KNOWN_SECRET_ENV_KEYS and len(value) >= 4
     }
     if settings.github_token and len(settings.github_token) >= 4:
         values.add(settings.github_token)
@@ -1612,8 +1612,8 @@ def _redact(value: str, secrets: frozenset[str]) -> str:
     redacted = value
     for secret in sorted(secrets, key=len, reverse=True):
         redacted = redacted.replace(secret, _REDACTION)
-    redacted = _URL_CREDENTIAL_RE.sub(r"\1<redacted>@", redacted)
-    return _TOKEN_RE.sub(_REDACTION, redacted)
+    redacted = URL_CREDENTIAL_RE.sub(r"\1<redacted>@", redacted)
+    return TOKEN_RE.sub(_REDACTION, redacted)
 
 
 def _redact_with_redaction_parts(
@@ -1656,7 +1656,7 @@ def _replace_url_credential_redaction_spans(
 ) -> list[_RedactionSegment]:
     rendered = _render_redaction_segments(segments)
     replacements: list[tuple[int, int, list[_RedactionSegment]]] = []
-    for match in _URL_CREDENTIAL_RE.finditer(rendered):
+    for match in URL_CREDENTIAL_RE.finditer(rendered):
         replacements.append((match.start(2), match.end(2), [("redaction", ""), ("literal", "@")]))
     return _replace_rendered_redaction_spans(segments, replacements)
 
@@ -1666,7 +1666,7 @@ def _replace_token_redaction_spans(
 ) -> list[_RedactionSegment]:
     rendered = _render_redaction_segments(segments)
     replacements: list[tuple[int, int, list[_RedactionSegment]]] = []
-    for match in _TOKEN_RE.finditer(rendered):
+    for match in TOKEN_RE.finditer(rendered):
         replacements.append((match.start(1), match.end(1), [("redaction", "")]))
     return _replace_rendered_redaction_spans(segments, replacements)
 
