@@ -1,6 +1,6 @@
 import base64
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -947,9 +947,7 @@ async def test_list_operations_empty(authed_client: AsyncClient, session: AsyncS
 
 
 @pytest.fixture
-def authed_client(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[AsyncClient]:
+def authed_client(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> Iterator[AsyncClient]:
     get_settings.cache_clear()
     monkeypatch.setenv("AWF_API_TOKEN", "test-token")
     client.headers["Authorization"] = "Bearer test-token"
