@@ -23,6 +23,13 @@ def test_getting_started_links_to_first_run_troubleshooting() -> None:
 
 
 @pytest.mark.unit
+def test_getting_started_first_run_troubleshooting_anchor_exists() -> None:
+    """Assert the first-run troubleshooting link points to an existing heading."""
+    troubleshooting_content = TROUBLESHOOTING_PATH.read_text(encoding="utf-8")
+    assert "## First-run troubleshooting" in troubleshooting_content
+
+
+@pytest.mark.unit
 def test_troubleshooting_sections_cover_required_symptoms() -> None:
     """Assert the troubleshooting document includes all required symptom sections."""
     content = TROUBLESHOOTING_PATH.read_text(encoding="utf-8")
