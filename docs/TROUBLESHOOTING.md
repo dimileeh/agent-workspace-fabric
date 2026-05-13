@@ -76,7 +76,14 @@ for network_id in $(docker network ls --filter "label=com.docker.compose.project
   docker network rm "${network_id}"
 done
 for volume_name in $(docker volume ls --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --quiet); do
-  docker volume rm -f "${volume_name}"
+  case "${volume_name}" in
+    *awf-postgres-data)
+      echo "Skipping control-plane Postgres volume ${volume_name} (preserve)"
+      ;;
+    *)
+      docker volume rm -f "${volume_name}"
+      ;;
+  esac
 done
 ```
 
