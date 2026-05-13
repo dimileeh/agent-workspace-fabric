@@ -51,7 +51,7 @@ of truth for this implementation.
 ## Verification Commands
 
 ```bash
-uv run --python 3.12 --extra dev pytest tests/unit/control/test_worker.py tests/unit/service/test_readiness.py tests/unit/api/test_validation_provenance.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/control/test_worker.py tests/unit/service/test_readiness.py tests/unit/service/test_failure_causality.py tests/unit/api/test_validation_provenance.py -q
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_controls.py tests/unit/service/test_controls_lifecycle.py -q
 uv run --python 3.12 --extra dev ruff check src/awf tests
 uv run --python 3.12 --extra dev mypy src/awf
