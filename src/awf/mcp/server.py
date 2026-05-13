@@ -1829,7 +1829,7 @@ def _contains_secret_bytes(
             return True
     for key, value in os.environ.items():
         if (
-            key.upper() in provider_readiness_service._KNOWN_SECRET_ENV_KEYS
+            key.upper() in provider_readiness_service.KNOWN_SECRET_ENV_KEYS
             and len(value) >= 4
             and value.encode() in content
         ):
@@ -1838,10 +1838,10 @@ def _contains_secret_bytes(
     # patterns (e.g. ghp_..., github_pat_..., sk-proj-...) even when the
     # exact value is not present in current settings or environment.
     decoded = content.decode("latin-1")
-    if provider_readiness_service._TOKEN_RE.search(decoded) is not None:
+    if provider_readiness_service.TOKEN_RE.search(decoded) is not None:
         return True
     # Additionally block URL credentials that the text path would redact.
-    return provider_readiness_service._URL_CREDENTIAL_RE.search(decoded) is not None
+    return provider_readiness_service.URL_CREDENTIAL_RE.search(decoded) is not None
 
 
 def _check_and_redact_artifact_content(
