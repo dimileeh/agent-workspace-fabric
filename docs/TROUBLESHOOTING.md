@@ -63,7 +63,21 @@ If compose still reports old local-service containers (`awf-local-service`),
 remove only that stack before rerunning `awf service bootstrap`:
 
 ```bash
-docker compose -f docker/compose/local-service.yml down --remove-orphans
+# If you are running from an AWF source checkout:
+export AWF_LOCAL_SERVICE_PROJECT="awf-local-service"
+docker compose -p "${AWF_LOCAL_SERVICE_PROJECT}" -f docker/compose/local-service.yml down --remove-orphans
+
+# If you are using an installed `awf` package outside the source tree:
+export AWF_LOCAL_SERVICE_PROJECT="awf-local-service"
+for container_id in $(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --quiet); do
+  docker rm -f "${container_id}"
+done
+for network_id in $(docker network ls --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --quiet); do
+  docker network rm "${network_id}"
+done
+for volume_name in $(docker volume ls --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --quiet); do
+  docker volume rm -f "${volume_name}"
+done
 ```
 
 If stale workspace stacks remain, remove them by deterministic project name:
