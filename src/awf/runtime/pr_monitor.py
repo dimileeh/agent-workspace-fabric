@@ -158,6 +158,12 @@ class CheckFailure:
     conclusion: str  # FAILURE / TIMED_OUT / CANCELLED / ACTION_REQUIRED
     log_excerpt: str  # tail of the failing step's log, truncated
     run_id: str | None = None
+    failing_commands: tuple[str, ...] = ()
+    test_node_ids: tuple[str, ...] = ()
+    assertion_snippets: tuple[str, ...] = ()
+    error_summaries: tuple[str, ...] = ()
+    suggested_repro_commands: tuple[str, ...] = ()
+    evidence_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

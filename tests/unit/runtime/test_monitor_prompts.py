@@ -418,6 +418,70 @@ class TestSyncBaseConflictPrompt:
 
 class TestFixCiPrompt:
     @pytest.mark.unit
+    def test_includes_focused_ci_evidence_before_raw_log_excerpt(self) -> None:
+        failures = (
+            CheckFailure(
+                name="coverage-gate",
+                conclusion="FAILURE",
+                log_excerpt="FAILED tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage",
+                run_id="42",
+                failing_commands=(
+                    "uv run --python 3.12 --extra dev pytest -n 8 --dist=loadscope "
+                    "--cov=awf --cov-fail-under=99",
+                ),
+                test_node_ids=("tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage",),
+                assertion_snippets=(
+                    "E   AssertionError: Missing reason catalog entries: ARTIFACT_BLOCKED",
+                ),
+                error_summaries=("Missing reason catalog entries: ARTIFACT_BLOCKED",),
+                suggested_repro_commands=(
+                    "uv run --python 3.12 --extra dev pytest "
+                    "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q",
+                ),
+            ),
+        )
+
+        prompt = fix_ci_prompt(pr_number=238, repo_slug="dimileeh/awf", failures=failures)
+
+        focused_index = prompt.index("Focused repro commands to run first")
+        raw_log_index = prompt.index("source_kind: github_check_log")
+        assert focused_index < raw_log_index
+        assert (
+            "uv run --python 3.12 --extra dev pytest "
+            "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q"
+        ) in prompt
+        assert "Run focused repro commands first" in prompt
+        assert (
+            "Do not run broad/full coverage locally merely to discover this known CI failure"
+            in prompt
+        )
+        assert "run_id: 42" in prompt
+        assert "source_kind: github_check_failure_summary" in prompt
+        assert "source_kind: github_check_log" in prompt
+
+    @pytest.mark.unit
+    def test_missing_ci_log_prompts_github_inspection_without_broad_discovery(self) -> None:
+        failures = (
+            CheckFailure(
+                name="coverage-gate",
+                conclusion="FAILURE",
+                log_excerpt="",
+                run_id="42",
+                evidence_warnings=("GitHub Actions log unavailable for failed check.",),
+            ),
+        )
+
+        prompt = fix_ci_prompt(pr_number=238, repo_slug="dimileeh/awf", failures=failures)
+
+        assert "GitHub Actions log unavailable" in prompt
+        assert "gh run view" in prompt
+        assert (
+            "Do not run broad/full coverage locally merely to discover this known CI failure"
+            in prompt
+        )
+        assert "AWF-EVIDENCE> (no log available)" not in prompt
+
+    @pytest.mark.unit
     def test_includes_every_failure_name_and_conclusion(self) -> None:
         failures = (
             CheckFailure(name="playwright", conclusion="FAILURE", log_excerpt="err1"),

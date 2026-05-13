@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 
 from awf.common.commands import AsyncCommandRunner
 from awf.common.logging import get_logger
+from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
@@ -945,7 +946,12 @@ class GitHubClient:
                 if run_id is not None
                 else None
             )
-            log_text = log.stdout if log is not None else ""
+            log_text = redact_ci_log(log.stdout if log is not None else "")
+            evidence = extract_ci_failure_evidence(
+                log_text,
+                check_name=run.get("name")
+                or (f"run/{run_id}" if run_id is not None else "run/unknown"),
+            )
             failures.append(
                 CheckFailure(
                     name=run.get("name")
@@ -953,6 +959,12 @@ class GitHubClient:
                     conclusion=conclusion.upper(),
                     log_excerpt=_tail(log_text, log_tail_chars),
                     run_id=run_id,
+                    failing_commands=evidence.failing_commands,
+                    test_node_ids=evidence.test_node_ids,
+                    assertion_snippets=evidence.assertion_snippets,
+                    error_summaries=evidence.error_summaries,
+                    suggested_repro_commands=evidence.suggested_repro_commands,
+                    evidence_warnings=evidence.evidence_warnings,
                 )
             )
         return tuple(failures)

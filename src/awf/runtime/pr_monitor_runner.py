@@ -1820,13 +1820,7 @@ class PullRequestMonitorRunner:
                 remote_branch=remote_branch,
                 monitor_log=monitor_log,
                 extra_payload={
-                    "failures": [
-                        {
-                            "name": failure.name,
-                            "conclusion": failure.conclusion,
-                        }
-                        for failure in action.failures
-                    ]
+                    "failures": [_ci_failure_payload(failure) for failure in action.failures]
                 },
                 extra_identity=tuple(failure.name for failure in action.failures),
             )
@@ -6304,11 +6298,17 @@ def _ci_transient_rerun_attempt(
     return attempt
 
 
-def _ci_failure_payload(failure: CheckFailure) -> dict[str, str | None]:
+def _ci_failure_payload(failure: CheckFailure) -> dict[str, object]:
     return {
         "name": failure.name,
         "conclusion": failure.conclusion,
         "run_id": failure.run_id,
+        "test_node_ids": list(failure.test_node_ids),
+        "suggested_repro_commands": list(failure.suggested_repro_commands),
+        "failing_commands": list(failure.failing_commands),
+        "assertion_snippets": list(failure.assertion_snippets),
+        "error_summaries": list(failure.error_summaries),
+        "evidence_warnings": list(failure.evidence_warnings),
     }
 
 

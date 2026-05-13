@@ -695,6 +695,12 @@ async def test_rerun_transient_ci_without_run_ids_dispatches_agent_repair(
         name="python-full-coverage",
         conclusion="FAILURE",
         log_excerpt="HTTP status server error (502 Bad Gateway)",
+        test_node_ids=("tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage",),
+        suggested_repro_commands=(
+            "uv run --python 3.12 --extra dev pytest "
+            "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q",
+        ),
+        error_summaries=("Missing reason catalog entries: ARTIFACT_BLOCKED",),
     )
     status = _status(
         check_state=CheckState.FAILURE,
@@ -734,6 +740,25 @@ async def test_rerun_transient_ci_without_run_ids_dispatches_agent_repair(
         operations = list((await session.execute(select(Operation))).scalars())
     assert [(op.payload or {}).get("action") for op in operations] == ["ci_repair"]
     assert operations[0].status == OperationStatus.succeeded.value
+    failures_payload = (operations[0].payload or {})["failures"]
+    assert failures_payload == [
+        {
+            "name": "python-full-coverage",
+            "conclusion": "FAILURE",
+            "run_id": None,
+            "test_node_ids": [
+                "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage",
+            ],
+            "suggested_repro_commands": [
+                "uv run --python 3.12 --extra dev pytest "
+                "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q",
+            ],
+            "failing_commands": [],
+            "assertion_snippets": [],
+            "error_summaries": ["Missing reason catalog entries: ARTIFACT_BLOCKED"],
+            "evidence_warnings": [],
+        }
+    ]
 
 
 @pytest.mark.unit
