@@ -4,6 +4,29 @@
 
 Use this guide for local Core first-run issues after installing AWF.
 
+## Failure handling
+
+AWF workspaces emit high-level `failure_reason` codes in:
+
+- `awf workspace show <workspace_id> --format pretty`
+- `awf workspace events <workspace_id>`
+
+Core reason codes include:
+
+- `agent_failure`
+- `validation_failure`
+- `infrastructure_failure`
+- `policy_failure`
+- `cleanup_failure`
+- `profile_resolution_failure`
+- `service_startup_failure`
+- `phase_timeout`
+- `health_check_failure`
+
+When a workspace fails, it is preserved for operator inspection by default (logs,
+runtime state, worktree, and artifacts). For cleanup, use explicit GC workflows
+(`awf service gc`); triage evidence is kept outside workspace filesystem cleanup.
+
 ## Symptom: service bootstrap command fails
 
 Run these checks after `awf init` or `awf service bootstrap` exits with an error:
