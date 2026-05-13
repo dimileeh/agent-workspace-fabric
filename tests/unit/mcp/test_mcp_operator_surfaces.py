@@ -1577,6 +1577,7 @@ class TestMcpOperatorSurfaceParity:
 
         list_response = await operator_stack.client.get(
             "/v1/operations",
+            headers=operator_stack.auth_headers,
             params={
                 "workspace_id": workspace_id,
                 "type": "validate",
@@ -1584,9 +1585,13 @@ class TestMcpOperatorSurfaceParity:
                 "limit": 10,
             },
         )
-        detail_response = await operator_stack.client.get(f"/v1/operations/{operation_id}")
+        detail_response = await operator_stack.client.get(
+            f"/v1/operations/{operation_id}",
+            headers=operator_stack.auth_headers,
+        )
         workspace_response = await operator_stack.client.get(
             f"/v1/workspaces/{workspace_id}/operations",
+            headers=operator_stack.auth_headers,
             params={
                 "type": "validate",
                 "status": "succeeded",
