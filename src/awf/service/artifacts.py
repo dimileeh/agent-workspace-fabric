@@ -149,6 +149,8 @@ def _iter_artifacts(workspace_id: str, artifact_dir: Path) -> Iterator[ArtifactM
             if not resolved.is_relative_to(root) or not resolved.is_file():
                 continue
             stat = resolved.stat()
+            if stat.st_nlink > 1:
+                continue
         except OSError:
             continue
         relative_path = candidate.relative_to(artifact_dir).as_posix()
@@ -223,6 +225,8 @@ def get_downloadable_artifact(
         if not resolved.is_relative_to(root) or not resolved.is_file():
             raise ArtifactNotFoundError(relative_path)
         stat = resolved.stat()
+        if stat.st_nlink > 1:
+            raise ArtifactNotFoundError(relative_path)
     except OSError as exc:
         raise ArtifactNotFoundError(relative_path) from exc
 

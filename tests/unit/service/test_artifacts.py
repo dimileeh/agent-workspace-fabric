@@ -933,6 +933,65 @@ class TestArtifactService:
         assert list_artifacts("ws_artifacts", artifact_dir) == []
 
     @pytest.mark.unit
+    def test_get_workspace_artifact_content_rejects_hard_link(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        outside = tmp_path / "outsideroot.txt"
+        outside.write_text("secret\n", encoding="utf-8")
+        report = artifact_dir / "report.txt"
+        report.hardlink_to(outside)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="report.txt",
+                limit_bytes=MAX_ARTIFACT_CONTENT_BYTES,
+            )
+
+    @pytest.mark.unit
+    def test_listing_skips_file_with_hard_link(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        outside = tmp_path / "outside.txt"
+        outside.write_text("outside\n", encoding="utf-8")
+        report = artifact_dir / "report.txt"
+        report.hardlink_to(outside)
+        kept = artifact_dir / "kept.txt"
+        kept.write_text("kept\n", encoding="utf-8")
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "kept.txt",
+        ]
+
+    @pytest.mark.unit
+    def test_listing_keeps_regular_single_link_file(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "report.txt"
+        report.write_text("report\n", encoding="utf-8")
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "report.txt",
+        ]
+
+    @pytest.mark.unit
+    def test_get_downloadable_artifact_rejects_hard_link(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        outside = tmp_path / "outsideroot.txt"
+        outside.write_text("secret\n", encoding="utf-8")
+        report = artifact_dir / "report.txt"
+        report.hardlink_to(outside)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_downloadable_artifact(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="report.txt",
+            )
+
+    @pytest.mark.unit
     def test_deleted_between_stat_and_open_raises_artifact_not_found(
         self,
         monkeypatch: pytest.MonkeyPatch,
