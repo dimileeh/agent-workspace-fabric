@@ -2597,6 +2597,10 @@ class TestReadWorkspaceArtifact:
         assert result.isError is True
         assert result.structuredContent is not None
         assert result.structuredContent["error_code"] == "ARTIFACT_OVERSIZED"
+        assert result.structuredContent.get("detail") is not None
+        assert isinstance(result.structuredContent["detail"], dict)
+        assert result.structuredContent["detail"]["limit_bytes"] == 2_000_000
+        assert result.structuredContent["detail"]["actual_bytes"] == 2_000_000
 
     @pytest.mark.unit
     async def test_respects_explicit_limit_bytes_within_ceiling(
@@ -2745,7 +2749,9 @@ class TestReadWorkspaceArtifact:
         assert result.structuredContent.get("detail") is not None
         assert isinstance(result.structuredContent["detail"], dict)
         assert result.structuredContent["detail"]["limit_bytes"] == limit_bytes
-        assert result.structuredContent["detail"]["actual_bytes"] == 250
+        assert result.structuredContent["detail"]["actual_bytes"] == (
+            (limit_bytes // len(secret)) * len("<redacted>")
+        )
 
     @pytest.mark.unit
     async def test_binary_artifact_containing_secret_is_blocked(

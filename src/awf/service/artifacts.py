@@ -253,7 +253,11 @@ def get_workspace_artifact_content(
     """
     if limit_bytes > MAX_ARTIFACT_CONTENT_BYTES:
         raise ArtifactOversizedError(
-            f"limit_bytes exceeds absolute maximum {MAX_ARTIFACT_CONTENT_BYTES}"
+            f"limit_bytes exceeds absolute maximum {MAX_ARTIFACT_CONTENT_BYTES}",
+            detail={
+                "limit_bytes": limit_bytes,
+                "actual_bytes": limit_bytes,
+            },
         )
     artifact = get_downloadable_artifact(
         workspace_id=workspace_id,

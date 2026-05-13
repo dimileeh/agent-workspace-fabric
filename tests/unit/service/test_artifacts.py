@@ -808,13 +808,16 @@ class TestArtifactService:
         report = artifact_dir / "small.bin"
         report.write_bytes(b"x")
 
-        with pytest.raises(ArtifactOversizedError):
+        with pytest.raises(ArtifactOversizedError) as exc_info:
             get_workspace_artifact_content(
                 workspace_id="ws_artifacts",
                 artifact_dir=artifact_dir,
                 relative_path="small.bin",
                 limit_bytes=MAX_ARTIFACT_CONTENT_BYTES + 1,
             )
+        assert exc_info.value.detail is not None
+        assert exc_info.value.detail["limit_bytes"] == MAX_ARTIFACT_CONTENT_BYTES + 1
+        assert exc_info.value.detail["actual_bytes"] == MAX_ARTIFACT_CONTENT_BYTES + 1
 
     @pytest.mark.unit
     def test_get_workspace_artifact_content_rejects_missing_file(self, tmp_path: Path) -> None:
