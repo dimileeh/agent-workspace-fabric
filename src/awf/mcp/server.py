@@ -1859,6 +1859,20 @@ def _check_and_redact_artifact_content(
     the artifact must be blocked or is oversized after redaction.
     """
     base_type = content_type.split(";")[0].strip().lower()
+    # Block any artifact that carries a common multibyte text encoding BOM.
+    # This must happen before the text-vs-binary dispatch so MIME-less files
+    # (e.g. .env, .log, extensionless text) that happen to be UTF-16/UTF-32
+    # encoded do not bypass the text redaction path.
+    if content.startswith((b"\xff\xfe", b"\xfe\xff")) or content.startswith(
+        (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")
+    ):
+        return (
+            b"",
+            _error_result(
+                error_code="ARTIFACT_BLOCKED",
+                message="Artifact uses an unsupported multibyte encoding (UTF-16/UTF-32) and cannot be safely redacted.",
+            ),
+        )
     if (
         is_likely_text
         or base_type.startswith("text/")
@@ -1870,17 +1884,6 @@ def _check_and_redact_artifact_content(
             "application/yaml",
         }
     ):
-        # Reject artifacts that carry common multibyte text encodings.
-        if content.startswith((b"\xff\xfe", b"\xfe\xff")) or content.startswith(
-            (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")
-        ):
-            return (
-                b"",
-                _error_result(
-                    error_code="ARTIFACT_BLOCKED",
-                    message="Text artifact uses an unsupported multibyte encoding (UTF-16/UTF-32) and cannot be safely redacted.",
-                ),
-            )
         text = content.decode("latin-1")
         redacted_text = _redact_sensitive_text(text, settings, service_settings=service_settings)
         content = redacted_text.encode("latin-1")
