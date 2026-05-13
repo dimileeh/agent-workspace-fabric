@@ -90,7 +90,8 @@ docker info
 docker compose version
 ```
 
-2. Fix permissions for the current user and daemon socket.
+2. Fix permissions for the current user and daemon socket (for example:
+   `sudo usermod -aG docker $USER`, then log out and log back in, or reboot).
 3. If permission is denied or socket is missing, restart Docker and rerun status:
 
 ```bash
