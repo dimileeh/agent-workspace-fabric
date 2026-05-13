@@ -41,7 +41,7 @@ async def load_primary_failure_snapshot(
     if embedded_primary:
         snapshot.update(_jsonable_mapping(embedded_primary))
 
-    if workspace.failure_reason:
+    if workspace.failure_reason and "failure_reason" not in snapshot:
         snapshot["failure_reason"] = workspace.failure_reason
     primary_failure_reason = _string(snapshot.get("failure_reason"))
     primary_is_validation_failure = primary_failure_reason == FailureReason.validation_failure.value
