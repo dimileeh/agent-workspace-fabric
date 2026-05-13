@@ -11,6 +11,7 @@ from typing import Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.adapters.provider_failures import (
+    AGENT_AUTH_FAILED,
     AGENT_PROVIDER_CAPACITY_EXHAUSTED,
     classify_provider_failure,
     infer_provider,
@@ -35,6 +36,7 @@ PROVIDER_RECOVERY_COOLDOWN_EVENT = "workspace.provider_recovery_cooldown"
 PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"
 PROVIDER_RETRY_DELAYED_REASON = "PROVIDER_RETRY_DELAYED"
 PROVIDER_FALLBACK_SELECTED_REASON = "PROVIDER_FALLBACK_SELECTED"
+PROVIDER_AUTH_FAILED = "PROVIDER_AUTH_FAILED"
 PROVIDER_RECOVERY_NO_LOOP_REASON = "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
 NON_RETRYABLE_PROVIDER_FAILURE = "NON_RETRYABLE_PROVIDER_FAILURE"
 PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED = "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
@@ -46,6 +48,7 @@ PROVIDER_RECOVERY_REASON_CODES: frozenset[str] = frozenset(
         PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
         PROVIDER_RETRY_DELAYED_REASON,
         PROVIDER_FALLBACK_SELECTED_REASON,
+        PROVIDER_AUTH_FAILED,
         PROVIDER_RECOVERY_NO_LOOP_REASON,
         NON_RETRYABLE_PROVIDER_FAILURE,
         PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED,
@@ -134,10 +137,17 @@ def provider_recovery_metadata_from_failure(
 
     policy = parse_provider_recovery_policy(task_policy)
     state = parse_provider_recovery_state(task_policy)
+    auth_failure = _is_auth_failure_metadata(metadata)
+    if auth_failure:
+        metadata["retryable"] = False
     metadata["fallback_allowed"] = (
-        bool(policy.fallbacks)
-        and state.fallback_attempt_number < policy.max_fallback_attempts
-        and bool(metadata.get("retryable"))
+        False
+        if auth_failure
+        else (
+            bool(policy.fallbacks)
+            and state.fallback_attempt_number < policy.max_fallback_attempts
+            and bool(metadata.get("retryable"))
+        )
     )
     metadata["recommended_action"] = _metadata_recommended_action(metadata)
     if isinstance(message, str) and message:
@@ -162,6 +172,8 @@ def decide_provider_recovery(
     )
     model = _metadata_str(metadata, "model") or current_model
 
+    if _is_auth_failure_metadata(metadata):
+        return _terminal_decision(PROVIDER_AUTH_FAILED, state=state)
     if not bool(metadata.get("retryable")):
         return _terminal_decision("NON_RETRYABLE_PROVIDER_FAILURE", state=state)
     if fingerprint is not None and fingerprint in state.failure_fingerprints:
@@ -198,6 +210,13 @@ def decide_provider_recovery(
         )
 
     return _terminal_decision("PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED", state=state)
+
+
+def _is_auth_failure_metadata(metadata: Mapping[str, Any]) -> bool:
+    return (
+        _metadata_str(metadata, "failure_type") == "auth"
+        or _metadata_str(metadata, "reason_code") == AGENT_AUTH_FAILED
+    )
 
 
 async def create_provider_recovery_attempt_row(
@@ -594,6 +613,8 @@ def _classification_metadata(
 
 
 def _metadata_recommended_action(metadata: Mapping[str, Any]) -> str:
+    if _is_auth_failure_metadata(metadata):
+        return "Refresh provider credentials before retrying this workspace."
     existing = metadata.get("recommended_action")
     if isinstance(existing, str) and existing.strip():
         return existing.strip()

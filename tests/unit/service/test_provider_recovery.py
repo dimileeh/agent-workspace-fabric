@@ -23,6 +23,7 @@ from awf.db.session import make_session_factory
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.service import provider_recovery as provider_recovery_mod
 from awf.service.provider_recovery import (
+    PROVIDER_AUTH_FAILED,
     FallbackTarget,
     ProviderRecoveryDecision,
     ProviderRecoveryPolicy,
@@ -245,6 +246,24 @@ def test_provider_recovery_metadata_derives_from_persisted_failure_details() -> 
     assert "<redacted>" in metadata["failure_fingerprint"]
 
 
+def test_provider_recovery_metadata_disables_fallback_for_auth_failure() -> None:
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code=AGENT_AUTH_FAILED,
+        message="Codex token_expired websocket 401 Unauthorized",
+        details={"provider": "openai", "model": "gpt-5.5"},
+        task_policy=v2_task_policy_snapshot(_request()),
+    )
+
+    assert metadata is not None
+    assert metadata["reason_code"] == AGENT_AUTH_FAILED
+    assert metadata["failure_type"] == "auth"
+    assert metadata["retryable"] is False
+    assert metadata["fallback_allowed"] is False
+    assert metadata["recommended_action"] == (
+        "Refresh provider credentials before retrying this workspace."
+    )
+
+
 def test_provider_recovery_value_helpers_normalize_payloads() -> None:
     explicit = FallbackTarget(agent="codex", provider="openai", model="gpt-5.5")
     inferred = FallbackTarget(agent="codex", provider=None, model="gpt-5.5")
@@ -378,6 +397,34 @@ def test_non_retryable_provider_failure_is_terminal() -> None:
     assert decision.action == "terminal"
     assert decision.retryable is False
     assert decision.terminal_reason == "NON_RETRYABLE_PROVIDER_FAILURE"
+
+
+def test_auth_provider_failure_is_terminal_even_with_retry_or_fallback_budget() -> None:
+    decision = decide_provider_recovery(
+        {
+            "reason_code": AGENT_AUTH_FAILED,
+            "failure_type": "auth",
+            "retryable": True,
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "failure_fingerprint": "auth:openai:gpt-5.5",
+        },
+        task_policy={
+            "provider_recovery": {
+                "fallbacks": [{"agent": "gemini", "model": "gemini-3.1-pro-preview"}],
+                "max_fallback_attempts": 1,
+                "max_same_provider_retries": 3,
+            }
+        },
+        current_agent="codex",
+        current_model="gpt-5.5",
+        now=datetime(2026, 5, 13, 12, 0, tzinfo=UTC),
+    )
+
+    assert decision.action == "terminal"
+    assert decision.retryable is False
+    assert decision.reason_code == PROVIDER_AUTH_FAILED
+    assert decision.terminal_reason == PROVIDER_AUTH_FAILED
 
 
 def test_retryable_failure_without_available_fallback_is_terminal_after_retry_budget() -> None:

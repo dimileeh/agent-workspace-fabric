@@ -129,6 +129,7 @@ from awf.service.merge_queue import (
     list_merge_queue_blockers_for_workspace,
 )
 from awf.service.provider_recovery import (
+    PROVIDER_AUTH_FAILED,
     PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
     PROVIDER_RECOVERY_COOLDOWN_EVENT,
     create_provider_recovery_attempt_row,
@@ -441,6 +442,10 @@ class ProviderRecoveryFallbackError(Exception):
 
 class ProviderRecoveryRetryError(Exception):
     """Raised when an operation should back off and retry later due to a provider error."""
+
+
+class ProviderRecoveryAuthError(Exception):
+    """Raised when PR-monitor repair cannot continue because provider auth is broken."""
 
 
 class _MonitorPolicyBlockedError(Exception):
@@ -848,7 +853,7 @@ class PullRequestMonitorRunner:
         self,
         workspace_id: str,
         exc: AgentRunError,
-    ) -> Literal["fallback", "retry", "deterministic"]:
+    ) -> Literal["fallback", "retry", "auth_failed", "deterministic"]:
         message = exc.result.stderr.strip() or exc.result.stdout.strip()
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
@@ -863,12 +868,18 @@ class PullRequestMonitorRunner:
             )
             if metadata is None:
                 return "deterministic"
+            provider_auth_failed = (
+                metadata.get("failure_type") == "auth"
+                or metadata.get("reason_code") == "AGENT_AUTH_FAILED"
+            )
             result = await create_provider_recovery_attempt_row(
                 s,
                 workspace_id,
                 metadata=metadata,
             )
             await s.commit()
+            if provider_auth_failed:
+                return "auth_failed"
             if result == "terminal" or result == "stale":
                 return "deterministic"
             if result is not None and result.action == "fallback" and not result.in_place:
@@ -889,6 +900,8 @@ class PullRequestMonitorRunner:
             raise ProviderRecoveryFallbackError() from exc
         if action == "retry":
             raise ProviderRecoveryRetryError()
+        if action == "auth_failed":
+            raise ProviderRecoveryAuthError() from exc
 
     async def _record_pr_monitor_audit_event(
         self,
@@ -1185,6 +1198,23 @@ class PullRequestMonitorRunner:
                 reason_code="PROVIDER_FALLBACK",
             )
             return
+        except ProviderRecoveryAuthError:
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.provider_auth_failed",
+                    "workspace_id": workspace_id,
+                    "reason_code": PROVIDER_AUTH_FAILED,
+                },
+            )
+            if state is not None:
+                await self._persist_state(workspace_id, state)
+            await self._terminate_failed(
+                workspace_id,
+                message="monitor: provider authentication failed",
+                reason_code=PROVIDER_AUTH_FAILED,
+            )
+            return
         finally:
             await self._write_monitor_log(
                 monitor_log,
@@ -1388,6 +1418,20 @@ class PullRequestMonitorRunner:
                     },
                     error_code="PROVIDER_FALLBACK",
                     error_message="Provider recovery triggered fallback",
+                )
+                raise
+            except ProviderRecoveryAuthError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_auth_failed",
+                        "reason_code": PROVIDER_AUTH_FAILED,
+                        "pushed": False,
+                    },
+                    error_code=PROVIDER_AUTH_FAILED,
+                    error_message="Provider authentication failed",
                 )
                 raise
             except BaseFetchError as exc:
@@ -1818,6 +1862,21 @@ class PullRequestMonitorRunner:
                     error_message="Provider recovery triggered fallback",
                 )
                 raise
+            except ProviderRecoveryAuthError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_auth_failed",
+                        "reason_code": PROVIDER_AUTH_FAILED,
+                        "failure_count": len(action.failures),
+                        "pushed": False,
+                    },
+                    error_code=PROVIDER_AUTH_FAILED,
+                    error_message="Provider authentication failed",
+                )
+                raise
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
                     operation,
@@ -1972,6 +2031,20 @@ class PullRequestMonitorRunner:
                     },
                     error_code="PROVIDER_FALLBACK",
                     error_message="Provider recovery triggered fallback",
+                )
+                raise
+            except ProviderRecoveryAuthError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_auth_failed",
+                        "reason_code": PROVIDER_AUTH_FAILED,
+                        "pushed": False,
+                    },
+                    error_code=PROVIDER_AUTH_FAILED,
+                    error_message="Provider authentication failed",
                 )
                 raise
             except ComposeExecCleanupError as exc:
