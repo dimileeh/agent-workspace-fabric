@@ -49,7 +49,18 @@ Result: `6 passed`.
 uv run --python 3.12 --extra dev pytest tests/unit/control/test_worker.py tests/unit/service/test_controls.py tests/unit/service/test_controls_lifecycle.py tests/unit/service/test_readiness.py tests/unit/service/test_failure_causality.py tests/unit/api/test_validation_provenance.py -q
 ```
 
-Result: `313 passed`.
+Result: original implementation evidence reported `313 passed`. Review follow-up
+rerun of the updated command reached `259 passed` before Postgres returned
+`DiskFullError` / `could not write init file` during isolated schema setup in
+this workspace. The added service-level suite and the API provenance suite were
+then run separately:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_failure_causality.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/api/test_validation_provenance.py -q
+```
+
+Result: `6 passed`; `34 passed`.
 
 ```bash
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_metrics.py tests/unit/service/test_workspace_response.py -q
