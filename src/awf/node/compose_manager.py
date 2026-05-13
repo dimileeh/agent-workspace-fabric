@@ -35,6 +35,10 @@ _log = get_logger(__name__)
 DOCKER_CAPTURE_TIMEOUT_SECONDS = 30.0
 COMPOSE_CAPTURE_TIMEOUT_SECONDS = 360.0
 _DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
+_COMPOSE_DISPATCH_RETRY_MARKERS = (
+    "unknown shorthand flag: 'd' in -d",
+    "unknown flag: --remove-orphans",
+)
 
 
 class ComposeOperationError(Exception):
@@ -184,6 +188,19 @@ class ComposeProjectPaths:
             "secret_lease_mount_metadata",
             frozen_mapping(self.secret_lease_mount_metadata),
         )
+
+
+def _is_transient_compose_dispatch_failure(stderr: str) -> bool:
+    """Detect Docker CLI/plugin dispatch flakes where ``compose`` is dropped.
+
+    Docker Desktop can occasionally return top-level ``docker`` flag errors for
+    a valid ``docker compose ...`` argv under heavy parallel test pressure. A
+    single retry is safe because Compose ``up``/``down`` are idempotent for the
+    same project/file pair and avoids failing workspaces on a malformed local
+    CLI dispatch.
+    """
+
+    return any(marker in stderr for marker in _COMPOSE_DISPATCH_RETRY_MARKERS)
 
 
 class ComposeManager:
@@ -409,50 +426,59 @@ class ComposeManager:
             "COMPOSE_PROJECT_NAME": project_name,
             "COMPOSE_FILE": str(compose_file),
         }
-        _log.debug("compose.exec", operation=operation, cmd=cmd)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=COMPOSE_CAPTURE_TIMEOUT_SECONDS,
-            )
-        except FileNotFoundError as e:
-            raise ComposeOperationError(
-                operation=operation,
-                returncode=127,
-                stdout="",
-                stderr=str(e),
-                reason_code="DOCKER_UNAVAILABLE",
-            ) from e
-        except TimeoutError as e:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            with contextlib.suppress(ProcessLookupError, TimeoutError):
-                await asyncio.wait_for(
-                    proc.wait(),
-                    timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
+        for attempt in range(2):
+            _log.debug("compose.exec", operation=operation, cmd=cmd, attempt=attempt + 1)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
-            raise ComposeOperationError(
-                operation=operation,
-                returncode=124,
-                stdout="",
-                stderr=(
-                    f"docker compose {operation} exceeded "
-                    f"{COMPOSE_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
-                ),
-                reason_code="DOCKER_COMMAND_TIMEOUT",
-            ) from e
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=COMPOSE_CAPTURE_TIMEOUT_SECONDS,
+                )
+            except FileNotFoundError as e:
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=127,
+                    stdout="",
+                    stderr=str(e),
+                    reason_code="DOCKER_UNAVAILABLE",
+                ) from e
+            except TimeoutError as e:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(ProcessLookupError, TimeoutError):
+                    await asyncio.wait_for(
+                        proc.wait(),
+                        timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
+                    )
+                raise ComposeOperationError(
+                    operation=operation,
+                    returncode=124,
+                    stdout="",
+                    stderr=(
+                        f"docker compose {operation} exceeded "
+                        f"{COMPOSE_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
+                    ),
+                    reason_code="DOCKER_COMMAND_TIMEOUT",
+                ) from e
 
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+            stdout = stdout_bytes.decode("utf-8", errors="replace")
+            stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-        assert proc.returncode is not None
-        if proc.returncode != 0:
+            assert proc.returncode is not None
+            if proc.returncode == 0:
+                return
+            if attempt == 0 and _is_transient_compose_dispatch_failure(stderr):
+                _log.warning(
+                    "compose.dispatch_retry",
+                    operation=operation,
+                    stderr=stderr[:400],
+                )
+                continue
             reason_code = "COMPOSE_COMMAND_FAILED"
             err_lower = stderr.lower()
             if (

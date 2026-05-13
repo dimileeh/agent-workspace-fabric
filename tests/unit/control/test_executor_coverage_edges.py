@@ -129,6 +129,37 @@ def _coverage(
 
 
 @pytest.mark.unit
+def test_read_ref_sha_falls_back_to_packed_refs_and_missing_ref(tmp_path: Path) -> None:
+    mirror = tmp_path / "mirror.git"
+    mirror.mkdir()
+    (mirror / "packed-refs").write_text(
+        "\n".join(
+            [
+                "# pack-refs with: peeled fully-peeled sorted",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/main",
+                "^bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "cccccccccccccccccccccccccccccccccccccccc refs/remotes/origin/feature",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert _read_ref_sha(mirror, "refs/remotes/origin/feature") == (
+        "cccccccccccccccccccccccccccccccccccccccc"
+    )
+    assert _read_ref_sha(mirror, "refs/remotes/origin/missing") is None
+
+
+@pytest.mark.unit
+def test_recovery_conformance_gaps_accepts_string_and_empty_values() -> None:
+    assert executor_mod._recovery_conformance_gaps({"gaps": " rerun AWF validation "}) == (  # noqa: SLF001
+        "rerun AWF validation",
+    )
+    assert executor_mod._recovery_conformance_gaps({"gaps": ""}) == ()  # noqa: SLF001
+    assert executor_mod._recovery_conformance_gaps({"gaps": object()}) == ()  # noqa: SLF001
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("recovery_payload", "head_sha", "rebase_result", "expected"),
     [

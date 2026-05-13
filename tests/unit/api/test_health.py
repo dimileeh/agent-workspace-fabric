@@ -530,6 +530,37 @@ async def test_reset_egress_audit_summary_counts_task_cancels_app_lookup() -> No
 
 
 @pytest.mark.unit
+async def test_reset_egress_audit_summary_counts_task_consumes_completed_task() -> None:
+    state = SimpleNamespace()
+
+    async def _completed_lookup() -> dict[str, int]:
+        return {"allowed": 1}
+
+    task = asyncio.create_task(_completed_lookup())
+    await task
+    health_route._track_egress_audit_summary_counts_task(state, task)
+
+    health_route.reset_egress_audit_summary_counts_task(state)
+
+    assert getattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None) is None
+
+
+@pytest.mark.unit
+async def test_pending_egress_audit_summary_counts_task_clears_completed_task() -> None:
+    state = SimpleNamespace()
+
+    async def _completed_lookup() -> dict[str, int]:
+        return {"warn": 2}
+
+    task = asyncio.create_task(_completed_lookup())
+    await task
+    setattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, task)
+
+    assert health_route._pending_egress_audit_summary_counts_task(state) is None
+    assert getattr(state, health_route._EGRESS_AUDIT_SUMMARY_COUNTS_TASK_STATE_ATTR, None) is None
+
+
+@pytest.mark.unit
 async def test_create_app_does_not_reset_other_app_egress_audit_lookup_task() -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
