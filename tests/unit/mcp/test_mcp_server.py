@@ -2668,7 +2668,7 @@ class TestReadWorkspaceArtifact:
         assert isinstance(result, dict)
         decoded = base64.b64decode(result["content"])
         assert decoded == b"prefix <redacted> suffix"
-        assert result["size_bytes"] == len(payload)
+        assert result["size_bytes"] == len(decoded)
 
     @pytest.mark.unit
     async def test_utf16le_artifact_is_blocked(

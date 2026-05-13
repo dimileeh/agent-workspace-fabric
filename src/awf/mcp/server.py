@@ -863,7 +863,7 @@ def build_mcp_server(
             relative_path=relative_path,
             name=name,
             content_type=content_type,
-            size_bytes=size_bytes,
+            size_bytes=len(content),
             content=base64.b64encode(content).decode("ascii"),
         )
         return _tool_result(response.model_dump(mode="json"))
