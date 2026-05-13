@@ -73,11 +73,9 @@ Status values:
 
 ### Active Slices
 
-Active first-wave slices are currently recorded below.
-
-| TODO area | Slice | Workspace | Agent / model | Status | Notes |
-| --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | TODO§P1-artifact-download: add bounded MCP artifact content/download tool | `ws_01349ca4ecca408baff1d446` | OpenCode/Ollama / `ollama/kimi-k2.6:cloud` | running | First-wave launch on 2026-05-12 after local AWF rebuild/restart and green provider preflight; auto-merge enabled; expected overlap with operation-read parity docs/tests. |
+No active slices are currently recorded. Rebuild/restart AWF and verify
+`healthz`, `readyz`, provider preflight, and zero active workspaces before
+launching the next wave.
 
 ### Reschedule Required Slices
 
@@ -89,15 +87,19 @@ not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P0 Operation And Recovery Truth | Preserve primary failure causality across stale callbacks and recovery paths | `ws_89f9bcd01ae747d6b4a251b5` | branch `awf/ws_89f9bcd01ae747d6b4a251b5`, no PR | reschedule_required | Failed 2026-05-12 after conformance during AWF post-agent commit. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported `end-of-file-fixer`, `awf-ruff-check`, and `awf-ruff-format-check`; temporary `fix_test*.py` files were present, and the conformance artifact was modified by the EOF hook. Provider preflight was ready and terminal runtime cleanup succeeded. Do not reschedule until the P0 deterministic post-agent pre-commit repair/retry gate below is fixed. |
-| P1 MCP And Project Onboarding Client Parity | TODO§P1-operation-read-auth: close REST auth parity for operation read endpoints | `ws_06ee567d44eb479bb0f68478` | branch `awf/ws_06ee567d44eb479bb0f68478`, no PR | reschedule_required | Failed 2026-05-12 after useful agent work and a local commit, during AWF post-agent commit of plan/conformance evidence. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported only `end-of-file-fixer` modifying `docs/awf-plans/ws_06ee567d44eb479bb0f68478.md` and `.conformance.json`; focused pytest, ruff, and mypy evidence passed in logs. Provider preflight was ready and terminal runtime cleanup succeeded. Do not reschedule until the P0 deterministic post-agent pre-commit repair/retry gate below is fixed. |
-| P1 MCP And Project Onboarding Client Parity | TODO§P1-mcp-global-events: add MCP parity for global events | `ws_7614d1ea986841bb9612d59f` | branch `awf/ws_7614d1ea986841bb9612d59f`, no PR | reschedule_required | Failed 2026-05-12 after conformance reported `CONFORMANCE_OK`, during AWF post-agent commit. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported `trailing-whitespace`, `end-of-file-fixer`, and `awf-ruff-format-check`; hooks modified AWF plan/conformance artifacts and ruff wanted `tests/unit/mcp/test_mcp_server.py` formatted. Focused validation evidence in logs showed 84 tests, ruff, and mypy passing before conformance. Provider preflight was ready and terminal runtime cleanup succeeded. Do not reschedule until the P0 deterministic post-agent pre-commit repair/retry gate below is fixed. |
+| P0 Operation And Recovery Truth | Preserve primary failure causality across stale callbacks and recovery paths | `ws_89f9bcd01ae747d6b4a251b5` | branch `awf/ws_89f9bcd01ae747d6b4a251b5`, no PR | reschedule_required | Failed 2026-05-12 after conformance during AWF post-agent commit. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported `end-of-file-fixer`, `awf-ruff-check`, and `awf-ruff-format-check`; temporary `fix_test*.py` files were present, and the conformance artifact was modified by the EOF hook. Provider preflight was ready and terminal runtime cleanup succeeded. The post-agent pre-commit blocker is now fixed by PR #239; reschedule from scratch after local AWF is green. |
+| P1 MCP And Project Onboarding Client Parity | TODO§P1-operation-read-auth: close REST auth parity for operation read endpoints | `ws_06ee567d44eb479bb0f68478` | branch `awf/ws_06ee567d44eb479bb0f68478`, no PR | reschedule_required | Failed 2026-05-12 after useful agent work and a local commit, during AWF post-agent commit of plan/conformance evidence. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported only `end-of-file-fixer` modifying `docs/awf-plans/ws_06ee567d44eb479bb0f68478.md` and `.conformance.json`; focused pytest, ruff, and mypy evidence passed in logs. Provider preflight was ready and terminal runtime cleanup succeeded. The post-agent pre-commit blocker is now fixed by PR #239; reschedule from scratch after local AWF is green. |
+| P1 MCP And Project Onboarding Client Parity | TODO§P1-mcp-global-events: add MCP parity for global events | `ws_7614d1ea986841bb9612d59f` | branch `awf/ws_7614d1ea986841bb9612d59f`, no PR | reschedule_required | Failed 2026-05-12 after conformance reported `CONFORMANCE_OK`, during AWF post-agent commit. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported `trailing-whitespace`, `end-of-file-fixer`, and `awf-ruff-format-check`; hooks modified AWF plan/conformance artifacts and ruff wanted `tests/unit/mcp/test_mcp_server.py` formatted. Focused validation evidence in logs showed 84 tests, ruff, and mypy passing before conformance. Provider preflight was ready and terminal runtime cleanup succeeded. The post-agent pre-commit blocker is now fixed by PR #239; reschedule from scratch after local AWF is green. |
 | P1 Developer Experience And Public Core Surface | First-run troubleshooting guide by symptom | `ws_4f44c108a58f46d092f4e411` | branch `awf/ws_4f44c108a58f46d092f4e411`, no PR | reschedule_required | Attempt produced local docs commits, but final coverage hit `13` pytest/xdist errors despite 99.02% coverage; AWF then misclassified the terminal state as `STALE_ACTIVE_EXECUTION` after repeated asyncpg `connection is closed` worker failures. Do not count this slice as done; DB connection resilience and active-execution adoption have landed, but this should wait for validation failure-causality preservation before retry. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 Test Coverage And Quality Gates | Robust post-agent pre-commit recovery | _local_ | [#239](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/239) | merged | Local Codex implementation; completed 2026-05-13 and generalizes post-agent commit/pre-commit classification, deterministic formatter/normalizer repair, targeted semantic repair, and original failure-causality preservation for timeout/provider failures. |
+| P0 Provider Resilience And Automated Fallback Recovery | Provider auth failure classification for PR monitor recovery | _local_ | [#240](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/240) | merged | Local Codex implementation; completed 2026-05-13 and classifies provider-auth failures with `PROVIDER_AUTH_FAILED` instead of treating them as generic agent/CI repair failures. |
+| P0 Test Coverage And Quality Gates | Feed GitHub Actions failure evidence into PR-monitor repair turns | _local_ | [#241](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/241) | merged | Local Codex implementation; completed 2026-05-14 and extracts redacted GitHub Actions failure evidence, focused repro commands, failing tests/errors, and check metadata for repair prompts without asking agents to rediscover known CI failures through broad local coverage. |
+| P1 MCP And Project Onboarding Client Parity | Bounded MCP artifact content read tool | `ws_01349ca4ecca408baff1d446` | [#238](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/238) | merged | OpenCode/Ollama `ollama/kimi-k2.6:cloud`; completed 2026-05-13 and adds bounded MCP artifact content reads with size/error guardrails and matching docs/reason-catalog coverage. |
 | P0 Reliability, Cleanup, And SLOs | Stop and release terminal failed runtime resources without destroying salvage evidence | `ws_de86ae75f42943d1830f1b0c` | [#236](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/236) | merged | Codex `gpt-5.5`; completed 2026-05-12 and stops terminal failed/cancelled/completed runtime stacks while preserving logs, artifacts, worktree/branch salvage metadata, failure diagnostics, and readiness distinction between retained evidence and leaked live resources. |
 | P0 Reliability, Cleanup, And SLOs | Harden Postgres/asyncpg connection resilience for long-running local control planes | `ws_b9cdd9b1c3474951876ee21d` | [#227](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/227) | merged | Codex `gpt-5.5`; completed 2026-05-10 and adds SQLAlchemy/asyncpg liveness, bounded invalidation/retry behavior, worker polling continuity, and service-health diagnostics for closed DB connections. |
 | P0 Operation And Recovery Truth | Add an AWF-owned conformance-to-validation handoff | `ws_c76512d8b0514eff9a3c8a38` | [#225](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/225) | merged | Codex `gpt-5.5`; completed 2026-05-09 and routes missing/stale AWF validation evidence from conformance into AWF-owned validation/provenance, then reruns conformance while keeping real plan/API gaps routed to agent iteration. |
@@ -433,7 +435,7 @@ not listed here.
 - [x] Add integration tests for Alembic multi-head detection and automatic merge revision generation.
 - [x] Add integration tests for Dockerized project profiles with sidecar services.
 - [x] Forbid empty tests, fake assertions, and broad monkeypatching that skips behavior under test.
-- [ ] Repair deterministic post-agent pre-commit hook rewrites before failing
+- [x] Repair deterministic post-agent pre-commit hook rewrites before failing
   otherwise-valid workspaces. Regression source: the 2026-05-12 first wave
   failed `ws_06ee567d44eb479bb0f68478`,
   `ws_7614d1ea986841bb9612d59f`, and
@@ -455,6 +457,11 @@ not listed here.
   Add TDD coverage for the exact hook combinations from the three failed
   workspaces and keep terminal runtime cleanup/readiness behavior intact. Do
   not reschedule those failed slices from scratch until this P0 is fixed.
+  Evidence: PR
+  [#239](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/239)
+  merged 2026-05-13 and adds generalized post-agent pre-commit classification,
+  one-shot deterministic hook repair/retry, targeted semantic repair, and
+  regression coverage for the observed hook combinations.
 - [ ] Make AWF self-dogfood parallel final coverage deterministic inside the
   workspace runtime. Regression source: `ws_4f44c108a58f46d092f4e411` ran
   `pytest -n 3 --dist=loadscope --cov=awf --cov-report=term-missing`, reached
@@ -465,7 +472,7 @@ not listed here.
   failure with failing node IDs and route it through validation recovery, not
   collapse into infra/stale execution. Add workspace-runtime regression coverage
   for `parallel_workers: 3` and local stress coverage for the self-profile.
-- [ ] Feed GitHub Actions failure evidence into PR-monitor repair turns.
+- [x] Feed GitHub Actions failure evidence into PR-monitor repair turns.
   Regression source: PR #238 / `ws_01349ca4ecca408baff1d446` repeatedly failed
   GitHub `python-full-coverage` on one catalog test, but the monitor repair loop
   asked the agent to rediscover the failure by running broad/full coverage
@@ -481,7 +488,10 @@ not listed here.
   suites; AWF must not ask agents to run full coverage locally merely to
   discover a known CI failure. Add generic tests for single-test failures,
   multiple-test failures, non-test command failures, unavailable log artifacts,
-  secret redaction, and provider-neutral check names.
+  secret redaction, and provider-neutral check names. Evidence: PR
+  [#241](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/241)
+  merged 2026-05-14 and feeds structured, redacted GitHub Actions failure
+  evidence plus focused repro commands into PR-monitor repair prompts.
 
 ## P1: Validation Runtime Performance
 
@@ -848,10 +858,13 @@ coding agent in any project to use AWF for a feature.
   global operation read endpoints, or keep the parity matrix operation rows
   explicitly marked `MCP partial` until those REST surfaces require the same
   token boundary as the MCP tools.
-- [ ] TODO§P1-artifact-download: Add a bounded MCP artifact content/download
+- [x] TODO§P1-artifact-download: Add a bounded MCP artifact content/download
   tool, or keep the matrix entry explicitly marked `MCP missing/backlog` until
   REST-compatible path validation, authorization, size limits, and error
-  envelopes are covered.
+  envelopes are covered. Evidence: `ws_01349ca4ecca408baff1d446` / PR
+  [#238](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/238)
+  merged 2026-05-13 and adds the bounded MCP artifact content read surface with
+  size/path/error guardrails and reason-catalog coverage.
 - [ ] TODO§P1-mcp-global-events: Add MCP parity for the global
   `GET /v1/events` surface, or keep the workspace-events row explicitly
   marked `MCP partial` until global events have a real MCP tool and coverage.
