@@ -950,9 +950,16 @@ async def test_list_operations_empty(authed_client: AsyncClient, session: AsyncS
 def authed_client(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> Iterator[AsyncClient]:
     get_settings.cache_clear()
     monkeypatch.setenv("AWF_API_TOKEN", "test-token")
+    original_auth = client.headers.get("Authorization")
     client.headers["Authorization"] = "Bearer test-token"
-    yield client
-    get_settings.cache_clear()
+    try:
+        yield client
+    finally:
+        if original_auth is None:
+            client.headers.pop("Authorization", None)
+        else:
+            client.headers["Authorization"] = original_auth
+        get_settings.cache_clear()
 
 
 @pytest.mark.unit
