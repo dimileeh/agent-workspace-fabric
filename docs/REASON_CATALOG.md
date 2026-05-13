@@ -9,6 +9,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs`
 **Docs Link:** [docs/REASON_CATALOG.md#api_unreachable](#api_unreachable)
 
+### ARTIFACT_BLOCKED
+**Problem:** AWF blocked reading artifact content through MCP.
+**Likely Cause:** The artifact content appears unsafe to return, such as binary data, encoded secrets, or text that cannot be safely redacted.
+**Operator Fix:** Inspect the workspace artifact directly from trusted local storage, or reduce/redact the artifact before requesting it through MCP.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#artifact_blocked](#artifact_blocked)
+
+### ARTIFACT_OVERSIZED
+**Problem:** AWF refused to read artifact content because it exceeded the configured byte limit.
+**Likely Cause:** The requested artifact is larger than the MCP read limit or grew beyond the limit while being read.
+**Operator Fix:** Request a smaller artifact, lower the requested path scope, or use the REST artifact download path when an operator intentionally needs the full file.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#artifact_oversized](#artifact_oversized)
+
 ### CI_TRANSIENT_RERUN_FAILED
 **Problem:** AWF could not request a GitHub rerun for CI failures classified as transient infrastructure failures.
 **Likely Cause:** GitHub rejected the rerun request, the workflow run no longer exists, or the token lacks permission to rerun workflow jobs.

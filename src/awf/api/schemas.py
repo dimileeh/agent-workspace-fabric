@@ -1199,6 +1199,18 @@ class WorkspaceArtifactListResponse(BaseModel):
     cursor: str | None = None
 
 
+class WorkspaceArtifactReadResponse(BaseModel):
+    """Bounded artifact bytes + metadata returned by ``awf_read_workspace_artifact``."""
+
+    workspace_id: str
+    relative_path: str
+    name: str
+    content_type: str
+    size_bytes: int
+    content: str
+    """Base64-encoded artifact bytes (standard alphabet, no line breaks)."""
+
+
 class ValidationProvenanceItemResponse(BaseModel):
     validation_run_id: str | None = None
     workspace_id: str
