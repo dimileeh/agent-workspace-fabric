@@ -847,48 +847,17 @@ def build_mcp_server(
         }
         is_likely_text = not is_likely_binary_type and b"\x00" not in content
         _service_settings = service_config.resolve_service_settings(settings_value)
-        if (
-            is_likely_text
-            or base_type.startswith("text/")
-            or base_type
-            in {
-                "application/json",
-                "application/xml",
-                "application/javascript",
-                "application/yaml",
-            }
-        ):
-            # Reject artifacts that carry common multibyte text encodings.
-            # Decoding UTF-16/UTF-32 as latin-1 interleaves NULs between
-            # characters, so simple string replacement redaction never matches
-            # the contiguous secret and the original secret-bearing bytes
-            # would be returned base64-encoded.
-            if content.startswith((b"\xff\xfe", b"\xfe\xff")) or content.startswith(
-                (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")
-            ):
-                return _error_result(
-                    error_code="ARTIFACT_BLOCKED",
-                    message="Text artifact uses an unsupported multibyte encoding (UTF-16/UTF-32) and cannot be safely redacted.",
-                )
-            text = content.decode("latin-1")
-            redacted_text = _redact_sensitive_text(
-                text, settings_value, service_settings=_service_settings
-            )
-            content = redacted_text.encode("latin-1")
-        elif _contains_secret_bytes(content, settings_value, service_settings=_service_settings):
-            return _error_result(
-                error_code="ARTIFACT_BLOCKED",
-                message="Binary artifact contains configured secrets and cannot be returned.",
-            )
-        if len(content) > limit_bytes:
-            return _error_result(
-                error_code="ARTIFACT_OVERSIZED",
-                message=f"redacted content length {len(content)} bytes exceeds limit {limit_bytes}",
-                detail={
-                    "limit_bytes": limit_bytes,
-                    "actual_bytes": len(content),
-                },
-            )
+        content, error_result = await asyncio.to_thread(
+            _check_and_redact_artifact_content,
+            content,
+            content_type,
+            limit_bytes,
+            settings_value,
+            _service_settings,
+            is_likely_text,
+        )
+        if error_result is not None:
+            return error_result
         response = WorkspaceArtifactReadResponse(
             workspace_id=workspace_id,
             relative_path=relative_path,
@@ -1869,6 +1838,69 @@ def _contains_secret_bytes(
     # patterns (e.g. ghp_..., github_pat_..., sk-proj-...) even when the
     # exact value is not present in current settings or environment.
     return provider_readiness_service._TOKEN_RE.search(content.decode("latin-1")) is not None
+
+
+def _check_and_redact_artifact_content(
+    content: bytes,
+    content_type: str,
+    limit_bytes: int,
+    settings: Settings,
+    service_settings: ServiceSettings,
+    is_likely_text: bool,
+) -> tuple[bytes, CallToolResult | None]:
+    """Apply BOM blocking, text redaction, binary secret detection, and size recheck.
+
+    Runs synchronously so it can be off-loaded to ``asyncio.to_thread``.
+    Returns ``(content, error_result)`` where ``error_result`` is non-None when
+    the artifact must be blocked or is oversized after redaction.
+    """
+    base_type = content_type.split(";")[0].strip().lower()
+    if (
+        is_likely_text
+        or base_type.startswith("text/")
+        or base_type
+        in {
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/yaml",
+        }
+    ):
+        # Reject artifacts that carry common multibyte text encodings.
+        if content.startswith((b"\xff\xfe", b"\xfe\xff")) or content.startswith(
+            (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")
+        ):
+            return (
+                b"",
+                _error_result(
+                    error_code="ARTIFACT_BLOCKED",
+                    message="Text artifact uses an unsupported multibyte encoding (UTF-16/UTF-32) and cannot be safely redacted.",
+                ),
+            )
+        text = content.decode("latin-1")
+        redacted_text = _redact_sensitive_text(text, settings, service_settings=service_settings)
+        content = redacted_text.encode("latin-1")
+    elif _contains_secret_bytes(content, settings, service_settings=service_settings):
+        return (
+            b"",
+            _error_result(
+                error_code="ARTIFACT_BLOCKED",
+                message="Binary artifact contains configured secrets and cannot be returned.",
+            ),
+        )
+    if len(content) > limit_bytes:
+        return (
+            b"",
+            _error_result(
+                error_code="ARTIFACT_OVERSIZED",
+                message=f"redacted content length {len(content)} bytes exceeds limit {limit_bytes}",
+                detail={
+                    "limit_bytes": limit_bytes,
+                    "actual_bytes": len(content),
+                },
+            ),
+        )
+    return (content, None)
 
 
 def _redact_sensitive_text(
