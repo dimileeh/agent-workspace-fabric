@@ -781,7 +781,11 @@ def build_mcp_server(
         limit_bytes: int = Field(
             default=65_536,
             ge=1,
-            description="Maximum bytes to read.",
+            description=(
+                "Maximum bytes to read. "
+                "Values above the server ceiling (1_048_576) are rejected "
+                "with ARTIFACT_OVERSIZED rather than a schema error."
+            ),
         ),
     ) -> StructuredToolResult:
         """Read a bounded chunk from a single workspace artifact.
