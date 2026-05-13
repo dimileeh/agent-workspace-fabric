@@ -37,7 +37,11 @@ docker compose ls
 ```
 
 If compose still reports old API/worker/migrate containers, remove the stale stack
-for the same host working directory before rerunning `awf service bootstrap`.
+for the same host working directory before rerunning `awf service bootstrap`:
+
+```bash
+docker compose down --remove-orphans
+```
 
 ## Symptom: Postgres is unavailable, is recovering, or disk is full
 
