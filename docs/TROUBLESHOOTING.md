@@ -241,11 +241,16 @@ awf service status --provider opencode --format pretty
 
 Verify the configured provider auth surface:
 
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `GEMINI_API_KEY`
-- `OLLAMA_API_KEY`
-- local provider auth mounts under expected auth mount paths
+- `codex`: `OPENAI_API_KEY` (or `OPENAI_API_TOKEN`, `CODEX_API_KEY`, `CODEX_AUTH_TOKEN`)
+- `claude_code`: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`
+- `gemini`: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `GOOGLE_APPLICATION_CREDENTIALS`
+- `opencode`: `OLLAMA_API_KEY` plus local auth at `~/.config/opencode` or `~/.ollama`
+- Service-visible auth mounts used by local providers:
+  - `/home/agent/.codex`
+  - `/home/agent/.claude` and `/home/agent/.claude.json`
+  - `/home/agent/.gemini`
+  - `/home/agent/.config/opencode`
+  - `/home/agent/.ollama`
 
 Then rerun preflight and a minimal bootstrap check:
 
