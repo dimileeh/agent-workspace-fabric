@@ -14,6 +14,7 @@ from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRe
 from awf.profiles.compose import (
     AGENT_AUTH_ENV_VARS,
     agent_environment_with_github_token,
+    agent_environment_with_legacy_host_auth,
     profile_agent_environment,
     profile_services,
     resolve_app_endpoints,
@@ -196,6 +197,21 @@ def test_github_token_placeholder_preserves_profile_supplied_agent_env() -> None
     assert env == (
         ("GH_TOKEN", "${WORKSPACE_GH_TOKEN}"),
         ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
+    )
+
+
+@pytest.mark.unit
+def test_opencode_bash_timeout_env_reaches_agent_as_placeholder() -> None:
+    env = agent_environment_with_legacy_host_auth(
+        (),
+        host_env={"OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS": "600000"},
+    )
+
+    assert env == (
+        (
+            "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
+            "${OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS}",
+        ),
     )
 
 
