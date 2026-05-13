@@ -114,7 +114,7 @@ test("workspace PR links open externally without navigating the console", async 
   const beforeUrl = page.url();
   await page
     .getByTestId("workspace-card-ws_long_title")
-    .getByRole("link", { name: "PR" })
+    .getByRole("link", { name: "PR #123" })
     .click();
 
   await expect(page).toHaveURL(beforeUrl);
