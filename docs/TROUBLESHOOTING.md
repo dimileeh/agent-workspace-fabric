@@ -256,7 +256,7 @@ Then rerun preflight and a minimal bootstrap check:
 
 ```bash
 awf service bootstrap
-awf service status --provider codex --format pretty
+awf service status --format pretty
 ```
 
 ## Symptom: GitHub auth failure
