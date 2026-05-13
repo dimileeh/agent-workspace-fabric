@@ -946,16 +946,16 @@ class GitHubClient:
                 if run_id is not None
                 else None
             )
-            log_text = redact_ci_log(log.stdout if log is not None else "")
+            run_name = run.get("name") or (f"run/{run_id}" if run_id is not None else "run/unknown")
+            raw_log_text = log.stdout if log is not None else ""
+            log_text = redact_ci_log(raw_log_text)
             evidence = extract_ci_failure_evidence(
-                log_text,
-                check_name=run.get("name")
-                or (f"run/{run_id}" if run_id is not None else "run/unknown"),
+                raw_log_text,
+                check_name=run_name,
             )
             failures.append(
                 CheckFailure(
-                    name=run.get("name")
-                    or (f"run/{run_id}" if run_id is not None else "run/unknown"),
+                    name=run_name,
                     conclusion=conclusion.upper(),
                     log_excerpt=_tail(log_text, log_tail_chars),
                     run_id=run_id,

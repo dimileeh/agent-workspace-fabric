@@ -638,6 +638,26 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_structured_test_evidence_prevents_transient_ci_rerun(self) -> None:
+        failure = CheckFailure(
+            name="python-full-coverage",
+            conclusion="FAILURE",
+            log_excerpt="curl: (56) Recv failure: Connection reset by peer",
+            run_id="25655330295",
+            test_node_ids=("pkg/tests/test_api.py::test_x",),
+            assertion_snippets=("E   AssertionError: boom",),
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_transient_rerun_helper_rejects_empty_failure_snapshot(self) -> None:
         assert not _should_rerun_transient_ci(
             _status(check_state=CheckState.FAILURE, ci_failures=()),

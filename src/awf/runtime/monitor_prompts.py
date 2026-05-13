@@ -227,10 +227,23 @@ def fix_ci_prompt(
                 )
             else:
                 parts.append(
-                    _missing_check_log_summary(
-                        repo_slug=repo_slug,
-                        pr_number=pr_number,
-                        failure=f,
+                    render_untrusted_evidence(
+                        UntrustedEvidence(
+                            source_kind="github_check_log_unavailable",
+                            source_name="GitHub CI missing check log",
+                            source_id=f.name,
+                            location=f"{repo_slug}#{pr_number}",
+                            metadata=_check_failure_metadata(
+                                repo_slug=repo_slug,
+                                pr_number=pr_number,
+                                failure=f,
+                            ),
+                            text=_missing_check_log_summary(
+                                repo_slug=repo_slug,
+                                pr_number=pr_number,
+                                failure=f,
+                            ),
+                        )
                     )
                 )
         body = "\n\n".join(parts)
@@ -355,7 +368,7 @@ def _check_failure_metadata(
         ("pr", f"#{pr_number}"),
         ("check_name", failure.name),
         ("conclusion", failure.conclusion),
-        ("run_id", failure.run_id),
+        *((("run_id", failure.run_id),) if failure.run_id is not None else ()),
     )
 
 
@@ -383,6 +396,18 @@ def _check_failure_evidence_summary(
     pr_number: int,
     failure: CheckFailure,
 ) -> str:
+    has_structured_evidence = any(
+        (
+            failure.suggested_repro_commands,
+            failure.test_node_ids,
+            failure.failing_commands,
+            failure.error_summaries,
+            failure.assertion_snippets,
+        )
+    )
+    if not has_structured_evidence:
+        return ""
+
     lines = _clean_metadata_lines(
         _check_failure_metadata(repo_slug=repo_slug, pr_number=pr_number, failure=failure)
     )
@@ -391,7 +416,6 @@ def _check_failure_evidence_summary(
     _append_section(lines, "Failing commands from CI", failure.failing_commands)
     _append_section(lines, "Error summaries", failure.error_summaries)
     _append_section(lines, "Assertion snippets", failure.assertion_snippets)
-    _append_section(lines, "Evidence warnings", failure.evidence_warnings)
     return "\n".join(lines)
 
 
