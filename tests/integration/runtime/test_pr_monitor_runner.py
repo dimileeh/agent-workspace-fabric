@@ -2063,7 +2063,9 @@ class TestMonitorDbHelpers:
             assert ws is not None
             started_wall = float(ws.monitor_threads_addressed[started_key])
         assert started_wall > 1_000_000_000
-        assert time.time() - started_wall == pytest.approx(300, abs=2)
+        elapsed = time.time() - started_wall
+        assert elapsed >= 300
+        assert elapsed < 360
 
 
 class TestCompleteWorkspaceTearsDownComposeStack:

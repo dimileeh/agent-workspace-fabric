@@ -158,6 +158,12 @@ class CheckFailure:
     conclusion: str  # FAILURE / TIMED_OUT / CANCELLED / ACTION_REQUIRED
     log_excerpt: str  # tail of the failing step's log, truncated
     run_id: str | None = None
+    failing_commands: tuple[str, ...] = ()
+    test_node_ids: tuple[str, ...] = ()
+    assertion_snippets: tuple[str, ...] = ()
+    error_summaries: tuple[str, ...] = ()
+    suggested_repro_commands: tuple[str, ...] = ()
+    evidence_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -609,13 +615,25 @@ def _ci_transient_rerun_count(
 
 def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     log_text = failure.log_excerpt.lower()
+    if _has_structured_code_failure_evidence(failure):
+        return False
     if not log_text.strip():
         return bool(failure.run_id) and failure.conclusion.upper() == "TIMED_OUT"
-    if any(marker in log_text for marker in _CI_CODE_FAILURE_MARKERS):
-        return False
-    if any(pattern.search(log_text) for pattern in _CI_CODE_FAILURE_PATTERNS):
+    if _looks_like_code_failure_text(log_text):
         return False
     return any(marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
+
+
+def _has_structured_code_failure_evidence(failure: CheckFailure) -> bool:
+    if failure.test_node_ids or failure.assertion_snippets:
+        return True
+    return _looks_like_code_failure_text("\n".join(failure.error_summaries).lower())
+
+
+def _looks_like_code_failure_text(text: str) -> bool:
+    if any(marker in text for marker in _CI_CODE_FAILURE_MARKERS):
+        return True
+    return any(pattern.search(text) for pattern in _CI_CODE_FAILURE_PATTERNS)
 
 
 def _supports_failed_job_rerun(failure: CheckFailure) -> bool:

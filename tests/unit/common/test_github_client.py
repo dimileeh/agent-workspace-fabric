@@ -12,6 +12,7 @@ canned stdout we want, and the client parses it. Assertions cover:
 from __future__ import annotations
 
 import json
+import shlex
 
 import pytest
 import structlog
@@ -1710,6 +1711,495 @@ class TestFetchPrStatus:
 
 
 class TestFetchFailingCheckLogs:
+    @pytest.mark.unit
+    async def test_extracts_single_pytest_failure_evidence_and_focused_command(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 42,
+                        "name": "coverage-gate",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "coverage\tRun tests\tuv run --python 3.12 --extra dev pytest -n 8 "
+                "--dist=loadscope --cov=awf --cov-fail-under=99\n"
+                "FAILED tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage "
+                "- AssertionError: Missing reason catalog entries: ARTIFACT_BLOCKED, "
+                "ARTIFACT_OVERSIZED\n"
+                "E   AssertionError: Missing reason catalog entries: ARTIFACT_BLOCKED, "
+                "ARTIFACT_OVERSIZED\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        assert len(failures) == 1
+        failure = failures[0]
+        assert failure.name == "coverage-gate"
+        assert failure.test_node_ids == (
+            "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage",
+        )
+        assert failure.suggested_repro_commands == (
+            "uv run --python 3.12 --extra dev pytest "
+            "tests/unit/docs/test_catalog_coverage.py::test_catalog_coverage -q",
+        )
+        assert any("Missing reason catalog entries" in item for item in failure.error_summaries)
+        assert any("ARTIFACT_BLOCKED" in item for item in failure.assertion_snippets)
+
+    @pytest.mark.unit
+    async def test_extracts_full_nested_pytest_node_path(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 421,
+                        "name": "coverage-gate",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "coverage\tRun tests\tpython -m pytest pkg/tests\n"
+                "FAILED pkg/tests/test_api.py::test_x - AssertionError: boom\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.test_node_ids == ("pkg/tests/test_api.py::test_x",)
+        assert failure.suggested_repro_commands == (
+            "python -m pytest pkg/tests/test_api.py::test_x -q",
+        )
+
+    @pytest.mark.unit
+    async def test_extracts_multiple_pytest_failures_with_bounded_focused_command(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 43,
+                        "name": "any-provider-check",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "FAILED tests/unit/a/test_one.py::test_alpha - AssertionError: alpha\n"
+                "FAILED tests/unit/b/test_two.py::TestTwo::test_beta - AssertionError: beta\n"
+                "FAILED tests/unit/c/test_three.py::test_gamma - AssertionError: gamma\n"
+                "FAILED tests/unit/d/test_four.py::test_delta - AssertionError: delta\n"
+                "FAILED tests/unit/e/test_five.py::test_epsilon - AssertionError: epsilon\n"
+                "FAILED tests/unit/f/test_six.py::test_zeta - AssertionError: zeta\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.test_node_ids[:2] == (
+            "tests/unit/a/test_one.py::test_alpha",
+            "tests/unit/b/test_two.py::TestTwo::test_beta",
+        )
+        assert len(failure.test_node_ids) == 6
+        assert failure.suggested_repro_commands == ()
+
+    @pytest.mark.unit
+    async def test_builds_focused_command_from_detected_pytest_command(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 430,
+                        "name": "python-tests",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "tests\tRun tests\tpython -m pytest -n 8 tests/unit\n"
+                "FAILED tests/unit/runtime/test_prompt.py::test_one - AssertionError: boom\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.suggested_repro_commands == (
+            "python -m pytest tests/unit/runtime/test_prompt.py::test_one -q",
+        )
+
+    @pytest.mark.unit
+    async def test_does_not_promote_untrusted_printed_pytest_commands(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 4301,
+                        "name": "python-tests",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "pytest tests/unit/runtime/test_prompt.py::test_one; echo owned\n"
+                "FAILED tests/unit/runtime/test_prompt.py::test_one - AssertionError: boom\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.failing_commands == ()
+        assert failure.suggested_repro_commands == ()
+
+    @pytest.mark.unit
+    async def test_quotes_parametrized_pytest_node_ids_in_focused_command(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 431,
+                        "name": "python-full-coverage",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "FAILED tests/unit/runtime/test_prompt.py::test_handles[bad value; "
+                "echo owned] - AssertionError: boom\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.test_node_ids == (
+            "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
+        )
+        assert failure.suggested_repro_commands == ()
+
+    @pytest.mark.unit
+    async def test_quotes_parametrized_pytest_node_ids_from_non_failed_lines(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 432,
+                        "name": "python-full-coverage",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "ERROR tests/unit/runtime/test_prompt.py::test_handles[bad value; "
+                "echo owned] - RuntimeError: boom\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.test_node_ids == (
+            "tests/unit/runtime/test_prompt.py::test_handles[bad value; echo owned]",
+        )
+        assert failure.suggested_repro_commands == ()
+
+    @pytest.mark.unit
+    async def test_preserves_pytest_param_ids_containing_failure_delimiter_text(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 433,
+                        "name": "python-full-coverage",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "FAILED tests/unit/runtime/test_prompt.py::test_handles[a - b] "
+                "- AssertionError: boom\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.test_node_ids == ("tests/unit/runtime/test_prompt.py::test_handles[a - b]",)
+        assert failure.suggested_repro_commands == ()
+
+    @pytest.mark.unit
+    async def test_preserves_significant_whitespace_in_pytest_param_ids(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 434,
+                        "name": "python-full-coverage",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "FAILED tests/unit/runtime/test_prompt.py::test_handles[bad  value] "
+                "- AssertionError: boom\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.test_node_ids == (
+            "tests/unit/runtime/test_prompt.py::test_handles[bad  value]",
+        )
+        assert failure.suggested_repro_commands == ()
+
+    @pytest.mark.unit
+    async def test_extracts_long_pytest_param_id_before_truncating_display_lines(self) -> None:
+        param_id = "case-" + ("x" * 520)
+        node_id = f"tests/unit/runtime/test_prompt.py::test_handles[{param_id}]"
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 435,
+                        "name": "python-full-coverage",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "tests\tRun tests\tpython -m pytest tests/unit/runtime/test_prompt.py\n"
+                f"FAILED {node_id} - AssertionError: boom\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.test_node_ids == (node_id,)
+        assert failure.suggested_repro_commands == (f"python -m pytest {shlex.quote(node_id)} -q",)
+        assert all(len(item) <= 500 for item in failure.error_summaries)
+
+    @pytest.mark.unit
+    async def test_extracts_non_test_command_failure_evidence(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 44,
+                        "name": "lint-and-type",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "lint\tRun ruff\tuv run --python 3.12 --extra dev ruff check src/awf tests\n"
+                "src/awf/runtime/foo.py:10:1: F401 imported but unused\n"
+                "Error: Process completed with exit code 1.\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        failure = failures[0]
+        assert failure.failing_commands == (
+            "uv run --python 3.12 --extra dev ruff check src/awf tests",
+        )
+        assert failure.suggested_repro_commands == ()
+        assert any("F401 imported but unused" in item for item in failure.error_summaries)
+
+    @pytest.mark.unit
+    async def test_redacts_secrets_before_log_and_evidence_are_stored(self) -> None:
+        secret = "sk-proj-ci-failure-secret"
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 45,
+                        "name": "external-ci",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                f"pytest\tRun\tuv run pytest tests/unit/test_secret.py::test_no_token TOKEN={secret}\n"
+                f"FAILED tests/unit/test_secret.py::test_no_token - AssertionError: {secret}\n"
+                f"E   Authorization: Bearer {secret}\n"
+            ),
+        )
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=1,
+            head_sha="abc",
+        )
+
+        serialized = repr(failures[0])
+        assert secret not in failures[0].log_excerpt
+        assert secret not in serialized
+        assert "<redacted>" in serialized
+
+    @pytest.mark.unit
+    async def test_missing_log_records_evidence_warning(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 46,
+                        "name": "logs-purged",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        fake.queue_result(returncode=1, stderr="log not found")
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
+        )
+
+        assert failures[0].log_excerpt == ""
+        assert failures[0].evidence_warnings == (
+            "GitHub Actions log unavailable for failed check logs-purged.",
+        )
+
     @pytest.mark.unit
     async def test_collects_failures_and_truncates_log(self) -> None:
         fake = FakeCommandRunner()
