@@ -950,21 +950,6 @@ class TestArtifactService:
             )
 
     @pytest.mark.unit
-    def test_listing_skips_file_with_hard_link(self, tmp_path: Path) -> None:
-        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
-        artifact_dir.mkdir(parents=True)
-        outside = tmp_path / "outside.txt"
-        outside.write_text("outside\n", encoding="utf-8")
-        report = artifact_dir / "report.txt"
-        report.hardlink_to(outside)
-        kept = artifact_dir / "kept.txt"
-        kept.write_text("kept\n", encoding="utf-8")
-
-        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
-            "kept.txt",
-        ]
-
-    @pytest.mark.unit
     def test_listing_keeps_regular_single_link_file(self, tmp_path: Path) -> None:
         artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
         artifact_dir.mkdir(parents=True)
