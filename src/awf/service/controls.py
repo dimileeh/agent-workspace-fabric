@@ -37,6 +37,7 @@ from awf.node.git_manager import GitManager
 from awf.service.failure_causality import (
     build_preserved_failure_payload,
     load_primary_failure_snapshot,
+    primary_failure_reason_code,
 )
 from awf.service.secret_leases import (
     TERMINAL_CLEANUP_REVOKE_REASON,
@@ -1097,10 +1098,9 @@ class WorkspaceControlService:
                 await repo.transition(
                     workspace,
                     to=WorkspaceStatus.failed,
-                    reason_code=(
-                        str(primary_failure.get("reason_code"))
-                        if primary_failure is not None and primary_failure.get("reason_code")
-                        else "CLEANUP_FAILED"
+                    reason_code=primary_failure_reason_code(
+                        primary_failure,
+                        fallback="CLEANUP_FAILED",
                     ),
                     payload=failed_transition_payload,
                 )
