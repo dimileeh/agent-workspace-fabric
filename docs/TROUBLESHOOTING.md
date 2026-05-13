@@ -36,11 +36,43 @@ docker compose version
 docker compose ls
 ```
 
-If compose still reports old API/worker/migrate containers, remove the stale stack
-for the same host working directory before rerunning `awf service bootstrap`:
+If compose still reports old local-service containers (`awf-local-service`),
+remove only that stack before rerunning `awf service bootstrap`:
 
 ```bash
-docker compose down --remove-orphans
+docker compose -f docker/compose/local-service.yml down --remove-orphans
+```
+
+If stale workspace stacks remain, remove them by deterministic project name:
+
+```bash
+export WORKSPACE_ID=<workspace_id>
+export AWF_COMPOSE_PROJECT="awf_${WORKSPACE_ID}"
+docker ps -a \
+  --filter "label=com.docker.compose.project=${AWF_COMPOSE_PROJECT}" \
+  --format "table {{.ID}}\t{{.Names}}"
+```
+
+Then remove just that workspace project if the rendered compose file still exists:
+
+```bash
+export AWF_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
+docker compose -f "${AWF_WORK_DIR}/compose/${WORKSPACE_ID}/compose.yml" \
+  -p "${AWF_COMPOSE_PROJECT}" down --remove-orphans
+```
+
+If the compose file is missing, clean the same workspace resources via labels:
+
+```bash
+for container_id in $(docker ps -a --filter "label=com.docker.compose.project=${AWF_COMPOSE_PROJECT}" --quiet); do
+  docker rm -f "${container_id}"
+done
+for network_id in $(docker network ls --filter "label=com.docker.compose.project=${AWF_COMPOSE_PROJECT}" --quiet); do
+  docker network rm "${network_id}"
+done
+for volume_name in $(docker volume ls --filter "label=com.docker.compose.project=${AWF_COMPOSE_PROJECT}" --quiet); do
+  docker volume rm -f "${volume_name}"
+done
 ```
 
 ## Symptom: Postgres is unavailable, is recovering, or disk is full
@@ -90,8 +122,29 @@ docker info
 docker compose version
 ```
 
-2. Fix permissions for the current user and daemon socket (for example:
-   `sudo usermod -aG docker $USER`, then log out and log back in, or reboot).
+2. Fix permissions for the current user and daemon socket:
+
+```bash
+ls -l /var/run/docker.sock
+id -nG
+id
+sudo usermod -aG docker "$USER"
+```
+
+Apply the new group membership in your current session, then verify with:
+
+```bash
+newgrp docker
+docker run --rm hello-world
+```
+
+On macOS and some shells, `newgrp` is unavailable; log out and log back in after
+group update, then run:
+
+```bash
+docker info
+```
+
 3. If permission is denied or socket is missing, restart Docker and rerun status:
 
 ```bash
