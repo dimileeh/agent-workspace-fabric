@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import FailureReason, WorkspaceStatus
@@ -206,6 +206,13 @@ async def _has_failure_epoch_reset_after(
             WorkspaceEvent.workspace_id == workspace_id,
             WorkspaceEvent.occurred_at > event.occurred_at,
             WorkspaceEvent.new_state.in_(_FAILURE_EPOCH_RESET_STATES),
+            or_(
+                WorkspaceEvent.event_type == "workspace.state_changed",
+                and_(
+                    WorkspaceEvent.event_type == "workspace.remonitor_requested",
+                    func.json_typeof(WorkspaceEvent.payload["state_reset"]) == "object",
+                ),
+            ),
         )
         .limit(1)
     )

@@ -319,6 +319,60 @@ async def test_primary_failure_snapshot_uses_current_failure_after_remonitor_res
 
 
 @pytest.mark.unit
+async def test_primary_failure_snapshot_ignores_non_state_active_event_after_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, _validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.infrastructure_failure.value,
+        failure_message="cleanup failed after primary validation failure",
+        reason_code="CLEANUP_FAILED",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+        embedded_primary={
+            "failure_reason": FailureReason.validation_failure.value,
+            "message": "pytest failed before cleanup",
+            "reason_code": "PYTEST_TEST_FAILURE",
+            "details": {
+                "operator_guidance": "Inspect the validation log before cleanup diagnostics."
+            },
+            "validation_run": {
+                "id": "vr_embedded_primary_after_diagnostic",
+                "status": "failed",
+                "reason_code": "PYTEST_TEST_FAILURE",
+            },
+        },
+    )
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.monitoring_pr.value
+        await repo.add_event(
+            workspace,
+            event_type="workspace.diagnostic_note",
+            reason_code="DIAGNOSTIC_NOTE",
+            payload={"message": "operator requested extra monitoring diagnostics"},
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.validation_failure.value
+    assert snapshot["message"] == "pytest failed before cleanup"
+    assert snapshot["reason_code"] == "PYTEST_TEST_FAILURE"
+    assert snapshot["details"] == {
+        "operator_guidance": "Inspect the validation log before cleanup diagnostics."
+    }
+    assert snapshot["validation_run"]["id"] == "vr_embedded_primary_after_diagnostic"
+
+
+@pytest.mark.unit
 async def test_primary_failure_snapshot_prefers_latest_failed_event_with_preserved_primary(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
