@@ -14,7 +14,6 @@ from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 
 PRIMARY_FAILURE_KEY = "primary_failure"
 SECONDARY_FAILURE_KEY = "secondary_failure"
-SECONDARY_FAILURES_KEY = "secondary_failures"
 
 
 async def load_primary_failure_snapshot(
@@ -128,7 +127,6 @@ def build_preserved_failure_payload(
         payload["details"] = _jsonable_mapping(details)
     payload[PRIMARY_FAILURE_KEY] = primary
     payload[SECONDARY_FAILURE_KEY] = secondary
-    payload[SECONDARY_FAILURES_KEY] = [secondary]
     return payload
 
 

@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.service.failure_causality import load_primary_failure_snapshot
+from awf.service.failure_causality import (
+    build_preserved_failure_payload,
+    load_primary_failure_snapshot,
+)
 
 
 @pytest.fixture
@@ -18,6 +21,28 @@ async def session_factory(
     engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     yield make_session_factory(engine)
+
+
+@pytest.mark.unit
+def test_preserved_failure_payload_uses_single_secondary_failure_shape() -> None:
+    payload = build_preserved_failure_payload(
+        {
+            "failure_reason": FailureReason.validation_failure.value,
+            "reason_code": "PYTEST_TEST_FAILURE",
+            "message": "pytest failed",
+        },
+        secondary_failure={
+            "failure_reason": "cleanup_failure",
+            "reason_code": "CLEANUP_FAILED",
+        },
+    )
+
+    assert payload["reason_code"] == "PYTEST_TEST_FAILURE"
+    assert payload["secondary_failure"] == {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "CLEANUP_FAILED",
+    }
+    assert "secondary_failures" not in payload
 
 
 @pytest.mark.unit
