@@ -11,6 +11,7 @@ TROUBLESHOOTING_PATH = REPO_ROOT / "docs" / "TROUBLESHOOTING.md"
 
 @pytest.mark.unit
 def test_getting_started_links_to_first_run_troubleshooting() -> None:
+    """Assert getting-started points readers at the first-run troubleshooting section."""
     content = GETTING_STARTED_PATH.read_text(encoding="utf-8")
     assert any(
         link in content
@@ -23,6 +24,7 @@ def test_getting_started_links_to_first_run_troubleshooting() -> None:
 
 @pytest.mark.unit
 def test_troubleshooting_sections_cover_required_symptoms() -> None:
+    """Assert the troubleshooting document includes all required symptom sections."""
     content = TROUBLESHOOTING_PATH.read_text(encoding="utf-8")
 
     required_sections = (
@@ -43,6 +45,7 @@ def test_troubleshooting_sections_cover_required_symptoms() -> None:
 
 @pytest.mark.unit
 def test_troubleshooting_guide_has_actionable_commands() -> None:
+    """Assert the troubleshooting guide documents required operational commands."""
     content = TROUBLESHOOTING_PATH.read_text(encoding="utf-8")
 
     required_commands = (
