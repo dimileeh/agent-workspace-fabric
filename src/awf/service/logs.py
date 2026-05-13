@@ -22,7 +22,7 @@ def _resolve_local_service_compose_file(compose_file: Path) -> Path:
         return compose_file
     if compose_file.exists():
         return compose_file
-    for root in (Path.cwd(), *Path.cwd().parents):
+    for root in Path.cwd().parents:
         candidate = root / compose_file
         if candidate.exists():
             return candidate
