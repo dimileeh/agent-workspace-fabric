@@ -366,14 +366,8 @@ API evidence endpoints:
 - `GET /v1/workspaces/{workspace_id}/events`
 - `GET /v1/workspaces/{workspace_id}/operations`
 - `GET /v1/workspaces/{workspace_id}/runtime`
+
+CLI:
+
 - `awf workspace operations <workspace_id>`
 - `awf workspace runtime <workspace_id>`
-
-API equivalents for operators using REST:
-
-- `GET /v1/workspaces/{workspace_id}/logs`
-- `GET /v1/workspaces/{workspace_id}/logs/{stream_id}`
-- `GET /v1/workspaces/{workspace_id}/events`
-- `GET /v1/workspaces/{workspace_id}/operations`
-- `GET /v1/workspaces/{workspace_id}/runtime`
-- `GET /v1/workspaces/{workspace_id}`
