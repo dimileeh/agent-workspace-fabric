@@ -16,6 +16,7 @@ import asyncio
 import base64
 import inspect
 import json
+import os
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
@@ -841,6 +842,7 @@ def build_mcp_server(
             "application/vnd.sqlite3",
         }
         is_likely_text = not is_likely_binary_type and b"\x00" not in content
+        _service_settings = service_config.resolve_service_settings(settings_value)
         if (
             is_likely_text
             or base_type.startswith("text/")
@@ -853,11 +855,15 @@ def build_mcp_server(
             }
         ):
             text = content.decode("latin-1")
-            _service_settings = service_config.resolve_service_settings(settings_value)
             redacted_text = _redact_sensitive_text(
                 text, settings_value, service_settings=_service_settings
             )
             content = redacted_text.encode("latin-1")
+        elif _contains_secret_bytes(content, settings_value, service_settings=_service_settings):
+            return _error_result(
+                error_code="ARTIFACT_BLOCKED",
+                message="Binary artifact contains configured secrets and cannot be returned.",
+            )
         if len(content) > limit_bytes:
             return _error_result(
                 error_code="ARTIFACT_OVERSIZED",
@@ -1825,6 +1831,25 @@ def _redact_sensitive_value(
             for key, item in value.items()
         }
     return value
+
+
+def _contains_secret_bytes(
+    content: bytes,
+    settings: Settings,
+    *,
+    service_settings: ServiceSettings,
+) -> bool:
+    for secret in (settings.api_token, settings.github_token, service_settings.github_token):
+        if secret and len(secret) >= 4 and secret.encode() in content:
+            return True
+    for key, value in os.environ.items():
+        if (
+            key.upper() in provider_readiness_service._KNOWN_SECRET_ENV_KEYS
+            and len(value) >= 4
+            and value.encode() in content
+        ):
+            return True
+    return False
 
 
 def _redact_sensitive_text(
