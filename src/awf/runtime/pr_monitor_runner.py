@@ -132,6 +132,7 @@ from awf.service.provider_recovery import (
     PROVIDER_AUTH_FAILED,
     PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
     PROVIDER_RECOVERY_COOLDOWN_EVENT,
+    _is_auth_failure_metadata,
     create_provider_recovery_attempt_row,
     provider_cooldown_not_before,
     provider_for_agent_model,
@@ -576,6 +577,28 @@ class PullRequestMonitorRunner:
             )
             await session.commit()
 
+    async def _finish_provider_auth_failed_operation(
+        self,
+        handle: MonitorOperationHandle | None,
+        *,
+        extra_result: Mapping[str, Any] | None = None,
+    ) -> None:
+        result: dict[str, Any] = {
+            "status": "failed",
+            "outcome": "provider_auth_failed",
+            "reason_code": PROVIDER_AUTH_FAILED,
+        }
+        if extra_result:
+            result.update(extra_result)
+        result["pushed"] = False
+        await self._finish_monitor_operation(
+            handle,
+            status=OperationStatus.failed,
+            result=result,
+            error_code=PROVIDER_AUTH_FAILED,
+            error_message="Provider authentication failed",
+        )
+
     async def _begin_monitor_state_operation(
         self,
         *,
@@ -868,10 +891,7 @@ class PullRequestMonitorRunner:
             )
             if metadata is None:
                 return "deterministic"
-            provider_auth_failed = (
-                metadata.get("failure_type") == "auth"
-                or metadata.get("reason_code") == "AGENT_AUTH_FAILED"
-            )
+            provider_auth_failed = _is_auth_failure_metadata(metadata)
             result = await create_provider_recovery_attempt_row(
                 s,
                 workspace_id,
@@ -1421,18 +1441,7 @@ class PullRequestMonitorRunner:
                 )
                 raise
             except ProviderRecoveryAuthError:
-                await self._finish_monitor_operation(
-                    operation,
-                    status=OperationStatus.failed,
-                    result={
-                        "status": "failed",
-                        "outcome": "provider_auth_failed",
-                        "reason_code": PROVIDER_AUTH_FAILED,
-                        "pushed": False,
-                    },
-                    error_code=PROVIDER_AUTH_FAILED,
-                    error_message="Provider authentication failed",
-                )
+                await self._finish_provider_auth_failed_operation(operation)
                 raise
             except BaseFetchError as exc:
                 base_fetch_result = await self._wait_after_transient_base_fetch_error(
@@ -1863,18 +1872,9 @@ class PullRequestMonitorRunner:
                 )
                 raise
             except ProviderRecoveryAuthError:
-                await self._finish_monitor_operation(
+                await self._finish_provider_auth_failed_operation(
                     operation,
-                    status=OperationStatus.failed,
-                    result={
-                        "status": "failed",
-                        "outcome": "provider_auth_failed",
-                        "reason_code": PROVIDER_AUTH_FAILED,
-                        "failure_count": len(action.failures),
-                        "pushed": False,
-                    },
-                    error_code=PROVIDER_AUTH_FAILED,
-                    error_message="Provider authentication failed",
+                    extra_result={"failure_count": len(action.failures)},
                 )
                 raise
             except ComposeExecCleanupError as exc:
@@ -2034,18 +2034,7 @@ class PullRequestMonitorRunner:
                 )
                 raise
             except ProviderRecoveryAuthError:
-                await self._finish_monitor_operation(
-                    operation,
-                    status=OperationStatus.failed,
-                    result={
-                        "status": "failed",
-                        "outcome": "provider_auth_failed",
-                        "reason_code": PROVIDER_AUTH_FAILED,
-                        "pushed": False,
-                    },
-                    error_code=PROVIDER_AUTH_FAILED,
-                    error_message="Provider authentication failed",
-                )
+                await self._finish_provider_auth_failed_operation(operation)
                 raise
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(

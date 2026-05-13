@@ -212,13 +212,6 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#port_config_invalid](#port_config_invalid)
 
-### PROVIDER_AUTH_FAILED
-**Problem:** A workspace agent or PR monitor could not run because the selected LLM provider authentication failed.
-**Likely Cause:** The provider token is expired, reused, missing inside the workspace runtime, or rejected by the provider CLI/API.
-**Operator Fix:** Refresh the provider credentials, restart or rebuild the AWF service/runtime if credentials are mounted into containers, then remonitor or reschedule the workspace.
-**Related Command:** `awf service doctor`
-**Docs Link:** [docs/REASON_CATALOG.md#provider_auth_failed](#provider_auth_failed)
-
 ### POST_AGENT_COMMIT_FAILED
 **Problem:** The post-agent ``git commit`` exited non-zero for a reason unrelated to a pre-commit hook (e.g. missing git identity, detached HEAD, "nothing to commit").
 **Likely Cause:** Git environment misconfiguration in the workspace container or an agent that left the worktree in an unexpected state (orphan HEAD, empty index after stage).
@@ -267,6 +260,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the blocked paths in the monitor event, remove or revert the out-of-scope quality-gate changes, then remonitor the workspace.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#protected_scope_push_blocked](#protected_scope_push_blocked)
+
+### PROVIDER_AUTH_FAILED
+**Problem:** A workspace agent or PR monitor could not run because the selected LLM provider authentication failed.
+**Likely Cause:** The provider token is expired, reused, missing inside the workspace runtime, or rejected by the provider CLI/API.
+**Operator Fix:** Refresh the provider credentials, restart or rebuild the AWF service/runtime if credentials are mounted into containers, then remonitor or reschedule the workspace.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#provider_auth_failed](#provider_auth_failed)
 
 ### PR_ADOPTION_INPUT_REQUIRED
 **Problem:** A PR monitor adoption request omitted required input.
