@@ -11,6 +11,7 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ from awf.adapters import registry as _registry  # noqa: F401 - populates adapter
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, FakeCommandRunner
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
+from awf.control import executor as executor_mod
 from awf.control.executor import (
     POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
     POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
@@ -2329,6 +2331,7 @@ class TestHappyPath:
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         ws_id = await _seed_ready_workspace(
             factory,
@@ -2336,6 +2339,23 @@ class TestHappyPath:
                 "name": "planned",
                 "planning": {"required": True, "enforce_plan_only_changes": True},
             },
+        )
+        retry_calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def _fake_retry_workspace_row(
+            session: AsyncSession,
+            workspace_id: str,
+            **kwargs: Any,
+        ) -> Any:
+            del session
+            retry_calls.append((workspace_id, kwargs))
+            return SimpleNamespace(new_workspace=SimpleNamespace(id="ws_retry"))
+
+        monkeypatch.setattr(
+            executor_mod,
+            "retry_workspace_row",
+            _fake_retry_workspace_row,
+            raising=False,
         )
 
         fake.queue_result(returncode=0, stdout="")  # before planning
@@ -2381,6 +2401,7 @@ class TestHappyPath:
         assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls)
         assert not any("push" in call.args for call in fake.calls)
         assert not any(call.args[-1] == "pytest -q" for call in fake.calls)
+        assert retry_calls == [(ws_id, {})]
 
     @pytest.mark.unit
     async def test_planning_profile_records_conformance_stall_when_compare_idle_timeout_after_implementation_commits(
