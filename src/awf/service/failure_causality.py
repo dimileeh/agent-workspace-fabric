@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import FailureReason, WorkspaceStatus
@@ -22,7 +22,13 @@ async def load_primary_failure_snapshot(
 ) -> dict[str, Any] | None:
     """Return durable primary failure evidence for ``workspace`` when present."""
 
-    latest_failed_event = await _latest_failed_state_event(session, workspace.id)
+    latest_failed_event = await _latest_failed_state_event(
+        session,
+        workspace.id,
+        require_primary_failure=True,
+    )
+    if latest_failed_event is None:
+        latest_failed_event = await _latest_failed_state_event(session, workspace.id)
     latest_validation_run = await _latest_failed_validation_run(session, workspace.id)
     event_payload = _mapping(latest_failed_event.payload if latest_failed_event else None)
     embedded_primary = _mapping(event_payload.get(PRIMARY_FAILURE_KEY) if event_payload else None)
@@ -143,17 +149,17 @@ def attach_primary_failure(
 async def _latest_failed_state_event(
     session: AsyncSession,
     workspace_id: str,
+    *,
+    require_primary_failure: bool = False,
 ) -> WorkspaceEvent | None:
-    stmt = (
-        select(WorkspaceEvent)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == "workspace.state_changed",
-            WorkspaceEvent.new_state == WorkspaceStatus.failed.value,
-        )
-        .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
-        .limit(1)
+    stmt = select(WorkspaceEvent).where(
+        WorkspaceEvent.workspace_id == workspace_id,
+        WorkspaceEvent.event_type == "workspace.state_changed",
+        WorkspaceEvent.new_state == WorkspaceStatus.failed.value,
     )
+    if require_primary_failure:
+        stmt = stmt.where(func.json_typeof(WorkspaceEvent.payload[PRIMARY_FAILURE_KEY]) == "object")
+    stmt = stmt.order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc()).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none()
 
 

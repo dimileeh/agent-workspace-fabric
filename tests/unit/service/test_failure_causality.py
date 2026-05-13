@@ -212,6 +212,64 @@ async def test_primary_failure_snapshot_keeps_embedded_failure_reason_after_row_
     assert snapshot["reason_code"] == "PYTEST_TEST_FAILURE"
 
 
+@pytest.mark.unit
+async def test_primary_failure_snapshot_prefers_latest_failed_event_with_preserved_primary(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, _validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.validation_failure.value,
+        failure_message="pytest failed before cleanup",
+        reason_code="PYTEST_TEST_FAILURE",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+        embedded_primary={
+            "failure_reason": FailureReason.validation_failure.value,
+            "message": "pytest failed before cleanup",
+            "reason_code": "PYTEST_TEST_FAILURE",
+            "validation_run": {
+                "id": "vr_preserved_primary",
+                "status": "failed",
+                "reason_code": "PYTEST_TEST_FAILURE",
+            },
+        },
+    )
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.destroying,
+            reason_code="DESTROY_REQUESTED",
+        )
+        workspace.failure_reason = FailureReason.infrastructure_failure.value
+        workspace.failure_message = "cleanup failed after primary validation failure"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="CLEANUP_FAILED",
+            payload={
+                "reason_code": "CLEANUP_FAILED",
+                "message": "cleanup failed after primary validation failure",
+            },
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.validation_failure.value
+    assert snapshot["message"] == "pytest failed before cleanup"
+    assert snapshot["reason_code"] == "PYTEST_TEST_FAILURE"
+    assert snapshot["validation_run"]["id"] == "vr_preserved_primary"
+
+
 async def _seed_failed_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     *,
