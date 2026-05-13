@@ -227,9 +227,9 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#post_agent_commit_format_rewrite_needed](#post_agent_commit_format_rewrite_needed)
 
 ### POST_AGENT_COMMIT_PRECOMMIT_FAILED
-**Problem:** A pre-commit hook rejected the post-agent commit after AWF exhausted bounded repair. Deterministic normalizer/formatter hooks are retried once by AWF; semantic hooks such as ``awf-ruff-check``, ``awf-mypy``, security, large-file, merge-conflict, or unknown hooks are routed through one targeted agent repair pass when the original agent run was healthy.
-**Likely Cause:** The agent's diff trips a semantic lint/type/security invariant, or a deterministic repair/targeted repair retry still left pre-commit failing.
-**Operator Fix:** Inspect ``details.post_agent_commit`` and the ``workspace.post_agent_commit_repair`` event for ``repair_strategy``, ``failed_hooks``, ``normalizer_paths``, ``restaged_paths``, and ``retry_outcome``. Run ``uv run --python 3.12 --extra dev pre-commit run --all-files`` locally against the workspace branch, fix the reported issues, push, and remonitor.
+**Problem:** A pre-commit hook rejected the post-agent commit after AWF exhausted bounded repair. Deterministic normalizer/formatter hooks are retried once by AWF. Ruff diagnostics marked ``[*]`` are repaired with a bounded ``ruff check --fix`` pass on already-staged Python paths. Remaining semantic hooks such as ``awf-ruff-check``, ``awf-mypy``, security, large-file, merge-conflict, or unknown hooks are routed through one targeted agent repair pass when the original agent run was healthy.
+**Likely Cause:** The agent's diff trips a semantic lint/type/security invariant, a Ruff auto-fix changed the code but the retry still failed, or a deterministic repair/targeted repair retry still left pre-commit failing.
+**Operator Fix:** Inspect ``details.post_agent_commit`` and the ``workspace.post_agent_commit_repair`` event for ``repair_strategy``, ``failed_hooks``, ``repaired_paths``, ``normalizer_paths``, ``restaged_paths``, and ``retry_outcome``. Run ``uv run --python 3.12 --extra dev pre-commit run --all-files`` locally against the workspace branch, fix the reported issues, push, and remonitor.
 **Related Command:** `uv run --python 3.12 --extra dev pre-commit run --all-files`
 **Docs Link:** [docs/REASON_CATALOG.md#post_agent_commit_precommit_failed](#post_agent_commit_precommit_failed)
 

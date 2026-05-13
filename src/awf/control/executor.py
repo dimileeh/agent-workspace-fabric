@@ -162,6 +162,7 @@ from awf.service.supply_chain_policy import (
     SupplyChainPolicyRefreshResult,
     SupplyChainPolicyRefreshService,
 )
+from awf.service.workspaces import WorkspaceRetryError, retry_workspace_row
 
 
 class _MonitorRunnerProto(Protocol):
@@ -302,6 +303,7 @@ class _PostValidationConformanceReportWriteError(RuntimeError):
 
 
 _AWF_RUFF_FORMAT_CHECK_HOOK_ID = "awf-ruff-format-check"
+_AWF_RUFF_CHECK_HOOK_ID = "awf-ruff-check"
 _PRE_COMMIT_DETERMINISTIC_REPAIR_HOOK_IDS = frozenset(
     {
         "trailing-whitespace",
@@ -312,6 +314,33 @@ _PRE_COMMIT_DETERMINISTIC_REPAIR_HOOK_IDS = frozenset(
 _PRE_COMMIT_HOOK_ID_PATTERN = re.compile(r"^-\s*hook id:\s*(?P<hook_id>\S+)", re.MULTILINE)
 _PRE_COMMIT_WOULD_REFORMAT_PATTERN = re.compile(r"^Would reformat:\s*(?P<path>\S.*)$", re.MULTILINE)
 _PRE_COMMIT_FIXING_PATH_PATTERN = re.compile(r"^Fixing\s+(?P<path>\S.*)$", re.MULTILINE)
+_RUFF_DIAGNOSTIC_PATTERN = re.compile(r"^\s*[A-Z]+[0-9]+\s*(?P<fixable>\[\*\])?")
+_RUFF_DIAGNOSTIC_PATH_PATTERN = re.compile(r"^\s*-->\s+(?P<path>.+?):\d+:\d+")
+
+
+def _ruff_check_autofix_repair_files(output: str) -> tuple[str, ...]:
+    """Return Ruff paths only when every observed diagnostic is auto-fixable."""
+
+    paths: list[str] = []
+    pending_fixable_path = False
+    saw_diagnostic = False
+    saw_unfixable = False
+    for line in output.splitlines():
+        diagnostic = _RUFF_DIAGNOSTIC_PATTERN.match(line)
+        if diagnostic is not None:
+            saw_diagnostic = True
+            pending_fixable_path = diagnostic.group("fixable") is not None
+            if not pending_fixable_path:
+                saw_unfixable = True
+            continue
+        if pending_fixable_path:
+            path = _RUFF_DIAGNOSTIC_PATH_PATTERN.match(line)
+            if path is not None:
+                paths.append(path.group("path").strip())
+                pending_fixable_path = False
+    if not saw_diagnostic or saw_unfixable:
+        return ()
+    return tuple(dict.fromkeys(paths))
 
 
 @dataclass(frozen=True)
@@ -338,6 +367,7 @@ class _PostAgentCommitClassification:
     deterministic_hooks: tuple[str, ...] = ()
     semantic_hooks: tuple[str, ...] = ()
     normalizer_repair_files: tuple[str, ...] = ()
+    autofix_repair_files: tuple[str, ...] = ()
     repair_strategy: str = "none"
 
 
@@ -415,6 +445,11 @@ def _classify_post_agent_commit_failure(
             for match in _PRE_COMMIT_FIXING_PATH_PATTERN.finditer(combined)
         )
     )
+    autofix_repair_files = (
+        _ruff_check_autofix_repair_files(combined)
+        if _AWF_RUFF_CHECK_HOOK_ID in failed_hooks
+        else ()
+    )
     deterministic_hooks = tuple(
         hook for hook in failed_hooks if hook in _PRE_COMMIT_DETERMINISTIC_REPAIR_HOOK_IDS
     )
@@ -438,6 +473,7 @@ def _classify_post_agent_commit_failure(
                 deterministic_hooks=deterministic_hooks,
                 semantic_hooks=semantic_hooks,
                 normalizer_repair_files=normalizer_repair_files,
+                autofix_repair_files=autofix_repair_files,
                 repair_strategy=repair_strategy,
             )
         return _PostAgentCommitClassification(
@@ -448,6 +484,7 @@ def _classify_post_agent_commit_failure(
             deterministic_hooks=deterministic_hooks,
             semantic_hooks=semantic_hooks,
             normalizer_repair_files=normalizer_repair_files,
+            autofix_repair_files=autofix_repair_files,
             repair_strategy=repair_strategy,
         )
 
@@ -1717,6 +1754,14 @@ class WorkspaceExecutor:
                         details=details,
                         salvage=_failure_salvage_payload(ws, worktree_path=worktree_path),
                     )
+                    if (
+                        isinstance(planning_failure, _PlanningRunFailure)
+                        and planning_failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+                    ):
+                        await self._auto_retry_planning_scope_failure(
+                            workspace_id=workspace_id,
+                            failure=planning_failure,
+                        )
                     return
             else:
                 # Recovery dispatch created the validate Operation in ``pending``;
@@ -4476,6 +4521,61 @@ class WorkspaceExecutor:
         safe_serialized_payload = _validation_evidence_json(payload)
         return f"AWF persisted validation run evidence:\n```json\n{safe_serialized_payload}\n```"
 
+    async def _auto_retry_planning_scope_failure(
+        self,
+        *,
+        workspace_id: str,
+        failure: _PlanningRunFailure,
+    ) -> None:
+        """Create one clean retry for a planning-scope violation."""
+        if failure.reason_code != AGENT_PLAN_PHASE_SCOPE_VIOLATION:
+            return
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                return
+            task_policy = (
+                workspace.task_policy if isinstance(workspace.task_policy, Mapping) else {}
+            )
+            scheduler_policy = task_policy.get("scheduler")
+            if isinstance(scheduler_policy, Mapping) and scheduler_policy.get(
+                "source_workspace_id"
+            ):
+                await repo.add_event(
+                    workspace,
+                    event_type="workspace.planning_scope_auto_retry_skipped",
+                    reason_code="PLANNING_SCOPE_AUTO_RETRY_ALREADY_RETRIED",
+                    payload={"source_reason_code": failure.reason_code},
+                )
+                await session.commit()
+                return
+            try:
+                result = await retry_workspace_row(session, workspace_id)
+            except WorkspaceRetryError as exc:
+                await repo.add_event(
+                    workspace,
+                    event_type="workspace.planning_scope_auto_retry_failed",
+                    reason_code="PLANNING_SCOPE_AUTO_RETRY_FAILED",
+                    payload={
+                        "source_reason_code": failure.reason_code,
+                        "error": str(exc)[:2000],
+                        "detail": exc.detail,
+                    },
+                )
+                await session.commit()
+                return
+            await repo.add_event(
+                workspace,
+                event_type="workspace.planning_scope_auto_retry_requested",
+                reason_code="PLANNING_SCOPE_AUTO_RETRY_REQUESTED",
+                payload={
+                    "source_reason_code": failure.reason_code,
+                    "new_workspace_id": result.new_workspace.id,
+                },
+            )
+            await session.commit()
+
     async def _run_agent_task_with_optional_planning(
         self,
         *,
@@ -5442,6 +5542,19 @@ class WorkspaceExecutor:
             )
             return
 
+        if classification.autofix_repair_files:
+            repaired = await self._run_post_agent_autofixable_precommit_repair(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                commit_result=commit_result,
+                classification=classification,
+                staged_paths=staged_paths,
+                run_commit=run_commit,
+                git_in_worktree=git_in_worktree,
+            )
+            if repaired:
+                return
+
         if classification.repair_strategy == "agent" and allow_agent_repair:
             await self._run_post_agent_semantic_precommit_repair(
                 workspace_id=workspace_id,
@@ -5621,6 +5734,146 @@ class WorkspaceExecutor:
                 == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
                 else None
             ),
+        )
+
+    async def _run_post_agent_autofixable_precommit_repair(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        commit_result: CommandResult,
+        classification: _PostAgentCommitClassification,
+        staged_paths: Sequence[str],
+        run_commit: Callable[[], Awaitable[CommandResult]],
+        git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
+    ) -> bool:
+        del commit_result
+        staged_python_set = {
+            path for path in staged_paths if path.endswith(".py") or path.endswith(".pyi")
+        }
+        repair_paths = [
+            path for path in classification.autofix_repair_files if path in staged_python_set
+        ]
+        if not repair_paths:
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=[],
+                restaged_paths=[],
+                formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
+                failed_hooks=classification.failed_hooks,
+                repair_strategy="deterministic_autofix",
+                retry_outcome="skipped",
+                reason_code=classification.reason_code,
+            )
+            return False
+
+        fix_result = await self._runner.run(
+            [
+                "uv",
+                "run",
+                "--python",
+                "3.12",
+                "--extra",
+                "dev",
+                "ruff",
+                "check",
+                "--fix",
+                "--",
+                *repair_paths,
+            ],
+            cwd=str(worktree_path),
+        )
+        if not fix_result.ok:
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=repair_paths,
+                restaged_paths=[],
+                formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
+                failed_hooks=classification.failed_hooks,
+                repair_strategy="deterministic_autofix",
+                retry_outcome="error",
+                reason_code=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
+            raise _PostAgentCommitStepError(
+                stage="ruff check --fix",
+                result=fix_result,
+                classification=classification,
+                format_repair_attempted=True,
+                precommit_repair_attempted=True,
+                repair_strategy="deterministic_autofix",
+                reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
+
+        restage_paths = list(staged_paths)
+        add_again = await git_in_worktree(["add", "--", *restage_paths])
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_agent_autofix_repair_add",
+        )
+        if not add_again.ok:
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=repair_paths,
+                restaged_paths=restage_paths,
+                formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
+                failed_hooks=classification.failed_hooks,
+                repair_strategy="deterministic_autofix",
+                retry_outcome="error",
+                reason_code=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
+            raise _PostAgentCommitStepError(
+                stage="git add",
+                result=add_again,
+                classification=classification,
+                format_repair_attempted=True,
+                precommit_repair_attempted=True,
+                repair_strategy="deterministic_autofix",
+                reason_code_override=POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+            )
+
+        retry_result = await run_commit()
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="post_agent_autofix_repair_commit",
+        )
+        if retry_result.ok:
+            await self._record_post_agent_commit_format_repair(
+                workspace_id=workspace_id,
+                repaired_paths=repair_paths,
+                restaged_paths=restage_paths,
+                formatter_paths=classification.format_repair_files,
+                normalizer_paths=classification.normalizer_repair_files,
+                failed_hooks=classification.failed_hooks,
+                repair_strategy="deterministic_autofix",
+                retry_outcome="succeeded",
+                reason_code=classification.reason_code,
+            )
+            return True
+
+        retry_classification = _classify_post_agent_commit_failure(retry_result)
+        await self._record_post_agent_commit_format_repair(
+            workspace_id=workspace_id,
+            repaired_paths=repair_paths,
+            restaged_paths=restage_paths,
+            formatter_paths=classification.format_repair_files,
+            normalizer_paths=classification.normalizer_repair_files,
+            failed_hooks=classification.failed_hooks,
+            repair_strategy="deterministic_autofix",
+            retry_outcome="failed",
+            reason_code=classification.reason_code,
+        )
+        raise _PostAgentCommitStepError(
+            stage="git commit",
+            result=retry_result,
+            classification=retry_classification,
+            format_repair_attempted=True,
+            precommit_repair_attempted=True,
+            repair_strategy="deterministic_autofix",
         )
 
     async def _run_post_agent_semantic_precommit_repair(

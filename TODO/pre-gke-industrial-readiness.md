@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-13
+Last updated: 2026-05-14
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -73,9 +73,12 @@ Status values:
 
 ### Active Slices
 
-No active slices are currently recorded. Rebuild/restart AWF and verify
-`healthz`, `readyz`, provider preflight, and zero active workspaces before
-launching the next wave.
+Active reschedule slices are currently recorded below.
+
+| TODO area | Slice | Workspace | Agent / model | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| P0 Operation And Recovery Truth | Preserve primary failure causality across stale callbacks and recovery paths | `ws_7038898eac3747ecaa53fb2c` | Codex / `gpt-5.5` | running | Rescheduled from failed `ws_89f9bcd01ae747d6b4a251b5` on 2026-05-14 after PRs #239-#241 landed and local AWF rebuilt/restarted green; auto-merge enabled; owns primary-failure preservation across stale callbacks, cleanup failures, and recovery paths. |
+| P0 API / CLI / MCP Contract Parity | Make workspace create/list surfaces parity-safe across REST, CLI, and MCP | `ws_02ef6b49f7dc4657a8e63355` | OpenCode / `ollama/kimi-k2.6:cloud` | running | Added 2026-05-14 after dogfooding exposed two control-surface gaps: `awf workspace create` cannot express canonical v2 model/resource/scheduler knobs, and repeated `--status`/`status` filters collapse to a single value so active-workspace queries can return zero. Auto-merge enabled; provider preflight ready; Codex/Gemini launch attempts were blocked before workspace creation by 5s runtime CLI probe timeouts, so this real attempt uses OpenCode/Kimi without override. |
 
 ### Reschedule Required Slices
 
@@ -88,8 +91,8 @@ not listed here.
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
 | P0 Operation And Recovery Truth | Preserve primary failure causality across stale callbacks and recovery paths | `ws_89f9bcd01ae747d6b4a251b5` | branch `awf/ws_89f9bcd01ae747d6b4a251b5`, no PR | reschedule_required | Failed 2026-05-12 after conformance during AWF post-agent commit. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported `end-of-file-fixer`, `awf-ruff-check`, and `awf-ruff-format-check`; temporary `fix_test*.py` files were present, and the conformance artifact was modified by the EOF hook. Provider preflight was ready and terminal runtime cleanup succeeded. The post-agent pre-commit blocker is now fixed by PR #239; reschedule from scratch after local AWF is green. |
-| P1 MCP And Project Onboarding Client Parity | TODO§P1-operation-read-auth: close REST auth parity for operation read endpoints | `ws_06ee567d44eb479bb0f68478` | branch `awf/ws_06ee567d44eb479bb0f68478`, no PR | reschedule_required | Failed 2026-05-12 after useful agent work and a local commit, during AWF post-agent commit of plan/conformance evidence. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported only `end-of-file-fixer` modifying `docs/awf-plans/ws_06ee567d44eb479bb0f68478.md` and `.conformance.json`; focused pytest, ruff, and mypy evidence passed in logs. Provider preflight was ready and terminal runtime cleanup succeeded. The post-agent pre-commit blocker is now fixed by PR #239; reschedule from scratch after local AWF is green. |
-| P1 MCP And Project Onboarding Client Parity | TODO§P1-mcp-global-events: add MCP parity for global events | `ws_7614d1ea986841bb9612d59f` | branch `awf/ws_7614d1ea986841bb9612d59f`, no PR | reschedule_required | Failed 2026-05-12 after conformance reported `CONFORMANCE_OK`, during AWF post-agent commit. `POST_AGENT_COMMIT_PRECOMMIT_FAILED` reported `trailing-whitespace`, `end-of-file-fixer`, and `awf-ruff-format-check`; hooks modified AWF plan/conformance artifacts and ruff wanted `tests/unit/mcp/test_mcp_server.py` formatted. Focused validation evidence in logs showed 84 tests, ruff, and mypy passing before conformance. Provider preflight was ready and terminal runtime cleanup succeeded. The post-agent pre-commit blocker is now fixed by PR #239; reschedule from scratch after local AWF is green. |
+| P1 MCP And Project Onboarding Client Parity | TODO§P1-operation-read-auth: close REST auth parity for operation read endpoints | `ws_06ee567d44eb479bb0f68478`, `ws_6c1132d9e6914d8fb0aeca22` | branches `awf/ws_06ee567d44eb479bb0f68478`, `awf/ws_6c1132d9e6914d8fb0aeca22`, no PR | reschedule_required | Original attempt failed 2026-05-12 during AWF post-agent commit of plan/conformance evidence. Reschedule `ws_6c1132d9e6914d8fb0aeca22` failed 2026-05-14 with `AGENT_PLAN_PHASE_SCOPE_VIOLATION`: Gemini committed the full implementation during the planning phase (`docs/MCP_CLIENT_PARITY.md`, operation route/tests, and contract metadata) instead of stopping after the plan artifact. Provider preflight was ready and terminal runtime cleanup succeeded. The retry context correctly said `discard_and_replan`, but AWF did not automatically invoke that recovery and left the workspace terminal; track this under the open planning-scope auto-retry P0 below. Do not count this slice done; retry from scratch only after active P0 parity/recovery work settles. |
+| P1 MCP And Project Onboarding Client Parity | TODO§P1-mcp-global-events: add MCP parity for global events | `ws_7614d1ea986841bb9612d59f`, `ws_2964d670befc43b8a00f5ad6` | branches `awf/ws_7614d1ea986841bb9612d59f`, `awf/ws_2964d670befc43b8a00f5ad6`, no PR | reschedule_required | Original attempt failed 2026-05-12 during AWF post-agent commit after conformance reported `CONFORMANCE_OK`. Reschedule `ws_2964d670befc43b8a00f5ad6` failed 2026-05-14 with `POST_AGENT_COMMIT_PRECOMMIT_FAILED`: `awf-ruff-check` reported fixable import ordering diagnostics in `src/awf/mcp/server.py`; AWF sent one semantic repair turn, but the repair agent moved `Callable` to `typing` while Ruff required it in `collections.abc`, so the retry still failed. Provider preflight was ready and terminal runtime cleanup succeeded. Do not count this slice done; retry from scratch after the open post-agent auto-fixable hook P0 below is fixed or explicitly deferred. |
 | P1 Developer Experience And Public Core Surface | First-run troubleshooting guide by symptom | `ws_4f44c108a58f46d092f4e411` | branch `awf/ws_4f44c108a58f46d092f4e411`, no PR | reschedule_required | Attempt produced local docs commits, but final coverage hit `13` pytest/xdist errors despite 99.02% coverage; AWF then misclassified the terminal state as `STALE_ACTIVE_EXECUTION` after repeated asyncpg `connection is closed` worker failures. Do not count this slice as done; DB connection resilience and active-execution adoption have landed, but this should wait for validation failure-causality preservation before retry. |
 
 ### Completed Slices
@@ -374,6 +377,24 @@ not listed here.
   discard and retry planning with an approved fallback model or intentionally
   promote/salvage the preserved branch only when policy says the premature
   implementation is acceptable.
+- [x] Actually invoke planning-scope recovery from the executor/control loop
+  instead of merely exposing retry context. Regression source:
+  `ws_6c1132d9e6914d8fb0aeca22` failed 2026-05-14 with
+  `AGENT_PLAN_PHASE_SCOPE_VIOLATION`; AWF recorded
+  `recovery_strategy=discard_and_replan` and preserved salvage evidence, but it
+  did not automatically discard/retry the planning phase or enqueue the
+  existing retry workflow. Acceptance: when the planning phase modifies only
+  out-of-scope implementation files, AWF must either automatically create a
+  clean retry workspace/attempt using the configured planning-scope recovery
+  policy, or explicitly mark the policy as operator-only in the task/workspace
+  response and backlog docs. Add regression coverage proving a live
+  `AGENT_PLAN_PHASE_SCOPE_VIOLATION` does not silently become a terminal
+  dogfood dead-end when policy says `discard_and_replan`.
+  Fixed locally 2026-05-14: executor now calls the retry workflow after
+  persisting the planning-scope failure, records auto-retry requested/skipped
+  or failed events, and limits automatic retries to non-retry source
+  workspaces. Regression coverage:
+  `tests/unit/control/test_executor.py::TestHappyPath::test_planning_profile_fails_when_plan_phase_changes_code`.
 
 ## P0: Reliability, Cleanup, And SLOs
 
@@ -462,6 +483,27 @@ not listed here.
   merged 2026-05-13 and adds generalized post-agent pre-commit classification,
   one-shot deterministic hook repair/retry, targeted semantic repair, and
   regression coverage for the observed hook combinations.
+- [x] Treat auto-fixable semantic hook diagnostics as deterministic repair when
+  the tool proves the fix is safe and bounded to the staged change set.
+  Regression source: `ws_2964d670befc43b8a00f5ad6` failed 2026-05-14 after
+  `awf-ruff-check` reported fixable `I001 [*]` / `UP035 [*]` diagnostics on
+  `src/awf/mcp/server.py`. AWF correctly classified the hook as semantic and
+  sent one targeted repair turn, but the agent hand-edited the imports
+  incorrectly and the final commit still failed. Acceptance: post-agent repair
+  must parse known hook output for explicit auto-fixable markers, run the
+  corresponding project-local fixer only against staged/owned paths
+  (for example bounded `uv run --python 3.12 --extra dev ruff check --fix --`
+  for Ruff diagnostics marked `[*]`), restage and retry once, while keeping
+  non-fixable lint/type/test/security hook failures on the targeted agent or
+  terminal path. Add tests proving this is a generic hook-fixability policy,
+  not a hardcoded "ruff failed" bypass.
+  Fixed locally 2026-05-14: executor now parses Ruff `[*]` diagnostics,
+  intersects repair paths with the staged Python diff, runs bounded
+  `ruff check --fix`, restages, retries once, and records
+  `repair_strategy=deterministic_autofix`. Regression coverage:
+  `tests/unit/control/test_executor_post_agent_commit_classifier.py::test_ruff_check_fixable_diagnostics_expose_bounded_autofix_paths`
+  and
+  `tests/unit/control/test_executor_post_agent_commit.py::test_post_agent_commit_autofixable_ruff_check_runs_bounded_fix_before_agent`.
 - [ ] Make AWF self-dogfood parallel final coverage deterministic inside the
   workspace runtime. Regression source: `ws_4f44c108a58f46d092f4e411` ran
   `pytest -n 3 --dist=loadscope --cov=awf --cov-report=term-missing`, reached
@@ -692,6 +734,25 @@ not listed here.
   merged 2026-05-07 and preserves healthy live agent/validation/push
   executions instead of tearing them down after worker restart or in-memory
   execution-task loss.
+
+## P0: API / CLI / MCP Contract Parity
+
+- [ ] Make workspace create/list surfaces parity-safe across REST, CLI, and MCP.
+  Regression source: during the 2026-05-14 dogfood launch, the canonical REST
+  `/v2/workspaces` request could select `task.model`, resources, and scheduler
+  knobs, while `awf workspace create` could not express the same request without
+  hand-written API calls. Separately, `awf workspace list --status requested
+  --status provisioning --status ready --status running --status validating
+  --status pushing --status monitoring_pr` returned zero rows even though direct
+  `workspace show` proved active running workspaces existed, because REST/CLI
+  accepted only one effective `status` filter. Acceptance: CLI create must expose
+  canonical v2 fields already present in REST/MCP without CLI-only behavior;
+  REST, CLI, and MCP list surfaces must support backward-compatible multi-status
+  filtering for active-workspace queries; contract/parity tests must pin request
+  fields, list filter semantics, docs status, and MCP schemas; and effort must be
+  handled explicitly as either a canonical cross-surface request field or a
+  documented profile/provider-derived value, not an accidental CLI gap. Active
+  workspace: `ws_02ef6b49f7dc4657a8e63355`.
 
 ## P1: API Contract Completion
 

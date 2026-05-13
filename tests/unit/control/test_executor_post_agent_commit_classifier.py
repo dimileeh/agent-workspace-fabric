@@ -205,6 +205,30 @@ def test_ruff_check_plus_ruff_format_uses_agent_repair_not_blind_auto_format() -
     assert classification.deterministic_hooks == ("awf-ruff-format-check",)
     assert classification.semantic_hooks == ("awf-ruff-check",)
     assert classification.format_repair_files == ("run_debug.py",)
+    assert classification.autofix_repair_files == ()
+
+
+@pytest.mark.unit
+def test_ruff_check_fixable_diagnostics_expose_bounded_autofix_paths() -> None:
+    stdout = (
+        "ruff check..............................................................Failed\n"
+        "- hook id: awf-ruff-check\n"
+        "- exit code: 1\n"
+        "\n"
+        "I001 [*] Import block is un-sorted or un-formatted\n"
+        "   --> src/awf/mcp/server.py:13:1\n"
+        "UP035 [*] Import from `collections.abc` instead: `Callable`\n"
+        "   --> src/awf/mcp/server.py:21:1\n"
+        "Found 2 errors.\n"
+        "[*] 2 fixable with the `--fix` option.\n"
+    )
+    classification = _classify_post_agent_commit_failure(_commit_result(stdout=stdout))
+
+    assert classification.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert classification.repair_strategy == "agent"
+    assert classification.deterministic_hooks == ()
+    assert classification.semantic_hooks == ("awf-ruff-check",)
+    assert classification.autofix_repair_files == ("src/awf/mcp/server.py",)
 
 
 @pytest.mark.unit
