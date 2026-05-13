@@ -5748,13 +5748,10 @@ class WorkspaceExecutor:
                 reason_code_override="SUPPLY_CHAIN_POLICY_BLOCKED",
                 failure_reason_override=FailureReason.policy_failure,
             )
-        # Normalizer-only plan artifacts are hook output; agent-added
-        # plan-only staged paths still need the ordinary output gate.
-        normalizer_repair_paths = set(classification.normalizer_repair_files)
-        has_non_normalizer_repair_path = any(
-            path not in normalizer_repair_paths for path in repair_staged_paths
-        )
-        if has_non_normalizer_repair_path and await self._fail_if_plan_only_paths(
+        # Always evaluate the final repair diff. A semantic repair can remove
+        # the real implementation change while leaving only hook-normalized
+        # plan artifacts staged, and that must not become a PR.
+        if await self._fail_if_plan_only_paths(
             workspace_id=workspace_id,
             changed_paths=repair_staged_paths,
             expected_status=WorkspaceStatus.running,

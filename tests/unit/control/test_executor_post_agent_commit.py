@@ -964,6 +964,54 @@ async def test_post_agent_commit_semantic_agent_repair_plan_only_change_is_block
 
 
 @pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_normalizer_only_plan_output_is_blocked(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\ndocs/awf-plans/ws_89.conformance.json\n")
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure includes normalizer plan artifact
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(
+        returncode=0,
+        stdout="docs/awf-plans/ws_89.conformance.json\n",
+    )  # only the normalizer-rewritten plan artifact remains staged
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == PLAN_ONLY_OUTPUT_REASON_CODE
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["stage"] == "post-agent pre-commit repair policy"
+    assert details["repair_strategy"] == "agent"
+    assert "only AWF plan/conformance artifact changes" in details["summary"]
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+    assert repair_events
+    assert repair_events[-1].reason_code == PLAN_ONLY_OUTPUT_REASON_CODE
+    assert repair_events[-1].payload["restaged_paths"] == [  # type: ignore[index]
+        "docs/awf-plans/ws_89.conformance.json"
+    ]
+
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+
+
+@pytest.mark.unit
 async def test_post_agent_commit_semantic_agent_repair_retry_failure_remains_visible(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
@@ -1021,7 +1069,10 @@ async def test_post_agent_commit_semantic_agent_repair_records_final_determinist
     )  # semantic pre-commit failure
     fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
     fake.queue_result(returncode=0)  # git add -A after repair
-    fake.queue_result(returncode=0, stdout="docs/awf-plans/ws_89.conformance.json\n")
+    fake.queue_result(
+        returncode=0,
+        stdout="src/awf/foo.py\ndocs/awf-plans/ws_89.conformance.json\n",
+    )
     fake.queue_result(
         returncode=1,
         stdout=_precommit_eof_only_output("docs/awf-plans/ws_89.conformance.json"),
@@ -1058,7 +1109,10 @@ async def test_post_agent_commit_semantic_agent_repair_records_final_determinist
         "awf-ruff-check",
         "awf-ruff-format-check",
     ]
-    assert agent_payload["restaged_paths"] == ["docs/awf-plans/ws_89.conformance.json"]
+    assert agent_payload["restaged_paths"] == [
+        "src/awf/foo.py",
+        "docs/awf-plans/ws_89.conformance.json",
+    ]
     assert deterministic_payload["repair_strategy"] == "deterministic"
     assert deterministic_payload["retry_outcome"] == "succeeded"
 
