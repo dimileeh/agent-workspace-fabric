@@ -44,6 +44,14 @@ async def load_primary_failure_snapshot(
 
     if workspace.failure_reason:
         snapshot["failure_reason"] = workspace.failure_reason
+    primary_failure_reason = _string(snapshot.get("failure_reason"))
+    primary_is_validation_failure = primary_failure_reason == FailureReason.validation_failure.value
+    has_embedded_validation_run = _mapping(snapshot.get("validation_run")) is not None
+    validation_run_to_attach = (
+        latest_validation_run
+        if primary_is_validation_failure and not has_embedded_validation_run
+        else None
+    )
 
     message = (
         _string(snapshot.get("message"))
@@ -57,12 +65,11 @@ async def load_primary_failure_snapshot(
         latest_failed_event.reason_code if latest_failed_event else None
     )
     validation_reason_code = (
-        latest_validation_run.reason_code if latest_validation_run is not None else None
+        validation_run_to_attach.reason_code if validation_run_to_attach is not None else None
     )
     reason_code = (
         validation_reason_code
-        if workspace.failure_reason == FailureReason.validation_failure.value
-        and validation_reason_code
+        if primary_is_validation_failure and validation_reason_code
         else _string(snapshot.get("reason_code")) or event_reason_code or validation_reason_code
     )
     if reason_code:
@@ -74,8 +81,8 @@ async def load_primary_failure_snapshot(
     if details:
         snapshot["details"] = _jsonable_mapping(details)
 
-    if latest_validation_run is not None:
-        validation_snapshot = _validation_run_snapshot(latest_validation_run)
+    if validation_run_to_attach is not None:
+        validation_snapshot = _validation_run_snapshot(validation_run_to_attach)
         snapshot["validation_run"] = validation_snapshot
         coverage = _mapping(validation_snapshot.get("coverage"))
         if coverage:
