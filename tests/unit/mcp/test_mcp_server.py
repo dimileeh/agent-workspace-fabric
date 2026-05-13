@@ -2600,7 +2600,7 @@ class TestReadWorkspaceArtifact:
         assert result.structuredContent.get("detail") is not None
         assert isinstance(result.structuredContent["detail"], dict)
         assert result.structuredContent["detail"]["limit_bytes"] == 2_000_000
-        assert result.structuredContent["detail"]["actual_bytes"] == 2_000_000
+        assert result.structuredContent["detail"]["actual_bytes"] is None
 
     @pytest.mark.unit
     async def test_respects_explicit_limit_bytes_within_ceiling(

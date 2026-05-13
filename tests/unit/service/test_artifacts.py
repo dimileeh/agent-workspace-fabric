@@ -817,7 +817,7 @@ class TestArtifactService:
             )
         assert exc_info.value.detail is not None
         assert exc_info.value.detail["limit_bytes"] == MAX_ARTIFACT_CONTENT_BYTES + 1
-        assert exc_info.value.detail["actual_bytes"] == MAX_ARTIFACT_CONTENT_BYTES + 1
+        assert exc_info.value.detail["actual_bytes"] is None
 
     @pytest.mark.unit
     def test_get_workspace_artifact_content_rejects_missing_file(self, tmp_path: Path) -> None:

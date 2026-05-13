@@ -256,7 +256,7 @@ def get_workspace_artifact_content(
             f"limit_bytes exceeds absolute maximum {MAX_ARTIFACT_CONTENT_BYTES}",
             detail={
                 "limit_bytes": limit_bytes,
-                "actual_bytes": limit_bytes,
+                "actual_bytes": None,  # file not read yet; size is unknown
             },
         )
     artifact = get_downloadable_artifact(
