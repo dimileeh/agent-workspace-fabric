@@ -1,6 +1,6 @@
 # Troubleshooting
 
-## First run troubleshooting
+## First-run troubleshooting
 
 Use this guide for local Core first-run issues after installing AWF.
 
