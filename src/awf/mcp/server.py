@@ -1837,7 +1837,11 @@ def _contains_secret_bytes(
     # Also block binary artifacts that contain recognizable provider token
     # patterns (e.g. ghp_..., github_pat_..., sk-proj-...) even when the
     # exact value is not present in current settings or environment.
-    return provider_readiness_service._TOKEN_RE.search(content.decode("latin-1")) is not None
+    decoded = content.decode("latin-1")
+    if provider_readiness_service._TOKEN_RE.search(decoded) is not None:
+        return True
+    # Additionally block URL credentials that the text path would redact.
+    return provider_readiness_service._URL_CREDENTIAL_RE.search(decoded) is not None
 
 
 def _check_and_redact_artifact_content(

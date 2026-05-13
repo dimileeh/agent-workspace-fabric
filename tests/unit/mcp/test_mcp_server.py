@@ -2925,6 +2925,39 @@ class TestReadWorkspaceArtifact:
         assert result["error_code"] == "ARTIFACT_BLOCKED"
 
     @pytest.mark.unit
+    async def test_binary_artifact_containing_url_credentials_is_blocked(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact binary URL credential blocked",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        # URL credential not present in settings/env, wrapped in null bytes to force binary path
+        payload = b"\x00" + b"https://user:password@example.com/secret" + b"\x00\xff"
+        (artifact_dir / "leaked.bin").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": "leaked.bin", "limit_bytes": 1024},
+        )
+        assert isinstance(result, dict)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"
+
+    @pytest.mark.unit
     async def test_env_artifact_is_redacted(
         self,
         factory: async_sessionmaker[AsyncSession],
