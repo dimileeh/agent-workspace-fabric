@@ -17,3 +17,4 @@ test_list_workspace_operations_filters = _operations_listing.test_list_workspace
 test_list_workspace_operations_not_found = (
     _operations_listing.test_list_workspace_operations_not_found
 )
+authed_client = _operations_listing.authed_client

@@ -8,14 +8,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as fastapi_status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session_factory
+from awf.api.deps import get_db_session_factory, require_api_token
 from awf.api.schemas import OperationListResponse, OperationResponse
 from awf.db.enums import OperationStatus, OperationType
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.operations import build_operation_list_response
 from awf.service.workspaces import WorkspaceService
 
-router = APIRouter(tags=["operations"])
+router = APIRouter(tags=["operations"], dependencies=[Depends(require_api_token)])
 _INVALID_OPERATION_CURSOR_DETAIL = {
     "error_code": "INVALID_CURSOR",
     "message": "Invalid operation list cursor.",
