@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from builtins import open as builtins_open
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,9 @@ from awf.common.config import get_settings
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.artifacts import (
+    MAX_ARTIFACT_CONTENT_BYTES,
     ArtifactNotFoundError,
+    ArtifactOversizedError,
     ArtifactPathError,
     _artifact_id,
     _artifact_kind,
@@ -21,6 +24,7 @@ from awf.service.artifacts import (
     artifact_id,
     artifact_kind,
     get_downloadable_artifact,
+    get_workspace_artifact_content,
     list_artifacts,
     workspace_artifact_dir,
 )
@@ -763,6 +767,151 @@ class TestArtifactService:
         assert list_artifacts("ws_artifacts", artifact_dir) == []
 
     @pytest.mark.unit
+    def test_get_workspace_artifact_content_reads_small_file(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "report.txt"
+        payload = b"hello artifact\n"
+        report.write_bytes(payload)
+
+        name, content_type, size_bytes, content = get_workspace_artifact_content(
+            workspace_id="ws_artifacts",
+            artifact_dir=artifact_dir,
+            relative_path="report.txt",
+            limit_bytes=MAX_ARTIFACT_CONTENT_BYTES,
+        )
+
+        assert name == "report.txt"
+        assert content_type == "text/plain"
+        assert size_bytes == len(payload)
+        assert content == payload
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_rejects_oversized_file(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "big.bin"
+        report.write_bytes(b"x" * 100)
+
+        with pytest.raises(ArtifactOversizedError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="big.bin",
+                limit_bytes=50,
+            )
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_rejects_excessive_limit(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "small.bin"
+        report.write_bytes(b"x")
+
+        with pytest.raises(ArtifactOversizedError) as exc_info:
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="small.bin",
+                limit_bytes=MAX_ARTIFACT_CONTENT_BYTES + 1,
+            )
+        assert exc_info.value.detail is not None
+        assert exc_info.value.detail["limit_bytes"] == MAX_ARTIFACT_CONTENT_BYTES + 1
+        assert exc_info.value.detail["actual_bytes"] is None
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_rejects_missing_file(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="missing.txt",
+                limit_bytes=MAX_ARTIFACT_CONTENT_BYTES,
+            )
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_rejects_invalid_path(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+
+        with pytest.raises(ArtifactPathError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="../secret.txt",
+                limit_bytes=MAX_ARTIFACT_CONTENT_BYTES,
+            )
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_rejects_symlink_escape(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret\n", encoding="utf-8")
+        (artifact_dir / "link.txt").symlink_to(outside)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="link.txt",
+                limit_bytes=MAX_ARTIFACT_CONTENT_BYTES,
+            )
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_race_growth_after_stat(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "grow.bin"
+        # Start small so stat check passes
+        report.write_bytes(b"x" * 10)
+
+        original_open = Path.open
+
+        def racing_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self.resolve() == report.resolve():
+                # Grow the file just before the actual read using builtin open
+                # to avoid recursion through Path.write_bytes -> Path.open
+                with builtins_open(str(report), "wb") as f:  # noqa: PTH123
+                    f.write(b"x" * 200)
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", racing_open)
+
+        with pytest.raises(ArtifactOversizedError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="grow.bin",
+                limit_bytes=50,
+            )
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_bounded_read_exact_limit(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "exact.bin"
+        payload = b"x" * 50
+        report.write_bytes(payload)
+
+        name, content_type, size_bytes, content = get_workspace_artifact_content(
+            workspace_id="ws_artifacts",
+            artifact_dir=artifact_dir,
+            relative_path="exact.bin",
+            limit_bytes=50,
+        )
+
+        assert content == payload
+        assert len(content) == 50
+
+    @pytest.mark.unit
     def test_listing_skips_file_that_disappears_during_resolve(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -782,3 +931,59 @@ class TestArtifactService:
         monkeypatch.setattr(Path, "resolve", resolve_candidate)
 
         assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_get_workspace_artifact_content_rejects_hard_link(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        outside = tmp_path / "outsideroot.txt"
+        outside.write_text("secret\n", encoding="utf-8")
+        report = artifact_dir / "report.txt"
+        report.hardlink_to(outside)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="report.txt",
+                limit_bytes=MAX_ARTIFACT_CONTENT_BYTES,
+            )
+
+    @pytest.mark.unit
+    def test_listing_keeps_regular_single_link_file(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "report.txt"
+        report.write_text("report\n", encoding="utf-8")
+
+        assert [item.relative_path for item in list_artifacts("ws_artifacts", artifact_dir)] == [
+            "report.txt",
+        ]
+
+    @pytest.mark.unit
+    def test_deleted_between_stat_and_open_raises_artifact_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "report.txt"
+        report.write_text("report\n", encoding="utf-8")
+        report_resolved = report.resolve()
+        original_open = Path.open
+
+        def open_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self.resolve() == report_resolved:
+                raise FileNotFoundError(str(self))
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", open_candidate)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_workspace_artifact_content(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="report.txt",
+                limit_bytes=1024,
+            )

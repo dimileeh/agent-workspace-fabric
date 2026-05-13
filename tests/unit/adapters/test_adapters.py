@@ -758,7 +758,7 @@ class TestOpenCodeAdapter:
         args = runner.calls[0].args
         _assert_docker_exec_prefix(args)
         sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
-        assert args[sh_start : sh_start + 3] == ["sh", "-lc", args[sh_start + 2]]
+        assert args[sh_start : sh_start + 3] == ["sh", "-c", args[sh_start + 2]]
         script = args[sh_start + 2]
         assert "OPENCODE_CONFIG_CONTENT" in script
         assert "AWF_OPENCODE_OLLAMA_BASE_URL" in script
@@ -877,7 +877,7 @@ class TestOpenCodeAdapter:
 
         proc = await asyncio.create_subprocess_exec(
             "sh",
-            "-lc",
+            "-c",
             _opencode_launcher_script(effort="xhigh"),
             "awf-opencode",
             "--model",

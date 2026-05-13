@@ -13,8 +13,10 @@ cleanly when they show up alongside other MCP servers.
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
+import os
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
@@ -30,6 +32,7 @@ from awf.api.schemas import (
     OwnedPath,
     PullRequestMonitorAdoptionRequest,
     WorkspaceAcceptedResponse,
+    WorkspaceArtifactReadResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
     WorkspaceLockListResponse,
@@ -41,14 +44,19 @@ from awf.api.schemas import (
 from awf.common.audit import redact_audit_text
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
-from awf.db.repositories import TaskExternalIdConflictError
+from awf.db.repositories import TaskExternalIdConflictError, WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
 from awf.service.artifacts import (
     DEFAULT_ARTIFACT_LIST_LIMIT,
     MAX_ARTIFACT_LIST_LIMIT,
+    ArtifactNotFoundError,
+    ArtifactOversizedError,
+    ArtifactPathError,
+    get_workspace_artifact_content,
     list_workspace_artifacts_metadata,
+    workspace_artifact_dir,
 )
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.controls import WorkspaceControlError
@@ -766,6 +774,121 @@ def build_mcp_server(
                 return _null_tool_result()
         return _tool_result(response.model_dump(mode="json"))
 
+    @mcp.tool(name="awf_read_workspace_artifact")
+    async def awf_read_workspace_artifact(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+        relative_path: str = Field(..., description="Relative POSIX artifact path to read."),
+        limit_bytes: int = Field(
+            default=65_536,
+            ge=1,
+            description=(
+                "Maximum bytes to read. "
+                "Values above the server ceiling (1_048_576) are rejected "
+                "with ARTIFACT_OVERSIZED rather than a schema error."
+            ),
+        ),
+    ) -> StructuredToolResult:
+        """Read a bounded chunk from a single workspace artifact.
+
+        Returns a JSON envelope with base64-encoded content.
+        """
+        async with service.session_factory() as session:
+            if not await WorkspaceRepository(session).exists(workspace_id):
+                return _error_result("NOT_FOUND", f"No workspace with id {workspace_id}")
+        artifact_dir = workspace_artifact_dir(settings_value.work_dir, workspace_id)
+        _service_settings = service_config.resolve_service_settings(settings_value)
+        try:
+            name, content_type, _size_bytes, content = await asyncio.to_thread(
+                get_workspace_artifact_content,
+                workspace_id=workspace_id,
+                artifact_dir=artifact_dir,
+                relative_path=relative_path,
+                limit_bytes=limit_bytes,
+            )
+        except ArtifactPathError as exc:
+            return _error_result(
+                "INVALID_ARTIFACT_PATH",
+                _redact_sensitive_text(
+                    str(exc), settings_value, service_settings=_service_settings
+                ),
+            )
+        except ArtifactNotFoundError:
+            return _error_result(
+                "NOT_FOUND",
+                _redact_sensitive_text(
+                    f"No artifact at path {relative_path}",
+                    settings_value,
+                    service_settings=_service_settings,
+                ),
+            )
+        except ArtifactOversizedError as exc:
+            return _error_result(
+                error_code="ARTIFACT_OVERSIZED",
+                message=_redact_sensitive_text(
+                    str(exc),
+                    settings_value,
+                    service_settings=_service_settings,
+                ),
+                detail=exc.detail,
+            )
+        # Redact known secrets from raw artifact bytes before base64-encoding,
+        # so secrets cannot leak past the MCP safety boundary inside the
+        # encoded content field.  Apply text redaction to text/* MIME types,
+        # to other common textual types (e.g. application/json) that may
+        # embed secrets, and to any file that decodes cleanly as text without
+        # null bytes (covers .env, .log, .yaml, extensionless text files, etc).
+        # Binary artifacts cannot meaningfully contain secret strings and a
+        # byte-level replacement would silently corrupt them.
+        base_type = content_type.split(";")[0].strip().lower()
+        is_likely_binary_type = base_type.startswith(
+            (
+                "image/",
+                "audio/",
+                "video/",
+                "font/",
+                "application/pdf",
+                "application/zip",
+                "application/gzip",
+                "application/x-tar",
+                "application/java-archive",
+                "application/vnd.ms-",
+                "application/vnd.openxmlformats-",
+                "application/vnd.oasis.opendocument",
+            )
+        ) or base_type in {
+            "application/wasm",
+            "application/postscript",
+            "application/epub+zip",
+            "application/rtf",
+            "application/x-msdos-program",
+            "application/java-vm",
+            "application/vnd.sqlite3",
+        }
+        is_likely_text = not is_likely_binary_type and b"\x00" not in content
+        content, error_result = await asyncio.to_thread(
+            _check_and_redact_artifact_content,
+            content,
+            limit_bytes,
+            settings_value,
+            _service_settings,
+            is_likely_text,
+        )
+        if error_result is not None:
+            return error_result
+        response = WorkspaceArtifactReadResponse(
+            workspace_id=workspace_id,
+            relative_path=relative_path,
+            name=name,
+            content_type=content_type,
+            size_bytes=len(content),
+            content=base64.b64encode(content).decode("ascii"),
+        )
+        payload = response.model_dump(mode="json")
+        encoded_content = payload.pop("content")
+        redacted_payload = _redact_sensitive_payload(payload, settings_value)
+        redacted_payload["content"] = encoded_content
+        return _tool_result(redacted_payload)
+
     @mcp.tool(name="awf_get_failure_analysis_summary")
     async def awf_get_failure_analysis_summary(
         since_hours: int = Field(
@@ -1426,8 +1549,10 @@ def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
-def _error_result(error_code: str, message: str) -> CallToolResult:
-    error = ErrorResponse(error_code=error_code, message=message)
+def _error_result(
+    error_code: str, message: str, *, detail: dict[str, Any] | None = None
+) -> CallToolResult:
+    error = ErrorResponse(error_code=error_code, message=message, detail=detail)
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
@@ -1712,6 +1837,84 @@ def _redact_sensitive_value(
             for key, item in value.items()
         }
     return value
+
+
+def _contains_secret_bytes(
+    content: bytes,
+    settings: Settings,
+    *,
+    service_settings: ServiceSettings,
+) -> bool:
+    for secret in (settings.api_token, settings.github_token, service_settings.github_token):
+        if secret and len(secret) >= 4 and secret.encode() in content:
+            return True
+    for key, value in os.environ.items():
+        if (
+            key.upper() in provider_readiness_service.KNOWN_SECRET_ENV_KEYS
+            and len(value) >= 4
+            and value.encode() in content
+        ):
+            return True
+    # Also block binary artifacts that contain recognizable provider token
+    # patterns (e.g. ghp_..., github_pat_..., sk-proj-...) even when the
+    # exact value is not present in current settings or environment.
+    decoded = content.decode("latin-1")
+    if provider_readiness_service.TOKEN_RE.search(decoded) is not None:
+        return True
+    # Additionally block URL credentials that the text path would redact.
+    return provider_readiness_service.URL_CREDENTIAL_RE.search(decoded) is not None
+
+
+def _check_and_redact_artifact_content(
+    content: bytes,
+    limit_bytes: int,
+    settings: Settings,
+    service_settings: ServiceSettings,
+    is_likely_text: bool,
+) -> tuple[bytes, CallToolResult | None]:
+    """Apply BOM blocking, text redaction, binary secret detection, and size recheck.
+
+    Runs synchronously so it can be off-loaded to ``asyncio.to_thread``.
+    Returns ``(content, error_result)`` where ``error_result`` is non-None when
+    the artifact must be blocked or is oversized after redaction.
+    """
+    # Block any artifact that carries a common multibyte text encoding BOM.
+    # This must happen before the text-vs-binary dispatch so MIME-less files
+    # (e.g. .env, .log, extensionless text) that happen to be UTF-16/UTF-32
+    # encoded do not bypass the text redaction path.
+    if content.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
+        return (
+            b"",
+            _error_result(
+                error_code="ARTIFACT_BLOCKED",
+                message="Artifact uses an unsupported multibyte encoding (UTF-16/UTF-32) and cannot be safely redacted.",
+            ),
+        )
+    if is_likely_text:
+        text = content.decode("latin-1")
+        redacted_text = _redact_sensitive_text(text, settings, service_settings=service_settings)
+        content = redacted_text.encode("latin-1")
+    elif _contains_secret_bytes(content, settings, service_settings=service_settings):
+        return (
+            b"",
+            _error_result(
+                error_code="ARTIFACT_BLOCKED",
+                message="Binary artifact contains configured secrets and cannot be returned.",
+            ),
+        )
+    if len(content) > limit_bytes:
+        return (
+            b"",
+            _error_result(
+                error_code="ARTIFACT_OVERSIZED",
+                message=f"redacted content length {len(content)} bytes exceeds limit {limit_bytes}",
+                detail={
+                    "limit_bytes": limit_bytes,
+                    "actual_bytes": len(content),
+                },
+            ),
+        )
+    return (content, None)
 
 
 def _redact_sensitive_text(

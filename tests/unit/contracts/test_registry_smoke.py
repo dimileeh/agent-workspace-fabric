@@ -94,6 +94,9 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
     "Durable workspace logs": (
         "tests/unit/mcp/test_mcp_server.py::TestWorkspaceLogs::test_lists_and_reads_indexed_log_streams",
     ),
+    "Artifact content/download": (
+        "tests/unit/mcp/test_mcp_server.py::TestReadWorkspaceArtifact::test_reads_safe_small_file_and_returns_base64_content",
+    ),
     "Cancel workspace": (
         "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_cancel_invokes_service_with_canonical_kwargs",
     ),

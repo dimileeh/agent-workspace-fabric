@@ -12,6 +12,7 @@ from heapq import heappop, heappush
 from itertools import count
 from os import stat_result
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +23,7 @@ from awf.service.bounded_list import BoundedListPage, paginate_bounded_iterable
 
 DEFAULT_ARTIFACT_LIST_LIMIT = 50
 MAX_ARTIFACT_LIST_LIMIT = 500
+MAX_ARTIFACT_CONTENT_BYTES = 1_048_576
 
 
 class ArtifactPathError(ValueError):
@@ -32,8 +34,18 @@ class ArtifactNotFoundError(FileNotFoundError):
     """Raised when an artifact cannot be safely read from managed storage."""
 
 
+class ArtifactOversizedError(ValueError):
+    """Raised when an artifact exceeds the requested or absolute byte-size limit."""
+
+    def __init__(self, message: str, *, detail: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.detail = detail
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactMetadata:
+    """Immutable artifact identity + filesystem metadata."""
+
     artifact_id: str
     workspace_id: str
     name: str
@@ -47,6 +59,8 @@ class ArtifactMetadata:
 
 @dataclass(frozen=True, slots=True)
 class DownloadableArtifact:
+    """Resolved artifact ready for stream/download with its stat snapshot."""
+
     workspace_id: str
     name: str
     relative_path: str
@@ -222,6 +236,61 @@ def get_downloadable_artifact(
         content_type=content_type_for(resolved),
         stat_result=stat,
     )
+
+
+def get_workspace_artifact_content(
+    *,
+    workspace_id: str,
+    artifact_dir: Path,
+    relative_path: str,
+    limit_bytes: int,
+) -> tuple[str, str, int, bytes]:
+    """Read validated artifact bytes and return metadata + content.
+
+    Returns ``(name, content_type, size_bytes, content)``.
+    Raises ``ArtifactPathError``, ``ArtifactNotFoundError``, or
+    ``ArtifactOversizedError``.
+    """
+    if limit_bytes > MAX_ARTIFACT_CONTENT_BYTES:
+        raise ArtifactOversizedError(
+            f"limit_bytes exceeds absolute maximum {MAX_ARTIFACT_CONTENT_BYTES}",
+            detail={
+                "limit_bytes": limit_bytes,
+                "actual_bytes": None,  # file not read yet; size is unknown
+            },
+        )
+    artifact = get_downloadable_artifact(
+        workspace_id=workspace_id,
+        artifact_dir=artifact_dir,
+        relative_path=relative_path,
+    )
+    if artifact.stat_result.st_nlink > 1:
+        raise ArtifactNotFoundError(relative_path)
+    if artifact.size_bytes > limit_bytes:
+        raise ArtifactOversizedError(
+            f"artifact size {artifact.size_bytes} bytes exceeds limit {limit_bytes}",
+            detail={
+                "limit_bytes": limit_bytes,
+                "actual_bytes": artifact.size_bytes,
+            },
+        )
+    try:
+        with artifact.path.open("rb") as f:
+            content = f.read(limit_bytes + 1)
+    except OSError as exc:
+        raise ArtifactNotFoundError(
+            f"artifact {artifact_id(workspace_id, relative_path)} (path={relative_path}) "
+            f"not readable, limit_bytes={limit_bytes}"
+        ) from exc
+    if len(content) > limit_bytes:
+        raise ArtifactOversizedError(
+            f"artifact grew during read and exceeds limit {limit_bytes}",
+            detail={
+                "limit_bytes": limit_bytes,
+                "actual_bytes": len(content),
+            },
+        )
+    return (artifact.name, artifact.content_type, len(content), content)
 
 
 def artifact_id(workspace_id: str, relative_path: str) -> str:
