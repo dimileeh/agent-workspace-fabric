@@ -757,7 +757,9 @@ _CAPABILITIES += (
         parity_backlog_slice="—",
         supports_idempotency_key=False,
         supports_if_match=False,
-        error_codes=frozenset({"INVALID_ARTIFACT_PATH", "NOT_FOUND", "ARTIFACT_OVERSIZED"}),
+        error_codes=frozenset(
+            {"INVALID_ARTIFACT_PATH", "NOT_FOUND", "ARTIFACT_OVERSIZED", "ARTIFACT_BLOCKED"}
+        ),
         rest_path_fields=frozenset({"workspace_id"}),
         rest_query_fields=frozenset({"path"}),
         mcp_request_fields=frozenset({"workspace_id", "relative_path", "limit_bytes"}),
