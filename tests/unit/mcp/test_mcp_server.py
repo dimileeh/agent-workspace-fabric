@@ -2667,6 +2667,44 @@ class TestReadWorkspaceArtifact:
         assert result["size_bytes"] == len(decoded)
 
     @pytest.mark.unit
+    async def test_utf16le_artifact_is_blocked(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        secret = "test-secret-token-abc"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact UTF-16 blocked",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        text = f"prefix {secret} suffix"
+        payload = b"\xff\xfe" + text.encode("utf-16le")
+        (artifact_dir / "secret_utf16.txt").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "secret_utf16.txt",
+                "limit_bytes": 1024,
+            },
+        )
+        assert isinstance(result, dict)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"
+
+    @pytest.mark.unit
     async def test_redaction_expansion_triggers_oversized(
         self,
         factory: async_sessionmaker[AsyncSession],

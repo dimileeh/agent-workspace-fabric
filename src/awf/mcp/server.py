@@ -858,6 +858,18 @@ def build_mcp_server(
                 "application/yaml",
             }
         ):
+            # Reject artifacts that carry common multibyte text encodings.
+            # Decoding UTF-16/UTF-32 as latin-1 interleaves NULs between
+            # characters, so simple string replacement redaction never matches
+            # the contiguous secret and the original secret-bearing bytes
+            # would be returned base64-encoded.
+            if content.startswith((b"\xff\xfe", b"\xfe\xff")) or content.startswith(
+                (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")
+            ):
+                return _error_result(
+                    error_code="ARTIFACT_BLOCKED",
+                    message="Text artifact uses an unsupported multibyte encoding (UTF-16/UTF-32) and cannot be safely redacted.",
+                )
             text = content.decode("latin-1")
             redacted_text = _redact_sensitive_text(
                 text, settings_value, service_settings=_service_settings
