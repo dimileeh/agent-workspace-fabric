@@ -867,21 +867,35 @@ async def test_destroy_cleanup_failure_records_secondary_when_workspace_already_
         and event.reason_code == "STALE_CALLBACK_IGNORED"
     ]
     assert ignored_callbacks == []
-    latest_failed = next(
+    state_failed_events = [
         event
         for event in events
         if event.event_type == "workspace.state_changed"
         and event.new_state == WorkspaceStatus.failed.value
+    ]
+    assert all((event.payload or {}).get("synthetic") is not True for event in state_failed_events)
+    secondary_failure_events = [
+        event for event in events if event.event_type == "workspace.secondary_failure_recorded"
+    ]
+    assert len(secondary_failure_events) == 1
+    secondary_failure_event = secondary_failure_events[0]
+    assert secondary_failure_event.old_state == WorkspaceStatus.failed.value
+    assert secondary_failure_event.new_state == WorkspaceStatus.failed.value
+    assert secondary_failure_event.reason_code == "PYTEST_TEST_FAILURE"
+    assert secondary_failure_event.payload is not None
+    assert secondary_failure_event.payload["synthetic"] is True
+    assert secondary_failure_event.payload["primary_failure"]["validation_run"]["id"] == (
+        validation_run_id
     )
-    assert latest_failed.old_state == WorkspaceStatus.failed.value
-    assert latest_failed.reason_code == "PYTEST_TEST_FAILURE"
-    assert latest_failed.payload is not None
-    assert latest_failed.payload["synthetic"] is True
-    assert latest_failed.payload["primary_failure"]["validation_run"]["id"] == validation_run_id
-    assert latest_failed.payload["secondary_failure"]["reason_code"] == "CLEANUP_FAILED"
-    assert latest_failed.payload["secondary_failures"][-1]["reason_code"] == "CLEANUP_FAILED"
+    assert secondary_failure_event.payload["secondary_failure"]["reason_code"] == "CLEANUP_FAILED"
+    assert (
+        secondary_failure_event.payload["secondary_failures"][-1]["reason_code"] == "CLEANUP_FAILED"
+    )
     assert operations[0].result is not None
-    assert operations[0].result["secondary_failures"] == latest_failed.payload["secondary_failures"]
+    assert (
+        operations[0].result["secondary_failures"]
+        == secondary_failure_event.payload["secondary_failures"]
+    )
     assert snapshot is not None
     assert snapshot.secondary_failures[-1]["reason_code"] == "CLEANUP_FAILED"
 

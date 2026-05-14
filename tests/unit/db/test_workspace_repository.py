@@ -27,6 +27,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
+    WorkspaceEventCreate,
     WorkspaceEventRepository,
     WorkspaceRepository,
     _schedulable_workspace_ids_stmt,
@@ -2219,6 +2220,44 @@ class TestTransition:
         # Nothing changed.
         assert ws.status == WorkspaceStatus.requested.value
         assert ws.version == 1
+
+
+class TestAddEvents:
+    @pytest.mark.unit
+    async def test_batch_assigns_increasing_event_order(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_version = workspace.version
+
+        events = await repo.add_events(
+            workspace,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="workspace.phase_started",
+                    reason_code="FIRST",
+                ),
+                WorkspaceEventCreate(
+                    event_type="workspace.phase_finished",
+                    reason_code="SECOND",
+                ),
+            ],
+        )
+
+        assert [event.event_order for event in events] == [
+            workspace_version,
+            workspace_version + 1,
+        ]
+        assert workspace.version == workspace_version
 
 
 class TestListEvents:

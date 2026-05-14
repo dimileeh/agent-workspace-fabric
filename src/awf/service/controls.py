@@ -37,6 +37,7 @@ from awf.node.git_manager import GitManager
 from awf.service.failure_causality import (
     PRIMARY_FAILURE_KEY,
     SECONDARY_FAILURE_KEY,
+    SECONDARY_FAILURE_RECORDED_EVENT_TYPE,
     SECONDARY_FAILURES_KEY,
     build_preserved_failure_payload,
     load_failure_causality_snapshot,
@@ -1129,17 +1130,17 @@ class WorkspaceControlService:
             elif workspace_status == WorkspaceStatus.failed:
                 # The workspace is already failed, so transition() is not used
                 # because there is no valid failed -> failed state-machine edge.
-                # Bump version so add_event records the next event_order.
+                # Bump version so add_event records the next causality event_order.
                 workspace.version += 1
-                synthetic_failed_transition_payload = {
+                secondary_failure_recorded_payload = {
                     **failed_transition_payload,
                     "synthetic": True,
                 }
                 await repo.add_event(
                     workspace,
-                    event_type="workspace.state_changed",
+                    event_type=SECONDARY_FAILURE_RECORDED_EVENT_TYPE,
                     reason_code=failed_reason_code,
-                    payload=synthetic_failed_transition_payload,
+                    payload=secondary_failure_recorded_payload,
                 )
             result_payload: dict[str, Any] = {
                 "status": workspace.status,

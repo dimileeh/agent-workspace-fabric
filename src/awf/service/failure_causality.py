@@ -17,9 +17,14 @@ from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 PRIMARY_FAILURE_KEY = "primary_failure"
 SECONDARY_FAILURE_KEY = "secondary_failure"
 SECONDARY_FAILURES_KEY = "secondary_failures"
+SECONDARY_FAILURE_RECORDED_EVENT_TYPE = "workspace.secondary_failure_recorded"
 _SECONDARY_FAILURE_HISTORY_LIMIT: Final = 20
 _PRIMARY_FAILURE_MESSAGE_MAX_LENGTH: Final = 2048
 _IGNORED_PRIMARY_VALIDATION_REASON_CODES = frozenset({"STALE_CALLBACK_IGNORED"})
+_FAILURE_CAUSALITY_EVENT_TYPES: Final[tuple[str, ...]] = (
+    "workspace.state_changed",
+    SECONDARY_FAILURE_RECORDED_EVENT_TYPE,
+)
 _FAILURE_EPOCH_RESET_STATES = frozenset(
     {
         WorkspaceStatus.provisioning.value,
@@ -306,7 +311,7 @@ async def _latest_failed_state_event(
 ) -> WorkspaceEvent | None:
     stmt = select(WorkspaceEvent).where(
         WorkspaceEvent.workspace_id == workspace_id,
-        WorkspaceEvent.event_type == "workspace.state_changed",
+        WorkspaceEvent.event_type.in_(_FAILURE_CAUSALITY_EVENT_TYPES),
         WorkspaceEvent.new_state == WorkspaceStatus.failed.value,
     )
     if require_primary_failure:
@@ -392,7 +397,7 @@ async def _secondary_failure_history_for_current_epoch(
         select(WorkspaceEvent)
         .where(
             WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == "workspace.state_changed",
+            WorkspaceEvent.event_type.in_(_FAILURE_CAUSALITY_EVENT_TYPES),
             WorkspaceEvent.new_state == WorkspaceStatus.failed.value,
             _event_occurs_after_or_at_same_tick(primary_event),
             _event_occurs_before_or_at_same_tick(latest_failed_event),

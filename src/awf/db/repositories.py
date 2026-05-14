@@ -3527,9 +3527,9 @@ class WorkspaceRepository:
                 new_state=workspace.status,
                 reason_code=event.reason_code,
                 payload=event.payload,
-                event_order=workspace.version,
+                event_order=workspace.version + index,
             )
-            for event in events
+            for index, event in enumerate(events)
         ]
         workspace.events.extend(created)
         await self._session.flush()

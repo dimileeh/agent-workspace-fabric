@@ -303,6 +303,7 @@ async def test_register_callback_accepts_exact_public_event_types(
             "event_types": [
                 "operation.state_changed",
                 "workspace.state_changed",
+                "workspace.secondary_failure_recorded",
                 "merge.candidate_updated",
                 "workspace.state_changed",
             ],
@@ -315,6 +316,7 @@ async def test_register_callback_accepts_exact_public_event_types(
     assert body["event_types"] == [
         "operation.state_changed",
         "workspace.state_changed",
+        "workspace.secondary_failure_recorded",
         "merge.candidate_updated",
     ]
     assert "secret" not in body
