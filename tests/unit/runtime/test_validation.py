@@ -240,6 +240,18 @@ def test_setup_dependency_network_classifier_skips_uv_run_script_dns_failure() -
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_unrelated_5xx_numbers() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=137,
+        stdout="installing docker==7.1.0 from local cache\n",
+        stderr="dependency setup worker exited with code 512 after OOM kill\n",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stderr", "expected_category"),
     [
@@ -275,6 +287,11 @@ def test_setup_dependency_network_classifier_skips_uv_run_script_dns_failure() -
         ),
         (
             "Package index https://files.pythonhosted.org/simple returned HTTP status code 503 "
+            "while fetching docker==7.1.0",
+            "http_5xx",
+        ),
+        (
+            "Package index https://files.pythonhosted.org/simple returned HTTP/1.1 503 "
             "while fetching docker==7.1.0",
             "http_5xx",
         ),

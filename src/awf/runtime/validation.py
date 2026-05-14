@@ -594,7 +594,7 @@ _SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "http_5xx",
         re.compile(
             r"(?i)("
-            r"\b5\d\d\b|"
+            r"http(?:s)?(?:/\d+(?:\.\d+)?)? +5\d\d\b|"
             r"http(?:s)? status(?: code)?[:= ]+5\d\d|"
             r"server error|bad gateway|service unavailable|gateway timeout"
             r")"
