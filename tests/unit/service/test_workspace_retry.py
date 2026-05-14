@@ -897,6 +897,9 @@ async def test_retry_planning_scope_violation_discards_premature_work_and_replan
         retried.task_prompt
     )
     assert "Rerun planning against the configured plan artifact" in retried.task_prompt
+    assert "during this retry planning phase" in retried.task_prompt
+    assert "phase-scoped" in retried.task_prompt
+    assert "After writing the plan, stop" not in retried.task_prompt
     assert "Prior source required plan paths from the failed planning attempt" in (
         retried.task_prompt
     )

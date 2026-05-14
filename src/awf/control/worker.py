@@ -166,6 +166,7 @@ class WorkerConfig:
     monitor_claim_lease_seconds: float = 300.0
     execution_claim_lease_seconds: float = 300.0
     stale_active_execution_scan_interval_seconds: float = 300.0
+    active_execution_preservation_grace_seconds: float = 900.0
     secret_lease_expiration_scan_interval_seconds: float = 60.0
     terminal_runtime_release_scan_interval_seconds: float = 300.0
     terminal_runtime_release_max_per_scan: int = 5
@@ -1469,13 +1470,17 @@ class ControlWorker:
         if finding is not None and finding.decision == "defer_retry_policy":
             await self._record_recoverable_runtime_stranding(candidate, snapshot, finding)
             return
-        if (
-            candidate.status in _ACTIVE_EXECUTION_STATUSES
-            and _has_running_agent_runtime(snapshot)
-            and not await self._has_operator_refresh_after_latest_preservation(candidate)
-        ):
-            await self._record_preserved_active_execution_after_restart(candidate, snapshot)
-            return
+        if candidate.status in _ACTIVE_EXECUTION_STATUSES and _has_running_agent_runtime(snapshot):
+            if await self._has_expired_preserved_active_execution(candidate):
+                if not await self._record_stale_active_execution_detected(
+                    candidate,
+                    snapshot,
+                ):
+                    await self._cleanup_and_fail_stale_active_execution(candidate, snapshot)
+                return
+            if not await self._has_operator_refresh_after_latest_preservation(candidate):
+                await self._record_preserved_active_execution_after_restart(candidate, snapshot)
+                return
         if candidate.compose_project_name and snapshot.stack_state == "running":
             if not await self._record_stale_active_execution_detected(
                 candidate,
@@ -1700,12 +1705,46 @@ class ControlWorker:
                 ws,
                 candidate.status,
             )
-            return await self._has_preserved_active_execution_event(
+            latest_preserved = await self._latest_preserved_active_execution_at(
                 session,
                 candidate.workspace_id,
                 candidate.status,
                 event_floor=event_floor,
             )
+            if latest_preserved is None:
+                return False
+            return not self._active_execution_preservation_is_expired(latest_preserved)
+
+    async def _has_expired_preserved_active_execution(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> bool:
+        if candidate.status not in _ACTIVE_EXECUTION_STATUSES:
+            return False
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return False
+            event_floor = await self._active_execution_preservation_event_floor(
+                session,
+                ws,
+                candidate.status,
+            )
+            latest_preserved = await self._latest_preserved_active_execution_at(
+                session,
+                candidate.workspace_id,
+                candidate.status,
+                event_floor=event_floor,
+            )
+            if latest_preserved is None:
+                return False
+            return self._active_execution_preservation_is_expired(latest_preserved)
+
+    def _active_execution_preservation_is_expired(self, preserved_at: datetime) -> bool:
+        grace = max(0.0, self._config.active_execution_preservation_grace_seconds)
+        return datetime.now(UTC) - _utc_datetime(preserved_at) >= timedelta(seconds=grace)
 
     async def _has_preserved_active_execution_event(
         self,
@@ -1871,11 +1910,14 @@ class ControlWorker:
                 ws,
                 candidate.status,
             )
-            if await self._has_preserved_active_execution_event(
+            latest_preserved = await self._latest_preserved_active_execution_at(
                 session,
                 candidate.workspace_id,
                 candidate.status,
                 event_floor=event_floor,
+            )
+            if latest_preserved is not None and not self._active_execution_preservation_is_expired(
+                latest_preserved
             ):
                 return False
             return await self._has_stale_active_execution_event(

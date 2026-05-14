@@ -4788,6 +4788,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             include_validation_run=True,
         )
         snapshot = _live_agent_snapshot(container_id="agent-primary-failure")
+
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -4829,6 +4830,94 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert preserved_events[0].payload["primary_failure"]["validation_run"]["id"] == (
             validation_run_id
         )
+
+    @pytest.mark.unit
+    async def test_restart_recovery_fails_expired_preserved_active_execution(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserve_expired"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserve-expired",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        preserved_at = datetime.now(UTC) - timedelta(minutes=30)
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            running_started = next(
+                event for event in state_events if event.new_state == WorkspaceStatus.running.value
+            )
+            running_started.occurred_at = preserved_at - timedelta(minutes=1)
+            preserved = await repo.add_event(
+                ws,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+                reason_code=PRESERVED_EXECUTION_REASON_CODE,
+                payload={
+                    "workspace_status": WorkspaceStatus.running.value,
+                    "decision": "preserve_runtime",
+                },
+            )
+            preserved.occurred_at = preserved_at
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+                active_execution_preservation_grace_seconds=60.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.infrastructure_failure.value
+        assert ws.failure_message is not None
+        assert "active execution was lost after a service or Docker restart" in ws.failure_message
+        assert len(stale_events) == 1
+        assert len(preserved_events) == 1
+        assert cleaner.calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": str(origin_repo),
+                "compose_project_name": compose_project,
+                "compose_file_path": Path(f"/tmp/awf/{workspace_id}/compose.yml"),
+                "worktree_host_path": None,
+                "remove_volumes": True,
+                "remove_worktree": False,
+            }
+        ]
 
     @pytest.mark.unit
     async def test_restart_recovery_records_preservation_once_per_active_phase(
