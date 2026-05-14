@@ -320,6 +320,89 @@ async def test_primary_failure_snapshot_keeps_validation_run_for_validation_fail
 
 
 @pytest.mark.unit
+async def test_primary_failure_snapshot_does_not_tiebreak_validation_runs_by_random_id(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, older_validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.validation_failure.value,
+        failure_message="pytest failed with same-tick validation callbacks",
+        reason_code="OLD_PYTEST_FAILURE",
+        validation_reason_code="OLD_PYTEST_FAILURE",
+    )
+
+    async with session_factory() as session:
+        validation_repo = ValidationRunRepository(session)
+        older_run = await validation_repo.get(older_validation_run_id)
+        assert older_run is not None
+        same_started_at = older_run.started_at + timedelta(seconds=1)
+        same_finished_at = same_started_at + timedelta(seconds=1)
+        older_run.id = "vr_zzzzzzzzzzzzzzzzzzzzzzzz"
+        older_run.reason_code = "OLD_PYTEST_FAILURE"
+        older_run.started_at = same_started_at
+        older_run.finished_at = same_finished_at
+        older_run.created_at = same_started_at
+        older_run.updated_at = same_finished_at
+        older_run.coverage = {
+            "percent": 80.0,
+            "minimum_percent": 99.0,
+            "failing_test_node_ids": ["tests/unit/test_example.py::test_old_failure"],
+        }
+
+        newer_run = await validation_repo.start(
+            workspace_id=workspace_id,
+            attempt_id=None,
+            tier=0,
+            commands=[
+                {
+                    "command": "uv run pytest tests/unit/test_example.py::test_current_failure",
+                    "phase": "validation",
+                }
+            ],
+            base_commit="a" * 40,
+            target_branch="main",
+            target_head_sha="b" * 40,
+            log_stream_refs={"validation": "logs/current-validation.log"},
+            workspace_head_sha="c" * 40,
+            profile_name="default",
+            profile_version=1,
+            profile_source=".awf/workspace.yml",
+            resolved_profile_digest="d" * 64,
+            environment_identity_digest="e" * 64,
+            environment_identity_inputs={"python": "3.12"},
+            started_at=same_started_at,
+        )
+        await validation_repo.finish(
+            newer_run.id,
+            status="failed",
+            reason_code="CURRENT_PYTEST_FAILURE",
+            finished_at=same_finished_at,
+            coverage={
+                "percent": 91.5,
+                "minimum_percent": 99.0,
+                "failing_test_node_ids": ["tests/unit/test_example.py::test_current_failure"],
+            },
+        )
+        newer_run.id = "vr_aaaaaaaaaaaaaaaaaaaaaaaa"
+        newer_run.created_at = same_started_at + timedelta(microseconds=1)
+        newer_run.updated_at = same_finished_at
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["reason_code"] == "CURRENT_PYTEST_FAILURE"
+    assert snapshot["validation_run"]["id"] == "vr_aaaaaaaaaaaaaaaaaaaaaaaa"
+    assert snapshot["coverage"]["failing_test_node_ids"] == [
+        "tests/unit/test_example.py::test_current_failure"
+    ]
+
+
+@pytest.mark.unit
 async def test_primary_failure_snapshot_ignores_later_stale_validation_callback_run(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

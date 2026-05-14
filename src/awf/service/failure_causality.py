@@ -381,7 +381,10 @@ async def _latest_failed_validation_run(
     stmt = stmt.order_by(
         ValidationRun.finished_at.desc().nullslast(),
         ValidationRun.started_at.desc(),
-        ValidationRun.id.desc(),
+        # Validation run IDs are uuid4-derived. When recorded run timestamps
+        # tie, use persisted write chronology instead of random ID order.
+        ValidationRun.created_at.desc(),
+        ValidationRun.updated_at.desc(),
     ).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none()
 
