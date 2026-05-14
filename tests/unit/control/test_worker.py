@@ -29,7 +29,6 @@ from awf.control.worker import (
     _active_execution_preservation_claim_cleanup_payload,
     _ActiveExecutionCandidate,
     _candidate_claim_is_stale,
-    _claim_recheck_conditions,
     _execution_claim_is_stale,
     _has_running_agent_runtime,
     _json_datetime,
@@ -51,6 +50,7 @@ from awf.db.repositories import (
     QueueDecisionRepository,
     TaskAttemptRepository,
     TaskRepository,
+    ValidationRunRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
@@ -336,6 +336,94 @@ async def _create_active_execution(
             await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
         await s.commit()
         return ws.id
+
+
+async def _seed_primary_failure_evidence(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    failure_reason: str,
+    failure_message: str,
+    reason_code: str,
+    include_validation_run: bool = False,
+) -> str | None:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        original_status = WorkspaceStatus(ws.status)
+        if original_status == WorkspaceStatus.failed:
+            await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="SEED")
+        validation_run_id: str | None = None
+        if include_validation_run:
+            validation_repo = ValidationRunRepository(s)
+            run = await validation_repo.start(
+                workspace_id=workspace_id,
+                attempt_id=None,
+                tier=0,
+                commands=[
+                    {
+                        "command": "uv run pytest tests/unit/test_example.py::test_failure",
+                        "phase": "validation",
+                    }
+                ],
+                base_commit="a" * 40,
+                target_branch="development",
+                target_head_sha="b" * 40,
+                log_stream_refs={"validation": "logs/validation.log"},
+                workspace_head_sha="c" * 40,
+                profile_name="default",
+                profile_version=1,
+                profile_source=".awf/workspace.yml",
+                resolved_profile_digest="d" * 64,
+                environment_identity_digest="e" * 64,
+                environment_identity_inputs={"python": "3.12"},
+            )
+            await validation_repo.finish(
+                run.id,
+                status="failed",
+                reason_code=reason_code,
+                coverage={
+                    "percent": 91.5,
+                    "minimum_percent": 99.0,
+                    "threshold": 99.0,
+                    "failing_test_node_ids": [
+                        "tests/unit/test_example.py::test_failure",
+                    ],
+                    "failing_test_evidence": [
+                        "FAILED tests/unit/test_example.py::test_failure",
+                    ],
+                },
+            )
+            validation_run_id = run.id
+        ws.failure_reason = failure_reason
+        ws.failure_message = failure_message
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.failed,
+            reason_code=reason_code,
+            payload={
+                "reason_code": reason_code,
+                "message": failure_message,
+                "details": {
+                    "recommended_action": "fix the primary failure before retrying",
+                    "recovery_strategy": "retry_after_fix",
+                },
+            },
+        )
+        if original_status in {
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+        }:
+            # The worker paths under test require an active row, while the
+            # causality evidence itself must come from a real failed
+            # transition. Do not write a remonitor state_reset here: that would
+            # deliberately start a new failure epoch and suppress the primary
+            # evidence these secondary-path tests exercise.
+            ws.status = original_status.value
+        await s.commit()
+        return validation_run_id
 
 
 async def _create_terminal_execution(
@@ -4691,6 +4779,72 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert cleaner.calls == []
 
     @pytest.mark.unit
+    async def test_active_execution_preservation_after_restart_keeps_primary_failure_evidence(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        compose_project = "awf_preserve_primary_failure"
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "preserve-primary-failure",
+            WorkspaceStatus.running,
+            compose_project_name=compose_project,
+        )
+        validation_run_id = await _seed_primary_failure_evidence(
+            session_factory,
+            workspace_id,
+            failure_reason=FailureReason.validation_failure.value,
+            failure_message="pytest failed before worker reconnect",
+            reason_code="PYTEST_TEST_FAILURE",
+            include_validation_run=True,
+        )
+        snapshot = _live_agent_snapshot(container_id="agent-primary-failure")
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_RecordingRuntimeInspector({compose_project: snapshot}),
+            runtime_cleaner=_RecordingRuntimeCleaner(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        await worker._record_preserved_active_execution_after_restart(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                repo_url=str(origin_repo),
+                compose_project_name=compose_project,
+            ),
+            snapshot,
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.failure_reason == FailureReason.validation_failure.value
+            assert ws.failure_message == "pytest failed before worker reconnect"
+            validation_run = await ValidationRunRepository(s).get(validation_run_id or "")
+            assert validation_run is not None
+            assert validation_run.reason_code == "PYTEST_TEST_FAILURE"
+            preserved_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=PRESERVED_EXECUTION_EVENT_TYPE,
+            )
+
+        assert len(preserved_events) == 1
+        assert preserved_events[0].payload is not None
+        assert preserved_events[0].payload["primary_failure"]["reason_code"] == (
+            "PYTEST_TEST_FAILURE"
+        )
+        assert preserved_events[0].payload["primary_failure"]["validation_run"]["id"] == (
+            validation_run_id
+        )
+
+    @pytest.mark.unit
     async def test_restart_recovery_fails_expired_preserved_active_execution(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -5382,6 +5536,12 @@ class TestRunOnceStaleActiveExecutionRecovery:
             status,
             compose_project_name=compose_project,
         )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            initial_version = ws.version
+            initial_event_sequence = ws.event_sequence
+
         inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
         cleaner = _RecordingRuntimeCleaner()
         executor = _RecordingExecutor()
@@ -5401,6 +5561,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert ws is not None
             assert ws.status == status.value
             assert ws.subphase == PRESERVED_EXECUTION_SUBPHASE
+            assert ws.version == initial_version + 1
             assert ws.failure_reason is None
             preserved_events = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
@@ -5412,6 +5573,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
 
         assert len(preserved_events) == 1
+        assert preserved_events[0].event_order == initial_event_sequence + 1
         assert preserved_events[0].payload is not None
         assert preserved_events[0].payload["workspace_status"] == status.value
         assert preserved_events[0].payload["decision"] == "preserve_runtime"
@@ -5664,6 +5826,91 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
 
     @pytest.mark.unit
+    async def test_stale_active_execution_preserves_validation_failure_and_records_secondary_stale(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-running-preserve-validation",
+            WorkspaceStatus.running,
+            compose_project_name="awf_stale_preserve_validation",
+        )
+        validation_run_id = await _seed_primary_failure_evidence(
+            session_factory,
+            workspace_id,
+            failure_reason=FailureReason.validation_failure.value,
+            failure_message="pytest failed before runtime cleanup",
+            reason_code="PYTEST_TEST_FAILURE",
+            include_validation_run=True,
+        )
+        cleaner = _RecordingRuntimeCleaner()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_stale_preserve_validation",
+            compose_file_path="/tmp/awf/ws/compose.yml",
+            repo_url=str(origin_repo),
+        )
+        snapshot = RuntimeSnapshot(
+            stack_state="running",
+            reason="worker process exited after validation failed",
+        )
+        assert await worker._record_stale_active_execution_detected(candidate, snapshot)
+
+        await worker._cleanup_and_fail_stale_active_execution(candidate, snapshot)
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.validation_failure.value
+            assert ws.failure_message == "pytest failed before runtime cleanup"
+            validation_run = await ValidationRunRepository(s).get(validation_run_id or "")
+            assert validation_run is not None
+            assert validation_run.reason_code == "PYTEST_TEST_FAILURE"
+            assert validation_run.coverage is not None
+            assert validation_run.coverage["percent"] == 91.5
+            assert validation_run.coverage["threshold"] == 99.0
+            assert validation_run.coverage["failing_test_node_ids"] == [
+                "tests/unit/test_example.py::test_failure"
+            ]
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+
+        latest_failed = next(
+            event for event in state_events if event.new_state == WorkspaceStatus.failed.value
+        )
+        assert latest_failed.reason_code == "PYTEST_TEST_FAILURE"
+        assert latest_failed.payload is not None
+        assert latest_failed.payload["reason_code"] == "PYTEST_TEST_FAILURE"
+        assert latest_failed.payload["primary_failure"]["validation_run"]["id"] == (
+            validation_run_id
+        )
+        assert latest_failed.payload["primary_failure"]["validation_run"]["coverage"][
+            "failing_test_node_ids"
+        ] == ["tests/unit/test_example.py::test_failure"]
+        assert latest_failed.payload["secondary_failure"]["reason_code"] == (
+            "STALE_ACTIVE_EXECUTION"
+        )
+        assert latest_failed.payload["secondary_failure"]["runtime"]["stack_state"] == "running"
+        assert latest_failed.payload["secondary_failures"][-1]["reason_code"] == (
+            "STALE_ACTIVE_EXECUTION"
+        )
+
+    @pytest.mark.unit
     async def test_stale_active_execution_cleanup_failure_keeps_row_active(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -5838,6 +6085,79 @@ class TestRunOnceStaleActiveExecutionRecovery:
             events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
             assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
             assert not any(event.reason_code == "STRANDED_WORKSPACE" for event in events)
+
+    @pytest.mark.unit
+    async def test_runtime_stranding_preserves_provider_auth_primary_failure(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stranded-preserve-auth",
+            WorkspaceStatus.validating,
+            compose_project_name="awf_stranded_preserve_auth",
+        )
+        await _seed_primary_failure_evidence(
+            session_factory,
+            workspace_id,
+            failure_reason=FailureReason.agent_failure.value,
+            failure_message="provider auth failed before runtime stranding",
+            reason_code="AGENT_AUTH_FAILED",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.validating,
+            compose_project_name="awf_stranded_preserve_auth",
+            repo_url=str(origin_repo),
+        )
+        snapshot = RuntimeSnapshot(stack_state="stopped", reason="no containers")
+        finding = WorkspaceRuntimeFinding(
+            workspace_id=workspace_id,
+            workspace_status=WorkspaceStatus.validating.value,
+            status="stranded",
+            reason_code="STRANDED_WORKSPACE",
+            decision="fail_workspace",
+            message="runtime is stranded",
+        )
+
+        await worker._fail_stranded_workspace(candidate, snapshot, finding)  # noqa: SLF001
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.agent_failure.value
+            assert ws.failure_message == "provider auth failed before runtime stranding"
+            state_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+            )
+            stranded_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+
+        latest_failed = next(
+            event for event in state_events if event.new_state == WorkspaceStatus.failed.value
+        )
+        assert latest_failed.reason_code == "AGENT_AUTH_FAILED"
+        assert latest_failed.payload is not None
+        assert latest_failed.payload["primary_failure"]["reason_code"] == "AGENT_AUTH_FAILED"
+        assert latest_failed.payload["secondary_failure"]["reason_code"] == "STRANDED_WORKSPACE"
+        assert latest_failed.payload["secondary_failures"][-1]["reason_code"] == (
+            "STRANDED_WORKSPACE"
+        )
+        assert len(stranded_events) == 1
+        assert stranded_events[0].payload is not None
+        assert stranded_events[0].payload["primary_failure"]["reason_code"] == ("AGENT_AUTH_FAILED")
 
     @pytest.mark.unit
     async def test_live_running_stack_is_preserved_and_not_failed_on_next_scan(
@@ -6916,6 +7236,280 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert inspector.calls == ["awf_refreshed_claim_running"]
 
     @pytest.mark.unit
+    async def test_stale_active_execution_failure_transition_rechecks_refreshed_claim(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = "ws_refreshed_during_failure"
+        stale_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        refreshed_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        workspace = SimpleNamespace(
+            id=workspace_id,
+            status=WorkspaceStatus.running.value,
+            execution_claimed_by="worker-a",
+            execution_claim_expires_at=stale_expires_at,
+            failure_reason=None,
+            failure_message=None,
+        )
+
+        class RecordingSession:
+            committed = False
+
+            async def __aenter__(self) -> RecordingSession:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def commit(self) -> None:
+                self.committed = True
+
+        class RecordingWorkspaceRepository:
+            transition_calls = 0
+            transition_if_current_calls: list[dict[str, object]] = []
+
+            def __init__(self, session: RecordingSession) -> None:
+                assert session is recording_session
+
+            async def get_for_update(self, requested_workspace_id: str) -> SimpleNamespace:
+                assert requested_workspace_id == workspace_id
+                return workspace
+
+            async def transition(
+                self,
+                transitioned_workspace: SimpleNamespace,
+                *,
+                to: WorkspaceStatus,
+                reason_code: str,
+                payload: dict[str, object] | None = None,
+            ) -> SimpleNamespace:
+                del reason_code, payload
+                self.__class__.transition_calls += 1
+                transitioned_workspace.status = to.value
+                return transitioned_workspace
+
+            async def transition_if_current(
+                self,
+                requested_workspace_id: str,
+                *,
+                from_status: WorkspaceStatus,
+                to: WorkspaceStatus,
+                reason_code: str,
+                payload: dict[str, object] | None = None,
+                extra_conditions: tuple[object, ...] = (),
+            ) -> None:
+                self.__class__.transition_if_current_calls.append(
+                    {
+                        "workspace_id": requested_workspace_id,
+                        "from_status": from_status,
+                        "to": to,
+                        "reason_code": reason_code,
+                        "payload": payload,
+                        "extra_conditions_count": len(extra_conditions),
+                    }
+                )
+
+        async def _refresh_claim_during_failure_causality_load(
+            session: AsyncSession,
+            loaded_workspace: Workspace,
+        ) -> None:
+            del session
+            loaded_workspace.execution_claim_expires_at = refreshed_expires_at
+
+        recording_session = RecordingSession()
+        monkeypatch.setattr(
+            worker_module,
+            "load_failure_causality_snapshot",
+            _refresh_claim_during_failure_causality_load,
+        )
+        monkeypatch.setattr(
+            worker_module,
+            "WorkspaceRepository",
+            RecordingWorkspaceRepository,
+        )
+        worker = ControlWorker(
+            session_factory=lambda: recording_session,  # type: ignore[arg-type]
+            provisioner=object(),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        await worker._fail_stale_active_execution(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_refreshed_during_failure",
+            ),
+            RuntimeSnapshot(stack_state="stopped", reason="worker restarted"),
+        )
+
+        assert RecordingWorkspaceRepository.transition_calls == 0
+        assert RecordingWorkspaceRepository.transition_if_current_calls == [
+            {
+                "workspace_id": workspace_id,
+                "from_status": WorkspaceStatus.running,
+                "to": WorkspaceStatus.failed,
+                "reason_code": "STALE_ACTIVE_EXECUTION",
+                "payload": None,
+                "extra_conditions_count": 1,
+            }
+        ]
+        assert recording_session.committed is False
+        assert workspace.status == WorkspaceStatus.running.value
+        assert workspace.failure_reason is None
+        assert workspace.execution_claimed_by == "worker-a"
+        assert workspace.execution_claim_expires_at == refreshed_expires_at
+
+    @pytest.mark.unit
+    async def test_runtime_stranding_failure_transition_rechecks_refreshed_claim(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = "ws_stranding_refreshed_during_failure"
+        stale_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        refreshed_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        workspace = SimpleNamespace(
+            id=workspace_id,
+            status=WorkspaceStatus.running.value,
+            execution_claimed_by="worker-a",
+            execution_claim_expires_at=stale_expires_at,
+            monitor_claimed_by=None,
+            monitor_claim_expires_at=None,
+            failure_reason=None,
+            failure_message=None,
+        )
+
+        class RecordingSession:
+            committed = False
+
+            async def __aenter__(self) -> RecordingSession:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def commit(self) -> None:
+                self.committed = True
+
+        class RecordingWorkspaceRepository:
+            transition_calls = 0
+            transition_if_current_calls: list[dict[str, object]] = []
+            event_calls = 0
+
+            def __init__(self, session: RecordingSession) -> None:
+                assert session is recording_session
+
+            async def get_for_update(self, requested_workspace_id: str) -> SimpleNamespace:
+                assert requested_workspace_id == workspace_id
+                return workspace
+
+            async def transition(
+                self,
+                transitioned_workspace: SimpleNamespace,
+                *,
+                to: WorkspaceStatus,
+                reason_code: str,
+                payload: dict[str, object] | None = None,
+            ) -> SimpleNamespace:
+                del reason_code, payload
+                self.__class__.transition_calls += 1
+                transitioned_workspace.status = to.value
+                return transitioned_workspace
+
+            async def transition_if_current(
+                self,
+                requested_workspace_id: str,
+                *,
+                from_status: WorkspaceStatus,
+                to: WorkspaceStatus,
+                reason_code: str,
+                payload: dict[str, object] | None = None,
+                extra_conditions: tuple[object, ...] = (),
+            ) -> None:
+                self.__class__.transition_if_current_calls.append(
+                    {
+                        "workspace_id": requested_workspace_id,
+                        "from_status": from_status,
+                        "to": to,
+                        "reason_code": reason_code,
+                        "payload": payload,
+                        "extra_conditions_count": len(extra_conditions),
+                    }
+                )
+
+            async def add_event(self, *_args: object, **_kwargs: object) -> None:
+                self.__class__.event_calls += 1
+
+        async def _refresh_claim_during_failure_causality_load(
+            session: AsyncSession,
+            loaded_workspace: Workspace,
+        ) -> None:
+            del session
+            loaded_workspace.execution_claim_expires_at = refreshed_expires_at
+
+        recording_session = RecordingSession()
+        monkeypatch.setattr(
+            worker_module,
+            "load_failure_causality_snapshot",
+            _refresh_claim_during_failure_causality_load,
+        )
+        monkeypatch.setattr(
+            worker_module,
+            "WorkspaceRepository",
+            RecordingWorkspaceRepository,
+        )
+        worker = ControlWorker(
+            session_factory=lambda: recording_session,  # type: ignore[arg-type]
+            provisioner=object(),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+        finding = WorkspaceRuntimeFinding(
+            workspace_id=workspace_id,
+            workspace_status=WorkspaceStatus.running.value,
+            status="stranded",
+            reason_code="STRANDED_WORKSPACE",
+            decision="fail_workspace",
+            message="runtime is stranded",
+        )
+
+        await worker._fail_stranded_workspace(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_refreshed_runtime_stranding",
+            ),
+            RuntimeSnapshot(stack_state="stopped", reason="worker restarted"),
+            finding,
+        )
+
+        assert RecordingWorkspaceRepository.transition_calls == 0
+        assert RecordingWorkspaceRepository.transition_if_current_calls == [
+            {
+                "workspace_id": workspace_id,
+                "from_status": WorkspaceStatus.running,
+                "to": WorkspaceStatus.failed,
+                "reason_code": "STRANDED_WORKSPACE",
+                "payload": None,
+                "extra_conditions_count": 1,
+            }
+        ]
+        assert RecordingWorkspaceRepository.event_calls == 0
+        assert recording_session.committed is False
+        assert workspace.status == WorkspaceStatus.running.value
+        assert workspace.failure_reason is None
+        assert workspace.execution_claimed_by == "worker-a"
+        assert workspace.execution_claim_expires_at == refreshed_expires_at
+
+    @pytest.mark.unit
     async def test_stale_active_execution_scan_is_limited_to_worker_node(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -7188,7 +7782,6 @@ def test_stale_execution_helper_defaults_for_non_runtime_statuses() -> None:
         monitor_claim_expires_at=now + timedelta(minutes=5),
     )
 
-    assert _claim_recheck_conditions(WorkspaceStatus.ready) == ()
     assert _candidate_claim_is_stale(workspace, WorkspaceStatus.ready, now) is True
 
     message = _stale_active_execution_failure_message(
@@ -8361,6 +8954,91 @@ class TestTerminalRuntimeRelease:
         assert release_failure_events[0].payload is not None
         assert release_failure_events[0].payload["cleanup"]["reason_code"] == CLEANUP_PARTIAL
         assert release_events == []
+
+    @pytest.mark.unit
+    async def test_terminal_runtime_release_failure_preserves_validation_provenance_details(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            "terminal-release-preserve-validation",
+            WorkspaceStatus.failed,
+        )
+        validation_run_id = await _seed_primary_failure_evidence(
+            session_factory,
+            workspace_id,
+            failure_reason=FailureReason.validation_failure.value,
+            failure_message="pytest failed before terminal release cleanup",
+            reason_code="PYTEST_TEST_FAILURE",
+            include_validation_run=True,
+        )
+        cleaner = _RecordingRuntimeCleaner(
+            WorkspaceCleanupResult(
+                status="partial",
+                reason_code=CLEANUP_PARTIAL,
+                steps=(
+                    WorkspaceCleanupStepResult(
+                        name="compose_down",
+                        status="failed",
+                        reason_code="DOCKER_UNAVAILABLE",
+                        error="cannot connect to docker",
+                    ),
+                ),
+            )
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                terminal_runtime_release_scan_interval_seconds=0.0,
+            ),
+        )
+
+        await worker._record_terminal_runtime_release_failed(  # noqa: SLF001
+            _TerminalRuntimeCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.failed,
+                repo_url=str(origin_repo),
+                compose_project_name=f"awf_{workspace_id}",
+                compose_file_path=f"/tmp/awf/{workspace_id}/compose.yml",
+            ),
+            cleanup=cleaner.result,
+            message="cleanup failed after validation failure",
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.validation_failure.value
+            assert ws.failure_message == "pytest failed before terminal release cleanup"
+            validation_run = await ValidationRunRepository(s).get(validation_run_id or "")
+            assert validation_run is not None
+            assert validation_run.coverage is not None
+            assert validation_run.coverage["failing_test_node_ids"] == [
+                "tests/unit/test_example.py::test_failure"
+            ]
+            release_failure_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.terminal_runtime_release_failed",
+            )
+
+        assert len(release_failure_events) == 1
+        assert release_failure_events[0].payload is not None
+        assert release_failure_events[0].payload["cleanup"]["reason_code"] == CLEANUP_PARTIAL
+        assert release_failure_events[0].payload["primary_failure"]["reason_code"] == (
+            "PYTEST_TEST_FAILURE"
+        )
+        assert release_failure_events[0].payload["primary_failure"]["validation_run"]["id"] == (
+            validation_run_id
+        )
 
     @pytest.mark.unit
     async def test_release_does_not_record_failure_event_when_success_event_already_exists(

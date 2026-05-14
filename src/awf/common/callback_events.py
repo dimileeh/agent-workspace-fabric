@@ -10,6 +10,7 @@ CALLBACK_EVENT_WILDCARDS: Final[frozenset[str]] = frozenset(
 PUBLIC_CALLBACK_EVENT_TYPES: Final[tuple[str, ...]] = (
     "workspace.created",
     "workspace.state_changed",
+    "workspace.secondary_failure_recorded",
     "operation.state_changed",
     "merge.candidate_updated",
 )

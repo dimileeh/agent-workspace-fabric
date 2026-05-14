@@ -218,6 +218,7 @@ class PullRequestMonitorAdoptionService:
                 if task.external_id == adoption_external_id:
                     task.external_id = superseded_external_id
 
+        await WorkspaceRepository(self._session).advance_workspace_version(workspace)
         await self._session.flush()
         return {
             "reason_code": PR_ADOPTION_SUPERSEDED_REASON,

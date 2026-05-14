@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import update as sa_update
@@ -674,6 +675,46 @@ async def test_control_prepare_operation_treats_blank_idempotency_key_as_absent(
 
 
 @pytest.mark.unit
+async def test_append_only_events_do_not_invalidate_if_match_controls(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    expected_version = workspace.version
+    repo = WorkspaceRepository(session)
+    await repo.add_event(
+        workspace,
+        event_type="workspace.audit.control_probe",
+        reason_code="AUDIT_ONLY",
+        payload={"probe": True},
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.cancel_workspace(
+        workspace.id,
+        reason="operator fetched before audit event",
+        stop_stack=False,
+        idempotency_key="cancel-after-audit-only-event",
+        expected_version=expected_version,
+    )
+    events = await _events(session, workspace.id)
+    reason_codes = [event.reason_code for event in events]
+    audit_event = next(event for event in events if event.reason_code == "AUDIT_ONLY")
+    cancel_state_event = next(
+        event
+        for event in events
+        if event.event_type == "workspace.state_changed" and event.reason_code == "OPERATOR_CANCEL"
+    )
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert workspace.version == expected_version + 1
+    assert workspace.event_sequence == 4
+    assert reason_codes.count("AUDIT_ONLY") == 1
+    assert reason_codes.count("OPERATOR_CANCEL") == 2
+    assert audit_event.event_order == 2
+    assert cancel_state_event.event_order == 3
+
+
+@pytest.mark.unit
 async def test_control_require_workspace_reports_missing_workspace(
     session: AsyncSession,
 ) -> None:
@@ -966,6 +1007,68 @@ async def test_remonitor_failed_workspace_with_pr_reenters_monitoring(
         "monitor_iter_count_reset_from": 8,
         "candidate_reopened": False,
     }
+
+
+@pytest.mark.unit
+async def test_remonitor_failed_workspace_reserves_state_reset_event_order(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/43"
+    workspace.pr_number = 43
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+    calls: list[tuple[str, str, str, str]] = []
+    original_add_event_with_states = WorkspaceRepository.add_event_with_states
+
+    async def _recording_add_event_with_states(
+        self: WorkspaceRepository,
+        event_workspace: Workspace,
+        *,
+        event_type: str,
+        old_state: WorkspaceStatus | str,
+        new_state: WorkspaceStatus | str,
+        reason_code: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> WorkspaceEvent:
+        calls.append((event_workspace.id, event_type, str(old_state), str(new_state)))
+        return await original_add_event_with_states(
+            self,
+            event_workspace,
+            event_type=event_type,
+            old_state=old_state,
+            new_state=new_state,
+            reason_code=reason_code,
+            payload=payload,
+        )
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "add_event_with_states",
+        _recording_add_event_with_states,
+    )
+
+    await service.remonitor_workspace(
+        workspace.id,
+        reason="reattach failed PR",
+        idempotency_key="remonitor-failed-pr-reserve-order",
+        expected_version=workspace.version,
+    )
+    events = await _events(session, workspace.id)
+
+    assert calls == [
+        (
+            workspace.id,
+            "workspace.remonitor_requested",
+            WorkspaceStatus.failed.value,
+            WorkspaceStatus.monitoring_pr.value,
+        )
+    ]
+    assert workspace.version == 2
+    assert events[0].event_order == 2
+    assert events[0].old_state == WorkspaceStatus.failed.value
+    assert events[0].new_state == WorkspaceStatus.monitoring_pr.value
 
 
 @pytest.mark.unit

@@ -2621,6 +2621,7 @@ class WorkspaceRepository:
             id=new_workspace_id(),
             status=WorkspaceStatus.requested.value,
             version=1,
+            event_sequence=1,
             repo_url=repo_url,
             branch_base=branch_base,
             remote_push_branch=remote_push_branch,
@@ -2654,6 +2655,7 @@ class WorkspaceRepository:
                 old_state=None,
                 new_state=WorkspaceStatus.requested.value,
                 reason_code="CREATED",
+                event_order=workspace.event_sequence,
             )
         )
         self._session.add(workspace)
@@ -3154,9 +3156,13 @@ class WorkspaceRepository:
         current = WorkspaceStatus(workspace.status)
         WorkspaceStateMachine.assert_transition(current, to)
 
+        event_order = await self._reserve_workspace_event_orders(
+            workspace,
+            count=1,
+            bump_version=True,
+        )
         old_state = workspace.status
         workspace.status = to.value
-        workspace.version += 1
         attempt = await TaskAttemptRepository(
             self._session,
             dialect_name=self._dialect_name,
@@ -3179,6 +3185,7 @@ class WorkspaceRepository:
                 new_state=to.value,
                 reason_code=reason_code,
                 payload=payload,
+                event_order=event_order,
             )
         )
         return workspace
@@ -3190,12 +3197,80 @@ class WorkspaceRepository:
         from_status: WorkspaceStatus,
         to: WorkspaceStatus,
         reason_code: str,
+        payload: dict[str, Any] | None = None,
         extra_conditions: tuple[ColumnElement[bool], ...] = (),
     ) -> Workspace | None:
         """Atomically transition a row only if it is still in ``from_status``."""
         WorkspaceStateMachine.assert_transition(from_status, to)
 
         now = datetime.now(UTC)
+        if self._dialect_name != "postgresql":
+            return await self._transition_if_current_with_atomic_update(
+                workspace_id,
+                from_status=from_status,
+                to=to,
+                reason_code=reason_code,
+                payload=payload,
+                extra_conditions=extra_conditions,
+                now=now,
+            )
+
+        stmt = (
+            select(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == from_status.value,
+                *extra_conditions,
+            )
+            .execution_options(populate_existing=True)
+        )
+        stmt = stmt.with_for_update(of=Workspace)
+        workspace = (await self._session.execute(stmt)).scalar_one_or_none()
+        if workspace is None:
+            return None
+
+        event_order = await self._reserve_workspace_event_orders(
+            workspace,
+            count=1,
+            bump_version=True,
+        )
+        old_state = workspace.status
+        workspace.status = to.value
+        workspace.updated_at = now
+        return await self._finish_transition_if_current(
+            workspace,
+            old_state=old_state,
+            to=to,
+            reason_code=reason_code,
+            payload=payload,
+            event_order=event_order,
+            now=now,
+        )
+
+    async def _transition_if_current_with_atomic_update(
+        self,
+        workspace_id: str,
+        *,
+        from_status: WorkspaceStatus,
+        to: WorkspaceStatus,
+        reason_code: str,
+        payload: dict[str, Any] | None,
+        extra_conditions: tuple[ColumnElement[bool], ...],
+        now: datetime,
+    ) -> Workspace | None:
+        """Claim the transition with one guarded write when row locks are unavailable."""
+        values: dict[str, Any] = {
+            "status": to.value,
+            "updated_at": now,
+            "event_sequence": Workspace.event_sequence + 1,
+            "version": Workspace.version + 1,
+        }
+        if to == WorkspaceStatus.monitoring_pr:
+            values["monitor_started_at"] = case(
+                (Workspace.monitor_started_at.is_(None), now),
+                else_=Workspace.monitor_started_at,
+            )
+
         result = await self._session.execute(
             update(Workspace)
             .where(
@@ -3203,20 +3278,46 @@ class WorkspaceRepository:
                 Workspace.status == from_status.value,
                 *extra_conditions,
             )
-            .values(
-                status=to.value,
-                version=Workspace.version + 1,
-                updated_at=now,
-            )
-            .returning(Workspace.id)
+            .values(**values)
+            .returning(Workspace.event_sequence, Workspace.version)
+            .execution_options(synchronize_session=False)
         )
-        if result.scalar_one_or_none() is None:
+        row = result.one_or_none()
+        if row is None:
             return None
 
-        workspace = await self.get(workspace_id)
-        if workspace is None:  # pragma: no cover - row was just updated in this txn
+        event_order = cast(int, row[0])
+        workspace = (
+            await self._session.execute(
+                select(Workspace)
+                .where(Workspace.id == workspace_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if workspace is None:  # pragma: no cover - protected by the FK/PK update match.
             return None
 
+        return await self._finish_transition_if_current(
+            workspace,
+            old_state=from_status.value,
+            to=to,
+            reason_code=reason_code,
+            payload=payload,
+            event_order=event_order,
+            now=now,
+        )
+
+    async def _finish_transition_if_current(
+        self,
+        workspace: Workspace,
+        *,
+        old_state: str,
+        to: WorkspaceStatus,
+        reason_code: str,
+        payload: dict[str, Any] | None,
+        event_order: int,
+        now: datetime,
+    ) -> Workspace:
         attempt = await TaskAttemptRepository(
             self._session,
             dialect_name=self._dialect_name,
@@ -3236,9 +3337,11 @@ class WorkspaceRepository:
             WorkspaceEvent(
                 id=new_event_id(),
                 event_type="workspace.state_changed",
-                old_state=from_status.value,
+                old_state=old_state,
                 new_state=to.value,
                 reason_code=reason_code,
+                payload=payload,
+                event_order=event_order,
             )
         )
         await self._session.flush()
@@ -3435,6 +3538,31 @@ class WorkspaceRepository:
         )
         return events[0]
 
+    async def add_event_with_states(
+        self,
+        workspace: Workspace,
+        *,
+        event_type: str,
+        old_state: WorkspaceStatus | str,
+        new_state: WorkspaceStatus | str,
+        reason_code: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> WorkspaceEvent:
+        event_order = await self._reserve_workspace_event_orders(workspace, count=1)
+        event = WorkspaceEvent(
+            id=new_event_id(),
+            workspace_id=workspace.id,
+            event_type=event_type,
+            old_state=_workspace_status_value(old_state),
+            new_state=_workspace_status_value(new_state),
+            reason_code=reason_code,
+            payload=payload,
+            event_order=event_order,
+        )
+        workspace.events.append(event)
+        await self._session.flush()
+        return event
+
     async def add_audit_event(
         self,
         workspace: Workspace,
@@ -3520,12 +3648,78 @@ class WorkspaceRepository:
             payload=payload,
         )
 
+    async def advance_workspace_version(self, workspace: Workspace) -> int:
+        """Advance the optimistic-control version for a real workspace mutation.
+
+        ``updated_at`` is intentionally preserved for this helper's atomic
+        UPDATE. Callers that also mutate workspace content fields rely on their
+        ORM writes and the Workspace ``onupdate`` hook to record the actual
+        content-change timestamp.
+        """
+        result = await self._session.execute(
+            update(Workspace)
+            .where(Workspace.id == workspace.id)
+            .values(
+                version=Workspace.version + 1,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.version)
+        )
+        new_version = result.scalar_one()
+        set_committed_value(workspace, "version", new_version)
+        return new_version
+
+    async def _reserve_workspace_event_orders(
+        self,
+        workspace: Workspace,
+        *,
+        count: int,
+        bump_version: bool = False,
+    ) -> int:
+        values: dict[str, Any] = {
+            "event_sequence": Workspace.event_sequence + count,
+            # Event-order reservation must not refresh retention/order
+            # timestamps. State transitions and explicit workspace
+            # mutations update this column through their own writes.
+            "updated_at": Workspace.updated_at,
+        }
+        if bump_version:
+            values["version"] = Workspace.version + 1
+        result = await self._session.execute(
+            update(Workspace)
+            .where(Workspace.id == workspace.id)
+            .values(**values)
+            .returning(Workspace.event_sequence, Workspace.version)
+        )
+        row = result.one()
+        new_event_sequence = cast(int, row[0])
+        set_committed_value(workspace, "event_sequence", new_event_sequence)
+        if bump_version:
+            new_version = cast(int, row[1])
+            set_committed_value(workspace, "version", new_version)
+        return new_event_sequence - count + 1
+
     async def add_events(
         self,
         workspace: Workspace,
         *,
         events: builtins.list[WorkspaceEventCreate],
     ) -> builtins.list[WorkspaceEvent]:
+        """Append events and reserve workspace-local event_order values.
+
+        ``workspace.event_sequence`` is the latest assigned event order. Reserve
+        new values with an atomic workspace-row update so concurrent event
+        writers cannot emit duplicate same-tick tie-breakers. The reservation
+        preserves ``version`` and ``updated_at`` because append-only event/audit
+        rows are not optimistic-control or retention-aging workspace changes.
+        """
+        if not events:
+            return []
+
+        first_event_order = await self._reserve_workspace_event_orders(
+            workspace,
+            count=len(events),
+        )
         created = [
             WorkspaceEvent(
                 id=new_event_id(),
@@ -3535,12 +3729,17 @@ class WorkspaceRepository:
                 new_state=workspace.status,
                 reason_code=event.reason_code,
                 payload=event.payload,
+                event_order=first_event_order + index,
             )
-            for event in events
+            for index, event in enumerate(events)
         ]
         workspace.events.extend(created)
         await self._session.flush()
         return created
+
+
+def _workspace_status_value(status: WorkspaceStatus | str) -> str:
+    return status.value if isinstance(status, WorkspaceStatus) else status
 
 
 def _matches_pr_adoption_identity(

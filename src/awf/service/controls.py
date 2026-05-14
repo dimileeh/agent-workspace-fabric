@@ -14,10 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse
 from awf.common.config import get_settings
-from awf.common.ids import new_event_id
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace, WorkspaceEvent
+from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -34,6 +33,16 @@ from awf.node.cleanup import (
 )
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
+from awf.service.failure_causality import (
+    PRIMARY_FAILURE_KEY,
+    SECONDARY_FAILURE_KEY,
+    SECONDARY_FAILURE_RECORDED_EVENT_TYPE,
+    SECONDARY_FAILURES_KEY,
+    build_preserved_failure_payload,
+    load_failure_causality_snapshot,
+    primary_failure_reason_code,
+    restore_primary_failure_row_fields,
+)
 from awf.service.secret_leases import (
     TERMINAL_CLEANUP_REVOKE_REASON,
     SecretLeaseService,
@@ -537,6 +546,7 @@ class WorkspaceControlService:
             idempotency_key=prepared.idempotency_key,
         )
         claims_reset = _claim_reset_snapshot(workspace)
+        claims_will_reset = any(value is not None for value in claims_reset.values())
         state_reset = await _reset_failed_workspace_for_remonitor(
             self._session,
             workspace,
@@ -549,7 +559,8 @@ class WorkspaceControlService:
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
-        workspace.version += 1
+        if state_reset is None and claims_will_reset:
+            await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
             "reason": reason,
             "operation_id": operation.id,
@@ -563,18 +574,14 @@ class WorkspaceControlService:
             event_payload["cancelled_recovery_reason_code"] = _OPERATOR_REMONITOR_REASON_CODE
             event_payload["cancelled_recovery_requested_action"] = OperationType.remonitor.value
         if state_reset is not None:
-            workspace.events.append(
-                WorkspaceEvent(
-                    id=new_event_id(),
-                    workspace_id=workspace.id,
-                    event_type="workspace.remonitor_requested",
-                    old_state=str(state_reset["from"]),
-                    new_state=str(state_reset["to"]),
-                    reason_code=_OPERATOR_REMONITOR_REASON_CODE,
-                    payload=event_payload,
-                )
+            await repo.add_event_with_states(
+                workspace,
+                event_type="workspace.remonitor_requested",
+                old_state=cast(str, state_reset["from"]),
+                new_state=cast(str, state_reset["to"]),
+                reason_code=_OPERATOR_REMONITOR_REASON_CODE,
+                payload=event_payload,
             )
-            await self._session.flush()
         else:
             await repo.add_event(
                 workspace,
@@ -1000,13 +1007,20 @@ class WorkspaceControlService:
             )
         )
         cleanup_payload = cleanup_result.to_dict()
-        await self._session.refresh(workspace)
+        # The cleanup callback may append an already-failed secondary event.
+        # Refresh with a row lock so the terminal/status decision stays
+        # serialized with other workspace mutations.
+        await self._session.refresh(workspace, with_for_update=True)
         requested_status = (
             WorkspaceStatus.failed if not cleanup_result.ok else WorkspaceStatus.destroyed
+        )
+        already_failed_cleanup_failure = (
+            not cleanup_result.ok and workspace.status == WorkspaceStatus.failed.value
         )
         if (
             workspace.status != WorkspaceStatus.destroying.value
             and WorkspaceStateMachine.is_callback_terminal(WorkspaceStatus(workspace.status))
+            and not already_failed_cleanup_failure
         ):
             ignored_event = await repo.record_ignored_stale_callback(
                 workspace,
@@ -1068,21 +1082,81 @@ class WorkspaceControlService:
         if not cleanup_result.ok:
             cleanup_message = _cleanup_failure_message(cleanup_result)
             bounded_cleanup_message = _bounded_operation_error_message(cleanup_message)
-            workspace.failure_reason = "cleanup_failure"
-            workspace.failure_message = bounded_cleanup_message
-            if WorkspaceStateMachine.can_transition(
-                WorkspaceStatus(workspace.status), WorkspaceStatus.failed
-            ):
+            failure_causality = await load_failure_causality_snapshot(self._session, workspace)
+            primary_failure = (
+                failure_causality.primary_failure if failure_causality is not None else None
+            )
+            previous_secondary_failures = (
+                failure_causality.secondary_failures if failure_causality is not None else ()
+            )
+            secondary_failure = {
+                "failure_reason": "cleanup_failure",
+                "reason_code": "CLEANUP_FAILED",
+                "message": bounded_cleanup_message,
+                "cleanup": cleanup_payload,
+            }
+            failed_transition_payload: dict[str, Any]
+            preserved_secondary_failure: dict[str, Any] = {}
+            preserved_secondary_failures: list[dict[str, Any]] = []
+            if primary_failure is not None:
+                failed_transition_payload = build_preserved_failure_payload(
+                    primary_failure,
+                    secondary_failure=secondary_failure,
+                    extra=cleanup_event_payload,
+                    previous_secondary_failures=previous_secondary_failures,
+                )
+                preserved_secondary_failure = failed_transition_payload[SECONDARY_FAILURE_KEY]
+                preserved_secondary_failures = failed_transition_payload[SECONDARY_FAILURES_KEY]
+            else:
+                failed_transition_payload = dict(cleanup_event_payload)
+            if primary_failure is None:
+                workspace.failure_reason = "cleanup_failure"
+                workspace.failure_message = bounded_cleanup_message
+            else:
+                restore_primary_failure_row_fields(workspace, primary_failure)
+            workspace_status = WorkspaceStatus(workspace.status)
+            failed_reason_code = primary_failure_reason_code(
+                primary_failure,
+                fallback="CLEANUP_FAILED",
+            )
+            if WorkspaceStateMachine.can_transition(workspace_status, WorkspaceStatus.failed):
                 await repo.transition(
                     workspace,
                     to=WorkspaceStatus.failed,
-                    reason_code="CLEANUP_FAILED",
-                    payload=cleanup_event_payload,
+                    reason_code=failed_reason_code,
+                    payload=failed_transition_payload,
                 )
-            operation_result = _with_secret_lease_result(
-                {"status": workspace.status, "cleanup": cleanup_payload},
-                secret_lease_summary,
-            )
+            elif workspace_status == WorkspaceStatus.failed:
+                # The workspace is already failed, so transition() is not used
+                # because there is no valid failed -> failed state-machine edge.
+                # Emit the secondary-failure event so cleanup faults remain in
+                # the internal causality event stream even when the original
+                # failure row never carried durable primary evidence.
+                secondary_failure_recorded_payload: dict[str, Any] = {
+                    "synthetic": True,
+                    SECONDARY_FAILURE_KEY: secondary_failure,
+                    SECONDARY_FAILURES_KEY: [
+                        *previous_secondary_failures,
+                        secondary_failure,
+                    ],
+                }
+                if primary_failure is not None:
+                    secondary_failure_recorded_payload.update(failed_transition_payload)
+                await repo.add_event(
+                    workspace,
+                    event_type=SECONDARY_FAILURE_RECORDED_EVENT_TYPE,
+                    reason_code=failed_reason_code,
+                    payload=secondary_failure_recorded_payload,
+                )
+            result_payload: dict[str, Any] = {
+                "status": workspace.status,
+                "cleanup": cleanup_payload,
+            }
+            if primary_failure is not None:
+                result_payload[PRIMARY_FAILURE_KEY] = primary_failure
+                result_payload[SECONDARY_FAILURE_KEY] = preserved_secondary_failure
+                result_payload[SECONDARY_FAILURES_KEY] = preserved_secondary_failures
+            operation_result = _with_secret_lease_result(result_payload, secret_lease_summary)
             await operations.finish(
                 operation,
                 status=OperationStatus.failed,
@@ -1090,13 +1164,15 @@ class WorkspaceControlService:
                 error_message=bounded_cleanup_message,
                 result=operation_result,
             )
-            audit_evidence = _with_secret_lease_evidence(
-                {
-                    "cleanup": cleanup_payload,
-                    "error_message": bounded_cleanup_message,
-                },
-                secret_lease_summary,
-            )
+            audit_payload: dict[str, Any] = {
+                "cleanup": cleanup_payload,
+                "error_message": bounded_cleanup_message,
+            }
+            if primary_failure is not None:
+                audit_payload[PRIMARY_FAILURE_KEY] = primary_failure
+                audit_payload[SECONDARY_FAILURE_KEY] = preserved_secondary_failure
+                audit_payload[SECONDARY_FAILURES_KEY] = preserved_secondary_failures
+            audit_evidence = _with_secret_lease_evidence(audit_payload, secret_lease_summary)
             await _add_control_audit_event(
                 repo,
                 workspace,
@@ -1365,6 +1441,7 @@ async def _reset_failed_workspace_for_remonitor(
             )
             candidate_reopened = True
 
+    await WorkspaceRepository(session).advance_workspace_version(workspace)
     return {
         "from": old_status,
         "to": WorkspaceStatus.monitoring_pr.value,

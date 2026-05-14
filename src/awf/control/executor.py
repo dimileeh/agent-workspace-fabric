@@ -3922,6 +3922,7 @@ class WorkspaceExecutor:
             if ws.task_kind != "feature_branch_pr" or not ws.branch_name:
                 return None
             ws.remote_push_branch = remote_push_branch
+            await repo.advance_workspace_version(ws)
             await repo.add_event(
                 ws,
                 event_type="workspace.remote_push_branch_recovered",

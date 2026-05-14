@@ -310,10 +310,13 @@ async def create_provider_recovery_attempt_row(
     ):
         await session.flush()
         return None
+    source_workspace_mutated = False
     if source_not_before is not None or decision.action == "terminal":
         source.task_policy = source_policy
+        source_workspace_mutated = True
     elif monitor_in_place_recovery and decision.action in {"retry", "fallback"}:
         source.task_policy = source_policy
+        source_workspace_mutated = True
         if decision.action == "fallback":
             source.agent = decision.target_agent or source.agent
             if decision.target_model is not None:
@@ -321,6 +324,8 @@ async def create_provider_recovery_attempt_row(
                     **source.task_policy,
                     "agent_model": decision.target_model,
                 }
+    if source_workspace_mutated:
+        await repo.advance_workspace_version(source)
     if source_not_before is not None:
         await repo.add_event(
             source,

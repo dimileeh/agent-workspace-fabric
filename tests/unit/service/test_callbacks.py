@@ -427,6 +427,73 @@ async def test_workspace_event_envelope_is_sanitized_and_replay_safe(
 
 
 @pytest.mark.unit
+async def test_secondary_failure_callback_envelope_excludes_internal_causality_payload(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        subscription = await _register_subscription(
+            session,
+            event_types=["workspace.secondary_failure_recorded"],
+        )
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="https://github.com/example/repo",
+            branch_base="main",
+            task_title="secondary failure callback",
+            task_prompt="prompt",
+            agent="codex",
+            test_commands=[],
+        )
+        event = await repo.add_event(
+            workspace,
+            event_type="workspace.secondary_failure_recorded",
+            reason_code="PYTEST_TEST_FAILURE",
+            payload={
+                "primary_failure": {
+                    "reason_code": "PYTEST_TEST_FAILURE",
+                    "message": "do not expose primary internals",
+                },
+                "secondary_failure": {
+                    "reason_code": "CLEANUP_FAILED",
+                    "message": "do not expose secondary internals",
+                },
+                "secondary_failures": [
+                    {
+                        "reason_code": "CLEANUP_FAILED",
+                        "message": "do not expose history internals",
+                    }
+                ],
+            },
+        )
+        workspace_id = workspace.id
+        event_id = event.id
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+
+    assert len(deliveries) == 1
+    assert deliveries[0].subscription_id == subscription.id
+    envelope = deliveries[0].envelope
+    assert envelope["event"] == {
+        "kind": "workspace",
+        "type": "workspace.secondary_failure_recorded",
+        "source_id": event_id,
+        "occurred_at": envelope["event"]["occurred_at"],
+    }
+    assert envelope["workspace"] == {
+        "id": workspace_id,
+        "old_state": WorkspaceStatus.requested.value,
+        "new_state": WorkspaceStatus.requested.value,
+        "reason_code": "PYTEST_TEST_FAILURE",
+    }
+    serialized = str(envelope)
+    assert "primary_failure" not in serialized
+    assert "secondary_failures" not in serialized
+    assert "secondary_failure" not in envelope["workspace"]
+    assert "do not expose" not in serialized
+
+
+@pytest.mark.unit
 async def test_operation_event_envelope_excludes_raw_payload_result_and_api_idempotency(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

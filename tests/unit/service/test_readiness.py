@@ -936,6 +936,50 @@ def test_readiness_failure_taxonomy_ignores_classified_failures_and_reports_demo
 
 
 @pytest.mark.unit
+def test_readiness_treats_preserved_validation_with_secondary_infra_as_classified() -> None:
+    summary = {
+        "since_hours": 24,
+        "total_failed_workspaces": 1,
+        "failure_groups": [{"failure_reason": "validation_failure", "count": 1}],
+        "latest_examples": [
+            {
+                "workspace_id": "ws_validation",
+                "failure_reason": "validation_failure",
+                "reason_code": "PYTEST_TEST_FAILURE",
+                "secondary_failure": {
+                    "failure_reason": "infrastructure_failure",
+                    "reason_code": "STALE_ACTIVE_EXECUTION",
+                },
+            }
+        ],
+        "root_cause_clusters": [
+            {
+                "failure_reason": "validation_failure",
+                "reason_code": "PYTEST_TEST_FAILURE",
+                "sample_workspace_ids": ("ws_validation",),
+                "count": 1,
+                "secondary_failures": [
+                    {
+                        "failure_reason": "cleanup_failure",
+                        "reason_code": "CLEANUP_FAILED",
+                    }
+                ],
+            }
+        ],
+    }
+
+    check = readiness._failure_taxonomy_check(  # noqa: SLF001
+        summary,
+        allow_generic_failures=False,
+    )
+
+    assert check.status == "ok"
+    assert check.reason_code == "FAILURE_TAXONOMY_CLASSIFIED"
+    assert check.evidence["generic_failures"] == []
+    assert readiness._generic_failure_findings(summary) == []  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_readiness_next_actions_and_jsonable_cover_non_mapping_inputs(
     tmp_path: Path,
 ) -> None:

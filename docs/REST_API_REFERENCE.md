@@ -499,7 +499,7 @@ curl -X POST http://localhost:8000/v1/callbacks \
   -d '{
     "name": "MyApp deploy notifier",
     "target_url": "https://myapp.example.com/awf/events",
-    "event_types": ["workspace.completed", "workspace.failed"],
+    "event_types": ["workspace.state_changed", "workspace.secondary_failure_recorded"],
     "enabled": true,
     "timeout_seconds": 10,
     "max_attempts": 3,
@@ -515,6 +515,45 @@ Auth required.
 curl -H "Authorization: Bearer $AWF_API_TOKEN" \
   "http://localhost:8000/v1/callbacks?enabled=true&limit=50"
 ```
+
+Public callback subscriptions accept the wildcards `workspace.*`, `merge.*`,
+and `operation.*`, plus exact public event types such as
+`workspace.created`, `workspace.state_changed`,
+`workspace.secondary_failure_recorded`, `operation.state_changed`, and
+`merge.candidate_updated`.
+
+Workspace callback deliveries use a sanitized envelope. For
+`workspace.secondary_failure_recorded`, the public shape is the same workspace
+event envelope used for other workspace events:
+
+```json
+{
+  "event": {
+    "kind": "workspace",
+    "type": "workspace.secondary_failure_recorded",
+    "source_id": "evt_01HXYZ",
+    "occurred_at": "2026-05-14T12:00:00Z"
+  },
+  "workspace": {
+    "id": "ws_01HXYZ",
+    "old_state": "failed",
+    "new_state": "failed",
+    "reason_code": "PYTEST_TEST_FAILURE"
+  },
+  "delivery": {
+    "id": "cbd_01HXYZ",
+    "subscription_id": "cb_01HXYZ",
+    "idempotency_key": "callback-delivery:cb_01HXYZ:workspace:evt_01HXYZ",
+    "dedupe_key": "workspace:evt_01HXYZ",
+    "attempt_count": 0,
+    "max_attempts": 3
+  }
+}
+```
+
+The internal failure-causality payload keys stored on the workspace event, such
+as `primary_failure`, `secondary_failure`, and `secondary_failures`, are not
+part of the external callback envelope.
 
 ---
 

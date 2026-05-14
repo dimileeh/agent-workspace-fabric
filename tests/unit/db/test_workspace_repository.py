@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
 
@@ -27,6 +27,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
+    WorkspaceEventCreate,
     WorkspaceEventRepository,
     WorkspaceRepository,
     _schedulable_workspace_ids_stmt,
@@ -2219,6 +2220,202 @@ class TestTransition:
         # Nothing changed.
         assert ws.status == WorkspaceStatus.requested.value
         assert ws.version == 1
+
+
+class TestAddEvents:
+    @pytest.mark.unit
+    async def test_transition_if_current_reserves_event_order_through_shared_helper(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        calls: list[tuple[str, int, bool]] = []
+        original_reserve = WorkspaceRepository._reserve_workspace_event_orders
+
+        async def _recording_reserve(
+            self: WorkspaceRepository,
+            reserved_workspace: Workspace,
+            *,
+            count: int,
+            bump_version: bool = False,
+        ) -> int:
+            calls.append((reserved_workspace.id, count, bump_version))
+            return await original_reserve(
+                self,
+                reserved_workspace,
+                count=count,
+                bump_version=bump_version,
+            )
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "_reserve_workspace_event_orders",
+            _recording_reserve,
+        )
+
+        transitioned = await repo.transition_if_current(
+            workspace.id,
+            from_status=WorkspaceStatus.requested,
+            to=WorkspaceStatus.provisioning,
+            reason_code="CLAIMED",
+        )
+
+        assert transitioned is not None
+        assert calls == [(workspace.id, 1, True)]
+        state_event = next(event for event in transitioned.events if event.reason_code == "CLAIMED")
+        assert state_event.event_order == 2
+        assert transitioned.version == 2
+        assert transitioned.event_sequence == 2
+
+    @pytest.mark.unit
+    async def test_transition_if_current_non_postgres_claim_uses_status_guarded_update(
+        self,
+    ) -> None:
+        class EmptyResult:
+            def one_or_none(self) -> None:
+                return None
+
+            def scalar_one_or_none(self) -> None:
+                return None
+
+        class RecordingSession:
+            info: dict[str, str] = {}
+            bind = None
+
+            def __init__(self) -> None:
+                self.executed: list[object] = []
+
+            async def execute(self, statement: object) -> EmptyResult:
+                self.executed.append(statement)
+                return EmptyResult()
+
+        recording_session = RecordingSession()
+        repo = WorkspaceRepository(recording_session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+        transitioned = await repo.transition_if_current(
+            "ws_claim",
+            from_status=WorkspaceStatus.requested,
+            to=WorkspaceStatus.provisioning,
+            reason_code="CLAIMED",
+        )
+
+        assert transitioned is None
+        assert len(recording_session.executed) == 1
+        sql = " ".join(str(recording_session.executed[0].compile(dialect=sqlite.dialect())).split())
+        assert sql.startswith("UPDATE workspaces SET ")
+        assert "status=?" in sql
+        assert "event_sequence=(workspaces.event_sequence + ?)" in sql
+        assert "version=(workspaces.version + ?)" in sql
+        assert "WHERE workspaces.id = ? AND workspaces.status = ?" in sql
+        assert "RETURNING event_sequence, version" in sql
+
+    @pytest.mark.unit
+    async def test_batch_reserves_event_order_without_advancing_workspace_version(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_version = workspace.version
+        workspace_updated_at = workspace.updated_at
+        committed_attrs: list[str] = []
+        original_set_committed_value = repositories.set_committed_value
+
+        def _record_committed_value(target: object, key: str, value: object) -> None:
+            if target is workspace:
+                committed_attrs.append(key)
+            original_set_committed_value(target, key, value)
+
+        monkeypatch.setattr(
+            repositories,
+            "set_committed_value",
+            _record_committed_value,
+        )
+
+        events = await repo.add_events(
+            workspace,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="workspace.phase_started",
+                    reason_code="FIRST",
+                ),
+                WorkspaceEventCreate(
+                    event_type="workspace.phase_finished",
+                    reason_code="SECOND",
+                ),
+            ],
+        )
+
+        assert [event.event_order for event in events] == [
+            workspace_version + 1,
+            workspace_version + 2,
+        ]
+        assert workspace.version == workspace_version
+        assert workspace.event_sequence == workspace_version + 2
+        assert workspace.updated_at == workspace_updated_at
+
+        next_event_sequence = workspace.event_sequence
+        event = await repo.add_event(
+            workspace,
+            event_type="workspace.phase_finished",
+            reason_code="THIRD",
+        )
+
+        assert event.event_order == next_event_sequence + 1
+        assert workspace.version == workspace_version
+        assert workspace.event_sequence == next_event_sequence + 1
+        assert workspace.updated_at == workspace_updated_at
+        assert committed_attrs == ["event_sequence", "event_sequence"]
+
+    @pytest.mark.unit
+    async def test_add_event_with_states_reserves_order_and_uses_explicit_states(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_version = workspace.version
+        workspace_updated_at = workspace.updated_at
+
+        event = await repo.add_event_with_states(
+            workspace,
+            event_type="workspace.remonitor_requested",
+            old_state=WorkspaceStatus.failed,
+            new_state=WorkspaceStatus.monitoring_pr,
+            reason_code="OPERATOR_REMONITOR",
+            payload={"state_reset": True},
+        )
+
+        assert event.workspace_id == workspace.id
+        assert event.old_state == WorkspaceStatus.failed.value
+        assert event.new_state == WorkspaceStatus.monitoring_pr.value
+        assert event.event_order == workspace_version + 1
+        assert workspace.version == workspace_version
+        assert workspace.event_sequence == workspace_version + 1
+        assert workspace.updated_at == workspace_updated_at
 
 
 class TestListEvents:
