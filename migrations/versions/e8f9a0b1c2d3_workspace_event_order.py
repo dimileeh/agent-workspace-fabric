@@ -24,6 +24,7 @@ def upgrade() -> None:
     # production writers or holding locks longer than the deploy budget.
     op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
     op.execute(sa.text("SET LOCAL statement_timeout = '10min'"))
+    op.execute(sa.text("ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS event_sequence INTEGER"))
     op.execute(
         sa.text("ALTER TABLE workspace_events ADD COLUMN IF NOT EXISTS event_order INTEGER")
     )
@@ -31,8 +32,8 @@ def upgrade() -> None:
     # and worker containers. Keep legacy writers that omit event_order safe
     # during that window by assigning the next workspace-local order in the DB.
     # Old writers can also flush their own ORM-side version bump before this
-    # trigger advances the row again; that leaves version ahead of max(event_order)
-    # but preserves unique monotonic event ordering. Keep this overlap short.
+    # trigger advances the event sequence, but the optimistic-control version
+    # remains decoupled from append-only event traffic.
     op.execute(
         sa.text(
             """
@@ -43,9 +44,9 @@ def upgrade() -> None:
             BEGIN
                 IF NEW.event_order IS NULL THEN
                     UPDATE workspaces
-                    SET version = version + 1
+                    SET event_sequence = COALESCE(event_sequence, 0) + 1
                     WHERE id = NEW.workspace_id
-                    RETURNING version INTO NEW.event_order;
+                    RETURNING event_sequence INTO NEW.event_order;
                 END IF;
 
                 RETURN NEW;
@@ -108,13 +109,19 @@ def upgrade() -> None:
                 GROUP BY workspace_id
             )
             UPDATE workspaces
-            SET version = event_order_bounds.max_event_order
+            SET event_sequence = event_order_bounds.max_event_order
             FROM event_order_bounds
             WHERE workspaces.id = event_order_bounds.workspace_id
-              AND workspaces.version < event_order_bounds.max_event_order
+              AND (
+                  workspaces.event_sequence IS NULL
+                  OR workspaces.event_sequence < event_order_bounds.max_event_order
+              )
             """
         )
     )
+    op.execute(sa.text("UPDATE workspaces SET event_sequence = 0 WHERE event_sequence IS NULL"))
+    op.execute(sa.text("ALTER TABLE workspaces ALTER COLUMN event_sequence SET DEFAULT 0"))
+    op.execute(sa.text("ALTER TABLE workspaces ALTER COLUMN event_sequence SET NOT NULL"))
     # Concurrent index creation cannot run inside Alembic's migration
     # transaction. Keep the data backfill transactional above, then release the
     # transaction before building the read-path index without blocking writers.
@@ -149,3 +156,4 @@ def downgrade() -> None:
     )
     op.execute(sa.text("DROP FUNCTION IF EXISTS awf_assign_workspace_event_order()"))
     op.execute(sa.text("ALTER TABLE workspace_events DROP COLUMN IF EXISTS event_order"))
+    op.execute(sa.text("ALTER TABLE workspaces DROP COLUMN IF EXISTS event_sequence"))

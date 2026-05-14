@@ -2621,6 +2621,7 @@ class WorkspaceRepository:
             id=new_workspace_id(),
             status=WorkspaceStatus.requested.value,
             version=1,
+            event_sequence=1,
             repo_url=repo_url,
             branch_base=branch_base,
             remote_push_branch=remote_push_branch,
@@ -2654,7 +2655,7 @@ class WorkspaceRepository:
                 old_state=None,
                 new_state=WorkspaceStatus.requested.value,
                 reason_code="CREATED",
-                event_order=workspace.version,
+                event_order=workspace.event_sequence,
             )
         )
         self._session.add(workspace)
@@ -3144,7 +3145,11 @@ class WorkspaceRepository:
         current = WorkspaceStatus(workspace.status)
         WorkspaceStateMachine.assert_transition(current, to)
 
-        event_order = await self._reserve_workspace_event_orders(workspace, count=1)
+        event_order = await self._reserve_workspace_event_orders(
+            workspace,
+            count=1,
+            bump_version=True,
+        )
         old_state = workspace.status
         workspace.status = to.value
         attempt = await TaskAttemptRepository(
@@ -3202,7 +3207,11 @@ class WorkspaceRepository:
         if workspace is None:
             return None
 
-        event_order = await self._reserve_workspace_event_orders(workspace, count=1)
+        event_order = await self._reserve_workspace_event_orders(
+            workspace,
+            count=1,
+            bump_version=True,
+        )
         old_state = workspace.status
         workspace.status = to.value
         workspace.updated_at = now
@@ -3535,22 +3544,49 @@ class WorkspaceRepository:
             payload=payload,
         )
 
-    async def _reserve_workspace_event_orders(self, workspace: Workspace, *, count: int) -> int:
+    async def advance_workspace_version(self, workspace: Workspace) -> int:
+        """Advance the optimistic-control version for a real workspace mutation."""
         result = await self._session.execute(
             update(Workspace)
             .where(Workspace.id == workspace.id)
             .values(
-                version=Workspace.version + count,
-                # Event-order reservation must not refresh retention/order
-                # timestamps. State transitions and explicit workspace
-                # mutations update this column through their own writes.
+                version=Workspace.version + 1,
                 updated_at=Workspace.updated_at,
             )
             .returning(Workspace.version)
         )
         new_version = result.scalar_one()
         set_committed_value(workspace, "version", new_version)
-        return new_version - count + 1
+        return new_version
+
+    async def _reserve_workspace_event_orders(
+        self,
+        workspace: Workspace,
+        *,
+        count: int,
+        bump_version: bool = False,
+    ) -> int:
+        values: dict[str, Any] = {
+            "event_sequence": Workspace.event_sequence + count,
+            # Event-order reservation must not refresh retention/order
+            # timestamps. State transitions and explicit workspace
+            # mutations update this column through their own writes.
+            "updated_at": Workspace.updated_at,
+        }
+        if bump_version:
+            values["version"] = Workspace.version + 1
+        result = await self._session.execute(
+            update(Workspace)
+            .where(Workspace.id == workspace.id)
+            .values(**values)
+            .returning(Workspace.event_sequence, Workspace.version)
+        )
+        row = result.one()
+        new_event_sequence = cast(int, row[0])
+        new_version = cast(int, row[1])
+        set_committed_value(workspace, "event_sequence", new_event_sequence)
+        set_committed_value(workspace, "version", new_version)
+        return new_event_sequence - count + 1
 
     async def add_events(
         self,
@@ -3560,11 +3596,11 @@ class WorkspaceRepository:
     ) -> builtins.list[WorkspaceEvent]:
         """Append events and reserve workspace-local event_order values.
 
-        ``workspace.version`` is also the latest assigned event order after the
-        event-order backfill migration. Reserve new values with an atomic
-        workspace-row update so concurrent event writers cannot emit duplicate
-        same-tick tie-breakers. The reservation preserves ``updated_at`` because
-        append-only event/audit rows are not retention-aging workspace changes.
+        ``workspace.event_sequence`` is the latest assigned event order. Reserve
+        new values with an atomic workspace-row update so concurrent event
+        writers cannot emit duplicate same-tick tie-breakers. The reservation
+        preserves ``version`` and ``updated_at`` because append-only event/audit
+        rows are not optimistic-control or retention-aging workspace changes.
         """
         if not events:
             return []

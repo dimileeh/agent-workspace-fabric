@@ -546,6 +546,7 @@ class WorkspaceControlService:
             idempotency_key=prepared.idempotency_key,
         )
         claims_reset = _claim_reset_snapshot(workspace)
+        claims_will_reset = any(value is not None for value in claims_reset.values())
         state_reset = await _reset_failed_workspace_for_remonitor(
             self._session,
             workspace,
@@ -558,6 +559,8 @@ class WorkspaceControlService:
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
+        if state_reset is None and claims_will_reset:
+            await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
             "reason": reason,
             "operation_id": operation.id,
@@ -1438,6 +1441,7 @@ async def _reset_failed_workspace_for_remonitor(
             )
             candidate_reopened = True
 
+    await WorkspaceRepository(session).advance_workspace_version(workspace)
     return {
         "from": old_status,
         "to": WorkspaceStatus.monitoring_pr.value,

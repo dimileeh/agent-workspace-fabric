@@ -223,7 +223,7 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "detected_at",
     } <= policy_columns
     assert "policy_blocked" in merge_candidate_columns
-    assert "task_policy" in workspace_columns
+    assert {"task_policy", "event_sequence"} <= workspace_columns
     assert {
         "base_sha",
         "workspace_head_sha",
@@ -398,6 +398,15 @@ async def test_workspace_event_order_migration_reruns_after_column_exists(
                         """
                     )
                 )
+                workspace_event_sequence = await conn.scalar(
+                    text(
+                        """
+                        SELECT event_sequence
+                        FROM workspaces
+                        WHERE id = 'ws_event_order_rerun'
+                        """
+                    )
+                )
                 index_names = await conn.run_sync(
                     lambda sync_conn: {
                         index["name"]
@@ -408,7 +417,8 @@ async def test_workspace_event_order_migration_reruns_after_column_exists(
             await engine.dispose()
 
     assert event_order == 1
-    assert workspace_version == 1
+    assert workspace_version == 0
+    assert workspace_event_sequence == 1
     assert "ix_workspace_events_workspace_occurred_order" in index_names
 
 
@@ -525,11 +535,11 @@ async def test_workspace_event_order_migration_backfills_existing_events(
                         )
                     )
                 ).all()
-                versions = (
+                workspace_counters = (
                     await conn.execute(
                         text(
                             """
-                            SELECT id, version
+                            SELECT id, version, event_sequence
                             FROM workspaces
                             WHERE id IN ('ws_event_order_a', 'ws_event_order_b')
                             ORDER BY id
@@ -547,9 +557,9 @@ async def test_workspace_event_order_migration_backfills_existing_events(
         ("ws_event_order_a", "evt_a_second", 4),
         ("ws_event_order_b", "evt_b_only", 1),
     ]
-    assert versions == [
-        ("ws_event_order_a", 4),
-        ("ws_event_order_b", 2),
+    assert workspace_counters == [
+        ("ws_event_order_a", 3, 4),
+        ("ws_event_order_b", 2, 1),
     ]
 
 
@@ -661,6 +671,15 @@ async def test_workspace_event_order_migration_orders_old_writer_events_after_up
                         """
                     )
                 )
+                workspace_event_sequence = await conn.scalar(
+                    text(
+                        """
+                        SELECT event_sequence
+                        FROM workspaces
+                        WHERE id = 'ws_event_order_old_writer'
+                        """
+                    )
+                )
         finally:
             await engine.dispose()
 
@@ -668,4 +687,5 @@ async def test_workspace_event_order_migration_orders_old_writer_events_after_up
         ("evt_event_order_existing", 1),
         ("evt_event_order_old_writer", 2),
     ]
-    assert workspace_version == 2
+    assert workspace_version == 0
+    assert workspace_event_sequence == 2

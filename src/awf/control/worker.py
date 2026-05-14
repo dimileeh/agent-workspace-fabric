@@ -1599,6 +1599,7 @@ class ControlWorker:
                 ws.execution_claimed_by = None
                 ws.execution_claim_expires_at = None
             ws.subphase = _ACTIVE_EXECUTION_PRESERVED_SUBPHASE
+            await repo.advance_workspace_version(ws)
             payload = _active_execution_preservation_payload(
                 candidate,
                 snapshot,
@@ -2132,10 +2133,21 @@ class ControlWorker:
                 finding.reason_code,
             ):
                 return
+            claims_will_clear = any(
+                value is not None
+                for value in (
+                    ws.execution_claimed_by,
+                    ws.execution_claim_expires_at,
+                    ws.monitor_claimed_by,
+                    ws.monitor_claim_expires_at,
+                )
+            )
             ws.execution_claimed_by = None
             ws.execution_claim_expires_at = None
             ws.monitor_claimed_by = None
             ws.monitor_claim_expires_at = None
+            if claims_will_clear:
+                await repo.advance_workspace_version(ws)
             await repo.add_event(
                 ws,
                 event_type=RUNTIME_STRANDED_EVENT_TYPE,

@@ -5540,6 +5540,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             ws = await WorkspaceRepository(s).get(workspace_id)
             assert ws is not None
             initial_version = ws.version
+            initial_event_sequence = ws.event_sequence
 
         inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
         cleaner = _RecordingRuntimeCleaner()
@@ -5572,7 +5573,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
 
         assert len(preserved_events) == 1
-        assert preserved_events[0].event_order == initial_version + 1
+        assert preserved_events[0].event_order == initial_event_sequence + 1
         assert preserved_events[0].payload is not None
         assert preserved_events[0].payload["workspace_status"] == status.value
         assert preserved_events[0].payload["decision"] == "preserve_runtime"

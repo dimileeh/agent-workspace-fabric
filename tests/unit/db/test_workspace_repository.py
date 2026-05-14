@@ -2238,7 +2238,7 @@ class TestAddEvents:
             agent="codex",
             test_commands=[],
         )
-        calls: list[tuple[str, int]] = []
+        calls: list[tuple[str, int, bool]] = []
         original_reserve = WorkspaceRepository._reserve_workspace_event_orders
 
         async def _recording_reserve(
@@ -2246,9 +2246,15 @@ class TestAddEvents:
             reserved_workspace: Workspace,
             *,
             count: int,
+            bump_version: bool = False,
         ) -> int:
-            calls.append((reserved_workspace.id, count))
-            return await original_reserve(self, reserved_workspace, count=count)
+            calls.append((reserved_workspace.id, count, bump_version))
+            return await original_reserve(
+                self,
+                reserved_workspace,
+                count=count,
+                bump_version=bump_version,
+            )
 
         monkeypatch.setattr(
             WorkspaceRepository,
@@ -2264,13 +2270,14 @@ class TestAddEvents:
         )
 
         assert transitioned is not None
-        assert calls == [(workspace.id, 1)]
+        assert calls == [(workspace.id, 1, True)]
         state_event = next(event for event in transitioned.events if event.reason_code == "CLAIMED")
         assert state_event.event_order == 2
         assert transitioned.version == 2
+        assert transitioned.event_sequence == 2
 
     @pytest.mark.unit
-    async def test_batch_reserves_event_order_and_advances_workspace_version(
+    async def test_batch_reserves_event_order_without_advancing_workspace_version(
         self,
         session: AsyncSession,
     ) -> None:
@@ -2304,18 +2311,20 @@ class TestAddEvents:
             workspace_version + 1,
             workspace_version + 2,
         ]
-        assert workspace.version == workspace_version + 2
+        assert workspace.version == workspace_version
+        assert workspace.event_sequence == workspace_version + 2
         assert workspace.updated_at == workspace_updated_at
 
-        next_version = workspace.version
+        next_event_sequence = workspace.event_sequence
         event = await repo.add_event(
             workspace,
             event_type="workspace.phase_finished",
             reason_code="THIRD",
         )
 
-        assert event.event_order == next_version + 1
-        assert workspace.version == next_version + 1
+        assert event.event_order == next_event_sequence + 1
+        assert workspace.version == workspace_version
+        assert workspace.event_sequence == next_event_sequence + 1
         assert workspace.updated_at == workspace_updated_at
 
     @pytest.mark.unit
@@ -2347,7 +2356,8 @@ class TestAddEvents:
         assert event.old_state == WorkspaceStatus.failed.value
         assert event.new_state == WorkspaceStatus.monitoring_pr.value
         assert event.event_order == workspace_version + 1
-        assert workspace.version == workspace_version + 1
+        assert workspace.version == workspace_version
+        assert workspace.event_sequence == workspace_version + 1
         assert workspace.updated_at == workspace_updated_at
 
 

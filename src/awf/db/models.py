@@ -8,7 +8,8 @@ Three core tables for the MVP:
 
 Design notes:
 
-- ``Workspace.version`` enables optimistic concurrency: repositories bump + check it.
+- ``Workspace.version`` enables optimistic concurrency for workspace mutations.
+- ``Workspace.event_sequence`` is the workspace-local append-only event counter.
 - ``Workspace.idempotency_key`` is unique (nullable) — duplicate POSTs with the same
   key return the existing workspace rather than creating a second one.
 - Status columns are stored as strings, not DB-level enums, so migrations don't
@@ -76,6 +77,9 @@ class Workspace(Base):
     )
     last_log_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    event_sequence: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
 
     # Request inputs
     repo_url: Mapped[str] = mapped_column(String(512), nullable=False)

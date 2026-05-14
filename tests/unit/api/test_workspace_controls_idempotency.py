@@ -1112,7 +1112,7 @@ async def test_validate_endpoint_returns_operation_response_and_coalesces_active
 
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
-    assert workspace.version == 9
+    assert workspace.version == 8
     assert [operation.id for operation in operations] == [payload["id"]]
     assert validate_event.reason_code == "OPERATOR_VALIDATE"
     assert validate_event.payload == {
@@ -1206,7 +1206,7 @@ async def test_rebase_endpoint_returns_operation_response_and_replays_exact_key(
 
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
-    assert workspace.version == 9
+    assert workspace.version == 8
     assert [operation.id for operation in operations] == [payload["id"]]
     assert operations[0].payload == {
         "owner": "operator_api",
@@ -1358,7 +1358,7 @@ async def test_recovery_fresh_key_stale_if_match_rejects_before_active_coalesce(
     assert conflict.json()["detail"]["error_code"] == "VERSION_CONFLICT"
     assert conflict.json()["detail"]["detail"] == {
         "expected_version": int(if_match),
-        "actual_version": int(if_match) + 2,
+        "actual_version": int(if_match) + 1,
     }
     assert after_counts == before_counts
 
@@ -1567,7 +1567,7 @@ async def test_rebase_fresh_key_stale_if_match_rejects_before_active_coalesce(
     assert conflict.json()["detail"]["error_code"] == "VERSION_CONFLICT"
     assert conflict.json()["detail"]["detail"] == {
         "expected_version": 7,
-        "actual_version": 9,
+        "actual_version": 8,
     }
     assert after_counts == before_counts
 
