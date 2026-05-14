@@ -70,6 +70,10 @@ awf init
 awf service status --format pretty
 ```
 
+If bootstrap or first-run health checks fail, use the
+[First run troubleshooting guide](TROUBLESHOOTING.md#first-run-troubleshooting)
+before continuing with provider or workspace-level work.
+
 After it reports success, export `AWF_GITHUB_TOKEN` so the worker can create
 PRs and use `awf init <path>` to inspect a project repository (see
 [Project Onboarding](PROJECT_ONBOARDING.md) for the project-mode
