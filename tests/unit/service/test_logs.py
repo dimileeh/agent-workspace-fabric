@@ -11,8 +11,10 @@ import pytest
 
 from awf.service.logs import (
     DEFAULT_LOG_TAIL,
+    LOCAL_SERVICE_COMPOSE_FILE,
     ServiceLogName,
     ServiceLogsError,
+    _resolve_local_service_compose_file,
     _run_subprocess,
     run_service_logs,
     service_logs_command,
@@ -279,3 +281,24 @@ def test_service_logs_default_file_missing_returns_scoped_error(
 
     assert exc_info.value.returncode == 1
     assert "Run awf service logs from an AWF source checkout" in exc_info.value.detail
+
+
+@pytest.mark.unit
+def test_resolve_local_service_compose_file_stops_at_home_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_nested = repo_root / "nested"
+    repo_nested.mkdir(parents=True)
+    outside_home = tmp_path.parent / "outside-home"
+    compose_file = outside_home / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}")
+
+    monkeypatch.setattr("awf.service.logs.Path.home", lambda: tmp_path)
+    monkeypatch.chdir(repo_nested)
+
+    assert (
+        _resolve_local_service_compose_file(LOCAL_SERVICE_COMPOSE_FILE)
+        == LOCAL_SERVICE_COMPOSE_FILE
+    )
