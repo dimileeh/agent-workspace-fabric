@@ -343,6 +343,7 @@ def _read_rest_params(capability_name: str) -> dict[str, object]:
         "overlap_graph",
         "workspace_operations",
         "global_operations",
+        "global_events",
     }:
         return {"limit": 2}
     return {}
@@ -365,8 +366,11 @@ def _read_mcp_args(capability_name: str, ids: dict[str, str]) -> dict[str, objec
         "workspace_stale_reasons",
         "workspace_artifacts",
         "workspace_operations",
+        "workspace_events",
     }:
         return {"workspace_id": ids["workspace_id"], "limit": 2}
+    if capability_name == "global_events":
+        return {"limit": 2}
     if capability_name == "workspace_logs":
         return {"workspace_id": ids["workspace_id"]}
     if capability_name == "read_workspace_log":

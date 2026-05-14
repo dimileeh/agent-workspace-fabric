@@ -234,9 +234,37 @@ class TestToolRegistration:
             "awf_read_workspace_log",
         } <= names
         assert {
+            "awf_list_workspace_operations",
+            "awf_list_workspace_events",
+            "awf_list_workspace_logs",
+            "awf_read_workspace_log",
+        } <= names
+        assert {
             "awf_cancel_workspace",
             "awf_stop_workspace",
             "awf_destroy_workspace",
+        } <= names
+        assert {
+            "awf_list_merge_queue",
+            "awf_list_workspace_overview",
+            "awf_list_workspace_validation",
+            "awf_list_workspace_stale_reasons",
+            "awf_list_workspace_artifacts",
+            "awf_read_workspace_artifact",
+            "awf_get_failure_analysis_summary",
+            "awf_get_workspace_reliability_summary",
+            "awf_get_resource_saturation_summary",
+            "awf_get_slo_metrics_summary",
+            "awf_get_core_release_readiness",
+            "awf_list_operations",
+            "awf_get_operation",
+            "awf_get_overlap_graph",
+            "awf_list_tasks",
+            "awf_list_task_attempts",
+            "awf_list_locks",
+            "awf_get_service_readiness",
+            "awf_get_service_health",
+            "awf_list_events",
         } <= names
         assert {
             "awf_list_merge_queue",
@@ -650,6 +678,22 @@ class TestToolRegistration:
         assert locks_props["limit"]["maximum"] == 500
         assert "status" in locks_props
         assert "workspace_status" not in locks_props
+        cursor_schema = _optional_string_schema(locks_props["cursor"])
+        assert cursor_schema["maxLength"] == 256
+
+        events_props = tools["awf_list_events"].inputSchema["properties"]
+        assert events_props["limit"]["default"] == 50
+        assert events_props["limit"]["minimum"] == 1
+        assert events_props["limit"]["maximum"] == 500
+        assert "workspace_id" in events_props
+        assert events_props["workspace_id"]["default"] is None
+        assert "event_type" in events_props
+        assert events_props["event_type"]["default"] is None
+
+        workspace_events_props = tools["awf_list_workspace_events"].inputSchema["properties"]
+        assert workspace_events_props["limit"]["default"] == 50
+        assert workspace_events_props["limit"]["minimum"] == 1
+        assert workspace_events_props["limit"]["maximum"] == 500
         cursor_schema = _optional_string_schema(locks_props["cursor"])
         assert cursor_schema["maxLength"] == 256
 
@@ -1900,7 +1944,90 @@ class TestWaitForWorkspace:
 
 class TestWorkspaceEvents:
     @pytest.mark.unit
-    async def test_lists_requested_workspace_events_with_limit_and_type(
+    async def test_lists_workspace_events_with_envelope_and_has_more(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        first = await _call(mcp, "awf_create_workspace", {**_CREATE_ARGS, "task_title": "first"})
+        first_id = _workspace_id(first)
+        base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            first_ws = await repo.get(first_id)
+            assert first_ws is not None
+            old = await repo.add_event(
+                first_ws,
+                event_type="workspace.phase_started",
+                reason_code="OLD",
+                payload={"phase": "agent"},
+            )
+            new = await repo.add_event(
+                first_ws,
+                event_type="workspace.phase_started",
+                reason_code="NEW",
+                payload={"phase": "validation"},
+            )
+            old.occurred_at = base
+            new.occurred_at = base + timedelta(seconds=2)
+            await session.commit()
+
+        result = await mcp.call_tool(
+            "awf_list_workspace_events",
+            {"workspace_id": first_id, "limit": 1},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is False
+        assert result.structuredContent is not None
+        payload = result.structuredContent
+        assert len(payload["items"]) == 1
+        assert payload["has_more"] is True
+        assert payload["limit"] == 1
+        assert payload["cursor"] is None
+
+        result_all = await mcp.call_tool(
+            "awf_list_workspace_events",
+            {"workspace_id": first_id, "limit": 50},
+        )
+        assert isinstance(result_all, CallToolResult)
+        payload_all = result_all.structuredContent
+        assert payload_all is not None
+        assert len(payload_all["items"]) >= 3
+        assert payload_all["has_more"] is False
+
+    @pytest.mark.unit
+    async def test_missing_workspace_events_return_null_tool_result(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool(
+            "awf_list_workspace_events",
+            {"workspace_id": "ws_missing"},
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is False
+        assert result.structuredContent is None
+
+
+class TestGlobalEvents:
+    @pytest.mark.unit
+    async def test_list_events_returns_empty_list(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await mcp.call_tool("awf_list_events", {"limit": 50})
+        assert isinstance(result, CallToolResult)
+        assert result.isError is False
+        payload = result.structuredContent
+        assert payload is not None
+        assert payload["items"] == []
+        assert payload["has_more"] is False
+        assert payload["limit"] == 50
+        assert payload["cursor"] is None
+        assert payload["next_cursor"] is None
+
+    @pytest.mark.unit
+    async def test_list_events_returns_events_across_workspaces(
         self,
         mcp,
         factory: async_sessionmaker[AsyncSession],
@@ -1913,7 +2040,6 @@ class TestWorkspaceEvents:
         )
         first_id = _workspace_id(first)
         second_id = _workspace_id(second)
-        base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
 
         async with factory() as session:
             repo = WorkspaceRepository(session)
@@ -1921,60 +2047,152 @@ class TestWorkspaceEvents:
             second_ws = await repo.get(second_id)
             assert first_ws is not None
             assert second_ws is not None
-            first_old = await repo.add_event(
+            await repo.add_event(
                 first_ws,
                 event_type="workspace.phase_started",
-                reason_code="OLD",
+                reason_code="FIRST",
                 payload={"phase": "agent"},
             )
-            first_new = await repo.add_event(
-                first_ws,
-                event_type="workspace.phase_started",
-                reason_code="NEW",
-                payload={"phase": "validation"},
-            )
-            wrong_workspace = await repo.add_event(
+            await repo.add_event(
                 second_ws,
                 event_type="workspace.phase_started",
-                reason_code="OTHER",
-                payload={"phase": "validation"},
+                reason_code="SECOND",
+                payload={"phase": "agent"},
             )
-            ignored_type = await repo.add_event(
-                first_ws,
-                event_type="workspace.log",
-                reason_code="IGNORED",
-                payload={"stream": "agent.stdout"},
-            )
-            first_old.occurred_at = base
-            first_new.occurred_at = base + timedelta(seconds=2)
-            wrong_workspace.occurred_at = base + timedelta(seconds=3)
-            ignored_type.occurred_at = base + timedelta(seconds=4)
             await session.commit()
 
-        events = await _call(
-            mcp,
-            "awf_list_workspace_events",
-            {
-                "workspace_id": first_id,
-                "event_type": "workspace.phase_started",
-                "limit": 1,
-            },
-        )
-
-        assert isinstance(events, list)
-        assert [event["workspace_id"] for event in events] == [first_id]
-        assert [event["reason_code"] for event in events] == ["NEW"]
-        assert [event["payload"] for event in events] == [{"phase": "validation"}]
+        result = await mcp.call_tool("awf_list_events", {"limit": 50})
+        assert isinstance(result, CallToolResult)
+        payload = result.structuredContent
+        assert payload is not None
+        workspace_ids = {item["workspace_id"] for item in payload["items"]}
+        assert first_id in workspace_ids
+        assert second_id in workspace_ids
 
     @pytest.mark.unit
-    async def test_missing_workspace_events_return_none(self, mcp) -> None:  # type: ignore[no-untyped-def]
-        result = await _call(
+    async def test_list_events_filters_by_workspace_id(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        first = await _call(mcp, "awf_create_workspace", {**_CREATE_ARGS, "task_title": "first"})
+        second = await _call(
             mcp,
-            "awf_list_workspace_events",
-            {"workspace_id": "ws_missing"},
+            "awf_create_workspace",
+            {**_CREATE_ARGS, "task_title": "second"},
         )
+        first_id = _workspace_id(first)
+        second_id = _workspace_id(second)
 
-        assert result is None
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            first_ws = await repo.get(first_id)
+            second_ws = await repo.get(second_id)
+            assert first_ws is not None
+            assert second_ws is not None
+            await repo.add_event(
+                first_ws,
+                event_type="workspace.phase_started",
+                reason_code="FIRST",
+                payload={"phase": "agent"},
+            )
+            await repo.add_event(
+                second_ws,
+                event_type="workspace.phase_started",
+                reason_code="SECOND",
+                payload={"phase": "agent"},
+            )
+            await session.commit()
+
+        result = await mcp.call_tool("awf_list_events", {"workspace_id": first_id, "limit": 50})
+        assert isinstance(result, CallToolResult)
+        payload = result.structuredContent
+        assert payload is not None
+        first_items = [i for i in payload["items"] if i["workspace_id"] == first_id]
+        second_items = [i for i in payload["items"] if i["workspace_id"] == second_id]
+        assert len(first_items) >= 1
+        assert len(second_items) == 0
+
+    @pytest.mark.unit
+    async def test_list_events_filters_by_event_type(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
+        ws_id = _workspace_id(created)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            await repo.add_event(
+                ws,
+                event_type="workspace.phase_started",
+                reason_code="STARTED",
+                payload={"phase": "agent"},
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.log",
+                reason_code="LOG",
+                payload={"stream": "stdout"},
+            )
+            await session.commit()
+
+        result = await mcp.call_tool(
+            "awf_list_events", {"event_type": "workspace.phase_started", "limit": 50}
+        )
+        assert isinstance(result, CallToolResult)
+        payload = result.structuredContent
+        assert payload is not None
+        phase_started_events = [
+            i for i in payload["items"] if i["event_type"] == "workspace.phase_started"
+        ]
+        assert len(phase_started_events) >= 1
+        for item in payload["items"]:
+            assert item["event_type"] == "workspace.phase_started"
+
+    @pytest.mark.unit
+    async def test_list_events_respects_limit(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
+        ws_id = _workspace_id(created)
+        base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            for i in range(5):
+                event = await repo.add_event(
+                    ws,
+                    event_type="workspace.phase_started",
+                    reason_code=f"EVENT_{i}",
+                    payload={"i": i},
+                )
+                event.occurred_at = base + timedelta(seconds=i)
+            await session.commit()
+
+        result = await mcp.call_tool("awf_list_events", {"limit": 2})
+        assert isinstance(result, CallToolResult)
+        payload = result.structuredContent
+        assert payload is not None
+        assert len(payload["items"]) == 2
+        assert payload["has_more"] is True
+        assert payload["limit"] == 2
+
+    @pytest.mark.unit
+    async def test_list_events_limit_bounds(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        assert "awf_list_events" in tools
+        props = tools["awf_list_events"].inputSchema["properties"]
+        assert props["limit"]["default"] == 50
+        assert props["limit"]["minimum"] == 1
+        assert props["limit"]["maximum"] == 500
 
 
 class TestWorkspaceRuntime:

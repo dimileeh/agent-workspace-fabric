@@ -77,6 +77,7 @@ NEW_OPERATOR_TOOLS = {
     "awf_list_locks",
     "awf_get_service_readiness",
     "awf_get_service_health",
+    "awf_list_events",
 }
 
 BOUNDED_READ_ONLY_LIST_TOOLS = {
@@ -91,6 +92,7 @@ BOUNDED_READ_ONLY_LIST_TOOLS = {
     "awf_list_tasks",
     "awf_list_task_attempts",
     "awf_list_locks",
+    "awf_list_events",
 }
 
 FORBIDDEN_OPERATOR_TOOL_PREFIXES = (
@@ -718,6 +720,7 @@ class TestMcpOperatorSurfaceParity:
             ),
             ("tasks", "/v1/tasks", {"limit": 10}, "awf_list_tasks", {"limit": 10}),
             ("locks", "/v1/locks", {"limit": 10}, "awf_list_locks", {"limit": 10}),
+            ("global_events", "/v1/events", {"limit": 10}, "awf_list_events", {"limit": 10}),
         ]
         empty_payloads: dict[str, dict[str, Any]] = {}
 

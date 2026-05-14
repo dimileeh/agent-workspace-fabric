@@ -35,6 +35,7 @@ from awf.api.schemas import (
     WorkspaceArtifactReadResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
+    WorkspaceEventListResponse,
     WorkspaceLockListResponse,
     WorkspaceLockResponse,
     WorkspaceLogListResponse,
@@ -578,14 +579,52 @@ def build_mcp_server(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
         limit: int = Field(default=50, ge=1, le=500),
         event_type: str | None = Field(default=None, description="Optional event-type filter."),
-    ) -> list[dict[str, Any]] | None:
-        """List immutable workspace events newest-first."""
+    ) -> CallToolResult:
+        """Read-only operator observability: list workspace events with REST envelope."""
         rows = await service.list_events(
             workspace_id,
-            limit=limit,
+            limit=limit + 1,
             event_type=event_type,
         )
-        return [row.model_dump(mode="json") for row in rows] if rows is not None else None
+        if rows is None:
+            return _null_tool_result()
+        has_more = len(rows) > limit
+        items = rows[:limit]
+        response = WorkspaceEventListResponse(
+            items=items,
+            has_more=has_more,
+            limit=limit,
+            cursor=None,
+        )
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_list_events")
+    async def awf_list_events(
+        workspace_id: str | None = Field(
+            default=None,
+            description="Optional workspace ID filter.",
+        ),
+        event_type: str | None = Field(
+            default=None,
+            description="Optional event-type filter.",
+        ),
+        limit: int = Field(default=50, ge=1, le=500),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list global AWF events with REST envelope."""
+        rows = await service.list_global_events(
+            workspace_id=workspace_id,
+            event_type=event_type,
+            limit=limit + 1,
+        )
+        has_more = len(rows) > limit
+        items = rows[:limit]
+        response = WorkspaceEventListResponse(
+            items=items,
+            has_more=has_more,
+            limit=limit,
+            cursor=None,
+        )
+        return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_workspace_runtime")
     async def awf_get_workspace_runtime(

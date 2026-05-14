@@ -932,7 +932,7 @@ coding agent in any project to use AWF for a feature.
   [#238](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/238)
   merged 2026-05-13 and adds the bounded MCP artifact content read surface with
   size/path/error guardrails and reason-catalog coverage.
-- [ ] TODO§P1-mcp-global-events: Add MCP parity for the global
+- [x] TODO§P1-mcp-global-events: Add MCP parity for the global
   `GET /v1/events` surface, or keep the workspace-events row explicitly
   marked `MCP partial` until global events have a real MCP tool and coverage.
   Reschedule required: `ws_cd0ccbb17db943ed8415aff1` and auto-retry

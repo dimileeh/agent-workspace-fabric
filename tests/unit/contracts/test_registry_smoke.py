@@ -130,6 +130,11 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
     "Existing PR monitor adoption": (
         "tests/unit/mcp/test_mcp_server.py::TestToolRegistration::test_adopt_pull_request_monitor_tool_creates_adoption",
     ),
+    "Workspace events": (
+        "tests/unit/mcp/test_mcp_server.py::TestGlobalEvents::test_list_events_returns_empty_list",
+        "tests/unit/mcp/test_mcp_server.py::TestGlobalEvents::test_list_events_returns_events_across_workspaces",
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_empty_read_only_operator_surfaces_match_rest_payloads",
+    ),
     "Optimistic concurrency on controls": (
         "tests/unit/contracts/test_if_match_alignment.py::test_mcp_control_tools_expose_optional_expected_version",
         "tests/unit/contracts/test_if_match_alignment.py::test_rest_stale_if_match_returns_version_conflict_envelope",

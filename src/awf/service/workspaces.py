@@ -887,6 +887,21 @@ class WorkspaceService:
             )
             return [WorkspaceEventResponse.model_validate(row) for row in rows]
 
+    async def list_global_events(
+        self,
+        *,
+        workspace_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 50,
+    ) -> builtins.list[WorkspaceEventResponse]:
+        async with self._factory() as s:
+            rows = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=event_type,
+                limit=limit,
+            )
+            return [WorkspaceEventResponse.model_validate(row) for row in rows]
+
     async def list_logs(
         self, workspace_id: str
     ) -> builtins.list[WorkspaceLogStreamResponse] | None:
