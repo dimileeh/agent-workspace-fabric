@@ -66,6 +66,7 @@ def test_troubleshooting_guide_has_actionable_commands() -> None:
         "gh auth status",
         "awf workspace show",
         "awf workspace events",
+        "awf workspace operations",
         "awf workspace logs",
         "awf workspace runtime",
         "awf workspace log <workspace_id> <stream_id>",
