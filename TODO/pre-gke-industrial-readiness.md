@@ -78,6 +78,8 @@ Active reschedule slices are currently recorded below.
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
 | P0 Operation And Recovery Truth | Preserve primary failure causality across stale callbacks and recovery paths | `ws_7038898eac3747ecaa53fb2c` | Codex / `gpt-5.5` | monitoring_pr | Rescheduled from failed `ws_89f9bcd01ae747d6b4a251b5` on 2026-05-14 after PRs #239-#241 landed and local AWF rebuilt/restarted green; auto-merge enabled; owns primary-failure preservation across stale callbacks, cleanup failures, and recovery paths. |
+| P0 API / CLI / MCP Contract Parity | Make workspace create/list surfaces parity-safe across REST, CLI, and MCP | `ws_b9112aecd2d94fc7b4babf26` | Gemini / `gemini-3.1-pro-preview` | running | Clean retry launched 2026-05-14 after local commit `89ea11f` fixed stale preserved-active cleanup. Replaces failed `ws_02ef6b49f7dc4657a8e63355`; auto-merge enabled; scope is limited to canonical v2 create CLI parity and multi-status REST/CLI/MCP list semantics. |
+| P1 MCP And Project Onboarding Client Parity | Add MCP parity for global events | `ws_32a3971e4aa147c08ed46683` | OpenCode / `ollama/glm-5.1:cloud` | running | Clean retry launched 2026-05-14 after local commit `89ea11f` fixed planning-scope retry prompt poisoning. Replaces failed `ws_cd0ccbb17db943ed8415aff1` / `ws_dabd5b60a8464f10b927f1d2`; auto-merge enabled; scope is limited to MCP global events parity and matching tests/docs. |
 | P1 Developer Experience And Public Core Surface | First-run troubleshooting guide by symptom | `ws_91940abf598341b789390979` | Codex / `gpt-5.3-codex-spark` | monitoring_pr | Rescheduled 2026-05-14 from failed `ws_4f44c108a58f46d092f4e411` after GitHub Actions evidence repair and failure-causality hardening landed/was active. Auto-merge enabled; scope is docs/devex plus docs tests only. |
 
 ### Reschedule Required Slices
@@ -90,13 +92,13 @@ not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P0 API / CLI / MCP Contract Parity | Make workspace create/list surfaces parity-safe across REST, CLI, and MCP | `ws_02ef6b49f7dc4657a8e63355` | `awf/ws_02ef6b49f7dc4657a8e63355` | reschedule_required | Attempt was stranded after a worker/service restart: the agent process exited but the container stayed alive, and AWF preserved the active execution indefinitely until local commit `89ea11f` added preservation expiry and stale-runtime cleanup. Do not count the salvage branch as completed; reschedule from a clean base after the local service rebuild. |
-| P1 MCP And Project Onboarding Client Parity | Add MCP parity for global events | `ws_cd0ccbb17db943ed8415aff1`, `ws_dabd5b60a8464f10b927f1d2` | `awf/ws_cd0ccbb17db943ed8415aff1`, `awf/ws_dabd5b60a8464f10b927f1d2` | reschedule_required | First attempt hit `AGENT_PLAN_PHASE_SCOPE_VIOLATION`; the automatic retry inherited a task prompt that globally said "After writing the plan, stop", so the retry stopped after planning and failed conformance with no implementation. Local commit `89ea11f` makes planning-scope retry instructions phase-scoped. Reschedule from a clean base. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 API / CLI / MCP Contract Parity | Make workspace create/list surfaces parity-safe across REST, CLI, and MCP | `ws_02ef6b49f7dc4657a8e63355` | `awf/ws_02ef6b49f7dc4657a8e63355` | failed | Attempt failed 2026-05-14 after a worker/service restart left a sleeping runtime container preserved as active after the agent process was gone. Local commit `89ea11f` fixed preserved-active expiry/cleanup; clean retry is active as `ws_b9112aecd2d94fc7b4babf26`. |
+| P1 MCP And Project Onboarding Client Parity | Add MCP parity for global events | `ws_cd0ccbb17db943ed8415aff1`, `ws_dabd5b60a8464f10b927f1d2` | `awf/ws_cd0ccbb17db943ed8415aff1`, `awf/ws_dabd5b60a8464f10b927f1d2` | superseded | First attempt failed planning scope; auto-retry failed because retry prompt globally told the agent to stop after planning. Local commit `89ea11f` fixed the phase-scoping bug; clean retry is active as `ws_32a3971e4aa147c08ed46683`. |
 | P0 Control-Plane Restart Recovery Hardening | Expire preserved active executions and keep planning-scope retries phase-scoped | _local_ | commit `89ea11f` | merged | Local Codex implementation; completed 2026-05-14 and fixes two dogfood blockers: preserved active executions now expire and are cleaned up instead of leaving sleeping containers marked `running`, and planning-scope retry prompts no longer globally tell the retry workspace to stop after planning. |
 | P1 MCP And Project Onboarding Client Parity | Close REST auth parity for operation read endpoints | `ws_94e4afca890d47b584208bfc` | [#244](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/244) | merged | Gemini `gemini-3.1-pro-preview`; completed 2026-05-14 and closes REST auth parity for operation read endpoints with focused tests/docs. |
 | P0 Test Coverage And Quality Gates | Robust post-agent pre-commit recovery | _local_ | [#239](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/239) | merged | Local Codex implementation; completed 2026-05-13 and generalizes post-agent commit/pre-commit classification, deterministic formatter/normalizer repair, targeted semantic repair, and original failure-causality preservation for timeout/provider failures. |
@@ -752,10 +754,9 @@ not listed here.
   fields, list filter semantics, docs status, and MCP schemas; and effort must be
   handled explicitly as either a canonical cross-surface request field or a
   documented profile/provider-derived value, not an accidental CLI gap.
-  Reschedule required: `ws_02ef6b49f7dc4657a8e63355` failed after its active
-  execution was preserved across restart and then expired; local commit
-  `89ea11f` fixed the preservation cleanup path, so this slice should be
-  relaunched from a clean base.
+  Active clean retry: `ws_b9112aecd2d94fc7b4babf26` after failed
+  `ws_02ef6b49f7dc4657a8e63355`; local commit `89ea11f` fixed the preserved
+  active-execution cleanup path before relaunch.
 
 ## P1: API Contract Completion
 
@@ -935,10 +936,10 @@ coding agent in any project to use AWF for a feature.
 - [ ] TODO§P1-mcp-global-events: Add MCP parity for the global
   `GET /v1/events` surface, or keep the workspace-events row explicitly
   marked `MCP partial` until global events have a real MCP tool and coverage.
-  Reschedule required: `ws_cd0ccbb17db943ed8415aff1` and auto-retry
-  `ws_dabd5b60a8464f10b927f1d2` failed before implementation landed; local
-  commit `89ea11f` fixed the planning-scope retry prompt poisoning, so this
-  slice should be relaunched from a clean base.
+  Active clean retry: `ws_32a3971e4aa147c08ed46683` after failed
+  `ws_cd0ccbb17db943ed8415aff1` and auto-retry
+  `ws_dabd5b60a8464f10b927f1d2`; local commit `89ea11f` fixed the
+  planning-scope retry prompt poisoning before relaunch.
 - [ ] TODO§P1-mcp-create-v2-full-parity: Add full MCP parity for
   `awf_create_workspace_v2` so MCP callers can request REST v2 `resources`
   and task scheduler knobs (`priority`, `human_boost`), or keep the create row

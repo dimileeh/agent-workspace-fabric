@@ -4905,6 +4905,8 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert ws.failure_reason == FailureReason.infrastructure_failure.value
         assert ws.failure_message is not None
         assert "active execution was lost after a service or Docker restart" in ws.failure_message
+        assert "stopped the stale runtime" in ws.failure_message
+        assert "without cleanup" not in ws.failure_message
         assert len(stale_events) == 1
         assert len(preserved_events) == 1
         assert cleaner.calls == [
