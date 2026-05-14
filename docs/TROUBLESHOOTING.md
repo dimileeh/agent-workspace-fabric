@@ -244,7 +244,8 @@ Verify the configured provider auth surface:
 - `codex`: `OPENAI_API_KEY` (or `OPENAI_API_TOKEN`, `CODEX_API_KEY`, `CODEX_AUTH_TOKEN`)
 - `claude_code`: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`
 - `gemini`: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `GOOGLE_APPLICATION_CREDENTIALS`
-- `opencode`: `OLLAMA_API_KEY` plus local auth at `~/.config/opencode` or `~/.ollama`
+- `opencode`: `OLLAMA_API_KEY` (OpenCode’s Ollama auth surface) plus local auth at
+  `~/.config/opencode` or `~/.ollama`
 - Local provider auth mounts are copied into per-workspace directories and injected at runtime:
   - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/codex` → `/home/agent/.codex`
   - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/claude/.claude` and `.../auth/<workspace>/claude/.claude.json` → `/home/agent/.claude` and `/home/agent/.claude.json`
