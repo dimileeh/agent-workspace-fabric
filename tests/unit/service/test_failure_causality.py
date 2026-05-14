@@ -428,6 +428,137 @@ async def test_epoch_reset_detection_treats_same_timestamp_reset_as_epoch_bounda
 
 
 @pytest.mark.unit
+async def test_epoch_reset_detection_reads_remonitor_state_reset_target(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reset_at = datetime(2026, 1, 1, 12, 5, tzinfo=UTC)
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Remonitor reset target regression",
+            task_prompt="Detect state_reset target even when event new_state is stale.",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.failed.value
+        failed_event = WorkspaceEvent(
+            id="evt_primary_failure",
+            workspace_id=workspace.id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.running.value,
+            new_state=WorkspaceStatus.failed.value,
+            reason_code="PYTEST_TEST_FAILURE",
+            payload={"reason_code": "PYTEST_TEST_FAILURE"},
+            occurred_at=reset_at - timedelta(minutes=5),
+        )
+        session.add(failed_event)
+        reset_event = await repo.add_event(
+            workspace,
+            event_type="workspace.remonitor_requested",
+            reason_code="OPERATOR_REMONITOR",
+            payload={
+                "state_reset": {
+                    "from": WorkspaceStatus.failed.value,
+                    "to": WorkspaceStatus.monitoring_pr.value,
+                },
+            },
+        )
+        reset_event.occurred_at = reset_at
+        assert reset_event.new_state == WorkspaceStatus.failed.value
+        await session.flush()
+
+        reset_detected = await failure_causality_service._has_failure_epoch_reset_after(
+            session,
+            workspace.id,
+            failed_event,
+        )
+
+    assert reset_detected is True
+
+
+@pytest.mark.unit
+async def test_primary_failure_snapshot_uses_current_failure_after_provisioning_reset(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reset_at = datetime(2026, 1, 1, 12, 5, tzinfo=UTC)
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Provisioning epoch reset regression",
+            task_prompt="Do not reuse pre-provisioning primary evidence.",
+            agent="codex",
+            test_commands=[],
+        )
+        old_failed_event = WorkspaceEvent(
+            id="evt_old_provisioning_failure",
+            workspace_id=workspace.id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.provisioning.value,
+            new_state=WorkspaceStatus.failed.value,
+            reason_code="OLD_PROVISIONING_FAILURE",
+            payload={
+                "primary_failure": {
+                    "failure_reason": FailureReason.validation_failure.value,
+                    "message": "old provisioning validation failed",
+                    "reason_code": "OLD_VALIDATION_FAILURE",
+                    "validation_run": {
+                        "id": "vr_old_provisioning",
+                        "status": "failed",
+                        "reason_code": "OLD_VALIDATION_FAILURE",
+                    },
+                },
+            },
+            occurred_at=reset_at - timedelta(minutes=10),
+        )
+        provisioning_reset_event = WorkspaceEvent(
+            id="evt_retry_provisioning",
+            workspace_id=workspace.id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.failed.value,
+            new_state=WorkspaceStatus.provisioning.value,
+            reason_code="RETRY_PROVISIONING",
+            payload=None,
+            occurred_at=reset_at,
+        )
+        current_failed_event = WorkspaceEvent(
+            id="evt_current_agent_failure",
+            workspace_id=workspace.id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.provisioning.value,
+            new_state=WorkspaceStatus.failed.value,
+            reason_code="AGENT_AUTH_FAILED",
+            payload={
+                "reason_code": "AGENT_AUTH_FAILED",
+                "message": "agent auth failed during reprovisioning",
+            },
+            occurred_at=reset_at + timedelta(minutes=5),
+        )
+        session.add_all([old_failed_event, provisioning_reset_event, current_failed_event])
+        workspace.status = WorkspaceStatus.failed.value
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "agent auth failed during reprovisioning"
+        workspace_id = workspace.id
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.agent_failure.value
+    assert snapshot["message"] == "agent auth failed during reprovisioning"
+    assert snapshot["reason_code"] == "AGENT_AUTH_FAILED"
+    assert "validation_run" not in snapshot
+
+
+@pytest.mark.unit
 async def test_primary_failure_snapshot_ignores_same_timestamp_epoch_reset_without_id_order(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

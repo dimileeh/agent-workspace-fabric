@@ -20,6 +20,7 @@ SECONDARY_FAILURES_KEY = "secondary_failures"
 _IGNORED_PRIMARY_VALIDATION_REASON_CODES = frozenset({"STALE_CALLBACK_IGNORED"})
 _FAILURE_EPOCH_RESET_STATES = frozenset(
     {
+        WorkspaceStatus.provisioning.value,
         WorkspaceStatus.ready.value,
         WorkspaceStatus.running.value,
         WorkspaceStatus.validating.value,
@@ -315,12 +316,17 @@ async def _latest_failed_validation_run(
 def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bool], ...]:
     return (
         WorkspaceEvent.workspace_id == workspace_id,
-        WorkspaceEvent.new_state.in_(_FAILURE_EPOCH_RESET_STATES),
         or_(
-            WorkspaceEvent.event_type == "workspace.state_changed",
+            and_(
+                WorkspaceEvent.event_type == "workspace.state_changed",
+                WorkspaceEvent.new_state.in_(_FAILURE_EPOCH_RESET_STATES),
+            ),
             and_(
                 WorkspaceEvent.event_type == "workspace.remonitor_requested",
                 func.json_typeof(WorkspaceEvent.payload["state_reset"]) == "object",
+                WorkspaceEvent.payload["state_reset"]["to"]
+                .as_string()
+                .in_(_FAILURE_EPOCH_RESET_STATES),
             ),
         ),
     )
