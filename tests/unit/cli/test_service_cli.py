@@ -225,6 +225,7 @@ def test_service_readiness_exits_nonzero_when_scorecard_fails(
 def test_service_logs_defaults_to_tail_api_and_worker_logs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    compose_file = str(Path("docker/compose/local-service.yml").resolve())
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -245,7 +246,7 @@ def test_service_logs_defaults_to_tail_api_and_worker_logs(
                 "docker",
                 "compose",
                 "-f",
-                "docker/compose/local-service.yml",
+                compose_file,
                 "logs",
                 "--tail",
                 "100",
@@ -261,6 +262,7 @@ def test_service_logs_defaults_to_tail_api_and_worker_logs(
 def test_service_logs_accepts_repeated_service_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    compose_file = str(Path("docker/compose/local-service.yml").resolve())
     calls: list[list[str]] = []
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -289,7 +291,7 @@ def test_service_logs_accepts_repeated_service_filters(
             "docker",
             "compose",
             "-f",
-            "docker/compose/local-service.yml",
+            compose_file,
             "logs",
             "--tail",
             "25",
@@ -303,6 +305,7 @@ def test_service_logs_accepts_repeated_service_filters(
 def test_service_logs_follow_streams_without_capturing_subprocess_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    compose_file = str(Path("docker/compose/local-service.yml").resolve())
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -321,7 +324,7 @@ def test_service_logs_follow_streams_without_capturing_subprocess_output(
                 "docker",
                 "compose",
                 "-f",
-                "docker/compose/local-service.yml",
+                compose_file,
                 "logs",
                 "--tail",
                 "100",
