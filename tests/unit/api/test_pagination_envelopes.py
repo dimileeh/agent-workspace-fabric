@@ -71,6 +71,7 @@ async def test_enveloped_list_endpoints_expose_standard_pagination_metadata(
         headers = {"Authorization": "Bearer secret"}
         response = await client.get(path, params=params, headers=headers)
     finally:
+        monkeypatch.undo()
         get_settings.cache_clear()
 
     assert response.status_code == 200
