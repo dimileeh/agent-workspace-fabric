@@ -44,8 +44,9 @@ FORBIDDEN_MCP_INPUTS = {
     "token",
 }
 
-CREATE_V2_FULL_PARITY_FIELDS = frozenset({"resources", "priority", "human_boost"})
-CREATE_V2_FULL_PARITY_BACKLOG = "TODO§P1-mcp-create-v2-full-parity"
+CREATE_V2_FULL_PARITY_FIELDS = frozenset(
+    {"cpu", "priority", "human_boost", "memory", "out_of_scope_changes", "provider_recovery"}
+)
 STATUS_FILTER_PARITY_CAPABILITIES = (
     "workspace_overview",
     "merge_queue",
@@ -199,11 +200,12 @@ async def test_create_v2_registry_status_tracks_mcp_payload_parity_gap() -> None
     tool = (await mcp_tools())["awf_create_workspace_v2"]
     missing = CREATE_V2_FULL_PARITY_FIELDS - tool.properties
 
-    expected_status = "MCP partial" if missing else "MCP implemented"
-    expected_backlog = CREATE_V2_FULL_PARITY_BACKLOG if missing else "—"
-
-    assert capability.parity_status == expected_status
-    assert capability.parity_backlog_slice == expected_backlog
+    if missing:
+        assert capability.parity_status == "MCP partial"
+        assert capability.parity_backlog_slice == "TODO§create-v2-parity"
+    else:
+        assert capability.parity_status == "MCP implemented"
+        assert capability.parity_backlog_slice == "—"
 
 
 @pytest.mark.unit
