@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 import yaml
 
 from awf.common.commands import CommandResult, FakeCommandRunner
@@ -206,6 +207,61 @@ def test_setup_dependency_network_classifier_extracts_uv_pypi_dns_failure() -> N
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stderr", "expected_category"),
+    [
+        (
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple "
+            "after connection reset by peer",
+            "connection",
+        ),
+        (
+            "Failed to fetch package docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "connection refused",
+            "connection",
+        ),
+        (
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "connect timeout",
+            "connect_timeout",
+        ),
+        (
+            "Failed to fetch package docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "read timed out",
+            "read_timeout",
+        ),
+        (
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "TLS handshake timeout",
+            "tls",
+        ),
+        (
+            "Package index https://files.pythonhosted.org/simple returned HTTP status code 503 "
+            "while fetching docker==7.1.0",
+            "http_5xx",
+        ),
+    ],
+)
+def test_setup_dependency_network_classifier_covers_transient_shapes(
+    stderr: str,
+    expected_category: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=stderr,
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == expected_category
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
 async def test_setup_dependency_network_failure_retries_and_succeeds_on_cache_hit(
     tmp_path: Path,
 ) -> None:
@@ -322,6 +378,59 @@ async def test_deterministic_setup_failure_is_not_retried(tmp_path: Path) -> Non
     assert len(fake.calls) == 1
     assert result.commands[0].reason_code == "COMMAND_FAILED"
     assert "setup_dependency_network" not in result.commands[0].metadata
+
+
+@pytest.mark.unit
+async def test_setup_dependency_retry_logs_redact_and_truncate_command_credentials(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=1,
+        setup_retry_backoff_seconds=(0,),
+    )
+    raw_secret = "ghp_1234567890abcdef"
+    long_secret_command = (
+        "uv sync --extra dev "
+        f"--index-url https://user:{raw_secret}@files.pythonhosted.org/simple "
+        + ("--config-setting xxxxxxxxxx " * 80)
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": [long_secret_command]},
+        }
+    )
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+
+    with structlog.testing.capture_logs() as captured:
+        result = await val.run_profile_phases(
+            workspace_id="ws_setup_retry_secret_command",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("setup",),
+        )
+
+    assert not result.all_passed
+    retry_log = next(
+        event for event in captured if event["event"] == "validation.setup_dependency_network_retry"
+    )
+    exhausted_log = next(
+        event
+        for event in captured
+        if event["event"] == "validation.setup_dependency_network_retry_exhausted"
+    )
+    for log_entry in (retry_log, exhausted_log):
+        command = str(log_entry["command"])
+        assert raw_secret not in command
+        assert f"user:{raw_secret}" not in command
+        assert "https://[redacted]@files.pythonhosted.org/simple" in command
+        assert command.endswith("...[truncated]")
+        assert len(command) <= 500 + len("...[truncated]")
 
 
 @pytest.mark.unit
