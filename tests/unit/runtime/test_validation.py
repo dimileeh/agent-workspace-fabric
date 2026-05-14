@@ -207,6 +207,23 @@ def test_setup_dependency_network_classifier_extracts_uv_pypi_dns_failure() -> N
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_index_url_credentials_for_package() -> None:
+    raw_secret = "ghp_1234567890abcdef"
+    classification = _classify_setup_dependency_network_failure(
+        command=(f"uv sync --index-url https://user:{raw_secret}@files.pythonhosted.org/simple"),
+        returncode=1,
+        stdout="",
+        stderr=_uv_pypi_dns_failure(package="docker==7.1.0"),
+    )
+
+    assert classification is not None
+    assert classification.package == "docker==7.1.0"
+    assert raw_secret not in str(classification.metadata)
+    assert "user:ghp_" not in str(classification.metadata)
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_ignores_version_like_fallback_host() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="pip install docker==7.1.0",

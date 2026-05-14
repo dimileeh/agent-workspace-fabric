@@ -724,13 +724,42 @@ def _setup_transient_category(text: str) -> str | None:
 
 
 def _extract_setup_dependency_package(text: str) -> str | None:
-    match = _SETUP_PACKAGE_SPEC_RE.search(text)
-    if match is not None:
-        return match.group("package")
-    match = _SETUP_PACKAGE_NAME_VERSION_RE.search(text)
-    if match is None:
-        return None
-    return f"{match.group('name')}=={match.group('version')}"
+    safe_text = _setup_dependency_package_search_text(text)
+    for match in _SETUP_PACKAGE_SPEC_RE.finditer(safe_text):
+        package = match.group("package")
+        if _is_safe_setup_dependency_package(package):
+            return package
+    for match in _SETUP_PACKAGE_NAME_VERSION_RE.finditer(safe_text):
+        package = f"{match.group('name')}=={match.group('version')}"
+        if _is_safe_setup_dependency_package(package):
+            return package
+    return None
+
+
+def _setup_dependency_package_search_text(text: str) -> str:
+    return _SETUP_URL_RE.sub(_strip_setup_dependency_url_userinfo, text)
+
+
+def _strip_setup_dependency_url_userinfo(match: re.Match[str]) -> str:
+    url = match.group(0)
+    parsed = urlparse(url)
+    if "@" not in parsed.netloc or parsed.hostname is None:
+        return url
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is not None:
+        host = f"{host}:{port}"
+    return parsed._replace(netloc=host).geturl()
+
+
+def _is_safe_setup_dependency_package(package: str) -> bool:
+    redacted = redact_audit_text(package, limit=len(package) + len("...[truncated]"))
+    return redacted == package
 
 
 def _extract_setup_dependency_host(text: str) -> str | None:
