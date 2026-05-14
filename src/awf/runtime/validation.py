@@ -737,6 +737,10 @@ def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
         return dependency_command_match
     if _looks_like_uv_dependency_setup_command(tokens):
         return specific_output_has_dependency_context if compound_command else True
+    # Unknown setup wrappers still get the bounded dependency-network retry only
+    # when their output names package or package-index evidence. This keeps
+    # profile-specific bootstrap scripts covered without expanding retries to
+    # every transient setup failure.
     return specific_output_has_dependency_context
 
 

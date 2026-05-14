@@ -249,7 +249,7 @@ def _setup_dependency_metadata(*, retry_exhausted: bool = False) -> dict[str, ob
         "diagnostic": (
             "Failed to download docker==7.1.0 from files.pythonhosted.org: "
             "failed to lookup address information: No address associated with hostname; "
-            "Authorization: Bearer ghp_1234567890abcdef"
+            "Authorization: Bearer ghp_FAKESECRET0000000"
         ),
     }
 
@@ -3545,7 +3545,7 @@ class TestExecutorCoverageEdges:
             assert exhausted_payload["reason_code"] == SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED
             assert exhausted_payload["failure_reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
             assert exhausted_payload["package"] == "docker==7.1.0"
-            assert "ghp_1234567890abcdef" not in json.dumps(exhausted_payload)
+            assert "ghp_FAKESECRET0000000" not in json.dumps(exhausted_payload)
             assert "[redacted]" in json.dumps(exhausted_payload)
             terminal = ws.events[-1]
             assert terminal.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
