@@ -1394,6 +1394,17 @@ class ValidationRunner:
                         step=step,
                         attempts=total_retry_count,
                     )
+                if setup_dependency_attempts and last_setup_dependency_classification is not None:
+                    result = _with_setup_dependency_network_metadata(
+                        result,
+                        step=step,
+                        classification=last_setup_dependency_classification,
+                        retry_count=total_retry_count,
+                        retry_budget=self._setup_retry_budget + retry_budget,
+                        retry_exhausted=False,
+                        recovered=False,
+                        attempts=setup_dependency_attempts,
+                    )
 
                 results.append(result)
                 _log.info(

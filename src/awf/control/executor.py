@@ -992,6 +992,14 @@ def _setup_dependency_network_details(first_fail: object | None) -> dict[str, An
     return cast(dict[str, Any], redact_audit_value(dict(details)))
 
 
+def _setup_dependency_network_failure_details(
+    first_fail: object | None,
+) -> dict[str, Any] | None:
+    if getattr(first_fail, "reason_code", None) != SETUP_DEPENDENCY_NETWORK_FAILURE:
+        return None
+    return _setup_dependency_network_details(first_fail)
+
+
 def _setup_dependency_network_event_payload(
     details: Mapping[str, Any],
     *,
@@ -1732,7 +1740,7 @@ class WorkspaceExecutor:
             )
             if not setup_result.all_passed:
                 first_fail = setup_result.first_failure
-                setup_dependency_details = _setup_dependency_network_details(first_fail)
+                setup_dependency_details = _setup_dependency_network_failure_details(first_fail)
                 setup_failure_reason_code = (
                     SETUP_DEPENDENCY_NETWORK_FAILURE
                     if setup_dependency_details is not None

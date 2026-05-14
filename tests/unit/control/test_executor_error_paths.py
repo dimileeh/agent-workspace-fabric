@@ -279,6 +279,45 @@ def _setup_dependency_command_result(
     )
 
 
+def _setup_dependency_then_later_failure_command_result(
+    tmp_path: Path,
+) -> ValidationCommandResult:
+    stdout_path = tmp_path / "setup_later_failure.stdout"
+    stderr_path = tmp_path / "setup_later_failure.stderr"
+    stdout_path.write_text("setup retry stdout\n", encoding="utf-8")
+    stderr_path.write_text("local post-install hook failed\n", encoding="utf-8")
+    setup_metadata = _setup_dependency_metadata(retry_exhausted=False)
+    setup_metadata.update(
+        {
+            "recovered": False,
+            "attempts": [
+                {
+                    "reason_code": SETUP_DEPENDENCY_NETWORK_FAILURE,
+                    "command": "uv sync --extra dev",
+                    "package": "docker==7.1.0",
+                    "host": "files.pythonhosted.org",
+                    "transient_category": "dns",
+                    "retryable": True,
+                    "attempt": 1,
+                    "retry_number": 1,
+                }
+            ],
+            "stream_ids": {},
+        }
+    )
+    return ValidationCommandResult(
+        command="uv sync --extra dev",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        phase="setup",
+        reason_code="COMMAND_FAILED",
+        retry_count=1,
+        metadata={"setup_dependency_network": setup_metadata},
+    )
+
+
 class _SetupDependencyValidation(_RecordingValidation):
     def __init__(self, setup_result: ValidationResult, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -3493,6 +3532,64 @@ class TestExecutorCoverageEdges:
             assert terminal.payload is not None
             assert terminal.payload["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
             assert terminal.payload["details"]["package"] == "docker==7.1.0"
+
+        assert validation.calls == [("setup", "pre_agent")]
+        assert fake.calls == []
+
+    @pytest.mark.unit
+    async def test_executor_setup_dependency_retry_then_later_setup_failure_records_retry_without_terminal_setup_reason(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(
+            factory,
+            resolved_profile={
+                "name": "setup-retry",
+                "phases": {"setup": ["uv sync --extra dev"]},
+            },
+        )
+        validation = _SetupDependencyValidation(
+            ValidationResult(
+                commands=[
+                    _setup_dependency_then_later_failure_command_result(tmp_path),
+                ]
+            )
+        )
+        executor = _make_executor(fake, factory, tmp_path, validation=validation)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "service_startup_failure"
+            assert ws.failure_message == "profile setup failed: uv sync --extra dev"
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+            retry_events = [
+                event
+                for event in events
+                if event.event_type == "workspace.setup_dependency_network_retry"
+            ]
+            exhausted_events = [
+                event
+                for event in events
+                if event.event_type == "workspace.setup_dependency_network_retry_exhausted"
+            ]
+            assert len(retry_events) == 1
+            assert exhausted_events == []
+            retry_payload = retry_events[0].payload
+            assert isinstance(retry_payload, dict)
+            assert retry_events[0].reason_code == SETUP_DEPENDENCY_NETWORK_RETRY
+            assert retry_payload["reason_code"] == SETUP_DEPENDENCY_NETWORK_RETRY
+            assert retry_payload["failure_reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
+            assert retry_payload["retry_count"] == 1
+            assert retry_payload["retry_exhausted"] is False
+            terminal = ws.events[-1]
+            assert terminal.reason_code == "SERVICE_STARTUP_FAILURE"
+            assert terminal.payload is None
 
         assert validation.calls == [("setup", "pre_agent")]
         assert fake.calls == []

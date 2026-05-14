@@ -699,7 +699,9 @@ async def test_setup_dependency_retry_logs_redact_and_truncate_command_credentia
 
 
 @pytest.mark.unit
-async def test_setup_dependency_retry_reclassifies_only_current_attempt(tmp_path: Path) -> None:
+async def test_setup_dependency_retry_preserves_metadata_when_later_failure_reclassifies(
+    tmp_path: Path,
+) -> None:
     fake = FakeCommandRunner()
     val = ValidationRunner(
         runner=fake,
@@ -728,7 +730,15 @@ async def test_setup_dependency_retry_reclassifies_only_current_attempt(tmp_path
     assert len(fake.calls) == 2
     assert result.commands[0].reason_code == "COMMAND_FAILED"
     assert result.commands[0].retry_count == 1
-    assert "setup_dependency_network" not in result.commands[0].metadata
+    retry_metadata = result.commands[0].metadata["setup_dependency_network"]
+    assert retry_metadata["retry_count"] == 1
+    assert retry_metadata["retry_budget"] == 2
+    assert retry_metadata["retry_exhausted"] is False
+    assert retry_metadata["recovered"] is False
+    assert retry_metadata["package"] == "docker==7.1.0"
+    assert retry_metadata["host"] == "files.pythonhosted.org"
+    assert retry_metadata["attempts"][0]["attempt"] == 1
+    assert retry_metadata["attempts"][0]["retry_number"] == 1
 
 
 @pytest.mark.unit
