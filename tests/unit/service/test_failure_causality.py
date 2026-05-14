@@ -380,7 +380,7 @@ async def test_primary_failure_snapshot_ignores_stale_embedded_primary_after_res
 
 
 @pytest.mark.unit
-async def test_epoch_reset_detection_uses_same_timestamp_event_id_tiebreaker(
+async def test_epoch_reset_detection_treats_same_timestamp_reset_as_epoch_boundary(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     same_tick = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -395,7 +395,7 @@ async def test_epoch_reset_detection_uses_same_timestamp_event_id_tiebreaker(
             test_commands=[],
         )
         failed_event = WorkspaceEvent(
-            id="evt_order_tie_1",
+            id="evt_zzzzzzzzzzzzzzzzzzzzzzzz",
             workspace_id=workspace.id,
             event_type="workspace.state_changed",
             old_state=WorkspaceStatus.running.value,
@@ -405,7 +405,7 @@ async def test_epoch_reset_detection_uses_same_timestamp_event_id_tiebreaker(
             occurred_at=same_tick,
         )
         reset_event = WorkspaceEvent(
-            id="evt_order_tie_2",
+            id="evt_aaaaaaaaaaaaaaaaaaaaaaaa",
             workspace_id=workspace.id,
             event_type="workspace.state_changed",
             old_state=WorkspaceStatus.failed.value,
@@ -417,6 +417,7 @@ async def test_epoch_reset_detection_uses_same_timestamp_event_id_tiebreaker(
         session.add_all([failed_event, reset_event])
         await session.flush()
 
+        assert reset_event.id < failed_event.id
         reset_detected = await failure_causality_service._has_failure_epoch_reset_after(
             session,
             workspace.id,
@@ -427,7 +428,7 @@ async def test_epoch_reset_detection_uses_same_timestamp_event_id_tiebreaker(
 
 
 @pytest.mark.unit
-async def test_primary_failure_snapshot_ignores_same_timestamp_epoch_reset(
+async def test_primary_failure_snapshot_ignores_same_timestamp_epoch_reset_without_id_order(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     same_tick = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -459,7 +460,7 @@ async def test_primary_failure_snapshot_ignores_same_timestamp_epoch_reset(
             if event.new_state == WorkspaceStatus.failed.value
             and event.reason_code == "CLEANUP_FAILED"
         )
-        stale_failed_event.id = "evt_same_timestamp_1"
+        stale_failed_event.id = "evt_zzzzzzzzzzzzzzzzzzzzzzzz"
         stale_failed_event.occurred_at = same_tick
 
         workspace.status = WorkspaceStatus.monitoring_pr.value
@@ -476,10 +477,11 @@ async def test_primary_failure_snapshot_ignores_same_timestamp_epoch_reset(
                 },
             },
         )
-        reset_event.id = "evt_same_timestamp_2"
+        reset_event.id = "evt_aaaaaaaaaaaaaaaaaaaaaaaa"
         reset_event.old_state = WorkspaceStatus.failed.value
         reset_event.new_state = WorkspaceStatus.monitoring_pr.value
         reset_event.occurred_at = same_tick
+        assert reset_event.id < stale_failed_event.id
 
         workspace.status = WorkspaceStatus.failed.value
         workspace.failure_reason = FailureReason.agent_failure.value

@@ -264,7 +264,7 @@ async def _has_failure_epoch_reset_after(
         select(WorkspaceEvent.id)
         .where(
             *_failure_epoch_reset_conditions(workspace_id),
-            _event_sorts_after(event),
+            _event_occurs_after_or_at_same_tick(event),
         )
         .limit(1)
     )
@@ -280,7 +280,7 @@ async def _latest_failure_epoch_reset_before(
         select(WorkspaceEvent)
         .where(
             *_failure_epoch_reset_conditions(workspace_id),
-            _event_sorts_before(event),
+            _event_occurs_before_or_at_same_tick(event),
         )
         .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
         .limit(1)
@@ -326,24 +326,14 @@ def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bo
     )
 
 
-def _event_sorts_after(event: WorkspaceEvent) -> ColumnElement[bool]:
-    return or_(
-        WorkspaceEvent.occurred_at > event.occurred_at,
-        and_(
-            WorkspaceEvent.occurred_at == event.occurred_at,
-            WorkspaceEvent.id > event.id,
-        ),
-    )
+def _event_occurs_after_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[bool]:
+    # Event IDs are uuid4-derived, so equal timestamps cannot be ordered by ID.
+    return WorkspaceEvent.occurred_at >= event.occurred_at
 
 
-def _event_sorts_before(event: WorkspaceEvent) -> ColumnElement[bool]:
-    return or_(
-        WorkspaceEvent.occurred_at < event.occurred_at,
-        and_(
-            WorkspaceEvent.occurred_at == event.occurred_at,
-            WorkspaceEvent.id < event.id,
-        ),
-    )
+def _event_occurs_before_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[bool]:
+    # Same-timestamp resets still separate failure epochs without a sequence key.
+    return WorkspaceEvent.occurred_at <= event.occurred_at
 
 
 def _validation_run_snapshot(run: ValidationRun) -> dict[str, Any]:
