@@ -547,10 +547,12 @@ _SETUP_DEPENDENCY_OPTION_VALUE_FLAGS = frozenset(
         "--timeout",
         "--trusted-host",
         "--userconfig",
+        "--workspace",
         "-C",
         "-b",
         "-f",
         "-p",
+        "-w",
     }
 )
 _PYTHON_OPTION_VALUE_FLAGS = frozenset({"-W", "-X"})
