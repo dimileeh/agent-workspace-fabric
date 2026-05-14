@@ -22,6 +22,8 @@ from awf.runtime.validation import (
     HEALTHCHECK_INVALID_CONFIGURATION,
     PROFILE_VALIDATION_TOOL_UNAVAILABLE,
     SETUP_DEPENDENCY_NETWORK_FAILURE,
+    SETUP_DEPENDENCY_NETWORK_RETRY,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
@@ -589,6 +591,8 @@ async def test_setup_dependency_retry_logs_redact_and_truncate_command_credentia
         for event in captured
         if event["event"] == "validation.setup_dependency_network_retry_exhausted"
     )
+    assert retry_log["reason_code"] == SETUP_DEPENDENCY_NETWORK_RETRY
+    assert exhausted_log["reason_code"] == SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED
     for log_entry in (retry_log, exhausted_log):
         command = str(log_entry["command"])
         assert raw_secret not in command

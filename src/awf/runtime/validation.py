@@ -1322,7 +1322,7 @@ class ValidationRunner:
                         transient_category=setup_dependency_classification.transient_category,
                         retry_count=setup_retry_count,
                         budget=self._setup_retry_budget,
-                        reason_code=SETUP_DEPENDENCY_NETWORK_FAILURE,
+                        reason_code=SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
                     )
                     return ValidationResult(commands=results)
 
