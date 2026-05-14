@@ -1689,7 +1689,7 @@ def workspace_adopt_pr(
 
 @workspace_app.command("list")
 def workspace_list(
-    status: list[WorkspaceStatus] = typer.Option(None, "--status"),
+    status: list[WorkspaceStatus] | None = typer.Option(None, "--status"),
     agent: AgentRuntime | None = typer.Option(None, "--agent"),
     repo_url: str | None = typer.Option(None, "--repo-url"),
     limit: int = typer.Option(50, "--limit"),
