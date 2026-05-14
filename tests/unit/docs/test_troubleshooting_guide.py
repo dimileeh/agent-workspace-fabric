@@ -69,7 +69,7 @@ def test_troubleshooting_guide_has_actionable_commands() -> None:
         "awf workspace logs",
         "awf workspace runtime",
         "awf workspace log <workspace_id> <stream_id>",
-        "GET /v1/workspaces/{workspace_id}/logs\n",
+        "GET /v1/workspaces/{workspace_id}/logs`\n",
         "GET /v1/workspaces/{workspace_id}/events",
         "GET /v1/workspaces/{workspace_id}/operations",
         "GET /v1/workspaces/{workspace_id}/runtime",
