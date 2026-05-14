@@ -202,7 +202,7 @@ async def test_create_v2_registry_status_tracks_mcp_payload_parity_gap() -> None
 
     if missing:
         assert capability.parity_status == "MCP partial"
-        assert capability.parity_backlog_slice.startswith("TODO§")
+        assert capability.parity_backlog_slice == "TODO§create-v2-parity"
     else:
         assert capability.parity_status == "MCP implemented"
         assert capability.parity_backlog_slice == "—"
