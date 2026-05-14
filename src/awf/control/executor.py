@@ -1000,7 +1000,7 @@ def _setup_dependency_network_event_payload(
     payload = dict(details)
     payload["reason_code"] = reason_code
     payload["failure_reason_code"] = SETUP_DEPENDENCY_NETWORK_FAILURE
-    return cast(dict[str, Any], redact_audit_value(payload))
+    return payload
 
 
 def _metadata_number(metadata: Mapping[str, object], key: str) -> int | float | None:
