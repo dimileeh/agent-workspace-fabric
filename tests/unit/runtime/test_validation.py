@@ -282,6 +282,18 @@ def test_setup_dependency_network_classifier_skips_non_install_package_manager_v
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_does_not_use_command_for_context_fallback() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./sync-packages.sh",
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "command",
     [

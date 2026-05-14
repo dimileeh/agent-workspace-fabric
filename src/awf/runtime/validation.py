@@ -663,7 +663,7 @@ def _classify_setup_dependency_network_failure(
     raw_context = f"{command}\n{raw_output}"
     if _SETUP_DETERMINISTIC_FAILURE_RE.search(raw_context):
         return None
-    if not _looks_like_dependency_setup(command=command, output=raw_context):
+    if not _looks_like_dependency_setup(command=command, output=raw_output):
         return None
     transient_category = _setup_transient_category(raw_context)
     if transient_category is None:
@@ -948,6 +948,8 @@ def _with_setup_dependency_network_metadata(
 
 
 def _setup_dependency_retry_applies(step: ProfileExecutionCommand) -> bool:
+    # Optional commands are finalized before retry classification; keep dependency-network
+    # retries scoped to required setup gates.
     return step.phase == "setup" and not step.database_hook and step.command.required
 
 
@@ -961,9 +963,9 @@ class ValidationRunner:
         artifacts_dir: Path,
         log_store: LogStore | None = None,
         setup_retry_budget: int = _SETUP_DEPENDENCY_NETWORK_DEFAULT_RETRY_BUDGET,
-        setup_retry_backoff_seconds: tuple[float, ...] = (
-            _SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS
-        ),
+        setup_retry_backoff_seconds: tuple[
+            float, ...
+        ] = _SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS,
     ) -> None:
         self._runner = runner
         self._artifacts_dir = artifacts_dir
