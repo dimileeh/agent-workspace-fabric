@@ -30,7 +30,8 @@ HTTP pinned-request extension handling explicit.
    `extensions = None` for pinned HTTP requests.
 3. Run the narrow callback service test subset, then run relevant lint/type
    checks if time permits.
-4. Record validation evidence in the matching validation document.
+4. Record validation evidence in
+   `plans/review_comment_4454403868_callback_delivery_VALIDATION.md`.
 5. Stage only changed files and commit locally with the requested review-comment
    message format.
 
