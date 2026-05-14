@@ -551,3 +551,121 @@ async def test_workspace_event_order_migration_backfills_existing_events(
         ("ws_event_order_a", 4),
         ("ws_event_order_b", 2),
     ]
+
+
+@pytest.mark.unit
+async def test_workspace_event_order_migration_orders_old_writer_events_after_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    async with postgres_empty_test_url() as database_url:
+        env = {
+            **os.environ,
+            "AWF_DATABASE_URL": database_url,
+        }
+
+        def _alembic(*args: str) -> None:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                cwd=repo_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        monkeypatch.chdir(repo_root)
+        _alembic("upgrade", "d6e7f8a9b0c1")
+
+        engine = make_engine(database_url)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO workspaces (
+                            id, status, version, repo_url, branch_base,
+                            task_title, task_prompt, agent, test_commands,
+                            requires_database, created_at, updated_at
+                        )
+                        VALUES (
+                            'ws_event_order_old_writer', 'failed', 0,
+                            'git@example.com:repo.git', 'main',
+                            'old writer row', 'do work', 'codex', '[]'::json,
+                            false, '2026-05-01 00:00:00+00',
+                            '2026-05-01 00:00:00+00'
+                        )
+                        """
+                    )
+                )
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO workspace_events (
+                            id, workspace_id, event_type, old_state,
+                            new_state, reason_code, payload, occurred_at
+                        )
+                        VALUES (
+                            'evt_event_order_existing',
+                            'ws_event_order_old_writer',
+                            'workspace.state_changed', 'running',
+                            'failed', 'EXISTING_FAILURE', '{}'::json,
+                            '2026-05-01 00:00:01+00'
+                        )
+                        """
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+        _alembic("upgrade", "head")
+
+        engine = make_engine(database_url)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO workspace_events (
+                            id, workspace_id, event_type, old_state,
+                            new_state, reason_code, payload, occurred_at
+                        )
+                        VALUES (
+                            'evt_event_order_old_writer',
+                            'ws_event_order_old_writer',
+                            'workspace.state_changed', 'validating',
+                            'failed', 'OLD_WORKER_FAILURE', '{}'::json,
+                            '2026-05-01 00:00:02+00'
+                        )
+                        """
+                    )
+                )
+                rows = (
+                    await conn.execute(
+                        text(
+                            """
+                            SELECT id, event_order
+                            FROM workspace_events
+                            WHERE workspace_id = 'ws_event_order_old_writer'
+                            ORDER BY event_order
+                            """
+                        )
+                    )
+                ).all()
+                workspace_version = await conn.scalar(
+                    text(
+                        """
+                        SELECT version
+                        FROM workspaces
+                        WHERE id = 'ws_event_order_old_writer'
+                        """
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    assert rows == [
+        ("evt_event_order_existing", 1),
+        ("evt_event_order_old_writer", 2),
+    ]
+    assert workspace_version == 2

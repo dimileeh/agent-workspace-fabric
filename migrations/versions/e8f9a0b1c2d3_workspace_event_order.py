@@ -27,6 +27,46 @@ def upgrade() -> None:
     op.execute(
         sa.text("ALTER TABLE workspace_events ADD COLUMN IF NOT EXISTS event_order INTEGER")
     )
+    # Bootstrap upgrades run migrations before recreating already-running API
+    # and worker containers. Keep legacy writers that omit event_order safe
+    # during that window by assigning the next workspace-local order in the DB.
+    op.execute(
+        sa.text(
+            """
+            CREATE OR REPLACE FUNCTION awf_assign_workspace_event_order()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF NEW.event_order IS NULL THEN
+                    UPDATE workspaces
+                    SET version = version + 1
+                    WHERE id = NEW.workspace_id
+                    RETURNING version INTO NEW.event_order;
+                END IF;
+
+                RETURN NEW;
+            END;
+            $$;
+            """
+        )
+    )
+    op.execute(
+        sa.text(
+            "DROP TRIGGER IF EXISTS trg_workspace_events_assign_event_order "
+            "ON workspace_events"
+        )
+    )
+    op.execute(
+        sa.text(
+            """
+            CREATE TRIGGER trg_workspace_events_assign_event_order
+            BEFORE INSERT ON workspace_events
+            FOR EACH ROW
+            EXECUTE FUNCTION awf_assign_workspace_event_order()
+            """
+        )
+    )
     # Keep the short lock wait on deploy-facing DDL only. The backfill may need
     # to wait behind ordinary row writers, while statement_timeout still bounds
     # total runtime.
@@ -98,4 +138,11 @@ def downgrade() -> None:
             if_exists=True,
             postgresql_concurrently=True,
         )
+    op.execute(
+        sa.text(
+            "DROP TRIGGER IF EXISTS trg_workspace_events_assign_event_order "
+            "ON workspace_events"
+        )
+    )
+    op.execute(sa.text("DROP FUNCTION IF EXISTS awf_assign_workspace_event_order()"))
     op.execute(sa.text("ALTER TABLE workspace_events DROP COLUMN IF EXISTS event_order"))
