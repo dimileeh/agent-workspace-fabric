@@ -969,6 +969,49 @@ async def test_remonitor_failed_workspace_with_pr_reenters_monitoring(
 
 
 @pytest.mark.unit
+async def test_remonitor_failed_workspace_reserves_state_reset_event_order(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/43"
+    workspace.pr_number = 43
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+    calls: list[tuple[str, int]] = []
+    original_reserve = WorkspaceRepository._reserve_workspace_event_orders
+
+    async def _recording_reserve(
+        self: WorkspaceRepository,
+        reserved_workspace: Workspace,
+        *,
+        count: int,
+    ) -> int:
+        calls.append((reserved_workspace.id, count))
+        return await original_reserve(self, reserved_workspace, count=count)
+
+    monkeypatch.setattr(
+        WorkspaceRepository,
+        "_reserve_workspace_event_orders",
+        _recording_reserve,
+    )
+
+    await service.remonitor_workspace(
+        workspace.id,
+        reason="reattach failed PR",
+        idempotency_key="remonitor-failed-pr-reserve-order",
+        expected_version=workspace.version,
+    )
+    events = await _events(session, workspace.id)
+
+    assert calls == [(workspace.id, 1)]
+    assert workspace.version == 2
+    assert events[0].event_order == 2
+    assert events[0].old_state == WorkspaceStatus.failed.value
+    assert events[0].new_state == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
 async def test_remonitor_failed_workspace_cancels_stale_pr_monitor_recovery_ops(
     session: AsyncSession,
 ) -> None:

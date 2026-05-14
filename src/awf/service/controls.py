@@ -572,7 +572,7 @@ class WorkspaceControlService:
             event_payload["cancelled_recovery_reason_code"] = _OPERATOR_REMONITOR_REASON_CODE
             event_payload["cancelled_recovery_requested_action"] = OperationType.remonitor.value
         if state_reset is not None:
-            workspace.version += 1
+            event_order = await repo._reserve_workspace_event_orders(workspace, count=1)
             workspace.events.append(
                 WorkspaceEvent(
                     id=new_event_id(),
@@ -582,7 +582,7 @@ class WorkspaceControlService:
                     new_state=str(state_reset["to"]),
                     reason_code=_OPERATOR_REMONITOR_REASON_CODE,
                     payload=event_payload,
-                    event_order=workspace.version,
+                    event_order=event_order,
                 )
             )
             await self._session.flush()
