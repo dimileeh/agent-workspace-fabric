@@ -12,6 +12,7 @@ _ENVELOPE_KEYS = {"items", "next_cursor", "has_more", "limit", "cursor"}
 
 
 def _overview_cursor() -> str:
+    """Generate a stable cursor for the workspace overview test."""
     payload = {
         "created_at": "2026-04-29T00:00:00+00:00",
         "workspace_id": "ws_envelope_cursor",
@@ -30,6 +31,7 @@ def _assert_standard_envelope(
     limit: int,
     cursor: str | None = None,
 ) -> None:
+    """Assert that a response payload conforms to the standard pagination envelope."""
     assert set(body) >= _ENVELOPE_KEYS
     assert isinstance(body["items"], list)
     assert body["limit"] == limit
@@ -57,12 +59,23 @@ def _assert_standard_envelope(
 )
 async def test_enveloped_list_endpoints_expose_standard_pagination_metadata(
     client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
     path: str,
     params: dict[str, object],
     expected_limit: int,
     expected_cursor: str | None,
 ) -> None:
-    response = await client.get(path, params=params)
+    """Test that listing endpoints return a standard pagination metadata envelope."""
+    from awf.common.config import get_settings
+
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+    get_settings.cache_clear()
+    try:
+        headers = {"Authorization": "Bearer secret"}
+        response = await client.get(path, params=params, headers=headers)
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
 
     assert response.status_code == 200
     _assert_standard_envelope(
@@ -76,6 +89,7 @@ async def test_enveloped_list_endpoints_expose_standard_pagination_metadata(
 async def test_enveloped_list_preserves_representative_item_shape(
     client: AsyncClient,
 ) -> None:
+    """Test that list operations preserve the required shape of items inside the envelope."""
     create = await client.post(
         "/v1/workspaces",
         json={
@@ -110,6 +124,7 @@ async def test_enveloped_list_preserves_representative_item_shape(
 async def test_workspace_list_keeps_legacy_bare_array_by_default(
     client: AsyncClient,
 ) -> None:
+    """Test that the legacy workspace list endpoint returns a bare array by default."""
     response = await client.get("/v1/workspaces")
 
     assert response.status_code == 200
