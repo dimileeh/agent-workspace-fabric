@@ -883,9 +883,13 @@ async def test_setup_dependency_retry_does_not_consume_flaky_retry_budget(
     command = result.commands[0]
     assert command.retry_count == 2
     retry_metadata = command.metadata["setup_dependency_network"]
-    assert retry_metadata["retry_count"] == 2
+    assert retry_metadata["retry_count"] == 1
+    assert retry_metadata["setup_retry_count"] == 1
+    assert retry_metadata["flaky_retry_count"] == 1
+    assert retry_metadata["total_retry_count"] == 2
     assert retry_metadata["retry_budget"] == 2
     assert retry_metadata["retry_exhausted"] is False
+    assert len(retry_metadata["attempts"]) == 1
     assert retry_metadata["attempts"][0]["attempt"] == 1
     assert retry_metadata["attempts"][0]["retry_number"] == 1
 
