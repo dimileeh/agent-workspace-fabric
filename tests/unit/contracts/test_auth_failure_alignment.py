@@ -317,7 +317,7 @@ def test_every_registry_protected_cli_command_propagates_auth_failure(
     result = _runner.invoke(cli_app, _protected_cli_args(capability_name))
 
     assert result.exit_code != 0
-    assert "Authorization" in captured.get("headers", {})
+    assert "Authorization" in captured["headers"]
     assert captured["headers"]["Authorization"] == "Bearer wrong-token"
     combined = (result.output or "") + (result.stderr or "")
     assert "UNAUTHORIZED" in combined
