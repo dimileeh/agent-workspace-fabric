@@ -2040,7 +2040,10 @@ class TestGlobalEvents:
         self,
         mcp,
     ) -> None:  # type: ignore[no-untyped-def]
-        result = await mcp.call_tool("awf_list_events", {"limit": 50})
+        result = await mcp.call_tool(
+            "awf_list_events",
+            {"event_type": "test.global_events.empty_probe", "limit": 50},
+        )
         assert isinstance(result, CallToolResult)
         assert result.isError is False
         payload = result.structuredContent

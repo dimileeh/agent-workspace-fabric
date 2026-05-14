@@ -133,6 +133,7 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
     "Workspace events": (
         "tests/unit/mcp/test_mcp_server.py::TestGlobalEvents::test_list_events_returns_empty_list",
         "tests/unit/mcp/test_mcp_server.py::TestGlobalEvents::test_list_events_returns_events_across_workspaces",
+        "tests/unit/mcp/test_mcp_server.py::TestWorkspaceEvents::test_lists_workspace_events_with_envelope_and_has_more",
         "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_empty_read_only_operator_surfaces_match_rest_payloads",
     ),
     "Optimistic concurrency on controls": (
