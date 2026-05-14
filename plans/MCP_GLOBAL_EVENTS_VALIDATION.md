@@ -1,7 +1,7 @@
 # Validation: MCP Global Events Parity (P1)
 
 ## Plan reference
-`plans/ws_32a3971e4aa147c08ed46683.md`
+`plans/MCP_GLOBAL_EVENTS_PLAN.md`
 
 ## Summary
 
