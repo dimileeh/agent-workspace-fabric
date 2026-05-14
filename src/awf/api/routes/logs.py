@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
 from awf.api.schemas import (
+    ErrorResponse,
     WorkspaceLogListResponse,
     WorkspaceLogReadResponse,
     WorkspaceLogStreamResponse,
@@ -17,7 +18,11 @@ from awf.api.schemas import (
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.runtime.logs import read_log_chunk
 
-router = APIRouter(prefix="/v1/workspaces/{workspace_id}/logs", tags=["logs"])
+router = APIRouter(
+    prefix="/v1/workspaces/{workspace_id}/logs",
+    tags=["logs"],
+    responses={401: {"model": ErrorResponse, "description": "Unauthorized"}},
+)
 
 
 @router.get(
