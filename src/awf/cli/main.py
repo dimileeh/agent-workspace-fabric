@@ -334,9 +334,10 @@ def _emit_profile_preview_pretty(payload: dict[str, Any]) -> None:
     typer.echo(f"Validation: {'; '.join(validation) if validation else 'none declared'}")
 
     coverage = _mapping_value(_mapping_value(profile.get("validation")).get("coverage"))
-    target = coverage.get("target")
-    if target is not None:
-        typer.echo(f"Coverage target: {_format_coverage_target(target)}")
+    coverage_target = _profile_coverage_target(coverage)
+    if coverage_target is not None:
+        target, fractional = coverage_target
+        typer.echo(f"Coverage target: {_format_coverage_target(target, fractional=fractional)}")
 
     network_posture_value = payload.get("network_posture")
     if isinstance(network_posture_value, Mapping):
@@ -480,9 +481,31 @@ def _text_value(value: object, default: str) -> str:
     return value if isinstance(value, str) and value else default
 
 
-def _format_coverage_target(value: object) -> str:
-    if isinstance(value, int | float) and 0 <= value <= 1:
-        return f"{value * 100:.1f}%"
+def _profile_coverage_target(coverage: Mapping[str, object]) -> tuple[object, bool] | None:
+    minimum_percent = coverage.get("minimum_percent")
+    if minimum_percent is not None:
+        return (minimum_percent, False) if _has_positive_coverage_target(minimum_percent) else None
+
+    legacy_target = coverage.get("target")
+    if legacy_target is None or not _has_positive_coverage_target(legacy_target):
+        return None
+    return legacy_target, True
+
+
+def _has_positive_coverage_target(value: object) -> bool:
+    if isinstance(value, int | float):
+        return value > 0
+    if isinstance(value, str):
+        return bool(value.strip())
+    return value is not None
+
+
+def _format_coverage_target(value: object, *, fractional: bool = False) -> str:
+    if isinstance(value, int | float):
+        percent = float(value)
+        if fractional and 0 <= percent <= 1:
+            percent *= 100
+        return f"{percent:.1f}%"
     return str(value)
 
 
