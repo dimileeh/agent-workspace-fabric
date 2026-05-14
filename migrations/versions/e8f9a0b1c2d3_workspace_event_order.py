@@ -30,6 +30,9 @@ def upgrade() -> None:
     # Bootstrap upgrades run migrations before recreating already-running API
     # and worker containers. Keep legacy writers that omit event_order safe
     # during that window by assigning the next workspace-local order in the DB.
+    # Old writers can also flush their own ORM-side version bump before this
+    # trigger advances the row again; that leaves version ahead of max(event_order)
+    # but preserves unique monotonic event ordering. Keep this overlap short.
     op.execute(
         sa.text(
             """

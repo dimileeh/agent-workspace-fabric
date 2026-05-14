@@ -1123,15 +1123,22 @@ class WorkspaceControlService:
                     reason_code=failed_reason_code,
                     payload=failed_transition_payload,
                 )
-            elif workspace_status == WorkspaceStatus.failed and primary_failure is not None:
+            elif workspace_status == WorkspaceStatus.failed:
                 # The workspace is already failed, so transition() is not used
                 # because there is no valid failed -> failed state-machine edge.
-                # Emit the public secondary-failure event only when it can
-                # carry the primary evidence that subscribers expect.
-                secondary_failure_recorded_payload = {
-                    **failed_transition_payload,
+                # Emit the secondary-failure event so cleanup faults remain in
+                # the internal causality event stream even when the original
+                # failure row never carried durable primary evidence.
+                secondary_failure_recorded_payload: dict[str, Any] = {
                     "synthetic": True,
+                    SECONDARY_FAILURE_KEY: secondary_failure,
+                    SECONDARY_FAILURES_KEY: [
+                        *previous_secondary_failures,
+                        secondary_failure,
+                    ],
                 }
+                if primary_failure is not None:
+                    secondary_failure_recorded_payload.update(failed_transition_payload)
                 await repo.add_event(
                     workspace,
                     event_type=SECONDARY_FAILURE_RECORDED_EVENT_TYPE,

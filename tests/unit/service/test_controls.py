@@ -595,7 +595,7 @@ async def test_destroy_workspace_records_cleanup_failures(
 
 
 @pytest.mark.unit
-async def test_destroy_cleanup_failure_without_primary_evidence_skips_secondary_event(
+async def test_destroy_cleanup_failure_without_primary_evidence_records_secondary_event(
     engine: AsyncEngine,
 ) -> None:
     factory = make_session_factory(engine)
@@ -654,11 +654,24 @@ async def test_destroy_cleanup_failure_without_primary_evidence_skips_secondary_
             operation_type=OperationType.destroy,
         )
         events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        snapshot = await load_failure_causality_snapshot(session, workspace)
 
     secondary_failure_events = [
         event for event in events if event.event_type == "workspace.secondary_failure_recorded"
     ]
-    assert secondary_failure_events == []
+    assert len(secondary_failure_events) == 1
+    secondary_failure_event = secondary_failure_events[0]
+    assert secondary_failure_event.old_state == WorkspaceStatus.failed.value
+    assert secondary_failure_event.new_state == WorkspaceStatus.failed.value
+    assert secondary_failure_event.reason_code == "CLEANUP_FAILED"
+    assert secondary_failure_event.payload is not None
+    assert secondary_failure_event.payload["synthetic"] is True
+    assert "primary_failure" not in secondary_failure_event.payload
+    assert secondary_failure_event.payload["secondary_failure"]["reason_code"] == "CLEANUP_FAILED"
+    assert secondary_failure_event.payload["secondary_failure"]["message"] == "volume busy"
+    assert secondary_failure_event.payload["secondary_failures"] == [
+        secondary_failure_event.payload["secondary_failure"]
+    ]
     assert response.status == WorkspaceStatus.failed
     assert response.operation_status == OperationStatus.failed.value
     assert workspace.failure_reason == "cleanup_failure"
@@ -666,6 +679,8 @@ async def test_destroy_cleanup_failure_without_primary_evidence_skips_secondary_
     assert operations[0].result is not None
     assert "primary_failure" not in operations[0].result
     assert "secondary_failure" not in operations[0].result
+    assert snapshot is not None
+    assert snapshot.secondary_failures[-1]["reason_code"] == "CLEANUP_FAILED"
 
 
 @pytest.mark.unit
