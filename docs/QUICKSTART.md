@@ -90,5 +90,6 @@ awf profile init . --write
 Next:
 
 - [Project Onboarding](PROJECT_ONBOARDING.md)
+- [PR Monitor Adoption](PR_MONITOR_ADOPTION.md)
 - [DX Smoke Command](SMOKE_COMMAND.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
