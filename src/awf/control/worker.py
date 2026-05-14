@@ -1602,6 +1602,8 @@ class ControlWorker:
                 claim_cleanup=claim_cleanup,
             )
             primary_failure = await load_primary_failure_snapshot(session, ws)
+            # Active-execution preservation writes diagnostic refresh/non-state
+            # payloads; causality lookup reads failed state-change events only.
             payload = attach_primary_failure(payload, primary_failure)
             operation = await OperationRepository(session).create(
                 workspace_id=candidate.workspace_id,

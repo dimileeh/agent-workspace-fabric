@@ -170,7 +170,6 @@ def build_preserved_failure_payload(
     secondary = _jsonable_mapping(secondary_failure)
     payload: dict[str, Any] = dict(_jsonable_mapping(extra or {}))
     secondary_failures = [
-        *list(_secondary_failure_history(payload)),
         *[_jsonable_mapping(item) for item in previous_secondary_failures],
         secondary,
     ]

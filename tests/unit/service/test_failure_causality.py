@@ -70,10 +70,14 @@ def test_preserved_failure_payload_accumulates_prior_secondary_failures() -> Non
 
 
 @pytest.mark.unit
-def test_preserved_failure_payload_normalizes_legacy_secondary_failure_history() -> None:
-    prior_secondary = {
+def test_preserved_failure_payload_ignores_secondary_history_in_extra_payload() -> None:
+    ignored_secondary = {
         "failure_reason": "cleanup_failure",
         "reason_code": "CLEANUP_FAILED",
+    }
+    prior_secondary = {
+        "failure_reason": "runtime_stranding",
+        "reason_code": "RUNTIME_STRANDED",
     }
     current_secondary = {
         "failure_reason": FailureReason.infrastructure_failure.value,
@@ -87,7 +91,8 @@ def test_preserved_failure_payload_normalizes_legacy_secondary_failure_history()
             "message": "pytest failed",
         },
         secondary_failure=current_secondary,
-        extra={"secondary_failure": prior_secondary},
+        extra={"secondary_failure": ignored_secondary},
+        previous_secondary_failures=(prior_secondary,),
     )
 
     assert payload["secondary_failure"] == current_secondary
