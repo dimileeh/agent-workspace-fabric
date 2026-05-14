@@ -38,6 +38,7 @@ from awf.db.repositories import (
 
 CALLBACK_USER_AGENT = "AWF-Callback-Delivery/1.0"
 _CALLBACK_EXCEPTION_TRACEBACK_LIMIT = 4000
+_NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 _log = get_logger(__name__)
 
 
@@ -607,6 +608,8 @@ def _is_public_ip(address: str) -> bool:
     ipv4_mapped = getattr(value, "ipv4_mapped", None)
     if isinstance(ipv4_mapped, ipaddress.IPv4Address):
         public_address = ipv4_mapped
+    elif isinstance(value, ipaddress.IPv6Address) and value in _NAT64_WELL_KNOWN_PREFIX:
+        public_address = ipaddress.IPv4Address(int(value) & 0xFFFFFFFF)
     return public_address.is_global and not public_address.is_multicast
 
 
