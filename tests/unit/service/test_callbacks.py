@@ -116,6 +116,34 @@ class _AddressFallbackPoster:
 
 
 @dataclass
+class _AddressFailurePoster:
+    failures: dict[str, Exception]
+    calls: list[_PostCall] = field(default_factory=list)
+
+    async def __call__(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        self.calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        if connect_ip_address in self.failures:
+            raise self.failures[connect_ip_address]
+        return CallbackPostResult(status_code=204)
+
+
+@dataclass
 class _FakeHttpxPost:
     url: str
     json: dict[str, Any]
@@ -953,6 +981,51 @@ async def test_callback_request_failures_log_redacted_traceback(
     assert "Traceback" in redacted_traceback
     assert "RuntimeError: transport failed Authorization: Bearer [redacted]" in (redacted_traceback)
     assert secret not in redacted_traceback
+
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_REQUEST_FAILED"
+
+
+@pytest.mark.unit
+async def test_callback_request_failures_log_all_validated_address_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: ("2606:4700:4700::1111", "1.1.1.1"),
+    )
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    poster = _AddressFailurePoster(
+        failures={
+            "1.1.1.1": TimeoutError("connect timed out"),
+            "2606:4700:4700::1111": ConnectionRefusedError("connection refused"),
+        },
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert [call.connect_ip_address for call in poster.calls] == [
+        "1.1.1.1",
+        "2606:4700:4700::1111",
+    ]
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_request_failed"
+    )
+    assert log_entry["delivery_id"] == delivery.id
+    assert log_entry["error_code"] == "CALLBACK_REQUEST_FAILED"
+    redacted_traceback = log_entry["redacted_traceback"]
+    assert "TimeoutError: connect timed out" in redacted_traceback
+    assert "ConnectionRefusedError: connection refused" in redacted_traceback
+    assert "callback connect_ip_address=1.1.1.1" in redacted_traceback
+    assert "callback connect_ip_address=2606:4700:4700::1111" in redacted_traceback
 
     stored = await _get_delivery(factory, delivery.id)
     assert stored.status == CallbackDeliveryStatus.pending.value

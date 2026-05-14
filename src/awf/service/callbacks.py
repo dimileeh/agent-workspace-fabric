@@ -367,7 +367,7 @@ async def _post_to_validated_callback_addresses(
     timeout: float,
     connect_ip_addresses: tuple[str, ...],
 ) -> CallbackPostResult:
-    last_exception: Exception | None = None
+    failures: list[Exception] = []
     for connect_ip_address in connect_ip_addresses:
         try:
             return await poster(
@@ -378,10 +378,20 @@ async def _post_to_validated_callback_addresses(
                 connect_ip_address=connect_ip_address,
             )
         except Exception as exc:  # noqa: BLE001 - later validated addresses may still work.
-            last_exception = exc
+            exc.add_note(f"callback connect_ip_address={connect_ip_address}")
+            failures.append(exc)
 
-    if last_exception is not None:
-        raise last_exception
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        failure_summary = ", ".join(
+            f"{address} ({type(exc).__name__})"
+            for address, exc in zip(connect_ip_addresses, failures, strict=True)
+        )
+        raise ExceptionGroup(
+            f"callback request failed for all validated target addresses: {failure_summary}",
+            failures,
+        )
     raise RuntimeError("validated callback target has no connect IP addresses")
 
 
