@@ -53,6 +53,7 @@ class _PostCall:
     json: dict[str, Any]
     headers: dict[str, str]
     timeout: float
+    connect_ip_address: str | None = None
 
 
 @dataclass
@@ -68,8 +69,17 @@ class _RecordingPoster:
         json: dict[str, Any],
         headers: dict[str, str],
         timeout: float,
+        connect_ip_address: str | None = None,
     ) -> CallbackPostResult:
-        self.calls.append(_PostCall(url=url, json=json, headers=headers, timeout=timeout))
+        self.calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
         if self.exc is not None:
             raise self.exc
         return CallbackPostResult(status_code=self.status_code)
@@ -81,6 +91,7 @@ class _FakeHttpxPost:
     json: dict[str, Any]
     headers: dict[str, str]
     timeout: float
+    extensions: dict[str, Any] | None = None
 
 
 @dataclass
@@ -91,7 +102,7 @@ class _FakeHttpxResponse:
 class _FakeAsyncClient:
     instances: list[_FakeAsyncClient] = []
 
-    def __init__(self) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.posts: list[_FakeHttpxPost] = []
         self.exited = False
         self.instances.append(self)
@@ -114,6 +125,7 @@ class _FakeAsyncClient:
         json: dict[str, Any],
         headers: dict[str, str],
         timeout: float,
+        extensions: dict[str, Any] | None = None,
     ) -> _FakeHttpxResponse:
         self.posts.append(
             _FakeHttpxPost(
@@ -121,6 +133,7 @@ class _FakeAsyncClient:
                 json=json,
                 headers=headers,
                 timeout=timeout,
+                extensions=extensions,
             )
         )
         return _FakeHttpxResponse(status_code=207)
@@ -396,6 +409,40 @@ async def test_default_httpx_poster_posts_json_with_timeout(
             json={"event": {"type": "workspace.state_changed"}},
             headers={"Idempotency-Key": "callback-delivery:test"},
             timeout=3.5,
+            extensions=None,
+        )
+    ]
+
+
+@pytest.mark.unit
+async def test_default_httpx_poster_pins_connection_to_validated_callback_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeAsyncClient.instances = []
+    monkeypatch.setattr(callback_service_module.httpx, "AsyncClient", _FakeAsyncClient)
+
+    result = await callback_service_module._httpx_post_json(
+        "https://operator.example.com:8443/events?attempt=1",
+        json={"event": {"type": "workspace.state_changed"}},
+        headers={"Idempotency-Key": "callback-delivery:test"},
+        timeout=3.5,
+        connect_ip_address="1.1.1.1",
+    )
+
+    assert result == CallbackPostResult(status_code=207)
+    assert len(_FakeAsyncClient.instances) == 1
+    client = _FakeAsyncClient.instances[0]
+    assert client.exited
+    assert client.posts == [
+        _FakeHttpxPost(
+            url="https://1.1.1.1:8443/events?attempt=1",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={
+                "Idempotency-Key": "callback-delivery:test",
+                "Host": "operator.example.com:8443",
+            },
+            timeout=3.5,
+            extensions={"sni_hostname": "operator.example.com"},
         )
     ]
 
@@ -587,6 +634,7 @@ async def test_successful_delivery_posts_sanitized_json_and_marks_succeeded(
     assert len(poster.calls) == 1
     call = poster.calls[0]
     assert call.url == "https://operator.example.com/events"
+    assert call.connect_ip_address == "1.1.1.1"
     assert call.headers == {
         "Content-Type": "application/json",
         "User-Agent": "AWF-Callback-Delivery/1.0",

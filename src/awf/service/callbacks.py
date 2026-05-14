@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -42,6 +42,11 @@ class CallbackPostResult:
     status_code: int
 
 
+@dataclass(frozen=True)
+class ValidatedCallbackTarget:
+    connect_ip_address: str
+
+
 class CallbackHttpPoster(Protocol):
     async def __call__(
         self,
@@ -50,6 +55,7 @@ class CallbackHttpPoster(Protocol):
         json: dict[str, Any],
         headers: dict[str, str],
         timeout: float,
+        connect_ip_address: str | None = None,
     ) -> CallbackPostResult: ...
 
 
@@ -224,7 +230,7 @@ class CallbackDeliveryService:
                 await repo.mark_attempt_started(delivery, now=self._clock())
                 await repo.sync_envelope_delivery_metadata(delivery)
                 try:
-                    _validate_callback_target(
+                    validated_target = _validate_callback_target(
                         subscription.target_url,
                         settings=self._settings,
                     )
@@ -233,6 +239,7 @@ class CallbackDeliveryService:
                         json=delivery.envelope,
                         headers=_delivery_headers(delivery),
                         timeout=float(subscription.timeout_seconds),
+                        connect_ip_address=validated_target.connect_ip_address,
                     )
                 except ValueError as exc:
                     await repo.mark_failed_or_retry(
@@ -291,9 +298,30 @@ async def _httpx_post_json(
     json: dict[str, Any],
     headers: dict[str, str],
     timeout: float,
+    connect_ip_address: str | None = None,
 ) -> CallbackPostResult:
+    request_url = url
+    request_headers = headers
+    extensions: dict[str, Any] | None = None
+    if connect_ip_address is not None:
+        request_url = _callback_url_with_connect_ip(
+            target_url=url,
+            connect_ip_address=connect_ip_address,
+        )
+        request_headers = {name: value for name, value in headers.items() if name.lower() != "host"}
+        request_headers["Host"] = _callback_host_header(url)
+        parsed = urlsplit(url)
+        if parsed.scheme == "https":
+            extensions = {"sni_hostname": parsed.hostname}
+
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=json, headers=headers, timeout=timeout)
+        response = await client.post(
+            request_url,
+            json=json,
+            headers=request_headers,
+            timeout=timeout,
+            extensions=extensions,
+        )
     return CallbackPostResult(status_code=response.status_code)
 
 
@@ -380,7 +408,7 @@ def _isoformat(value: datetime | None) -> str | None:
     return value.isoformat()
 
 
-def _validate_callback_target(target_url: str, *, settings: Settings) -> None:
+def _validate_callback_target(target_url: str, *, settings: Settings) -> ValidatedCallbackTarget:
     parsed = urlsplit(target_url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("target_url must use http or https")
@@ -400,7 +428,8 @@ def _validate_callback_target(target_url: str, *, settings: Settings) -> None:
         raise ValueError("target_url host is not allowlisted")
     if not _is_public_callback_target_host(parsed.hostname):
         raise ValueError("target_url must use a public host")
-    _validate_callback_target_dns(hostname=parsed.hostname)
+    connect_ip_address = _validate_callback_target_dns(hostname=parsed.hostname)
+    return ValidatedCallbackTarget(connect_ip_address=connect_ip_address)
 
 
 def _normalize_callback_host(hostname: str) -> str:
@@ -413,22 +442,67 @@ def _normalized_allowed_callback_hosts(
     return {_normalize_callback_host(host) for host in allowed_hosts}
 
 
-def _validate_callback_target_dns(*, hostname: str) -> None:
-    addresses = _resolve_callback_target_ip_addresses(hostname)
+def _validate_callback_target_dns(*, hostname: str) -> str:
+    addresses = tuple(_resolve_callback_target_ip_addresses(hostname))
     if not addresses:
         raise ValueError("target_url host could not be resolved")
     for address in addresses:
         if not _is_public_ip(address):
             raise ValueError("target_url resolved host is not public")
+    return addresses[0]
 
 
-def _resolve_callback_target_ip_addresses(hostname: str) -> set[str]:
+def _resolve_callback_target_ip_addresses(hostname: str) -> tuple[str, ...]:
     try:
         records = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise ValueError("target_url host resolution failed") from exc
 
-    return {address for _, _, _, _, (address, *_rest) in records if isinstance(address, str)}
+    addresses: list[str] = []
+    seen: set[str] = set()
+    for _, _, _, _, (address, *_rest) in records:
+        if not isinstance(address, str) or address in seen:
+            continue
+        addresses.append(address)
+        seen.add(address)
+    return tuple(addresses)
+
+
+def _callback_url_with_connect_ip(*, target_url: str, connect_ip_address: str) -> str:
+    parsed = urlsplit(target_url)
+    netloc = _url_host_literal(connect_ip_address)
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, ""))
+
+
+def _callback_host_header(target_url: str) -> str:
+    parsed = urlsplit(target_url)
+    if parsed.hostname is None:
+        raise ValueError("target_url must include a host")
+
+    host = _url_host_literal(parsed.hostname)
+    if parsed.port is not None and parsed.port != _default_callback_port(parsed.scheme):
+        return f"{host}:{parsed.port}"
+    return host
+
+
+def _url_host_literal(hostname: str) -> str:
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return hostname
+    if address.version == 6:
+        return f"[{address}]"
+    return str(address)
+
+
+def _default_callback_port(scheme: str) -> int | None:
+    if scheme == "http":
+        return 80
+    if scheme == "https":
+        return 443
+    return None
 
 
 def _is_public_ip(address: str) -> bool:
