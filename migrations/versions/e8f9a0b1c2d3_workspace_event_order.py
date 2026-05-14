@@ -24,7 +24,9 @@ def upgrade() -> None:
     # production writers or holding locks longer than the deploy budget.
     op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
     op.execute(sa.text("SET LOCAL statement_timeout = '10min'"))
-    op.add_column("workspace_events", sa.Column("event_order", sa.Integer(), nullable=True))
+    op.execute(
+        sa.text("ALTER TABLE workspace_events ADD COLUMN IF NOT EXISTS event_order INTEGER")
+    )
     op.execute(
         sa.text(
             """
@@ -41,6 +43,7 @@ def upgrade() -> None:
             SET event_order = ordered_events.backfilled_event_order
             FROM ordered_events
             WHERE workspace_events.id = ordered_events.id
+              AND workspace_events.event_order IS NULL
             """
         )
     )
@@ -73,6 +76,7 @@ def upgrade() -> None:
             "workspace_events",
             ["workspace_id", "occurred_at", "event_order"],
             unique=False,
+            if_not_exists=True,
             postgresql_concurrently=True,
         )
         op.execute(sa.text("RESET lock_timeout"))
@@ -84,6 +88,7 @@ def downgrade() -> None:
         op.drop_index(
             "ix_workspace_events_workspace_occurred_order",
             table_name="workspace_events",
+            if_exists=True,
             postgresql_concurrently=True,
         )
-    op.drop_column("workspace_events", "event_order")
+    op.execute(sa.text("ALTER TABLE workspace_events DROP COLUMN IF EXISTS event_order"))

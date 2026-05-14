@@ -47,6 +47,13 @@ class FailureCausalitySnapshot:
 
 @dataclass(frozen=True)
 class _FailureCausalityEvents:
+    """Failure events selected for primary and secondary evidence reads.
+
+    ``primary_event`` may be a ``workspace.secondary_failure_recorded`` event.
+    Those synthetic events embed the original primary failure snapshot, and the
+    newest embedded copy is the most durable source after later secondary faults.
+    """
+
     primary_event: WorkspaceEvent
     latest_failed_event: WorkspaceEvent
 

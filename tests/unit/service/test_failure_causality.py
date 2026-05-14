@@ -1641,6 +1641,68 @@ async def test_failure_causality_snapshot_reads_secondary_failure_recorded_event
 
 
 @pytest.mark.unit
+async def test_primary_failure_event_can_be_synthetic_secondary_record(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    primary_failure = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "message": "pytest failed before cleanup",
+        "reason_code": "PYTEST_TEST_FAILURE",
+    }
+    cleanup_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "CLEANUP_FAILED",
+    }
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure causality synthetic primary event source",
+            task_prompt="Document secondary failure events as primary evidence carriers.",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "pytest failed before cleanup"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="PYTEST_TEST_FAILURE",
+            payload={
+                "reason_code": "PYTEST_TEST_FAILURE",
+                "message": "pytest failed before cleanup",
+            },
+        )
+        synthetic_event = await repo.add_event(
+            workspace,
+            event_type="workspace.secondary_failure_recorded",
+            reason_code="PYTEST_TEST_FAILURE",
+            payload=build_preserved_failure_payload(
+                primary_failure,
+                secondary_failure=cleanup_secondary,
+            ),
+        )
+        workspace_id = workspace.id
+        synthetic_event_id = synthetic_event.id
+        await session.commit()
+
+    async with session_factory() as session:
+        primary_event = await failure_causality_service._primary_failure_event_for_current_epoch(
+            session,
+            workspace_id,
+        )
+
+    assert primary_event is not None
+    assert primary_event.id == synthetic_event_id
+    assert primary_event.event_type == "workspace.secondary_failure_recorded"
+
+
+@pytest.mark.unit
 async def test_failure_causality_snapshot_dedupes_truncated_secondary_history_windows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

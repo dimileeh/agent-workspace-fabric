@@ -296,8 +296,116 @@ def test_workspace_event_order_migration_has_timeout_guardrails() -> None:
 
     assert "SET LOCAL lock_timeout" in migration
     assert "SET LOCAL statement_timeout" in migration
+    assert "ADD COLUMN IF NOT EXISTS event_order" in migration
+    assert "workspace_events.event_order IS NULL" in migration
     assert "autocommit_block()" in migration
+    assert "if_not_exists=True" in migration
+    assert "if_exists=True" in migration
     assert "postgresql_concurrently=True" in migration
+
+
+@pytest.mark.unit
+async def test_workspace_event_order_migration_reruns_after_column_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    async with postgres_empty_test_url() as database_url:
+        env = {
+            **os.environ,
+            "AWF_DATABASE_URL": database_url,
+        }
+
+        def _alembic(*args: str) -> None:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                cwd=repo_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        monkeypatch.chdir(repo_root)
+        _alembic("upgrade", "d6e7f8a9b0c1")
+
+        engine = make_engine(database_url)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("ALTER TABLE workspace_events ADD COLUMN event_order INTEGER")
+                )
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO workspaces (
+                            id, status, version, repo_url, branch_base,
+                            task_title, task_prompt, agent, test_commands,
+                            requires_database, created_at, updated_at
+                        )
+                        VALUES (
+                            'ws_event_order_rerun', 'failed', 0,
+                            'git@example.com:repo.git', 'main',
+                            'rerun row', 'do work', 'codex', '[]'::json,
+                            false, '2026-05-01 00:00:00+00',
+                            '2026-05-01 00:00:00+00'
+                        )
+                        """
+                    )
+                )
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO workspace_events (
+                            id, workspace_id, event_type, old_state,
+                            new_state, reason_code, payload, occurred_at
+                        )
+                        VALUES (
+                            'evt_event_order_rerun', 'ws_event_order_rerun',
+                            'workspace.state_changed', 'running',
+                            'failed', 'ONLY_FAILURE', '{}'::json,
+                            '2026-05-01 00:00:01+00'
+                        )
+                        """
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+        _alembic("upgrade", "head")
+
+        engine = make_engine(database_url)
+        try:
+            async with engine.connect() as conn:
+                event_order = await conn.scalar(
+                    text(
+                        """
+                        SELECT event_order
+                        FROM workspace_events
+                        WHERE id = 'evt_event_order_rerun'
+                        """
+                    )
+                )
+                workspace_version = await conn.scalar(
+                    text(
+                        """
+                        SELECT version
+                        FROM workspaces
+                        WHERE id = 'ws_event_order_rerun'
+                        """
+                    )
+                )
+                index_names = await conn.run_sync(
+                    lambda sync_conn: {
+                        index["name"]
+                        for index in inspect(sync_conn).get_indexes("workspace_events")
+                    }
+                )
+        finally:
+            await engine.dispose()
+
+    assert event_order == 1
+    assert workspace_version == 1
+    assert "ix_workspace_events_workspace_occurred_order" in index_names
 
 
 @pytest.mark.unit
