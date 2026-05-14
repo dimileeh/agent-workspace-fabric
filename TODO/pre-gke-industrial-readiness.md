@@ -935,10 +935,10 @@ coding agent in any project to use AWF for a feature.
   [#238](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/238)
   merged 2026-05-13 and adds the bounded MCP artifact content read surface with
   size/path/error guardrails and reason-catalog coverage.
-- [ ] TODO§P1-mcp-global-events: Add MCP parity for the global
+- [x] TODO§P1-mcp-global-events: Add MCP parity for the global
   `GET /v1/events` surface, or keep the workspace-events row explicitly
   marked `MCP partial` until global events have a real MCP tool and coverage.
-  Active clean retry: `ws_32a3971e4aa147c08ed46683` after failed
+  Completed by `ws_32a3971e4aa147c08ed46683` after failed
   `ws_cd0ccbb17db943ed8415aff1` and auto-retry
   `ws_dabd5b60a8464f10b927f1d2`; local commit `89ea11f` fixed the
   planning-scope retry prompt poisoning before relaunch.

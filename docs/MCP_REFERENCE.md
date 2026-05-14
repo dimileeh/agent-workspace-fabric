@@ -30,7 +30,8 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 | `awf_list_operations` | List operations globally with REST-compatible filters. |
 | `awf_get_operation` | Fetch one operation by id. |
 | `awf_list_workspace_operations` | List one workspace's active and completed operations newest-first. |
-| `awf_list_workspace_events` | List one workspace's immutable events newest-first, with optional event-type filtering. |
+| `awf_list_events` | Read-only operator global event listing, supporting optional workspace and event-type filters. |
+| `awf_list_workspace_events` | List one workspace's immutable events newest-first, returning a `WorkspaceEventListResponse` envelope. |
 | `awf_list_workspace_logs` | List indexed durable log streams for one workspace. |
 | `awf_read_workspace_log` | Read a bounded log chunk by stream id and byte offset. |
 | `awf_get_overlap_graph` | Fetch the advisory owned-path overlap graph. |
