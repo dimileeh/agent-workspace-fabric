@@ -310,6 +310,17 @@ def _emit_pretty_dict(d: dict[str, Any], *, prefix: str = "") -> None:
         typer.echo(f"  {pretty_key}: {value}")
 
 
+def _parse_json_option(flag: str, value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        typer.echo(
+            f"error: invalid value for {flag}; must be valid JSON: {exc}",
+            err=True,
+        )
+        raise typer.Exit(code=2) from exc
+
+
 def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:
     url = f"{base_url.rstrip('/')}{path}"
     try:
@@ -1232,6 +1243,16 @@ def workspace_create(
     task_class: TaskClass | None = typer.Option(None, "--task-class"),
     priority: int | None = typer.Option(None, "--priority"),
     human_boost: int | None = typer.Option(None, "--human-boost"),
+    out_of_scope_changes_json: str | None = typer.Option(
+        None,
+        "--out-of-scope-changes-json",
+        help="JSON payload for task out-of-scope-changes policy.",
+    ),
+    provider_recovery_json: str | None = typer.Option(
+        None,
+        "--provider-recovery-json",
+        help="JSON payload for task provider_recovery policy.",
+    ),
     owned_paths: list[str] | None = typer.Option(None, "--owned-path", help="Repeatable."),
     external_id: str | None = typer.Option(None, "--external-id"),
     cpu: float | None = typer.Option(None, "--cpu"),
@@ -1304,6 +1325,16 @@ def workspace_create(
         body["task"]["priority"] = priority
     if human_boost is not None:
         body["task"]["human_boost"] = human_boost
+    if out_of_scope_changes_json is not None:
+        body["task"]["out_of_scope_changes"] = _parse_json_option(
+            "--out-of-scope-changes-json",
+            out_of_scope_changes_json,
+        )
+    if provider_recovery_json is not None:
+        body["task"]["provider_recovery"] = _parse_json_option(
+            "--provider-recovery-json",
+            provider_recovery_json,
+        )
     if owned_paths is not None:
         body["task"]["owned_paths"] = owned_paths
 

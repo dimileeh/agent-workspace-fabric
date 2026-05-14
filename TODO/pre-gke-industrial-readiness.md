@@ -942,7 +942,7 @@ coding agent in any project to use AWF for a feature.
   `ws_cd0ccbb17db943ed8415aff1` and auto-retry
   `ws_dabd5b60a8464f10b927f1d2`; local commit `89ea11f` fixed the
   planning-scope retry prompt poisoning before relaunch.
-- [ ] TODO§create-v2-parity: Add full MCP and CLI parity for `awf_create_workspace_v2` and `workspace create` so callers can configure REST v2 `out_of_scope_changes` and `provider_recovery` policies, or keep the matrix row explicitly marked `MCP partial`.
+- [x] TODO§create-v2-parity: Add full MCP and CLI parity for `awf_create_workspace_v2` and `workspace create` so callers can configure REST v2 `out_of_scope_changes` and `provider_recovery` policies, or keep the matrix row explicitly marked `MCP partial`. Completed by `ws_61e0f7b210fa423faef0b6f3` (local workspace), with parity-coverage and policy-field tests updated.
 - [x] Add a docs/status consistency test for the parity matrix so entries marked
   implemented must correspond to real REST routes, CLI commands, MCP tools, and
   contract-test coverage; partial or missing entries must remain visible as

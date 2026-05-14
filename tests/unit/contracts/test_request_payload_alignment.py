@@ -388,6 +388,16 @@ async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
             "task_class": "docs_task",
             "priority": 10,
             "human_boost": 2,
+            "out_of_scope_changes": {
+                "mode": "block",
+                "allowlist_patterns": ["src/awf/**", "docs/**"],
+            },
+            "provider_recovery": {
+                "max_fallback_attempts": 2,
+                "fallbacks": [
+                    {"agent": "codex", "provider": "openai", "model": "gpt-5"},
+                ],
+            },
             "owned_paths": ["src/awf/**"],
             "auto_merge": True,
             "initial_review_grace_period_seconds": None,
@@ -427,6 +437,16 @@ async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
             "task_class": "docs_task",
             "priority": 10,
             "human_boost": 2,
+            "out_of_scope_changes": {
+                "mode": "block",
+                "allowlist_patterns": ["src/awf/**", "docs/**"],
+            },
+            "provider_recovery": {
+                "max_fallback_attempts": 2,
+                "fallbacks": [
+                    {"agent": "codex", "provider": "openai", "model": "gpt-5"},
+                ],
+            },
             "owned_paths": ["src/awf/**"],
             "profile_ref": "auto",
             "profile": None,
