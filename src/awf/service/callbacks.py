@@ -440,9 +440,7 @@ def _validate_callback_target(target_url: str, *, settings: Settings) -> Validat
     host = _normalize_callback_host(parsed.hostname)
     if settings.callbacks_require_https and parsed.scheme != "https":
         raise ValueError("target_url must use https")
-    if settings.callbacks_allowed_hosts and host not in _normalized_allowed_callback_hosts(
-        settings.callbacks_allowed_hosts
-    ):
+    if settings.callbacks_allowed_hosts and host not in settings.callbacks_allowed_hosts:
         raise ValueError("target_url host is not allowlisted")
     if not is_public_callback_target_host(parsed.hostname):
         raise ValueError("target_url must use a public host")
@@ -452,12 +450,6 @@ def _validate_callback_target(target_url: str, *, settings: Settings) -> Validat
 
 def _normalize_callback_host(hostname: str) -> str:
     return hostname.lower().rstrip(".")
-
-
-def _normalized_allowed_callback_hosts(
-    allowed_hosts: list[str] | tuple[str, ...],
-) -> set[str]:
-    return {_normalize_callback_host(host) for host in allowed_hosts}
 
 
 def _validate_callback_target_dns(*, hostname: str) -> str:
