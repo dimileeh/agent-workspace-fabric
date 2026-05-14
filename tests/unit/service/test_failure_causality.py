@@ -73,6 +73,67 @@ def test_preserved_failure_payload_accumulates_prior_secondary_failures() -> Non
 
 
 @pytest.mark.unit
+def test_preserved_failure_payload_caps_secondary_failure_history() -> None:
+    expected_limit = 20
+    previous_secondaries = tuple(
+        {
+            "failure_reason": "cleanup_failure",
+            "reason_code": f"CLEANUP_FAILED_{index}",
+        }
+        for index in range(expected_limit + 3)
+    )
+    current_secondary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": "STALE_ACTIVE_EXECUTION",
+    }
+
+    payload = build_preserved_failure_payload(
+        {
+            "failure_reason": FailureReason.validation_failure.value,
+            "reason_code": "PYTEST_TEST_FAILURE",
+            "message": "pytest failed",
+        },
+        secondary_failure=current_secondary,
+        previous_secondary_failures=previous_secondaries,
+    )
+
+    retained = payload["secondary_failures"]
+    expected_prior_start = len(previous_secondaries) - (expected_limit - 1)
+    assert payload["secondary_failure"] == current_secondary
+    assert len(retained) == expected_limit
+    assert retained[:-1] == list(previous_secondaries[expected_prior_start:])
+    assert retained[-1] == current_secondary
+
+
+@pytest.mark.unit
+def test_secondary_failure_history_reader_returns_bounded_tail() -> None:
+    expected_limit = 20
+    previous_secondaries = [
+        {
+            "failure_reason": "cleanup_failure",
+            "reason_code": f"CLEANUP_FAILED_{index}",
+        }
+        for index in range(expected_limit + 3)
+    ]
+    legacy_secondary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": "STALE_ACTIVE_EXECUTION",
+    }
+
+    history = failure_causality_service._secondary_failure_history(
+        {
+            "secondary_failures": previous_secondaries,
+            "secondary_failure": legacy_secondary,
+        }
+    )
+
+    expected_prior_start = len(previous_secondaries) + 1 - expected_limit
+    assert len(history) == expected_limit
+    assert history[:-1] == tuple(previous_secondaries[expected_prior_start:])
+    assert history[-1] == legacy_secondary
+
+
+@pytest.mark.unit
 def test_preserved_failure_payload_ignores_secondary_history_in_extra_payload() -> None:
     ignored_secondary = {
         "failure_reason": "cleanup_failure",

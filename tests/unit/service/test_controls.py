@@ -714,6 +714,73 @@ async def test_destroy_cleanup_failure_preserves_existing_validation_failure(
 
 
 @pytest.mark.unit
+async def test_destroy_cleanup_failure_restores_primary_fields_from_embedded_payload(
+    engine: AsyncEngine,
+) -> None:
+    cleaner = _RecordingCleaner(failures=["volume busy"])
+    factory = make_session_factory(engine)
+    primary_failure = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "reason_code": "PYTEST_TEST_FAILURE",
+        "message": "pytest failed before cleanup",
+    }
+    stale_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "CLEANUP_FAILED",
+        "message": "first cleanup failed after validation",
+    }
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.destroying,
+        )
+        prior_failed_event = await repo.add_event(
+            workspace,
+            event_type="workspace.state_changed",
+            reason_code="CLEANUP_FAILED",
+            payload=controls.build_preserved_failure_payload(
+                primary_failure,
+                secondary_failure=stale_secondary,
+            ),
+        )
+        prior_failed_event.old_state = WorkspaceStatus.destroying.value
+        prior_failed_event.new_state = WorkspaceStatus.failed.value
+        workspace.failure_reason = "cleanup_failure"
+        workspace.failure_message = "first cleanup failed after validation"
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: cleaner,
+        )
+
+        response = await service.destroy_workspace(
+            workspace.id,
+            force=False,
+            remove_volumes=True,
+            remove_worktree=True,
+            idempotency_key="destroy-restore-primary-row-fields",
+        )
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+
+    assert response.status == WorkspaceStatus.failed
+    assert response.message == "workspace cleanup failed"
+    assert workspace.failure_reason == FailureReason.validation_failure.value
+    assert workspace.failure_message == "pytest failed before cleanup"
+    failed_transition = next(
+        event
+        for event in events
+        if event.event_type == "workspace.state_changed"
+        and event.new_state == WorkspaceStatus.failed.value
+        and event.reason_code == "PYTEST_TEST_FAILURE"
+    )
+    assert failed_transition.payload is not None
+    assert failed_transition.payload["primary_failure"] == primary_failure
+    assert failed_transition.payload["secondary_failure"]["reason_code"] == "CLEANUP_FAILED"
+
+
+@pytest.mark.unit
 async def test_destroy_workspace_records_structured_partial_cleanup_and_retry(
     engine: AsyncEngine,
 ) -> None:

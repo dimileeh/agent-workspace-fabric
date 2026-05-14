@@ -1107,6 +1107,8 @@ class WorkspaceControlService:
             if primary_failure is None:
                 workspace.failure_reason = "cleanup_failure"
                 workspace.failure_message = bounded_cleanup_message
+            else:
+                _restore_primary_failure_row_fields(workspace, primary_failure)
             if WorkspaceStateMachine.can_transition(
                 WorkspaceStatus(workspace.status), WorkspaceStatus.failed
             ):
@@ -1731,6 +1733,18 @@ async def _finish_stack_stop_failed_operation(
 
 def _bounded_operation_error_message(message: str) -> str:
     return message[:_OPERATION_ERROR_MESSAGE_MAX_LENGTH]
+
+
+def _restore_primary_failure_row_fields(
+    workspace: Workspace,
+    primary_failure: Mapping[str, Any],
+) -> None:
+    failure_reason = primary_failure.get("failure_reason")
+    if isinstance(failure_reason, str) and failure_reason:
+        workspace.failure_reason = failure_reason
+    failure_message = primary_failure.get("message")
+    if isinstance(failure_message, str) and failure_message:
+        workspace.failure_message = failure_message[:_OPERATION_ERROR_MESSAGE_MAX_LENGTH]
 
 
 async def _add_control_audit_event(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,7 @@ from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 PRIMARY_FAILURE_KEY = "primary_failure"
 SECONDARY_FAILURE_KEY = "secondary_failure"
 SECONDARY_FAILURES_KEY = "secondary_failures"
+_SECONDARY_FAILURE_HISTORY_LIMIT: Final = 20
 _IGNORED_PRIMARY_VALIDATION_REASON_CODES = frozenset({"STALE_CALLBACK_IGNORED"})
 _FAILURE_EPOCH_RESET_STATES = frozenset(
     {
@@ -187,10 +188,12 @@ def build_preserved_failure_payload(
     primary.pop(SECONDARY_FAILURES_KEY, None)
     secondary = _jsonable_mapping(secondary_failure)
     payload: dict[str, Any] = dict(_jsonable_mapping(extra or {}))
-    secondary_failures = [
-        *[_jsonable_mapping(item) for item in previous_secondary_failures],
-        secondary,
-    ]
+    secondary_failures = _bounded_secondary_failure_history(
+        [
+            *[_jsonable_mapping(item) for item in previous_secondary_failures],
+            secondary,
+        ]
+    )
     reason_code = _string(primary.get("reason_code"))
     message = _string(primary.get("message"))
     if reason_code:
@@ -459,7 +462,13 @@ def _secondary_failure_history(payload: Mapping[str, Any] | None) -> tuple[dict[
         if legacy_secondary not in failures:
             failures.append(legacy_secondary)
 
-    return tuple(failures)
+    return tuple(_bounded_secondary_failure_history(failures))
+
+
+def _bounded_secondary_failure_history(
+    failures: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return list(failures[-_SECONDARY_FAILURE_HISTORY_LIMIT:])
 
 
 def _jsonable(value: Any) -> Any:
