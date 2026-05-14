@@ -3187,27 +3187,25 @@ class WorkspaceRepository:
         WorkspaceStateMachine.assert_transition(from_status, to)
 
         now = datetime.now(UTC)
-        result = await self._session.execute(
-            update(Workspace)
+        stmt = (
+            select(Workspace)
             .where(
                 Workspace.id == workspace_id,
                 Workspace.status == from_status.value,
                 *extra_conditions,
             )
-            .values(
-                status=to.value,
-                version=Workspace.version + 1,
-                updated_at=now,
-            )
-            .returning(Workspace.id)
+            .execution_options(populate_existing=True)
         )
-        if result.scalar_one_or_none() is None:
+        if self._dialect_name == "postgresql":
+            stmt = stmt.with_for_update(of=Workspace)
+        workspace = (await self._session.execute(stmt)).scalar_one_or_none()
+        if workspace is None:
             return None
 
-        workspace = await self.get(workspace_id)
-        if workspace is None:  # pragma: no cover - row was just updated in this txn
-            return None
-
+        event_order = await self._reserve_workspace_event_orders(workspace, count=1)
+        old_state = workspace.status
+        workspace.status = to.value
+        workspace.updated_at = now
         attempt = await TaskAttemptRepository(
             self._session,
             dialect_name=self._dialect_name,
@@ -3227,10 +3225,10 @@ class WorkspaceRepository:
             WorkspaceEvent(
                 id=new_event_id(),
                 event_type="workspace.state_changed",
-                old_state=from_status.value,
+                old_state=old_state,
                 new_state=to.value,
                 reason_code=reason_code,
-                event_order=workspace.version,
+                event_order=event_order,
             )
         )
         await self._session.flush()

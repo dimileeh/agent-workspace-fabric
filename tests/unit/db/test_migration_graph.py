@@ -296,6 +296,8 @@ def test_workspace_event_order_migration_has_timeout_guardrails() -> None:
 
     assert "SET LOCAL lock_timeout" in migration
     assert "SET LOCAL statement_timeout" in migration
+    assert "autocommit_block()" in migration
+    assert "postgresql_concurrently=True" in migration
 
 
 @pytest.mark.unit

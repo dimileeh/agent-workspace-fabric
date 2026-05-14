@@ -2224,6 +2224,52 @@ class TestTransition:
 
 class TestAddEvents:
     @pytest.mark.unit
+    async def test_transition_if_current_reserves_event_order_through_shared_helper(
+        self,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        calls: list[tuple[str, int]] = []
+        original_reserve = WorkspaceRepository._reserve_workspace_event_orders
+
+        async def _recording_reserve(
+            self: WorkspaceRepository,
+            reserved_workspace: Workspace,
+            *,
+            count: int,
+        ) -> int:
+            calls.append((reserved_workspace.id, count))
+            return await original_reserve(self, reserved_workspace, count=count)
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "_reserve_workspace_event_orders",
+            _recording_reserve,
+        )
+
+        transitioned = await repo.transition_if_current(
+            workspace.id,
+            from_status=WorkspaceStatus.requested,
+            to=WorkspaceStatus.provisioning,
+            reason_code="CLAIMED",
+        )
+
+        assert transitioned is not None
+        assert calls == [(workspace.id, 1)]
+        state_event = next(event for event in transitioned.events if event.reason_code == "CLAIMED")
+        assert state_event.event_order == 2
+        assert transitioned.version == 2
+
+    @pytest.mark.unit
     async def test_batch_reserves_event_order_and_advances_workspace_version(
         self,
         session: AsyncSession,

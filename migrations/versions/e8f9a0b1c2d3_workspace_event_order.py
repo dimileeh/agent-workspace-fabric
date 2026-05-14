@@ -62,14 +62,28 @@ def upgrade() -> None:
             """
         )
     )
-    op.create_index(
-        "ix_workspace_events_workspace_occurred_order",
-        "workspace_events",
-        ["workspace_id", "occurred_at", "event_order"],
-        unique=False,
-    )
+    # Concurrent index creation cannot run inside Alembic's migration
+    # transaction. Keep the data backfill transactional above, then release the
+    # transaction before building the read-path index without blocking writers.
+    with op.get_context().autocommit_block():
+        op.execute(sa.text("SET lock_timeout = '5s'"))
+        op.execute(sa.text("SET statement_timeout = '10min'"))
+        op.create_index(
+            "ix_workspace_events_workspace_occurred_order",
+            "workspace_events",
+            ["workspace_id", "occurred_at", "event_order"],
+            unique=False,
+            postgresql_concurrently=True,
+        )
+        op.execute(sa.text("RESET lock_timeout"))
+        op.execute(sa.text("RESET statement_timeout"))
 
 
 def downgrade() -> None:
-    op.drop_index("ix_workspace_events_workspace_occurred_order", table_name="workspace_events")
+    with op.get_context().autocommit_block():
+        op.drop_index(
+            "ix_workspace_events_workspace_occurred_order",
+            table_name="workspace_events",
+            postgresql_concurrently=True,
+        )
     op.drop_column("workspace_events", "event_order")

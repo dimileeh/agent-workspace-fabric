@@ -568,13 +568,35 @@ def _append_secondary_failure_history(
     if not history_items:
         return
 
-    overlap = 0
+    overlap = _secondary_failure_history_overlap(failures, history_items)
+    failures.extend(history_items[overlap:])
+
+
+def _secondary_failure_history_overlap(
+    failures: Sequence[dict[str, Any]],
+    history_items: Sequence[dict[str, Any]],
+) -> int:
     max_overlap = min(len(failures), len(history_items))
     for candidate in range(max_overlap, 0, -1):
-        if failures[-candidate:] == history_items[:candidate]:
-            overlap = candidate
-            break
-    failures.extend(history_items[overlap:])
+        prefix = history_items[:candidate]
+        # Persisted payloads can carry bounded windows of earlier history, so
+        # the overlap may appear before the current accumulated suffix.
+        if _secondary_failure_history_contains(failures, prefix):
+            return candidate
+    return 0
+
+
+def _secondary_failure_history_contains(
+    failures: Sequence[dict[str, Any]],
+    prefix: Sequence[dict[str, Any]],
+) -> bool:
+    if not prefix:
+        return True
+    prefix_length = len(prefix)
+    for start in range(0, len(failures) - prefix_length + 1):
+        if list(failures[start : start + prefix_length]) == list(prefix):
+            return True
+    return False
 
 
 def _bounded_secondary_failure_history(

@@ -1641,6 +1641,96 @@ async def test_failure_causality_snapshot_reads_secondary_failure_recorded_event
 
 
 @pytest.mark.unit
+async def test_failure_causality_snapshot_dedupes_truncated_secondary_history_windows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    primary_at = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
+    truncated_at = datetime(2100, 1, 1, 12, 1, tzinfo=UTC)
+    latest_at = datetime(2100, 1, 1, 12, 2, tzinfo=UTC)
+    primary_failure = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "message": "pytest failed before cleanup",
+        "reason_code": "PYTEST_TEST_FAILURE",
+    }
+    initial_history = [
+        {"failure_reason": "cleanup_failure", "reason_code": f"CLEANUP_FAILED_{index}"}
+        for index in range(4)
+    ]
+    truncated_history = initial_history[1:3]
+    latest_secondary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": "STALE_ACTIVE_EXECUTION",
+    }
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure causality truncated secondary regression",
+            task_prompt="Do not double-count re-extracted truncated secondary histories.",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.failed.value
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "pytest failed before cleanup"
+        session.add_all(
+            [
+                WorkspaceEvent(
+                    id="evt_primary_with_secondary_history",
+                    workspace_id=workspace.id,
+                    event_type="workspace.state_changed",
+                    old_state=WorkspaceStatus.running.value,
+                    new_state=WorkspaceStatus.failed.value,
+                    reason_code="PYTEST_TEST_FAILURE",
+                    payload={
+                        "primary_failure": primary_failure,
+                        "secondary_failures": initial_history,
+                    },
+                    occurred_at=primary_at,
+                    event_order=1,
+                ),
+                WorkspaceEvent(
+                    id="evt_truncated_secondary_history",
+                    workspace_id=workspace.id,
+                    event_type="workspace.secondary_failure_recorded",
+                    old_state=WorkspaceStatus.failed.value,
+                    new_state=WorkspaceStatus.failed.value,
+                    reason_code="CLEANUP_HISTORY_TRUNCATED",
+                    payload={"secondary_failures": truncated_history},
+                    occurred_at=truncated_at,
+                    event_order=2,
+                ),
+                WorkspaceEvent(
+                    id="evt_latest_secondary_history",
+                    workspace_id=workspace.id,
+                    event_type="workspace.secondary_failure_recorded",
+                    old_state=WorkspaceStatus.failed.value,
+                    new_state=WorkspaceStatus.failed.value,
+                    reason_code="STALE_ACTIVE_EXECUTION",
+                    payload={
+                        "secondary_failures": [*truncated_history, latest_secondary],
+                    },
+                    occurred_at=latest_at,
+                    event_order=3,
+                ),
+            ]
+        )
+        workspace_id = workspace.id
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_failure_causality_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot.primary_failure["reason_code"] == "PYTEST_TEST_FAILURE"
+    assert snapshot.secondary_failures == (*initial_history, latest_secondary)
+
+
+@pytest.mark.unit
 async def test_failure_causality_snapshot_orders_same_timestamp_secondary_history_null_event_orders_last(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1854,6 +1944,101 @@ async def test_failure_causality_snapshot_orders_same_timestamp_failures_by_even
     assert snapshot.primary_failure["reason_code"] == "CURRENT_VALIDATION_FAILURE"
     assert snapshot.primary_failure["validation_run"]["id"] == "vr_current_same_tick"
     assert snapshot.secondary_failures == (current_secondary,)
+
+
+@pytest.mark.unit
+async def test_failure_causality_snapshot_prefers_later_same_tick_state_failure_over_secondary(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    same_tick = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
+    original_primary = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "message": "pytest failed before cleanup",
+        "reason_code": "PYTEST_TEST_FAILURE",
+    }
+    cleanup_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "CLEANUP_FAILED",
+    }
+    terminal_primary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "message": "terminal release failed after cleanup",
+        "reason_code": "TERMINAL_RELEASE_FAILED",
+    }
+    terminal_secondary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": "TERMINAL_RUNTIME_RELEASE_FAILED",
+    }
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure causality same-tick synthetic ordering regression",
+            task_prompt="A later real failed transition wins over a same-tick synthetic event.",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "pytest failed before cleanup"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="PYTEST_TEST_FAILURE",
+            payload={"primary_failure": original_primary},
+        )
+        secondary_event = await repo.add_event(
+            workspace,
+            event_type="workspace.secondary_failure_recorded",
+            reason_code="PYTEST_TEST_FAILURE",
+            payload=build_preserved_failure_payload(
+                original_primary,
+                secondary_failure=cleanup_secondary,
+            ),
+        )
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.destroying,
+            reason_code="DESTROY_REQUESTED",
+        )
+        workspace.failure_reason = FailureReason.infrastructure_failure.value
+        workspace.failure_message = "terminal release failed after cleanup"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="TERMINAL_RELEASE_FAILED",
+            payload=build_preserved_failure_payload(
+                terminal_primary,
+                secondary_failure=terminal_secondary,
+            ),
+        )
+        latest_failed_event = next(
+            event
+            for event in workspace.events
+            if event.new_state == WorkspaceStatus.failed.value
+            and event.reason_code == "TERMINAL_RELEASE_FAILED"
+        )
+        secondary_event.occurred_at = same_tick
+        latest_failed_event.occurred_at = same_tick
+        assert secondary_event.event_order is not None
+        assert latest_failed_event.event_order is not None
+        assert latest_failed_event.event_order > secondary_event.event_order
+        workspace_id = workspace.id
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_failure_causality_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot.primary_failure["reason_code"] == "TERMINAL_RELEASE_FAILED"
+    assert snapshot.secondary_failures == (terminal_secondary,)
 
 
 async def _seed_failed_workspace(
