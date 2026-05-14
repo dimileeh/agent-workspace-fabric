@@ -5795,6 +5795,9 @@ class TestRunOnceStaleActiveExecutionRecovery:
             "STALE_ACTIVE_EXECUTION"
         )
         assert latest_failed.payload["secondary_failure"]["runtime"]["stack_state"] == "running"
+        assert latest_failed.payload["secondary_failures"][-1]["reason_code"] == (
+            "STALE_ACTIVE_EXECUTION"
+        )
 
     @pytest.mark.unit
     async def test_stale_active_execution_cleanup_failure_keeps_row_active(
@@ -6038,6 +6041,9 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert latest_failed.payload is not None
         assert latest_failed.payload["primary_failure"]["reason_code"] == "AGENT_AUTH_FAILED"
         assert latest_failed.payload["secondary_failure"]["reason_code"] == "STRANDED_WORKSPACE"
+        assert latest_failed.payload["secondary_failures"][-1]["reason_code"] == (
+            "STRANDED_WORKSPACE"
+        )
         assert len(stranded_events) == 1
         assert stranded_events[0].payload is not None
         assert stranded_events[0].payload["primary_failure"]["reason_code"] == ("AGENT_AUTH_FAILED")

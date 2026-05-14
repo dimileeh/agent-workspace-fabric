@@ -56,6 +56,7 @@ from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.service.failure_causality import (
     attach_primary_failure,
     build_preserved_failure_payload,
+    load_failure_causality_snapshot,
     load_primary_failure_snapshot,
     primary_failure_reason_code,
 )
@@ -1936,7 +1937,13 @@ class ControlWorker:
                 return
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return
-            primary_failure = await load_primary_failure_snapshot(session, ws)
+            failure_causality = await load_failure_causality_snapshot(session, ws)
+            primary_failure = (
+                failure_causality.primary_failure if failure_causality is not None else None
+            )
+            previous_secondary_failures = (
+                failure_causality.secondary_failures if failure_causality is not None else ()
+            )
             secondary_failure = _secondary_stale_active_execution_payload(
                 candidate,
                 snapshot,
@@ -1950,6 +1957,7 @@ class ControlWorker:
                 build_preserved_failure_payload(
                     primary_failure,
                     secondary_failure=secondary_failure,
+                    previous_secondary_failures=previous_secondary_failures,
                 )
                 if primary_failure is not None
                 else None
@@ -1991,7 +1999,13 @@ class ControlWorker:
                 return
             if not _workspace_claim_recheck_passes(ws, candidate.status, datetime.now(UTC)):
                 return
-            primary_failure = await load_primary_failure_snapshot(session, ws)
+            failure_causality = await load_failure_causality_snapshot(session, ws)
+            primary_failure = (
+                failure_causality.primary_failure if failure_causality is not None else None
+            )
+            previous_secondary_failures = (
+                failure_causality.secondary_failures if failure_causality is not None else ()
+            )
             secondary_failure = _secondary_runtime_stranding_payload(
                 candidate,
                 snapshot,
@@ -2006,6 +2020,7 @@ class ControlWorker:
                 build_preserved_failure_payload(
                     primary_failure,
                     secondary_failure=secondary_failure,
+                    previous_secondary_failures=previous_secondary_failures,
                 )
                 if primary_failure is not None
                 else None

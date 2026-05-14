@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -14,6 +15,7 @@ from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 
 PRIMARY_FAILURE_KEY = "primary_failure"
 SECONDARY_FAILURE_KEY = "secondary_failure"
+SECONDARY_FAILURES_KEY = "secondary_failures"
 _FAILURE_EPOCH_RESET_STATES = frozenset(
     {
         WorkspaceStatus.ready.value,
@@ -25,15 +27,54 @@ _FAILURE_EPOCH_RESET_STATES = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class FailureCausalitySnapshot:
+    """Current-epoch failure evidence that should survive secondary faults."""
+
+    primary_failure: dict[str, Any]
+    secondary_failures: tuple[dict[str, Any], ...] = ()
+
+
 async def load_primary_failure_snapshot(
     session: AsyncSession,
     workspace: Workspace,
 ) -> dict[str, Any] | None:
     """Return durable primary failure evidence for ``workspace`` when present."""
 
+    snapshot = await load_failure_causality_snapshot(session, workspace)
+    return snapshot.primary_failure if snapshot is not None else None
+
+
+async def load_failure_causality_snapshot(
+    session: AsyncSession,
+    workspace: Workspace,
+) -> FailureCausalitySnapshot | None:
+    """Return current-epoch primary failure and accumulated secondary evidence."""
+
     latest_failed_event = await _primary_failure_event_for_current_epoch(session, workspace.id)
     latest_validation_run = await _latest_failed_validation_run(session, workspace.id)
     event_payload = _mapping(latest_failed_event.payload if latest_failed_event else None)
+    primary_failure = _primary_failure_snapshot(
+        workspace,
+        latest_failed_event=latest_failed_event,
+        latest_validation_run=latest_validation_run,
+        event_payload=event_payload,
+    )
+    if primary_failure is None:
+        return None
+    return FailureCausalitySnapshot(
+        primary_failure=primary_failure,
+        secondary_failures=_secondary_failure_history(event_payload),
+    )
+
+
+def _primary_failure_snapshot(
+    workspace: Workspace,
+    *,
+    latest_failed_event: WorkspaceEvent | None,
+    latest_validation_run: ValidationRun | None,
+    event_payload: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
     embedded_primary = _mapping(event_payload.get(PRIMARY_FAILURE_KEY) if event_payload else None)
 
     # Embedded primary payloads can outlive a resumed workspace after its live
@@ -121,10 +162,18 @@ def build_preserved_failure_payload(
     *,
     secondary_failure: Mapping[str, Any],
     extra: Mapping[str, Any] | None = None,
+    previous_secondary_failures: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     primary = _jsonable_mapping(primary_failure)
+    primary.pop(SECONDARY_FAILURE_KEY, None)
+    primary.pop(SECONDARY_FAILURES_KEY, None)
     secondary = _jsonable_mapping(secondary_failure)
     payload: dict[str, Any] = dict(_jsonable_mapping(extra or {}))
+    secondary_failures = [
+        *list(_secondary_failure_history(payload)),
+        *[_jsonable_mapping(item) for item in previous_secondary_failures],
+        secondary,
+    ]
     reason_code = _string(primary.get("reason_code"))
     message = _string(primary.get("message"))
     if reason_code:
@@ -136,6 +185,7 @@ def build_preserved_failure_payload(
         payload["details"] = _jsonable_mapping(details)
     payload[PRIMARY_FAILURE_KEY] = primary
     payload[SECONDARY_FAILURE_KEY] = secondary
+    payload[SECONDARY_FAILURES_KEY] = secondary_failures
     return payload
 
 
@@ -293,6 +343,28 @@ def _mapping(value: Any) -> Mapping[str, Any] | None:
 
 def _jsonable_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     return {str(key): _jsonable(item) for key, item in value.items()}
+
+
+def _secondary_failure_history(payload: Mapping[str, Any] | None) -> tuple[dict[str, Any], ...]:
+    if payload is None:
+        return ()
+
+    failures: list[dict[str, Any]] = []
+    secondary_failures = payload.get(SECONDARY_FAILURES_KEY)
+    if isinstance(secondary_failures, Sequence) and not isinstance(
+        secondary_failures, str | bytes | bytearray
+    ):
+        failures.extend(
+            _jsonable_mapping(item) for item in secondary_failures if isinstance(item, Mapping)
+        )
+
+    secondary_failure = _mapping(payload.get(SECONDARY_FAILURE_KEY))
+    if secondary_failure is not None:
+        legacy_secondary = _jsonable_mapping(secondary_failure)
+        if legacy_secondary not in failures:
+            failures.append(legacy_secondary)
+
+    return tuple(failures)
 
 
 def _jsonable(value: Any) -> Any:

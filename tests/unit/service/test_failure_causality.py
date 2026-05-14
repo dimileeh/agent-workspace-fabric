@@ -12,6 +12,7 @@ from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.failure_causality import (
     build_preserved_failure_payload,
+    load_failure_causality_snapshot,
     load_primary_failure_snapshot,
 )
 
@@ -24,25 +25,73 @@ async def session_factory(
 
 
 @pytest.mark.unit
-def test_preserved_failure_payload_uses_single_secondary_failure_shape() -> None:
+def test_preserved_failure_payload_keeps_latest_secondary_and_history() -> None:
+    secondary_failure = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "CLEANUP_FAILED",
+    }
     payload = build_preserved_failure_payload(
         {
             "failure_reason": FailureReason.validation_failure.value,
             "reason_code": "PYTEST_TEST_FAILURE",
             "message": "pytest failed",
         },
-        secondary_failure={
-            "failure_reason": "cleanup_failure",
-            "reason_code": "CLEANUP_FAILED",
-        },
+        secondary_failure=secondary_failure,
     )
 
     assert payload["reason_code"] == "PYTEST_TEST_FAILURE"
-    assert payload["secondary_failure"] == {
+    assert payload["secondary_failure"] == secondary_failure
+    assert payload["secondary_failures"] == [secondary_failure]
+
+
+@pytest.mark.unit
+def test_preserved_failure_payload_accumulates_prior_secondary_failures() -> None:
+    prior_secondary = {
         "failure_reason": "cleanup_failure",
         "reason_code": "CLEANUP_FAILED",
     }
-    assert "secondary_failures" not in payload
+    current_secondary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": "STALE_ACTIVE_EXECUTION",
+    }
+
+    payload = build_preserved_failure_payload(
+        {
+            "failure_reason": FailureReason.validation_failure.value,
+            "reason_code": "PYTEST_TEST_FAILURE",
+            "message": "pytest failed",
+        },
+        secondary_failure=current_secondary,
+        previous_secondary_failures=(prior_secondary,),
+    )
+
+    assert payload["secondary_failure"] == current_secondary
+    assert payload["secondary_failures"] == [prior_secondary, current_secondary]
+
+
+@pytest.mark.unit
+def test_preserved_failure_payload_normalizes_legacy_secondary_failure_history() -> None:
+    prior_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "CLEANUP_FAILED",
+    }
+    current_secondary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": "STALE_ACTIVE_EXECUTION",
+    }
+
+    payload = build_preserved_failure_payload(
+        {
+            "failure_reason": FailureReason.validation_failure.value,
+            "reason_code": "PYTEST_TEST_FAILURE",
+            "message": "pytest failed",
+        },
+        secondary_failure=current_secondary,
+        extra={"secondary_failure": prior_secondary},
+    )
+
+    assert payload["secondary_failure"] == current_secondary
+    assert payload["secondary_failures"] == [prior_secondary, current_secondary]
 
 
 @pytest.mark.unit
@@ -428,6 +477,71 @@ async def test_primary_failure_snapshot_prefers_latest_failed_event_with_preserv
     assert snapshot["message"] == "pytest failed before cleanup"
     assert snapshot["reason_code"] == "PYTEST_TEST_FAILURE"
     assert snapshot["validation_run"]["id"] == "vr_preserved_primary"
+
+
+@pytest.mark.unit
+async def test_failure_causality_snapshot_loads_current_epoch_secondary_history(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, _validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.validation_failure.value,
+        failure_message="pytest failed before cleanup",
+        reason_code="PYTEST_TEST_FAILURE",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+    )
+    cleanup_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "CLEANUP_FAILED",
+    }
+    stale_secondary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": "STALE_ACTIVE_EXECUTION",
+    }
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        primary_snapshot = await load_primary_failure_snapshot(session, workspace)
+        assert primary_snapshot is not None
+
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.destroying,
+            reason_code="DESTROY_REQUESTED",
+        )
+        workspace.failure_reason = FailureReason.infrastructure_failure.value
+        workspace.failure_message = "cleanup failed after primary validation failure"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="CLEANUP_FAILED",
+            payload=build_preserved_failure_payload(
+                primary_snapshot,
+                secondary_failure=cleanup_secondary,
+            ),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_failure_causality_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot.primary_failure["reason_code"] == "PYTEST_TEST_FAILURE"
+    assert snapshot.secondary_failures == (cleanup_secondary,)
+
+    payload = build_preserved_failure_payload(
+        snapshot.primary_failure,
+        secondary_failure=stale_secondary,
+        previous_secondary_failures=snapshot.secondary_failures,
+    )
+
+    assert payload["secondary_failure"] == stale_secondary
+    assert payload["secondary_failures"] == [cleanup_secondary, stale_secondary]
 
 
 async def _seed_failed_workspace(

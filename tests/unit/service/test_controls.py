@@ -652,6 +652,7 @@ async def test_destroy_cleanup_failure_preserves_existing_validation_failure(
     assert latest_failed.payload is not None
     assert latest_failed.payload["primary_failure"]["validation_run"]["id"] == validation_run_id
     assert latest_failed.payload["secondary_failure"]["reason_code"] == "CLEANUP_FAILED"
+    assert latest_failed.payload["secondary_failures"][-1]["reason_code"] == "CLEANUP_FAILED"
     assert latest_failed.payload["secondary_failure"]["cleanup"]["failed_steps"][0]["error"] == (
         "volume busy"
     )
