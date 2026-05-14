@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
@@ -53,7 +54,16 @@ async def load_failure_causality_snapshot(
     """Return current-epoch primary failure and accumulated secondary evidence."""
 
     latest_failed_event = await _primary_failure_event_for_current_epoch(session, workspace.id)
-    latest_validation_run = await _latest_failed_validation_run(session, workspace.id)
+    epoch_reset_event = (
+        await _latest_failure_epoch_reset_before(session, workspace.id, latest_failed_event)
+        if latest_failed_event is not None
+        else None
+    )
+    latest_validation_run = await _latest_failed_validation_run(
+        session,
+        workspace.id,
+        epoch_started_at=epoch_reset_event.occurred_at if epoch_reset_event is not None else None,
+    )
     event_payload = _mapping(latest_failed_event.payload if latest_failed_event else None)
     primary_failure = _primary_failure_snapshot(
         workspace,
@@ -253,44 +263,87 @@ async def _has_failure_epoch_reset_after(
     stmt = (
         select(WorkspaceEvent.id)
         .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.occurred_at > event.occurred_at,
-            WorkspaceEvent.new_state.in_(_FAILURE_EPOCH_RESET_STATES),
-            or_(
-                WorkspaceEvent.event_type == "workspace.state_changed",
-                and_(
-                    WorkspaceEvent.event_type == "workspace.remonitor_requested",
-                    func.json_typeof(WorkspaceEvent.payload["state_reset"]) == "object",
-                ),
-            ),
+            *_failure_epoch_reset_conditions(workspace_id),
+            _event_sorts_after(event),
         )
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
-async def _latest_failed_validation_run(
+async def _latest_failure_epoch_reset_before(
     session: AsyncSession,
     workspace_id: str,
-) -> ValidationRun | None:
+    event: WorkspaceEvent,
+) -> WorkspaceEvent | None:
     stmt = (
-        select(ValidationRun)
+        select(WorkspaceEvent)
         .where(
-            ValidationRun.workspace_id == workspace_id,
-            ValidationRun.status == "failed",
-            or_(
-                ValidationRun.reason_code.is_(None),
-                ~ValidationRun.reason_code.in_(_IGNORED_PRIMARY_VALIDATION_REASON_CODES),
-            ),
+            *_failure_epoch_reset_conditions(workspace_id),
+            _event_sorts_before(event),
         )
-        .order_by(
-            ValidationRun.finished_at.desc().nullslast(),
-            ValidationRun.started_at.desc(),
-            ValidationRun.id.desc(),
-        )
+        .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _latest_failed_validation_run(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    epoch_started_at: datetime | None = None,
+) -> ValidationRun | None:
+    stmt = select(ValidationRun).where(
+        ValidationRun.workspace_id == workspace_id,
+        ValidationRun.status == "failed",
+        or_(
+            ValidationRun.reason_code.is_(None),
+            ~ValidationRun.reason_code.in_(_IGNORED_PRIMARY_VALIDATION_REASON_CODES),
+        ),
+    )
+    if epoch_started_at is not None:
+        stmt = stmt.where(ValidationRun.started_at >= epoch_started_at)
+    stmt = stmt.order_by(
+        ValidationRun.finished_at.desc().nullslast(),
+        ValidationRun.started_at.desc(),
+        ValidationRun.id.desc(),
+    ).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bool], ...]:
+    return (
+        WorkspaceEvent.workspace_id == workspace_id,
+        WorkspaceEvent.new_state.in_(_FAILURE_EPOCH_RESET_STATES),
+        or_(
+            WorkspaceEvent.event_type == "workspace.state_changed",
+            and_(
+                WorkspaceEvent.event_type == "workspace.remonitor_requested",
+                func.json_typeof(WorkspaceEvent.payload["state_reset"]) == "object",
+            ),
+        ),
+    )
+
+
+def _event_sorts_after(event: WorkspaceEvent) -> ColumnElement[bool]:
+    return or_(
+        WorkspaceEvent.occurred_at > event.occurred_at,
+        and_(
+            WorkspaceEvent.occurred_at == event.occurred_at,
+            WorkspaceEvent.id > event.id,
+        ),
+    )
+
+
+def _event_sorts_before(event: WorkspaceEvent) -> ColumnElement[bool]:
+    return or_(
+        WorkspaceEvent.occurred_at < event.occurred_at,
+        and_(
+            WorkspaceEvent.occurred_at == event.occurred_at,
+            WorkspaceEvent.id < event.id,
+        ),
+    )
 
 
 def _validation_run_snapshot(run: ValidationRun) -> dict[str, Any]:

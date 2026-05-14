@@ -9,8 +9,10 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.models import WorkspaceEvent
 from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service import failure_causality as failure_causality_service
 from awf.service.failure_causality import (
     build_preserved_failure_payload,
     load_failure_causality_snapshot,
@@ -378,6 +380,126 @@ async def test_primary_failure_snapshot_ignores_stale_embedded_primary_after_res
 
 
 @pytest.mark.unit
+async def test_epoch_reset_detection_uses_same_timestamp_event_id_tiebreaker(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    same_tick = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure epoch ordering regression",
+            task_prompt="Detect same-timestamp epoch resets.",
+            agent="codex",
+            test_commands=[],
+        )
+        failed_event = WorkspaceEvent(
+            id="evt_order_tie_1",
+            workspace_id=workspace.id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.running.value,
+            new_state=WorkspaceStatus.failed.value,
+            reason_code="PYTEST_TEST_FAILURE",
+            payload={"reason_code": "PYTEST_TEST_FAILURE"},
+            occurred_at=same_tick,
+        )
+        reset_event = WorkspaceEvent(
+            id="evt_order_tie_2",
+            workspace_id=workspace.id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.failed.value,
+            new_state=WorkspaceStatus.monitoring_pr.value,
+            reason_code="MONITORING_PR",
+            payload=None,
+            occurred_at=same_tick,
+        )
+        session.add_all([failed_event, reset_event])
+        await session.flush()
+
+        reset_detected = await failure_causality_service._has_failure_epoch_reset_after(
+            session,
+            workspace.id,
+            failed_event,
+        )
+
+    assert reset_detected is True
+
+
+@pytest.mark.unit
+async def test_primary_failure_snapshot_ignores_same_timestamp_epoch_reset(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    same_tick = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    workspace_id, _validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.infrastructure_failure.value,
+        failure_message="cleanup failed after primary validation failure",
+        reason_code="CLEANUP_FAILED",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+        embedded_primary={
+            "failure_reason": FailureReason.validation_failure.value,
+            "message": "old pytest failure before cleanup",
+            "reason_code": "PYTEST_TEST_FAILURE",
+            "validation_run": {
+                "id": "vr_same_timestamp_stale_primary",
+                "status": "failed",
+                "reason_code": "PYTEST_TEST_FAILURE",
+            },
+        },
+    )
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        stale_failed_event = next(
+            event
+            for event in workspace.events
+            if event.new_state == WorkspaceStatus.failed.value
+            and event.reason_code == "CLEANUP_FAILED"
+        )
+        stale_failed_event.id = "evt_same_timestamp_1"
+        stale_failed_event.occurred_at = same_tick
+
+        workspace.status = WorkspaceStatus.monitoring_pr.value
+        workspace.failure_reason = None
+        workspace.failure_message = None
+        reset_event = await repo.add_event(
+            workspace,
+            event_type="workspace.state_changed",
+            reason_code="OPERATOR_REMONITOR",
+            payload={
+                "state_reset": {
+                    "from": WorkspaceStatus.failed.value,
+                    "to": WorkspaceStatus.monitoring_pr.value,
+                },
+            },
+        )
+        reset_event.id = "evt_same_timestamp_2"
+        reset_event.old_state = WorkspaceStatus.failed.value
+        reset_event.new_state = WorkspaceStatus.monitoring_pr.value
+        reset_event.occurred_at = same_tick
+
+        workspace.status = WorkspaceStatus.failed.value
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "agent failed after same-timestamp remonitor reset"
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.agent_failure.value
+    assert snapshot["message"] == "agent failed after same-timestamp remonitor reset"
+    assert snapshot.get("reason_code") != "PYTEST_TEST_FAILURE"
+    assert "validation_run" not in snapshot
+
+
+@pytest.mark.unit
 async def test_primary_failure_snapshot_uses_current_failure_after_remonitor_reset(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -442,6 +564,89 @@ async def test_primary_failure_snapshot_uses_current_failure_after_remonitor_res
     assert snapshot["message"] == "agent retry failed after remonitor"
     assert snapshot["reason_code"] == "AGENT_AUTH_FAILED"
     assert "validation_run" not in snapshot
+
+
+@pytest.mark.unit
+async def test_primary_failure_snapshot_filters_validation_runs_before_current_epoch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.validation_failure.value,
+        failure_message="old pytest failure before remonitor",
+        reason_code="OLD_PYTEST_FAILURE",
+        validation_reason_code="OLD_PYTEST_FAILURE",
+    )
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        validation_run = await ValidationRunRepository(session).get(validation_run_id)
+        assert validation_run is not None
+        old_failed_event = next(
+            event
+            for event in workspace.events
+            if event.new_state == WorkspaceStatus.failed.value
+            and event.reason_code == "OLD_PYTEST_FAILURE"
+        )
+        old_validation_finished_at = old_failed_event.occurred_at + timedelta(minutes=1)
+        reset_at = old_validation_finished_at + timedelta(minutes=5)
+        current_failure_at = reset_at + timedelta(minutes=5)
+        old_failed_event.occurred_at = old_validation_finished_at
+        validation_run.started_at = old_validation_finished_at - timedelta(minutes=1)
+        validation_run.finished_at = old_validation_finished_at
+
+        workspace.status = WorkspaceStatus.monitoring_pr.value
+        workspace.failure_reason = None
+        workspace.failure_message = None
+        reset_event = await repo.add_event(
+            workspace,
+            event_type="workspace.state_changed",
+            reason_code="OPERATOR_REMONITOR",
+            payload={
+                "state_reset": {
+                    "from": WorkspaceStatus.failed.value,
+                    "to": WorkspaceStatus.monitoring_pr.value,
+                },
+            },
+        )
+        reset_event.old_state = WorkspaceStatus.failed.value
+        reset_event.new_state = WorkspaceStatus.monitoring_pr.value
+        reset_event.occurred_at = reset_at
+
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "current validation failed before run finished"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="CURRENT_VALIDATION_FAILURE",
+            payload={
+                "reason_code": "CURRENT_VALIDATION_FAILURE",
+                "message": "current validation failed before run finished",
+            },
+        )
+        current_failure_event = next(
+            event
+            for event in workspace.events
+            if event.new_state == WorkspaceStatus.failed.value
+            and event.reason_code == "CURRENT_VALIDATION_FAILURE"
+        )
+        current_failure_event.occurred_at = current_failure_at
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.validation_failure.value
+    assert snapshot["message"] == "current validation failed before run finished"
+    assert snapshot["reason_code"] == "CURRENT_VALIDATION_FAILURE"
+    assert "validation_run" not in snapshot
+    assert "coverage" not in snapshot
 
 
 @pytest.mark.unit

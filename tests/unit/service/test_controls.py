@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -595,8 +596,42 @@ async def test_destroy_workspace_records_cleanup_failures(
 @pytest.mark.unit
 async def test_destroy_cleanup_failure_preserves_existing_validation_failure(
     engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cleaner = _RecordingCleaner(failures=["volume busy"])
+    original_builder = controls.build_preserved_failure_payload
+
+    def builder_with_serialization_probe(
+        primary_failure: Mapping[str, Any],
+        *,
+        secondary_failure: Mapping[str, Any],
+        extra: Mapping[str, Any] | None = None,
+        previous_secondary_failures: Sequence[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
+        payload = original_builder(
+            primary_failure,
+            secondary_failure=secondary_failure,
+            extra=extra,
+            previous_secondary_failures=previous_secondary_failures,
+        )
+        payload["secondary_failure"] = {
+            **payload["secondary_failure"],
+            "helper_serialization_probe": "current",
+        }
+        payload["secondary_failures"] = [
+            {
+                **secondary,
+                "helper_serialization_probe": index,
+            }
+            for index, secondary in enumerate(payload["secondary_failures"])
+        ]
+        return payload
+
+    monkeypatch.setattr(
+        controls,
+        "build_preserved_failure_payload",
+        builder_with_serialization_probe,
+    )
     factory = make_session_factory(engine)
     async with factory() as session:
         workspace = await _create_control_workspace(
@@ -625,10 +660,7 @@ async def test_destroy_cleanup_failure_preserves_existing_validation_failure(
             workspace.id,
             operation_type=OperationType.destroy,
         )
-        state_events = await WorkspaceEventRepository(session).list(
-            workspace_id=workspace.id,
-            event_type="workspace.state_changed",
-        )
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
         validation_run = await ValidationRunRepository(session).get(validation_run_id)
 
     assert response.status == WorkspaceStatus.failed
@@ -646,15 +678,38 @@ async def test_destroy_cleanup_failure_preserves_existing_validation_failure(
     assert operations[0].error_code == "CLEANUP_FAILED"
     assert operations[0].error_message == "volume busy"
     latest_failed = next(
-        event for event in state_events if event.new_state == WorkspaceStatus.failed.value
+        event
+        for event in events
+        if event.event_type == "workspace.state_changed"
+        and event.new_state == WorkspaceStatus.failed.value
     )
     assert latest_failed.reason_code == "PYTEST_TEST_FAILURE"
     assert latest_failed.payload is not None
     assert latest_failed.payload["primary_failure"]["validation_run"]["id"] == validation_run_id
     assert latest_failed.payload["secondary_failure"]["reason_code"] == "CLEANUP_FAILED"
     assert latest_failed.payload["secondary_failures"][-1]["reason_code"] == "CLEANUP_FAILED"
+    assert latest_failed.payload["secondary_failure"]["helper_serialization_probe"] == "current"
+    assert latest_failed.payload["secondary_failures"][-1]["helper_serialization_probe"] == 0
     assert latest_failed.payload["secondary_failure"]["cleanup"]["failed_steps"][0]["error"] == (
         "volume busy"
+    )
+    assert operations[0].result is not None
+    assert operations[0].result["secondary_failure"] == latest_failed.payload["secondary_failure"]
+    assert operations[0].result["secondary_failures"] == latest_failed.payload["secondary_failures"]
+    audit_event = next(
+        event
+        for event in events
+        if event.event_type == "workspace.audit.control_operation"
+        and event.reason_code == "CLEANUP_FAILED"
+    )
+    assert audit_event.payload is not None
+    assert (
+        audit_event.payload["evidence"]["secondary_failure"]
+        == latest_failed.payload["secondary_failure"]
+    )
+    assert (
+        audit_event.payload["evidence"]["secondary_failures"]
+        == latest_failed.payload["secondary_failures"]
     )
 
 

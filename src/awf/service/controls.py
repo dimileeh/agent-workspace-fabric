@@ -35,6 +35,9 @@ from awf.node.cleanup import (
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
 from awf.service.failure_causality import (
+    PRIMARY_FAILURE_KEY,
+    SECONDARY_FAILURE_KEY,
+    SECONDARY_FAILURES_KEY,
     build_preserved_failure_payload,
     load_failure_causality_snapshot,
     primary_failure_reason_code,
@@ -1086,17 +1089,18 @@ class WorkspaceControlService:
                 "message": bounded_cleanup_message,
                 "cleanup": cleanup_payload,
             }
-            failed_transition_payload = (
-                build_preserved_failure_payload(
+            failed_transition_payload: dict[str, Any]
+            if primary_failure is not None:
+                failed_transition_payload = build_preserved_failure_payload(
                     primary_failure,
                     secondary_failure=secondary_failure,
                     extra=cleanup_event_payload,
                     previous_secondary_failures=previous_secondary_failures,
                 )
-                if primary_failure is not None
-                else cleanup_event_payload
-            )
-            secondary_failures = [*previous_secondary_failures, secondary_failure]
+                preserved_secondary_failure = failed_transition_payload[SECONDARY_FAILURE_KEY]
+                preserved_secondary_failures = failed_transition_payload[SECONDARY_FAILURES_KEY]
+            else:
+                failed_transition_payload = dict(cleanup_event_payload)
             if primary_failure is None:
                 workspace.failure_reason = "cleanup_failure"
                 workspace.failure_message = bounded_cleanup_message
@@ -1117,9 +1121,9 @@ class WorkspaceControlService:
                 "cleanup": cleanup_payload,
             }
             if primary_failure is not None:
-                result_payload["primary_failure"] = primary_failure
-                result_payload["secondary_failure"] = secondary_failure
-                result_payload["secondary_failures"] = secondary_failures
+                result_payload[PRIMARY_FAILURE_KEY] = primary_failure
+                result_payload[SECONDARY_FAILURE_KEY] = preserved_secondary_failure
+                result_payload[SECONDARY_FAILURES_KEY] = preserved_secondary_failures
             operation_result = _with_secret_lease_result(result_payload, secret_lease_summary)
             await operations.finish(
                 operation,
@@ -1133,9 +1137,9 @@ class WorkspaceControlService:
                 "error_message": bounded_cleanup_message,
             }
             if primary_failure is not None:
-                audit_payload["primary_failure"] = primary_failure
-                audit_payload["secondary_failure"] = secondary_failure
-                audit_payload["secondary_failures"] = secondary_failures
+                audit_payload[PRIMARY_FAILURE_KEY] = primary_failure
+                audit_payload[SECONDARY_FAILURE_KEY] = preserved_secondary_failure
+                audit_payload[SECONDARY_FAILURES_KEY] = preserved_secondary_failures
             audit_evidence = _with_secret_lease_evidence(audit_payload, secret_lease_summary)
             await _add_control_audit_event(
                 repo,
