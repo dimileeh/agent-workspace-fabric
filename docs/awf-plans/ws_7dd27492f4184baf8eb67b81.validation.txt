@@ -1,0 +1,12 @@
+Validation request for ws_7dd27492f4184baf8eb67b81
+(Workspace/auth hardening — API timing-safe token checks and workspace metadata auth)
+
+Planned commands:
+
+1) uv run --python 3.12 --extra dev pytest tests/unit/api/test_deps.py tests/unit/api/test_workspaces.py tests/unit/api/test_workspaces_direct.py tests/unit/contracts/test_auth_failure_alignment.py tests/unit/contracts/test_surface_metadata_alignment.py -q
+2) uv run --python 3.12 --extra dev ruff check src/awf/api tests/unit/api tests/unit/contracts
+3) uv run --python 3.12 --extra dev mypy src/awf
+
+Execution status:
+- Not executed locally in this phase to keep workspace work in the requested AWF validation flow.
+- Please run AWF-owned validation phase and update this file with pass/fail evidence.
