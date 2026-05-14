@@ -368,25 +368,32 @@ async def _post_to_validated_callback_addresses(
     connect_ip_addresses: tuple[str, ...],
 ) -> CallbackPostResult:
     failures: list[Exception] = []
+    failed_addresses: list[str] = []
+    monotonic_clock = asyncio.get_running_loop().time
+    deadline = monotonic_clock() + timeout
     for connect_ip_address in connect_ip_addresses:
+        remaining_timeout = deadline - monotonic_clock()
+        if remaining_timeout <= 0:
+            break
         try:
             return await poster(
                 url,
                 json=json,
                 headers=headers,
-                timeout=timeout,
+                timeout=remaining_timeout,
                 connect_ip_address=connect_ip_address,
             )
         except Exception as exc:  # noqa: BLE001 - later validated addresses may still work.
             exc.add_note(f"callback connect_ip_address={connect_ip_address}")
             failures.append(exc)
+            failed_addresses.append(connect_ip_address)
 
     if len(failures) == 1:
         raise failures[0]
     if failures:
         failure_summary = ", ".join(
             f"{address} ({type(exc).__name__})"
-            for address, exc in zip(connect_ip_addresses, failures, strict=True)
+            for address, exc in zip(failed_addresses, failures, strict=True)
         )
         raise ExceptionGroup(
             f"callback request failed for all validated target addresses: {failure_summary}",

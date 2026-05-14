@@ -779,6 +779,117 @@ async def test_successful_delivery_prefers_ipv4_then_falls_back_across_validated
 
 
 @pytest.mark.unit
+async def test_validated_address_fallback_reuses_one_delivery_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    calls: list[_PostCall] = []
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def poster(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        if connect_ip_address == "1.1.1.1":
+            loop.now += 6.25
+            raise TimeoutError("connect timed out")
+        return CallbackPostResult(status_code=202)
+
+    result = await callback_service_module._post_to_validated_callback_addresses(
+        poster,
+        "https://operator.example.com/events",
+        json={"event": {"type": "workspace.state_changed"}},
+        headers={"Idempotency-Key": "callback-delivery:test"},
+        timeout=10.0,
+        connect_ip_addresses=("1.1.1.1", "2606:4700:4700::1111"),
+    )
+
+    assert result == CallbackPostResult(status_code=202)
+    assert [call.connect_ip_address for call in calls] == [
+        "1.1.1.1",
+        "2606:4700:4700::1111",
+    ]
+    assert [call.timeout for call in calls] == [10.0, 3.75]
+
+
+@pytest.mark.unit
+async def test_validated_address_fallback_stops_when_timeout_budget_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    calls: list[_PostCall] = []
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def poster(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        if connect_ip_address == "1.1.1.1":
+            loop.now += 4.0
+            raise TimeoutError("first address timed out")
+        if connect_ip_address == "2.2.2.2":
+            loop.now += 6.0
+            raise TimeoutError("second address timed out")
+        return CallbackPostResult(status_code=202)
+
+    with pytest.raises(ExceptionGroup) as exc_info:
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=10.0,
+            connect_ip_addresses=("1.1.1.1", "2.2.2.2", "3.3.3.3"),
+        )
+
+    assert [call.connect_ip_address for call in calls] == ["1.1.1.1", "2.2.2.2"]
+    assert [call.timeout for call in calls] == [10.0, 6.0]
+    assert "1.1.1.1 (TimeoutError)" in str(exc_info.value)
+    assert "2.2.2.2 (TimeoutError)" in str(exc_info.value)
+    assert "3.3.3.3" not in str(exc_info.value)
+
+
+@pytest.mark.unit
 async def test_drain_due_offloads_callback_target_validation(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
