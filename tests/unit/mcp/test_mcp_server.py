@@ -199,8 +199,10 @@ def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
     any_of = schema.get("anyOf")
     assert isinstance(any_of, list)
     string_schema = next(
-        item for item in any_of if isinstance(item, dict) and item.get("type") == "string"
+        (item for item in any_of if isinstance(item, dict) and item.get("type") == "string"),
+        None,
     )
+    assert string_schema is not None, f"Could not find string schema in anyOf: {any_of}"
     assert isinstance(string_schema, dict)
     return string_schema
 
