@@ -682,6 +682,32 @@ class TestCollectSmokeReportMockedMode:
         assert console_phase["evidence"]["source"] == "configured"
         assert report["console_links"]["ui"] == configured_url
 
+    async def test_malformed_configured_console_url_reports_unavailable_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+        configured_url = "http://localhost:badport"
+        monkeypatch.setattr("awf.service.smoke._default_console_checker", _default_console_checker)
+
+        def _configured_console(settings):
+            return {"api_base_url": "http://localhost:8000", "console_url": configured_url}
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_configured_console,
+        )
+
+        console_phase = next(p for p in report["phases"] if p["name"] == "console_links")
+        assert console_phase["status"] == "warn"
+        assert console_phase["reason_code"] == "SMOKE_CONSOLE_UNAVAILABLE"
+        assert console_phase["evidence"]["source"] == "configured"
+        assert report["console_links"]["ui"] == configured_url
+
 
 @pytest.mark.unit
 class TestCollectSmokeReportExceptionPaths:
@@ -1113,6 +1139,11 @@ class TestCollectSmokeReportExceptionPaths:
             mock_cls.return_value.__aenter__.return_value = mock_instance
 
             result = await _default_console_checker("http://localhost:3000")
+
+        assert result is False
+
+    async def test_default_console_checker_treats_malformed_url_as_unreachable(self) -> None:
+        result = await _default_console_checker("http://localhost:badport")
 
         assert result is False
 

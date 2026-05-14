@@ -527,7 +527,7 @@ async def _default_console_checker(url: str) -> bool:
     try:
         async with httpx.AsyncClient(timeout=1.0) as client:
             response = await client.get(url)
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return False
     return 200 <= response.status_code < 400
 
