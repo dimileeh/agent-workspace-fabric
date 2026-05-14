@@ -1245,11 +1245,13 @@ def workspace_create(
     human_boost: int | None = typer.Option(None, "--human-boost"),
     out_of_scope_changes_json: str | None = typer.Option(
         None,
+        "--out-of-scope-changes-json",
         "--out_of_scope_changes_json",
         help="JSON payload for task out_of_scope_changes policy.",
     ),
     provider_recovery_json: str | None = typer.Option(
         None,
+        "--provider-recovery-json",
         "--provider_recovery_json",
         help="JSON payload for task provider-recovery policy.",
     ),
@@ -1327,14 +1329,14 @@ def workspace_create(
         body["task"]["human_boost"] = human_boost
     if out_of_scope_changes_json is not None:
         out_of_scope_changes = _parse_json_option(
-            "--out_of_scope_changes_json",
+            "--out-of-scope-changes-json",
             out_of_scope_changes_json,
         )
         if out_of_scope_changes is not None:
             body["task"]["out_of_scope_changes"] = out_of_scope_changes
     if provider_recovery_json is not None:
         provider_recovery = _parse_json_option(
-            "--provider_recovery_json",
+            "--provider-recovery-json",
             provider_recovery_json,
         )
         if provider_recovery is not None:
