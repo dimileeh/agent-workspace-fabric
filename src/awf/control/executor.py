@@ -1742,7 +1742,7 @@ class WorkspaceExecutor:
                     await self._finish_active_recovery_operations(
                         workspace_id=workspace_id,
                         status=OperationStatus.failed,
-                        reason_code=setup_failure_reason_code or "MONITOR_RECOVERY_SETUP_FAILED",
+                        reason_code="MONITOR_RECOVERY_SETUP_FAILED",
                         error_message=(
                             f"profile setup failed: {first_fail.command}"
                             if first_fail is not None

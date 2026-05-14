@@ -43,7 +43,13 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
 )
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
-from awf.runtime.validation import ValidationRunner
+from awf.runtime.validation import (
+    SETUP_DEPENDENCY_NETWORK_FAILURE,
+    SETUP_DEPENDENCY_NETWORK_METADATA_KEY,
+    ValidationCommandResult,
+    ValidationResult,
+    ValidationRunner,
+)
 from tests.postgres import postgres_test_engine
 
 from .executor_paths import _test_worktree_path, _test_worktrees_root
@@ -157,6 +163,57 @@ class SimpleValidationResult:
     total_retries = 0
     commands: list[Any] = []
     coverage = None
+
+
+class _SetupFailureValidation:
+    def __init__(self, setup_result: ValidationResult) -> None:
+        self._setup_result = setup_result
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...],
+        **_kwargs: Any,
+    ) -> ValidationResult:
+        self.calls.append(phase_names)
+        if phase_names == ("setup", "pre_agent"):
+            return self._setup_result
+        return ValidationResult()
+
+    async def run_profile_coverage(self, **_kwargs: Any) -> None:
+        return None
+
+
+def _setup_dependency_exhausted_result(tmp_path: Path) -> ValidationCommandResult:
+    stdout_path = tmp_path / "setup.stdout"
+    stderr_path = tmp_path / "setup.stderr"
+    stdout_path.write_text("setup stdout\n", encoding="utf-8")
+    stderr_path.write_text("setup stderr\n", encoding="utf-8")
+    return ValidationCommandResult(
+        command="uv sync --extra dev",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        phase="setup",
+        reason_code=SETUP_DEPENDENCY_NETWORK_FAILURE,
+        retry_count=2,
+        metadata={
+            SETUP_DEPENDENCY_NETWORK_METADATA_KEY: {
+                "reason_code": SETUP_DEPENDENCY_NETWORK_FAILURE,
+                "command": "uv sync --extra dev",
+                "package": "docker==7.1.0",
+                "host": "files.pythonhosted.org",
+                "transient_category": "dns",
+                "retryable": True,
+                "retry_count": 2,
+                "retry_budget": 2,
+                "retry_exhausted": True,
+                "diagnostic": "failed to lookup address information",
+            }
+        },
+    )
 
 
 async def _seed_ready_workspace_with_recovery(
@@ -966,6 +1023,68 @@ async def test_open_pr_guard_uses_fresh_recovery_operation_after_claim(
     ]
     assert len(recovery_ops) == 1
     assert recovery_ops[0].status == OperationStatus.succeeded.value
+
+
+@pytest.mark.unit
+async def test_setup_dependency_exhaustion_during_recovery_preserves_monitor_reason(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    validation = _SetupFailureValidation(
+        ValidationResult(commands=[_setup_dependency_exhausted_result(tmp_path)])
+    )
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        validation=validation,
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        resolved_profile={
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+        },
+    )
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+
+    assert validation.calls == [("setup", "pre_agent")]
+    assert fake.calls == []
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    assert ws.failure_reason == "service_startup_failure"
+    assert ws.failure_message == "profile setup failed: uv sync --extra dev"
+
+    recovery_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(recovery_ops) == 1
+    recovery_op = recovery_ops[0]
+    assert recovery_op.status == OperationStatus.failed.value
+    assert recovery_op.error_code == "MONITOR_RECOVERY_SETUP_FAILED"
+    assert recovery_op.result == {"reason_code": "MONITOR_RECOVERY_SETUP_FAILED"}
+
+    failed_events = [
+        event
+        for event in events
+        if event.event_type == "workspace.state_changed"
+        and event.new_state == WorkspaceStatus.failed.value
+    ]
+    assert failed_events
+    terminal_event = failed_events[0]
+    assert terminal_event.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert terminal_event.payload is not None
+    assert terminal_event.payload["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert terminal_event.payload["details"]["package"] == "docker==7.1.0"
 
 
 @pytest.mark.unit
