@@ -95,6 +95,29 @@ class TestSmokeRunCommand:
         assert "SMOKE_AUTH_READY" in result.stdout
         assert "phases[0]." not in result.stdout
 
+    def test_pretty_format_does_not_duplicate_reason_when_message_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_smoke_collector(
+            monkeypatch,
+            phases=[
+                {
+                    "name": "service_readiness",
+                    "status": "ok",
+                    "reason_code": "SMOKE_SERVICE_READY",
+                    "evidence": {},
+                    "action": "none",
+                },
+            ],
+        )
+
+        result = _runner.invoke(app, ["smoke", "run", "--format", "pretty"])
+
+        assert result.exit_code == 0
+        assert "  [ok] service_readiness: SMOKE_SERVICE_READY" not in result.stdout
+        assert "        reason: SMOKE_SERVICE_READY" in result.stdout
+        assert result.stdout.count("SMOKE_SERVICE_READY") == 1
+
     def test_project_flag_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def _collect(*args, **kwargs):
             return {
