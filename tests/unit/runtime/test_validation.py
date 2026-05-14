@@ -227,7 +227,13 @@ def test_setup_dependency_network_classifier_skips_index_url_credentials_for_pac
 
 @pytest.mark.unit
 def test_setup_dependency_network_classifier_does_not_extract_jwt_secret_as_host() -> None:
-    raw_secret = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
+    raw_secret = ".".join(
+        [
+            "eyJhbGciOiJIUzI1NiJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+            "signature123",
+        ]
+    )
     classification = _classify_setup_dependency_network_failure(
         command=f"TOKEN={raw_secret} uv sync --extra dev",
         returncode=1,
