@@ -213,8 +213,10 @@ def _optional_object_schema(schema: dict[str, object]) -> dict[str, object]:
 
     assert isinstance(any_of, list)
     object_schema = next(
-        item for item in any_of if isinstance(item, dict) and item.get("type") == "object"
+        (item for item in any_of if isinstance(item, dict) and item.get("type") == "object"),
+        None,
     )
+    assert object_schema is not None, f"Could not find object schema in anyOf: {any_of}"
     assert isinstance(object_schema, dict)
     return object_schema
 
