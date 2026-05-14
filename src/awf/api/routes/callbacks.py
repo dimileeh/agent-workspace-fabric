@@ -12,7 +12,7 @@ from awf.api.schemas import (
     CallbackSubscriptionCreateRequest,
     CallbackSubscriptionListResponse,
     CallbackSubscriptionResponse,
-    ErrorResponse,
+    HTTPExceptionErrorResponse,
 )
 from awf.common.config import Settings, get_settings
 from awf.service.callbacks import CallbackIdempotencyConflictError, CallbackService
@@ -21,8 +21,8 @@ router = APIRouter(
     prefix="/v1/callbacks",
     tags=["callbacks"],
     responses={
-        401: {"model": ErrorResponse, "description": "Unauthorized"},
-        503: {"model": ErrorResponse, "description": "Service Unavailable"},
+        401: {"model": HTTPExceptionErrorResponse, "description": "Unauthorized"},
+        503: {"model": HTTPExceptionErrorResponse, "description": "Service Unavailable"},
     },
 )
 _IDEMPOTENCY_KEY_MAX_LENGTH = 128
@@ -34,8 +34,8 @@ _IDEMPOTENCY_KEY_MAX_LENGTH = 128
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_api_token)],
     responses={
-        400: {"model": ErrorResponse, "description": "Bad Request"},
-        409: {"model": ErrorResponse, "description": "Conflict"},
+        400: {"model": HTTPExceptionErrorResponse, "description": "Bad Request"},
+        409: {"model": HTTPExceptionErrorResponse, "description": "Conflict"},
     },
 )
 async def register_callback(

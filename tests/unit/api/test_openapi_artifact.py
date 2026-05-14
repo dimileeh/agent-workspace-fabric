@@ -131,7 +131,13 @@ def test_callback_endpoints_document_structured_error_responses(
         assert "403" not in responses
         for status_code in expected_statuses:
             schema = responses[status_code]["content"]["application/json"]["schema"]
-            assert schema == {"$ref": "#/components/schemas/ErrorResponse"}
+            assert schema == {"$ref": "#/components/schemas/HTTPExceptionErrorResponse"}
+
+    wrapper_schema = openapi_spec["components"]["schemas"]["HTTPExceptionErrorResponse"]
+    assert wrapper_schema["required"] == ["detail"]
+    assert wrapper_schema["properties"]["detail"] == {
+        "$ref": "#/components/schemas/ErrorResponse",
+    }
 
 
 @pytest.mark.unit

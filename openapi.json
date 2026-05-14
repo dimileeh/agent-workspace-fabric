@@ -1086,6 +1086,19 @@
         "title": "FallbackTargetResponse",
         "type": "object"
       },
+      "HTTPExceptionErrorResponse": {
+        "description": "FastAPI ``HTTPException`` envelope for structured API errors.",
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "HTTPExceptionErrorResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -10721,7 +10734,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HTTPExceptionErrorResponse"
                 }
               }
             },
@@ -10741,7 +10754,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HTTPExceptionErrorResponse"
                 }
               }
             },
@@ -10808,7 +10821,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HTTPExceptionErrorResponse"
                 }
               }
             },
@@ -10818,7 +10831,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HTTPExceptionErrorResponse"
                 }
               }
             },
@@ -10828,7 +10841,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HTTPExceptionErrorResponse"
                 }
               }
             },
@@ -10848,7 +10861,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HTTPExceptionErrorResponse"
                 }
               }
             },

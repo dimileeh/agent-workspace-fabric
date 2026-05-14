@@ -1500,3 +1500,9 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
     detail: dict[str, Any] | None = None
+
+
+class HTTPExceptionErrorResponse(BaseModel):
+    """FastAPI ``HTTPException`` envelope for structured API errors."""
+
+    detail: ErrorResponse
