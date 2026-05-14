@@ -48,7 +48,7 @@ class CallbackPostResult:
 
 @dataclass(frozen=True)
 class ValidatedCallbackTarget:
-    connect_ip_address: str
+    connect_ip_addresses: tuple[str, ...]
 
 
 class CallbackHttpPoster(Protocol):
@@ -239,12 +239,13 @@ class CallbackDeliveryService:
                         subscription.target_url,
                         settings=self._settings,
                     )
-                    result = await self._http_poster(
+                    result = await _post_to_validated_callback_addresses(
+                        self._http_poster,
                         subscription.target_url,
                         json=delivery.envelope,
                         headers=_delivery_headers(delivery),
                         timeout=float(subscription.timeout_seconds),
-                        connect_ip_address=validated_target.connect_ip_address,
+                        connect_ip_addresses=validated_target.connect_ip_addresses,
                     )
                 except ValueError as exc:
                     await repo.mark_failed_or_retry(
@@ -341,6 +342,33 @@ async def _httpx_post_json(
             extensions=extensions,
         )
     return CallbackPostResult(status_code=response.status_code)
+
+
+async def _post_to_validated_callback_addresses(
+    poster: CallbackHttpPoster,
+    url: str,
+    *,
+    json: dict[str, Any],
+    headers: dict[str, str],
+    timeout: float,
+    connect_ip_addresses: tuple[str, ...],
+) -> CallbackPostResult:
+    last_exception: Exception | None = None
+    for connect_ip_address in connect_ip_addresses:
+        try:
+            return await poster(
+                url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        except Exception as exc:  # noqa: BLE001 - later validated addresses may still work.
+            last_exception = exc
+
+    if last_exception is not None:
+        raise last_exception
+    raise RuntimeError("validated callback target has no connect IP addresses")
 
 
 def _delivery_headers(delivery: CallbackDelivery) -> dict[str, str]:
@@ -444,18 +472,18 @@ def _validate_callback_target(target_url: str, *, settings: Settings) -> Validat
         raise ValueError("target_url host is not allowlisted")
     if not is_public_callback_target_host(parsed.hostname):
         raise ValueError("target_url must use a public host")
-    connect_ip_address = _validate_callback_target_dns(hostname=parsed.hostname)
-    return ValidatedCallbackTarget(connect_ip_address=connect_ip_address)
+    connect_ip_addresses = _validate_callback_target_dns(hostname=parsed.hostname)
+    return ValidatedCallbackTarget(connect_ip_addresses=connect_ip_addresses)
 
 
-def _validate_callback_target_dns(*, hostname: str) -> str:
+def _validate_callback_target_dns(*, hostname: str) -> tuple[str, ...]:
     addresses = tuple(_resolve_callback_target_ip_addresses(hostname))
     if not addresses:
         raise ValueError("target_url host could not be resolved")
     for address in addresses:
         if not _is_public_ip(address):
             raise ValueError("target_url resolved host is not public")
-    return addresses[0]
+    return addresses
 
 
 def _resolve_callback_target_ip_addresses(hostname: str) -> tuple[str, ...]:

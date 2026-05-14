@@ -87,6 +87,35 @@ class _RecordingPoster:
 
 
 @dataclass
+class _AddressFallbackPoster:
+    failing_addresses: set[str]
+    status_code: int = 204
+    calls: list[_PostCall] = field(default_factory=list)
+
+    async def __call__(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        self.calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        if connect_ip_address in self.failing_addresses:
+            raise RuntimeError(f"connection failed for {connect_ip_address}")
+        return CallbackPostResult(status_code=self.status_code)
+
+
+@dataclass
 class _FakeHttpxPost:
     url: str
     json: dict[str, Any]
@@ -654,6 +683,38 @@ async def test_successful_delivery_posts_sanitized_json_and_marks_succeeded(
     assert stored.attempt_count == 1
     assert stored.envelope["delivery"]["attempt_count"] == 1
     assert stored.delivered_at is not None
+
+
+@pytest.mark.unit
+async def test_successful_delivery_falls_back_across_validated_callback_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: ("2606:4700:4700::1111", "1.1.1.1"),
+    )
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    poster = _AddressFallbackPoster(
+        failing_addresses={"2606:4700:4700::1111"},
+        status_code=202,
+    )
+
+    await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert [call.connect_ip_address for call in poster.calls] == [
+        "2606:4700:4700::1111",
+        "1.1.1.1",
+    ]
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.succeeded.value
+    assert stored.attempt_count == 1
+    assert stored.response_status_code == 202
 
 
 @pytest.mark.unit
