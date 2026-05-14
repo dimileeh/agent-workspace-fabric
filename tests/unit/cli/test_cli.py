@@ -214,10 +214,16 @@ class TestWorkspaceCreate:
         "flag, value",
         (
             ("--out-of-scope-changes-json", "{mode:block}"),
+            ("--out-of-scope-changes-json", "[1,2,3]"),
             ("--provider-recovery-json", "{fallbacks:[{agent:codex}]}"),
+            ("--provider-recovery-json", "null"),
         ),
     )
-    def test_invalid_json_policy_flags_do_not_request(self, flag: str, value: str) -> None:
+    def test_invalid_json_policy_flag_values_do_not_request(
+        self,
+        flag: str,
+        value: str,
+    ) -> None:
         with patch("awf.cli.main.httpx.request") as mock:
             result = _runner.invoke(
                 app,
