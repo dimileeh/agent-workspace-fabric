@@ -1940,6 +1940,8 @@ class ControlWorker:
                 return
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
                 return
+            # Keep causality and transition in one locked epoch so preserved
+            # primary evidence cannot race a concurrent workspace recovery.
             failure_causality = await load_failure_causality_snapshot(session, ws)
             primary_failure = (
                 failure_causality.primary_failure if failure_causality is not None else None
@@ -2004,6 +2006,8 @@ class ControlWorker:
                 return
             if not _workspace_claim_recheck_passes(ws, candidate.status, datetime.now(UTC)):
                 return
+            # Keep causality and transition in one locked epoch so preserved
+            # primary evidence cannot race a concurrent workspace recovery.
             failure_causality = await load_failure_causality_snapshot(session, ws)
             primary_failure = (
                 failure_causality.primary_failure if failure_causality is not None else None

@@ -100,11 +100,7 @@ def _primary_failure_snapshot(
     # Embedded primary payloads can outlive a resumed workspace after its live
     # failure fields are cleared, so they may enrich but not bootstrap evidence.
     has_workspace_evidence = bool(workspace.failure_reason or workspace.failure_message)
-    has_validation_evidence = (
-        latest_validation_run is not None
-        and workspace.failure_reason == FailureReason.validation_failure.value
-    )
-    if not has_workspace_evidence and not has_validation_evidence:
+    if not has_workspace_evidence:
         return None
 
     snapshot: dict[str, Any] = {}
