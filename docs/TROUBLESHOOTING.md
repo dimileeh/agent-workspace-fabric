@@ -247,10 +247,10 @@ Verify the configured provider auth surface:
 - `opencode`: `OLLAMA_API_KEY` plus local auth at `~/.config/opencode` or `~/.ollama`
 - Local provider auth mounts are copied into per-workspace directories and injected at runtime:
   - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/codex` → `/home/agent/.codex`
-  - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/claude` → `/home/agent/.claude` and `/home/agent/.claude.json`
-  - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/gemini` → `/home/agent/.gemini`
-  - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/opencode` → `/home/agent/.config/opencode`
-  - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/ollama` → `/home/agent/.ollama`
+  - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/claude/.claude` and `.../auth/<workspace>/claude/.claude.json` → `/home/agent/.claude` and `/home/agent/.claude.json`
+  - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/gemini/.gemini` → `/home/agent/.gemini`
+  - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/opencode/.config/opencode` → `/home/agent/.config/opencode`
+  - `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/ollama/.ollama` → `/home/agent/.ollama`
 
 Then rerun preflight and a minimal bootstrap check:
 
