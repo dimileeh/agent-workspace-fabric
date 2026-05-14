@@ -234,12 +234,6 @@ class TestToolRegistration:
             "awf_read_workspace_log",
         } <= names
         assert {
-            "awf_list_workspace_operations",
-            "awf_list_workspace_events",
-            "awf_list_workspace_logs",
-            "awf_read_workspace_log",
-        } <= names
-        assert {
             "awf_cancel_workspace",
             "awf_stop_workspace",
             "awf_destroy_workspace",
