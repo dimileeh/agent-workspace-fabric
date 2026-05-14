@@ -104,5 +104,6 @@ def _authorization_header_value(
     credentials: HTTPAuthorizationCredentials | str | None,
 ) -> str | None:
     if isinstance(credentials, HTTPAuthorizationCredentials):
-        return f"{credentials.scheme} {credentials.credentials}"
+        scheme = "Bearer" if credentials.scheme.lower() == "bearer" else credentials.scheme
+        return f"{scheme} {credentials.credentials}"
     return credentials

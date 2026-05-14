@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import structlog
 from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 
 import awf.api.deps as deps
 from awf.common.config import Settings
@@ -28,6 +29,14 @@ def test_require_api_token_reports_missing_and_invalid_tokens() -> None:
     assert unauthorized.value.headers == {"WWW-Authenticate": "Bearer"}
 
     deps.require_api_token("Bearer secret", settings=configured_settings)
+
+
+@pytest.mark.unit
+def test_require_api_token_accepts_http_bearer_credentials_case_insensitively() -> None:
+    settings = Settings(_env_file=None, api_token="secret")
+    credentials = HTTPAuthorizationCredentials(scheme="bearer", credentials="secret")
+
+    deps.require_api_token(credentials, settings=settings)
 
 
 @pytest.mark.unit
