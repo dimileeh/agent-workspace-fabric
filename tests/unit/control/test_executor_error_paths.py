@@ -3461,7 +3461,13 @@ class TestExecutorCoverageEdges:
                 for event in events
                 if event.event_type == "workspace.setup_dependency_network_retry"
             ]
+            exhausted_events = [
+                event
+                for event in events
+                if event.event_type == "workspace.setup_dependency_network_retry_exhausted"
+            ]
             assert len(retry_events) == 1
+            assert exhausted_events == []
             payload = retry_events[0].payload
             assert isinstance(payload, dict)
             assert retry_events[0].reason_code == SETUP_DEPENDENCY_NETWORK_RETRY
@@ -3527,6 +3533,7 @@ class TestExecutorCoverageEdges:
             assert exhausted_payload["failure_reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
             assert exhausted_payload["package"] == "docker==7.1.0"
             assert "ghp_1234567890abcdef" not in json.dumps(exhausted_payload)
+            assert "[redacted]" in json.dumps(exhausted_payload)
             terminal = ws.events[-1]
             assert terminal.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
             assert terminal.payload is not None
