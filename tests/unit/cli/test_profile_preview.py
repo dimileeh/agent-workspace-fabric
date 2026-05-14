@@ -38,7 +38,7 @@ def test_profile_preview_pretty_is_curated_not_flattened(
                     "validation": {"coverage": {"target": 0.99}},
                     "security": {"network": {"egress": "limited"}},
                 },
-                "network_posture": {"status": "warn", "reason": "legacy-open"},
+                "network_posture": "restricted",
                 "lint_findings": [
                     {"severity": "warn", "message": "healthcheck missing"},
                 ],
@@ -63,6 +63,7 @@ def test_profile_preview_pretty_is_curated_not_flattened(
     assert "Profile: python-postgres" in result.stdout
     assert "Runtime: image=python:3.12 dockerfile=Dockerfile" in result.stdout
     assert "Services: postgres" in result.stdout
+    assert "Network posture: restricted" in result.stdout
     assert "Validation: pytest -q" in result.stdout
     assert "Next: awf init" in result.stdout
     assert "profile.phases.validate[0].command" not in result.stdout

@@ -338,11 +338,16 @@ def _emit_profile_preview_pretty(payload: dict[str, Any]) -> None:
     if target is not None:
         typer.echo(f"Coverage target: {_format_coverage_target(target)}")
 
-    network_posture = _mapping_value(payload.get("network_posture"))
-    if network_posture:
+    network_posture_value = payload.get("network_posture")
+    if isinstance(network_posture_value, Mapping):
+        network_posture = _mapping_value(network_posture_value)
         status = _text_value(network_posture.get("status"), "unknown")
         reason = _text_value(network_posture.get("reason"), "")
         typer.echo(f"Network posture: {status}{f' ({reason})' if reason else ''}")
+    else:
+        network_posture_status = _text_value(network_posture_value, "")
+        if network_posture_status:
+            typer.echo(f"Network posture: {network_posture_status}")
 
     findings = _list_value(payload.get("lint_findings"))
     if findings:
