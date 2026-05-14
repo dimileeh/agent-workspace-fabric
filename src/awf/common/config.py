@@ -12,10 +12,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 RuntimeEnv = Literal["local", "ci", "staging", "prod"]
@@ -70,7 +70,7 @@ class Settings(BaseSettings):
         default=False,
         description="Require callback targets to use https:// scheme.",
     )
-    callbacks_allowed_hosts: tuple[str, ...] = Field(
+    callbacks_allowed_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
         default_factory=tuple,
         description=(
             "Optional allowlist of callback target hostnames (normalized to lowercase "

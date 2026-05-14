@@ -121,6 +121,23 @@ class TestSettings:
         assert settings.network_posture_open_legacy_cutoff is None
 
     @pytest.mark.unit
+    def test_callback_allowed_hosts_accepts_comma_separated_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AWF_CALLBACKS_ALLOWED_HOSTS",
+            "operator.example.com,backup.example.com",
+        )
+
+        settings = Settings(_env_file=None)
+
+        assert settings.callbacks_allowed_hosts == (
+            "operator.example.com",
+            "backup.example.com",
+        )
+
+    @pytest.mark.unit
     def test_invalid_callback_allowed_hosts_raises_validation_error(self) -> None:
         with pytest.raises(
             ValidationError,
