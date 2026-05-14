@@ -226,6 +226,24 @@ def test_setup_dependency_network_classifier_skips_index_url_credentials_for_pac
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_does_not_extract_jwt_secret_as_host() -> None:
+    raw_secret = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
+    classification = _classify_setup_dependency_network_failure(
+        command=f"TOKEN={raw_secret} uv sync --extra dev",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Failed to download docker==7.1.0 after request retries: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.host is None
+    assert raw_secret not in str(classification.metadata)
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_ignores_version_like_fallback_host() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="pip install docker==7.1.0",

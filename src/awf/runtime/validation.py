@@ -872,16 +872,23 @@ def _is_safe_setup_dependency_package(package: str) -> bool:
     return redacted == package
 
 
+def _is_safe_setup_dependency_host(host: str) -> bool:
+    redacted = redact_audit_text(host, limit=len(host) + len("...[truncated]"))
+    return redacted == host
+
+
 def _extract_setup_dependency_host(text: str) -> str | None:
     for match in _SETUP_URL_RE.finditer(text):
         host = urlparse(match.group(0)).hostname
-        if host:
+        if host and _is_safe_setup_dependency_host(host):
             return host
     for match in _SETUP_HOST_FALLBACK_RE.finditer(text):
         candidate = match.group(1).strip(".")
         if candidate.endswith((".py", ".toml", ".lock")):
             continue
         if re.fullmatch(r"[\d.]+", candidate):
+            continue
+        if not _is_safe_setup_dependency_host(candidate):
             continue
         return candidate
     return None
