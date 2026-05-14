@@ -1977,6 +1977,7 @@ class TestWorkspaceEvents:
         assert payload["has_more"] is True
         assert payload["limit"] == 1
         assert payload["cursor"] is None
+        assert payload["next_cursor"] is None
 
         result_all = await mcp.call_tool(
             "awf_list_workspace_events",
@@ -1987,6 +1988,7 @@ class TestWorkspaceEvents:
         assert payload_all is not None
         assert len(payload_all["items"]) >= 3
         assert payload_all["has_more"] is False
+        assert payload_all["next_cursor"] is None
 
     @pytest.mark.unit
     async def test_missing_workspace_events_return_empty_list(self, mcp) -> None:  # type: ignore[no-untyped-def]
@@ -2001,6 +2003,9 @@ class TestWorkspaceEvents:
         assert payload is not None
         assert payload["items"] == []
         assert payload["has_more"] is False
+        assert payload["limit"] == 50
+        assert payload["cursor"] is None
+        assert payload["next_cursor"] is None
 
 
 class TestGlobalEvents:
@@ -2060,6 +2065,10 @@ class TestGlobalEvents:
         assert isinstance(result, CallToolResult)
         payload = result.structuredContent
         assert payload is not None
+        assert payload["has_more"] is False
+        assert payload["limit"] == 50
+        assert payload["cursor"] is None
+        assert payload["next_cursor"] is None
         workspace_ids = {item["workspace_id"] for item in payload["items"]}
         assert first_id in workspace_ids
         assert second_id in workspace_ids
@@ -2103,6 +2112,10 @@ class TestGlobalEvents:
         assert isinstance(result, CallToolResult)
         payload = result.structuredContent
         assert payload is not None
+        assert payload["has_more"] is False
+        assert payload["limit"] == 50
+        assert payload["cursor"] is None
+        assert payload["next_cursor"] is None
         first_items = [i for i in payload["items"] if i["workspace_id"] == first_id]
         second_items = [i for i in payload["items"] if i["workspace_id"] == second_id]
         assert len(first_items) >= 1
@@ -2179,6 +2192,8 @@ class TestGlobalEvents:
         assert len(payload["items"]) == 2
         assert payload["has_more"] is True
         assert payload["limit"] == 2
+        assert payload["cursor"] is None
+        assert payload["next_cursor"] is None
 
     @pytest.mark.unit
     async def test_list_events_limit_bounds(self, mcp) -> None:  # type: ignore[no-untyped-def]
