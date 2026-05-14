@@ -2886,6 +2886,61 @@ async def test_run_retries_transient_base_fetch_500_and_completes(
 
 
 @pytest.mark.unit
+async def test_run_retries_remote_tracking_ref_lock_race_and_completes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "error: cannot lock ref "
+            "'refs/remotes/origin/codex/awf-post-merge-fixes': is at "
+            "dffa1db03af61da5db52e16a6e79163c35b88d5d but expected "
+            "cc82a8d265b6d63593417a13d3d9507cc0ede8d5\n"
+            "From https://github.com/dimileeh/aira-agent-workspace-fabric\n"
+            " ! cc82a8d2..dffa1db0  codex/awf-post-merge-fixes -> "
+            "origin/codex/awf-post-merge-fixes  (unable to update local ref)"
+        ),
+    )
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=0, stdout=pr_payload(closed=True, merged=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.gh = _CapturingGH(  # type: ignore[assignment]
+        status=replace(
+            _green_status(),
+            closed=True,
+            merged=True,
+            merge_commit_sha="mergecommit1234567890",
+        )
+    )
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [5.0]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.completed.value
+        assert any(
+            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY" for event in workspace.events
+        )
+
+
+@pytest.mark.unit
 async def test_run_fails_after_transient_base_fetch_retry_budget_is_exhausted(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
