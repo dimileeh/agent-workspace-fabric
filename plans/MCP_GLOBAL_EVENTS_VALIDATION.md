@@ -61,7 +61,7 @@ Implemented MCP parity for global AWF events (`GET /v1/events`) by adding the `a
 
 ## Validation results
 
-```
+```text
 $ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server.py tests/unit/mcp/test_mcp_operator_surfaces.py tests/unit/mcp/test_mcp_client_parity_docs.py tests/unit/mcp/test_mcp_parity_matrix_crossref.py -q
 157 passed in 104.93s
 
