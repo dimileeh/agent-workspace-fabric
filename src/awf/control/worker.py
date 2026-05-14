@@ -2053,10 +2053,12 @@ class ControlWorker:
             ws = await repo.get_for_update(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
-            if not _workspace_claim_recheck_passes(ws, candidate.status, datetime.now(UTC)):
+            claim_cutoff = datetime.now(UTC)
+            if not _workspace_claim_recheck_passes(ws, candidate.status, claim_cutoff):
                 return
-            # Keep causality and transition in one locked epoch so preserved
-            # primary evidence cannot race a concurrent workspace recovery.
+            # Keep causality and transition in one locked epoch where row
+            # locks exist; the guarded transition below preserves the stale
+            # claim predicate for dialects without row locks.
             failure_causality = await load_failure_causality_snapshot(session, ws)
             primary_failure = (
                 failure_causality.primary_failure if failure_causality is not None else None
@@ -2083,12 +2085,17 @@ class ControlWorker:
                 if primary_failure is not None
                 else None
             )
-            await repo.transition(
-                ws,
+            transitioned = await repo.transition_if_current(
+                candidate.workspace_id,
+                from_status=candidate.status,
                 to=WorkspaceStatus.failed,
                 reason_code=reason_code,
                 payload=transition_payload,
+                extra_conditions=_claim_recheck_conditions(candidate.status, claim_cutoff),
             )
+            if transitioned is None:
+                return
+            ws = transitioned
             ws.execution_claimed_by = None
             ws.execution_claim_expires_at = None
             ws.monitor_claimed_by = None
@@ -2618,6 +2625,17 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
         Workspace.monitor_claim_expires_at.is_(None),
         Workspace.monitor_claim_expires_at <= claim_cutoff,
     )
+
+
+def _claim_recheck_conditions(
+    status: WorkspaceStatus,
+    claim_cutoff: datetime,
+) -> tuple[Any, ...]:
+    if status in _ACTIVE_EXECUTION_STATUSES:
+        return (_stale_execution_claim_filter(claim_cutoff),)
+    if status == WorkspaceStatus.monitoring_pr:
+        return (_stale_monitor_claim_filter(claim_cutoff),)
+    return ()
 
 
 async def _existing_ordered_queue_decision_keys(

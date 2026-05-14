@@ -7365,6 +7365,151 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert workspace.execution_claim_expires_at == refreshed_expires_at
 
     @pytest.mark.unit
+    async def test_runtime_stranding_failure_transition_rechecks_refreshed_claim(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = "ws_stranding_refreshed_during_failure"
+        stale_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        refreshed_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        workspace = SimpleNamespace(
+            id=workspace_id,
+            status=WorkspaceStatus.running.value,
+            execution_claimed_by="worker-a",
+            execution_claim_expires_at=stale_expires_at,
+            monitor_claimed_by=None,
+            monitor_claim_expires_at=None,
+            failure_reason=None,
+            failure_message=None,
+        )
+
+        class RecordingSession:
+            committed = False
+
+            async def __aenter__(self) -> RecordingSession:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def commit(self) -> None:
+                self.committed = True
+
+        class RecordingWorkspaceRepository:
+            transition_calls = 0
+            transition_if_current_calls: list[dict[str, object]] = []
+            event_calls = 0
+
+            def __init__(self, session: RecordingSession) -> None:
+                assert session is recording_session
+
+            async def get_for_update(self, requested_workspace_id: str) -> SimpleNamespace:
+                assert requested_workspace_id == workspace_id
+                return workspace
+
+            async def transition(
+                self,
+                transitioned_workspace: SimpleNamespace,
+                *,
+                to: WorkspaceStatus,
+                reason_code: str,
+                payload: dict[str, object] | None = None,
+            ) -> SimpleNamespace:
+                del reason_code, payload
+                self.__class__.transition_calls += 1
+                transitioned_workspace.status = to.value
+                return transitioned_workspace
+
+            async def transition_if_current(
+                self,
+                requested_workspace_id: str,
+                *,
+                from_status: WorkspaceStatus,
+                to: WorkspaceStatus,
+                reason_code: str,
+                payload: dict[str, object] | None = None,
+                extra_conditions: tuple[object, ...] = (),
+            ) -> None:
+                self.__class__.transition_if_current_calls.append(
+                    {
+                        "workspace_id": requested_workspace_id,
+                        "from_status": from_status,
+                        "to": to,
+                        "reason_code": reason_code,
+                        "payload": payload,
+                        "extra_conditions_count": len(extra_conditions),
+                    }
+                )
+
+            async def add_event(self, *_args: object, **_kwargs: object) -> None:
+                self.__class__.event_calls += 1
+
+        async def _refresh_claim_during_failure_causality_load(
+            session: AsyncSession,
+            loaded_workspace: Workspace,
+        ) -> None:
+            del session
+            loaded_workspace.execution_claim_expires_at = refreshed_expires_at
+
+        recording_session = RecordingSession()
+        monkeypatch.setattr(
+            worker_module,
+            "load_failure_causality_snapshot",
+            _refresh_claim_during_failure_causality_load,
+        )
+        monkeypatch.setattr(
+            worker_module,
+            "WorkspaceRepository",
+            RecordingWorkspaceRepository,
+        )
+        worker = ControlWorker(
+            session_factory=lambda: recording_session,  # type: ignore[arg-type]
+            provisioner=object(),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+        finding = WorkspaceRuntimeFinding(
+            workspace_id=workspace_id,
+            workspace_status=WorkspaceStatus.running.value,
+            status="stranded",
+            reason_code="STRANDED_WORKSPACE",
+            decision="fail_workspace",
+            message="runtime is stranded",
+        )
+
+        await worker._fail_stranded_workspace(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_refreshed_runtime_stranding",
+            ),
+            RuntimeSnapshot(stack_state="stopped", reason="worker restarted"),
+            finding,
+        )
+
+        assert RecordingWorkspaceRepository.transition_calls == 0
+        assert RecordingWorkspaceRepository.transition_if_current_calls == [
+            {
+                "workspace_id": workspace_id,
+                "from_status": WorkspaceStatus.running,
+                "to": WorkspaceStatus.failed,
+                "reason_code": "STRANDED_WORKSPACE",
+                "payload": None,
+                "extra_conditions_count": 1,
+            }
+        ]
+        assert RecordingWorkspaceRepository.event_calls == 0
+        assert recording_session.committed is False
+        assert workspace.status == WorkspaceStatus.running.value
+        assert workspace.failure_reason is None
+        assert workspace.execution_claimed_by == "worker-a"
+        assert workspace.execution_claim_expires_at == refreshed_expires_at
+
+    @pytest.mark.unit
     async def test_stale_active_execution_scan_is_limited_to_worker_node(
         self,
         session_factory: async_sessionmaker[AsyncSession],
