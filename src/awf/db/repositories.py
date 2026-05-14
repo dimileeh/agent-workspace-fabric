@@ -3425,6 +3425,31 @@ class WorkspaceRepository:
         )
         return events[0]
 
+    async def add_event_with_states(
+        self,
+        workspace: Workspace,
+        *,
+        event_type: str,
+        old_state: WorkspaceStatus | str,
+        new_state: WorkspaceStatus | str,
+        reason_code: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> WorkspaceEvent:
+        event_order = await self._reserve_workspace_event_orders(workspace, count=1)
+        event = WorkspaceEvent(
+            id=new_event_id(),
+            workspace_id=workspace.id,
+            event_type=event_type,
+            old_state=_workspace_status_value(old_state),
+            new_state=_workspace_status_value(new_state),
+            reason_code=reason_code,
+            payload=payload,
+            event_order=event_order,
+        )
+        workspace.events.append(event)
+        await self._session.flush()
+        return event
+
     async def add_audit_event(
         self,
         workspace: Workspace,
@@ -3564,6 +3589,10 @@ class WorkspaceRepository:
         workspace.events.extend(created)
         await self._session.flush()
         return created
+
+
+def _workspace_status_value(status: WorkspaceStatus | str) -> str:
+    return status.value if isinstance(status, WorkspaceStatus) else status
 
 
 def _matches_pr_adoption_identity(

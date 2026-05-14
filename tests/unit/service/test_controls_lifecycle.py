@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import update as sa_update
@@ -978,22 +979,34 @@ async def test_remonitor_failed_workspace_reserves_state_reset_event_order(
     workspace.pr_number = 43
     await session.flush()
     service, _stopper, _cleaner = _service(session)
-    calls: list[tuple[str, int]] = []
-    original_reserve = WorkspaceRepository._reserve_workspace_event_orders
+    calls: list[tuple[str, str, str, str]] = []
+    original_add_event_with_states = WorkspaceRepository.add_event_with_states
 
-    async def _recording_reserve(
+    async def _recording_add_event_with_states(
         self: WorkspaceRepository,
-        reserved_workspace: Workspace,
+        event_workspace: Workspace,
         *,
-        count: int,
-    ) -> int:
-        calls.append((reserved_workspace.id, count))
-        return await original_reserve(self, reserved_workspace, count=count)
+        event_type: str,
+        old_state: WorkspaceStatus | str,
+        new_state: WorkspaceStatus | str,
+        reason_code: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> WorkspaceEvent:
+        calls.append((event_workspace.id, event_type, str(old_state), str(new_state)))
+        return await original_add_event_with_states(
+            self,
+            event_workspace,
+            event_type=event_type,
+            old_state=old_state,
+            new_state=new_state,
+            reason_code=reason_code,
+            payload=payload,
+        )
 
     monkeypatch.setattr(
         WorkspaceRepository,
-        "_reserve_workspace_event_orders",
-        _recording_reserve,
+        "add_event_with_states",
+        _recording_add_event_with_states,
     )
 
     await service.remonitor_workspace(
@@ -1004,7 +1017,14 @@ async def test_remonitor_failed_workspace_reserves_state_reset_event_order(
     )
     events = await _events(session, workspace.id)
 
-    assert calls == [(workspace.id, 1)]
+    assert calls == [
+        (
+            workspace.id,
+            "workspace.remonitor_requested",
+            WorkspaceStatus.failed.value,
+            WorkspaceStatus.monitoring_pr.value,
+        )
+    ]
     assert workspace.version == 2
     assert events[0].event_order == 2
     assert events[0].old_state == WorkspaceStatus.failed.value

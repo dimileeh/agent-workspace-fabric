@@ -2318,6 +2318,38 @@ class TestAddEvents:
         assert workspace.version == next_version + 1
         assert workspace.updated_at == workspace_updated_at
 
+    @pytest.mark.unit
+    async def test_add_event_with_states_reserves_order_and_uses_explicit_states(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_version = workspace.version
+        workspace_updated_at = workspace.updated_at
+
+        event = await repo.add_event_with_states(
+            workspace,
+            event_type="workspace.remonitor_requested",
+            old_state=WorkspaceStatus.failed,
+            new_state=WorkspaceStatus.monitoring_pr,
+            reason_code="OPERATOR_REMONITOR",
+            payload={"state_reset": True},
+        )
+
+        assert event.workspace_id == workspace.id
+        assert event.old_state == WorkspaceStatus.failed.value
+        assert event.new_state == WorkspaceStatus.monitoring_pr.value
+        assert event.event_order == workspace_version + 1
+        assert workspace.version == workspace_version + 1
+        assert workspace.updated_at == workspace_updated_at
+
 
 class TestListEvents:
     @pytest.mark.unit

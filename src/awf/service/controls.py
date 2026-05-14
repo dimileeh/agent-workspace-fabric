@@ -14,10 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse
 from awf.common.config import get_settings
-from awf.common.ids import new_event_id
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace, WorkspaceEvent
+from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -572,20 +571,14 @@ class WorkspaceControlService:
             event_payload["cancelled_recovery_reason_code"] = _OPERATOR_REMONITOR_REASON_CODE
             event_payload["cancelled_recovery_requested_action"] = OperationType.remonitor.value
         if state_reset is not None:
-            event_order = await repo._reserve_workspace_event_orders(workspace, count=1)
-            workspace.events.append(
-                WorkspaceEvent(
-                    id=new_event_id(),
-                    workspace_id=workspace.id,
-                    event_type="workspace.remonitor_requested",
-                    old_state=str(state_reset["from"]),
-                    new_state=str(state_reset["to"]),
-                    reason_code=_OPERATOR_REMONITOR_REASON_CODE,
-                    payload=event_payload,
-                    event_order=event_order,
-                )
+            await repo.add_event_with_states(
+                workspace,
+                event_type="workspace.remonitor_requested",
+                old_state=cast(str, state_reset["from"]),
+                new_state=cast(str, state_reset["to"]),
+                reason_code=_OPERATOR_REMONITOR_REASON_CODE,
+                payload=event_payload,
             )
-            await self._session.flush()
         else:
             await repo.add_event(
                 workspace,
