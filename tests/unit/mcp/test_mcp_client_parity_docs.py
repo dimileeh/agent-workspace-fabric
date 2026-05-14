@@ -49,6 +49,7 @@ READ_ONLY_OPERATOR_ROWS = {
         "awf_get_service_health",
         "awf_get_service_readiness",
     },
+    "Workspace events": {"awf_list_events", "awf_list_workspace_events"},
 }
 
 IDEMPOTENT_MCP_CONTROL_TOOLS = {
