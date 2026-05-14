@@ -95,9 +95,12 @@ _WORKSPACE_AUTH_HEADER = f"Bearer {_WORKSPACE_API_TOKEN}"
 
 
 @pytest.fixture(autouse=True)
-def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
     monkeypatch.setenv("AWF_API_TOKEN", _WORKSPACE_API_TOKEN)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture
