@@ -1992,7 +1992,7 @@ class TestWorkspaceEvents:
         assert payload_all["next_cursor"] is None
 
     @pytest.mark.unit
-    async def test_missing_workspace_events_return_empty_list(self, mcp) -> None:  # type: ignore[no-untyped-def]
+    async def test_missing_workspace_events_return_null_tool_result(self, mcp) -> None:  # type: ignore[no-untyped-def]
         result = await mcp.call_tool(
             "awf_list_workspace_events",
             {"workspace_id": "ws_missing"},
@@ -2000,13 +2000,7 @@ class TestWorkspaceEvents:
 
         assert isinstance(result, CallToolResult)
         assert result.isError is False
-        payload = result.structuredContent
-        assert payload is not None
-        assert payload["items"] == []
-        assert payload["has_more"] is False
-        assert payload["limit"] == 50
-        assert payload["cursor"] is None
-        assert payload["next_cursor"] is None
+        assert result.structuredContent is None
 
 
 class TestGlobalEvents:

@@ -580,7 +580,7 @@ def build_mcp_server(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
         limit: int = Field(default=50, ge=1, le=500),
         event_type: str | None = Field(default=None, description="Optional event-type filter."),
-    ) -> StructuredToolResult:
+    ) -> CallToolResult:
         """Read-only operator observability: list workspace events with REST envelope."""
         rows = await service.list_events(
             workspace_id,
@@ -588,10 +588,7 @@ def build_mcp_server(
             event_type=event_type,
         )
         if rows is None:
-            response = WorkspaceEventListResponse(
-                items=[], has_more=False, limit=limit, cursor=None
-            )
-            return _tool_result(response.model_dump(mode="json"))
+            return _null_tool_result()
         has_more = len(rows) > limit
         items = rows[:limit]
         response = WorkspaceEventListResponse(
