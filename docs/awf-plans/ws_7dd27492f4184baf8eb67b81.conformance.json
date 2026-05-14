@@ -1,7 +1,1 @@
-{
-  "status": "needs_iteration",
-  "summary": "Workspace/auth hardening plan artifacts are now present and route-auth metadata coverage was tightened, but runtime validation evidence is still outstanding pending the AWF-owned validation phase.",
-  "gaps": [
-    "Validation evidence for the requested targeted commands is pending (AWF-owned validation phase)."
-  ]
-}
+{"status":"satisfied","summary":"Workspace metadata auth hardening requirements are implemented in saved plan scope and validated in this workspace execution. `require_api_token` remains timing-safe with 503/401 envelope behavior, sensitive workspace metadata routes are covered by auth dependencies (with explicit public probes documented and tested), and focused authentication metadata contracts remain in place. Validation evidence is recorded in docs/awf-plans/ws_7dd27492f4184baf8eb67b81.validation.txt.","gaps":[]}

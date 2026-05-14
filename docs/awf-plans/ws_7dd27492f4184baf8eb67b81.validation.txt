@@ -1,12 +1,33 @@
 Validation request for ws_7dd27492f4184baf8eb67b81
 (Workspace/auth hardening — API timing-safe token checks and workspace metadata auth)
 
-Planned commands:
+Executed AWF-owned validation commands for this slice:
 
 1) uv run --python 3.12 --extra dev pytest tests/unit/api/test_deps.py tests/unit/api/test_workspaces.py tests/unit/api/test_workspaces_direct.py tests/unit/contracts/test_auth_failure_alignment.py tests/unit/contracts/test_surface_metadata_alignment.py -q
-2) uv run --python 3.12 --extra dev ruff check src/awf/api tests/unit/api tests/unit/contracts
-3) uv run --python 3.12 --extra dev mypy src/awf
+Result: PASS
 
-Execution status:
-- Not executed locally in this phase to keep workspace work in the requested AWF validation flow.
-- Please run AWF-owned validation phase and update this file with pass/fail evidence.
+Output:
+320 passed in 183.48s (0:03:03)
+
+2) uv run --python 3.12 --extra dev ruff check src/awf/api tests/unit/api tests/unit/contracts
+Result: PASS
+
+Output:
+All checks passed!
+
+3) uv run --python 3.12 --extra dev mypy src/awf
+Result: PASS
+
+Output:
+Success: no issues found in 154 source files
+
+Notes:
+- No code changes were required for this iteration to satisfy the slice requirements.
+- Existing test coverage already includes:
+  - constant-time token comparison coverage in `tests/unit/api/test_deps.py`
+  - unauthorized/wrong-token and authorized metadata route coverage in
+    `tests/unit/api/test_workspaces.py`
+  - route metadata auth regression + public route exceptions in
+    `tests/unit/contracts/test_surface_metadata_alignment.py`
+  - auth envelope contract coverage in
+    `tests/unit/contracts/test_auth_failure_alignment.py`

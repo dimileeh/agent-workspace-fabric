@@ -179,6 +179,18 @@ curl -H "Authorization: Bearer $AWF_API_TOKEN" \
 Returns the full workspace response including status, task policy, validation
 provenance, lifecycle stages, LLM usage, and provider recovery state.
 
+### Secret lease status (operator metadata)
+
+Auth required (`Authorization: Bearer $AWF_API_TOKEN`).
+
+```bash
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/secret-leases"
+```
+
+Returns redacted secret lease inventory (`lease_id`, `secret_name`, `target`, `provider`,
+`status`, `expires_at`, etc.) for operator metadata visibility and control.
+
 ---
 
 ## Read Logs and Events
