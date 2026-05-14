@@ -205,6 +205,20 @@ def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
     return string_schema
 
 
+def _optional_object_schema(schema: dict[str, object]) -> dict[str, object]:
+    any_of = schema.get("anyOf")
+    if any_of is None:
+        assert schema.get("type") == "object"
+        return schema
+
+    assert isinstance(any_of, list)
+    object_schema = next(
+        item for item in any_of if isinstance(item, dict) and item.get("type") == "object"
+    )
+    assert isinstance(object_schema, dict)
+    return object_schema
+
+
 def _assert_idempotency_key_schema(schema: dict[str, object]) -> None:
     string_schema = _optional_string_schema(schema)
     assert str(schema["description"]).startswith("Required idempotency key")
@@ -358,8 +372,8 @@ class TestToolRegistration:
             "minLength": 1,
             "type": "string",
         }
-        assert out_of_scope_changes["type"] == "object"
-        assert provider_recovery["type"] == "object"
+        assert _optional_object_schema(out_of_scope_changes)["type"] == "object"
+        assert _optional_object_schema(provider_recovery)["type"] == "object"
         assert (
             create_v2.inputSchema["properties"]["provider_readiness_override"]["default"] is False
         )
