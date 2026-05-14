@@ -116,6 +116,25 @@ def test_callback_endpoints_expose_authorization_header_in_openapi(openapi_spec:
 
 
 @pytest.mark.unit
+def test_callback_endpoints_document_structured_error_responses(
+    openapi_spec: dict,
+) -> None:
+    path = openapi_spec["paths"]["/v1/callbacks"]
+    expected_statuses_by_method = {
+        "get": {"401", "503"},
+        "post": {"400", "401", "409", "503"},
+    }
+
+    for method, expected_statuses in expected_statuses_by_method.items():
+        responses = path[method]["responses"]
+        assert expected_statuses <= responses.keys()
+        assert "403" not in responses
+        for status_code in expected_statuses:
+            schema = responses[status_code]["content"]["application/json"]["schema"]
+            assert schema == {"$ref": "#/components/schemas/ErrorResponse"}
+
+
+@pytest.mark.unit
 def test_authorization_headers_are_required_in_openapi(openapi_spec: dict) -> None:
     optional_auth_headers: list[str] = []
     for path, path_item in openapi_spec.get("paths", {}).items():
