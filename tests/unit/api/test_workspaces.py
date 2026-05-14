@@ -361,6 +361,7 @@ async def test_workspace_metadata_routes_accept_authorized_requests(client: Asyn
     ).status_code == 202
 
     assert (await client.get("/v1/workspaces", params={"limit": 1})).status_code == 200
+    assert (await client.get("/v1/workspaces/overview")).status_code == 200
     assert (await client.get(f"/v1/workspaces/{workspace_id}")).status_code == 200
     assert (await client.get(f"/v1/workspaces/{workspace_id}/events")).status_code == 200
     assert (await client.get(f"/v1/workspaces/{workspace_id}/stale-reasons")).status_code == 200

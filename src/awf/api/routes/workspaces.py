@@ -423,7 +423,6 @@ async def list_workspace_stale_reasons(
         422: {"model": ErrorResponse},
         502: {"model": ErrorResponse},
     },
-    dependencies=[Depends(require_api_token)],
 )
 async def adopt_pull_request_monitor(
     payload: PullRequestMonitorAdoptionRequest,
@@ -459,7 +458,6 @@ async def adopt_pull_request_monitor(
         409: {"model": ErrorResponse},
         503: SERVICE_UNAVAILABLE_ERROR_RESPONSE,
     },
-    dependencies=[Depends(require_api_token)],
 )
 async def retry_workspace(
     workspace_id: str,
