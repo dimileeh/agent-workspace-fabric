@@ -39,7 +39,7 @@ Implemented MCP parity for global AWF events (`GET /v1/events`) by adding the `a
    - Added `"Workspace events": {"awf_list_events", "awf_list_workspace_events"}` to `READ_ONLY_OPERATOR_ROWS`.
 
 6. **`tests/unit/contracts/_capabilities.py`**
-   - `global_events`: `mcp_tool="awf_list_events"`, `parity_status="MCP implemented"`, `parity_backlog_slice="—"`, added `mcp_request_fields` and `mcp_required_fields`.
+   - `global_events`: `mcp_tool="awf_list_events"`, `parity_status="MCP implemented"`, `parity_backlog_slice="—"`, added `mcp_request_fields` (`mcp_required_fields` left as default empty — all tool params are optional).
    - `workspace_events`: `parity_status="MCP implemented"`, `parity_backlog_slice="—"`, added `mcp_request_fields` reflecting envelope.
 
 7. **`tests/unit/contracts/test_registry_smoke.py`**
