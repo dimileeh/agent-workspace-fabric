@@ -21,6 +21,12 @@ human-readable `message`, `evidence`, and an `action` string.
 The overall report includes `status` (ok/warn/fail), `project`, `mode`
 (live/mocked_local), `phases`, `console_links`, and `next_actions`.
 
+Smoke reports probe configured console URLs before reporting
+`SMOKE_CONSOLE_READY`. When `AWF_CONSOLE_URL` is not set, they infer and probe
+the default local console URL, `http://localhost:3000`. Start it with
+`npm --prefix apps/console run dev` when the `console_links` phase reports
+`SMOKE_CONSOLE_UNAVAILABLE`.
+
 ## Options
 
 | Flag | Default | Description |

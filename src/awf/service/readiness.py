@@ -121,6 +121,36 @@ class CoreReadinessReport:
         }
 
 
+def render_core_readiness_pretty(report: CoreReadinessReport) -> str:
+    """Render the Core release gate as a compact operator terminal view."""
+
+    lines = [
+        f"AWF Core release readiness: {report.status}",
+        (
+            "This is the release gate for AWF Core. For local service health, "
+            "use `awf service status --format pretty` or `awf service doctor`."
+        ),
+        (
+            f"Summary: {report.summary['ok']} ok, {report.summary['warn']} warn, "
+            f"{report.summary['fail']} fail"
+        ),
+        "",
+        "Checks:",
+    ]
+    for check in report.checks:
+        lines.append(f"  [{check.status}] {check.name}: {check.message}")
+        lines.append(f"        reason: {check.reason_code}")
+        lines.extend(_readiness_evidence_lines(check))
+
+    if report.next_actions:
+        lines.append("")
+        lines.append("Next actions:")
+        for action in report.next_actions:
+            lines.append(f"  - {action}")
+
+    return "\n".join(lines) + "\n"
+
+
 async def collect_core_readiness_report(
     *,
     settings: ServiceSettings,
@@ -235,6 +265,48 @@ async def collect_core_readiness_report(
         checks=tuple(checks),
         next_actions=tuple(_next_actions(checks)),
     )
+
+
+def _readiness_evidence_lines(check: CoreReadinessCheck) -> list[str]:
+    if check.name == "prd_slo_thresholds":
+        evidence = _mapping(check.evidence)
+        lines: list[str] = []
+        since_hours = evidence.get("since_hours")
+        if since_hours is not None:
+            lines.append(f"        window: {since_hours}h")
+        breaches = _mapping(evidence.get("breaches"))
+        if breaches:
+            lines.append("        breaches:")
+            for name, breach in sorted(breaches.items()):
+                if not isinstance(breach, Mapping):
+                    lines.append(f"          - {name}: {breach}")
+                    continue
+                threshold = _mapping(breach.get("threshold"))
+                operator = _string(threshold.get("operator")) or "?"
+                threshold_value = threshold.get("value")
+                actual = breach.get("actual")
+                lines.append(
+                    "          - "
+                    f"{name}: {_format_readiness_rate(actual)} "
+                    f"{operator} {_format_readiness_rate(threshold_value)}"
+                )
+        elif check.status != "ok":
+            lines.append("        breaches: none reported")
+        return lines
+
+    if check.name in {"service_status", "provider_readiness", "cleanup_posture"}:
+        status = check.evidence.get("status")
+        if status is not None:
+            return [f"        evidence status: {status}"]
+    return []
+
+
+def _format_readiness_rate(value: object) -> str:
+    if isinstance(value, int | float):
+        return f"{value * 100:.1f}%"
+    if value is None:
+        return "no data"
+    return str(value)
 
 
 def _cached_status_collector(payload: dict[str, object] | None) -> StatusCollector | None:

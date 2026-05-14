@@ -406,6 +406,7 @@ Inspect the service and logs from another terminal:
 uv run --python 3.12 --extra dev awf service status
 uv run --python 3.12 --extra dev awf service status --provider github --format pretty
 uv run --python 3.12 --extra dev awf service readiness --format json
+uv run --python 3.12 --extra dev awf service release-readiness --format pretty
 curl 'http://localhost:8000/readyz?provider=github'
 curl 'http://localhost:8000/release-readiness'
 uv run --python 3.12 --extra dev awf service logs --follow --service worker
@@ -420,11 +421,12 @@ downgrades are warnings by default. Pass `--provider <name>` or
 checks.
 
 `awf service readiness --format json` is the executable local Core release
-scorecard. It aggregates service readiness, doctor diagnostics with cached
-status reuse, provider readiness, cleanup/orphan posture, PRD SLO thresholds,
-recent failure taxonomy, and the maintained `examples/awf-core-demo` onboarding
-smoke evidence. The same report is exposed through `GET /release-readiness` and
-the MCP `awf_get_core_release_readiness` tool. The gate fails when recent
+scorecard; `awf service release-readiness` is the same gate under a clearer
+name. It aggregates service readiness, doctor diagnostics with cached status
+reuse, provider readiness, cleanup/orphan posture, PRD SLO thresholds, recent
+failure taxonomy, and the maintained `examples/awf-core-demo` onboarding smoke
+evidence. The same report is exposed through `GET /release-readiness` and the
+MCP `awf_get_core_release_readiness` tool. The gate fails when recent
 workspace failures still have generic or unknown reason codes, or rolling PRD
 SLO metrics are unavailable/stale/below threshold, unless an operator
 explicitly runs it with an allowlist flag and records the rationale in the

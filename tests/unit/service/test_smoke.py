@@ -10,6 +10,7 @@ import pytest
 
 from awf.service.smoke import (
     _default_config_resolver,
+    _default_console_checker,
     _default_service_collector,
     _extract_validation_commands,
     _phase_service_readiness,
@@ -135,6 +136,22 @@ def _ok_profile_preview_ok():
 def _config_resolver(api_base_url="http://localhost:8000"):
     def _fn(settings):
         return {"api_base_url": api_base_url, "console_url": "http://localhost:3000"}
+
+    return _fn
+
+
+@pytest.fixture(autouse=True)
+def _stub_default_console_checker(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fn(_url: str) -> bool:
+        return True
+
+    monkeypatch.setattr("awf.service.smoke._default_console_checker", _fn)
+
+
+def _console_checker(reachable: bool, expected_url: str = "http://localhost:3000"):
+    async def _fn(url: str) -> bool:
+        assert url == expected_url
+        return reachable
 
     return _fn
 
@@ -607,10 +624,63 @@ class TestCollectSmokeReportMockedMode:
             auth_collector=_ok_auth_collector(),
             profile_preview=_ok_profile_preview_ok(),
             config_resolver=_no_console,
+            console_checker=_console_checker(False),
         )
 
         console_phase = next(p for p in report["phases"] if p["name"] == "console_links")
         assert console_phase["reason_code"] == "SMOKE_CONSOLE_UNAVAILABLE"
+        assert report["console_links"]["ui"] == "http://localhost:3000"
+        assert "npm --prefix apps/console run dev" in console_phase["action"]
+
+    async def test_default_local_console_url_reports_ready_when_reachable(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+
+        def _no_console(settings):
+            return {"api_base_url": "http://localhost:8000"}
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_no_console,
+            console_checker=_console_checker(True),
+        )
+
+        console_phase = next(p for p in report["phases"] if p["name"] == "console_links")
+        assert console_phase["status"] == "ok"
+        assert console_phase["reason_code"] == "SMOKE_CONSOLE_READY"
+        assert report["console_links"]["ui"] == "http://localhost:3000"
+
+    async def test_configured_console_url_reports_unavailable_when_probe_fails(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+        configured_url = "http://localhost:3999"
+
+        def _configured_console(settings):
+            return {"api_base_url": "http://localhost:8000", "console_url": configured_url}
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_configured_console,
+            console_checker=_console_checker(False, expected_url=configured_url),
+        )
+
+        console_phase = next(p for p in report["phases"] if p["name"] == "console_links")
+        assert console_phase["status"] == "warn"
+        assert console_phase["reason_code"] == "SMOKE_CONSOLE_UNAVAILABLE"
+        assert console_phase["evidence"]["source"] == "configured"
+        assert report["console_links"]["ui"] == configured_url
 
 
 @pytest.mark.unit
@@ -882,10 +952,11 @@ class TestCollectSmokeReportExceptionPaths:
             auth_collector=_ok_auth_collector(),
             profile_preview=_ok_profile_preview_ok(),
             config_resolver=_null_config,
+            console_checker=_console_checker(False),
         )
 
         assert report["console_links"]["api_docs"] == "http://localhost:8000/docs"
-        assert report["console_links"]["ui"] == "unavailable"
+        assert report["console_links"]["ui"] == "http://localhost:3000"
 
     async def test_next_actions_collected_from_phases(self, tmp_path: Path) -> None:
         async def _bad_service(settings, *, http_client=None):
@@ -1032,6 +1103,30 @@ class TestCollectSmokeReportExceptionPaths:
         assert result["status"] == "fail"
         assert result["reason_code"] == "SMOKE_SERVICE_UNREACHABLE"
         assert "boom" in result["evidence"]["error"]
+
+    async def test_default_console_checker_rejects_client_error_status(self) -> None:
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_get = AsyncMock()
+            mock_get.return_value = SimpleNamespace(status_code=404)
+            mock_instance = SimpleNamespace()
+            mock_instance.get = mock_get
+            mock_cls.return_value.__aenter__.return_value = mock_instance
+
+            result = await _default_console_checker("http://localhost:3000")
+
+        assert result is False
+
+    async def test_default_console_checker_accepts_success_status(self) -> None:
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_get = AsyncMock()
+            mock_get.return_value = SimpleNamespace(status_code=200)
+            mock_instance = SimpleNamespace()
+            mock_instance.get = mock_get
+            mock_cls.return_value.__aenter__.return_value = mock_instance
+
+            result = await _default_console_checker("http://localhost:3000")
+
+        assert result is True
 
     async def test_extract_validation_commands_direct_call_no_phases(self) -> None:
         class NoDraftPreview:

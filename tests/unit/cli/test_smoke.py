@@ -89,8 +89,11 @@ class TestSmokeRunCommand:
         )
         result = _runner.invoke(app, ["smoke", "run", "--format", "pretty"])
         assert result.exit_code == 0
+        assert "AWF smoke: ok" in result.stdout
+        assert "[ok] service_readiness" in result.stdout
         assert "SMOKE_SERVICE_READY" in result.stdout
         assert "SMOKE_AUTH_READY" in result.stdout
+        assert "phases[0]." not in result.stdout
 
     def test_project_flag_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def _collect(*args, **kwargs):

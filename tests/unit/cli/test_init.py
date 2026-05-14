@@ -211,6 +211,24 @@ def test_init_prints_clear_next_steps(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 @pytest.mark.unit
+def test_init_existing_profile_does_not_suggest_profile_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+    profile_path = tmp_path / ".awf" / "workspace.yml"
+    profile_path.parent.mkdir()
+    profile_path.write_text("version: 1\nname: existing\n", encoding="utf-8")
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "profile already exists" in result.output
+    assert "awf profile preview" in result.output
+    assert "awf smoke run --mocked-local --format pretty" in result.output
+    assert "awf profile init <path> --write" not in result.output
+
+
+@pytest.mark.unit
 def test_init_runs_status_and_doctor_checks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
