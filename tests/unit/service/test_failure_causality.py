@@ -859,6 +859,70 @@ async def test_epoch_reset_detection_reads_remonitor_state_reset_target(
 
 
 @pytest.mark.unit
+async def test_remonitor_new_state_resets_failure_epoch_without_state_reset_payload(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, _validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.infrastructure_failure.value,
+        failure_message="cleanup failed after primary validation failure",
+        reason_code="CLEANUP_FAILED",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+        embedded_primary={
+            "failure_reason": FailureReason.validation_failure.value,
+            "message": "pytest failed before remonitor",
+            "reason_code": "PYTEST_TEST_FAILURE",
+            "validation_run": {
+                "id": "vr_pre_remonitor_primary",
+                "status": "failed",
+                "reason_code": "PYTEST_TEST_FAILURE",
+            },
+        },
+    )
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.monitoring_pr.value
+        workspace.failure_reason = None
+        workspace.failure_message = None
+        await repo.add_event_with_states(
+            workspace,
+            event_type="workspace.remonitor_requested",
+            old_state=WorkspaceStatus.failed,
+            new_state=WorkspaceStatus.monitoring_pr,
+            reason_code="OPERATOR_REMONITOR",
+            payload={"reason": "operator requested remonitor"},
+        )
+
+        workspace.failure_reason = FailureReason.infrastructure_failure.value
+        workspace.failure_message = "stale active scan failed after remonitor"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="STALE_ACTIVE_EXECUTION",
+            payload={
+                "reason_code": "STALE_ACTIVE_EXECUTION",
+                "message": "stale active scan failed after remonitor",
+            },
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.infrastructure_failure.value
+    assert snapshot["message"] == "stale active scan failed after remonitor"
+    assert snapshot["reason_code"] == "STALE_ACTIVE_EXECUTION"
+    assert "validation_run" not in snapshot
+
+
+@pytest.mark.unit
 async def test_primary_failure_snapshot_uses_current_failure_after_provisioning_reset(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

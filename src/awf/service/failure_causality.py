@@ -438,10 +438,15 @@ def _failure_epoch_reset_conditions(
             ),
             and_(
                 WorkspaceEvent.event_type == "workspace.remonitor_requested",
-                _json_payload_object_predicate(session, "state_reset"),
-                WorkspaceEvent.payload["state_reset"]["to"]
-                .as_string()
-                .in_(_FAILURE_EPOCH_RESET_STATES),
+                or_(
+                    WorkspaceEvent.new_state.in_(_FAILURE_EPOCH_RESET_STATES),
+                    and_(
+                        _json_payload_object_predicate(session, "state_reset"),
+                        WorkspaceEvent.payload["state_reset"]["to"]
+                        .as_string()
+                        .in_(_FAILURE_EPOCH_RESET_STATES),
+                    ),
+                ),
             ),
         ),
     )
