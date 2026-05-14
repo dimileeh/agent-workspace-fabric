@@ -139,7 +139,8 @@ def render_core_readiness_pretty(report: CoreReadinessReport) -> str:
     ]
     for check in report.checks:
         lines.append(f"  [{check.status}] {check.name}: {check.message}")
-        lines.append(f"        reason: {check.reason_code}")
+        if check.status != "ok":
+            lines.append(f"        reason: {check.reason_code}")
         lines.extend(_readiness_evidence_lines(check))
 
     if report.next_actions:
