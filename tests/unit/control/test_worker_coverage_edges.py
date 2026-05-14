@@ -13,6 +13,7 @@ import structlog
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.control.worker as worker_module
 from awf.control.worker import (
     _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
     _STALE_ACTIVE_EXECUTION_REASON_CODE,
@@ -32,7 +33,7 @@ from awf.control.worker import (
     _utc_datetime,
     _worker_exception_is_transient_db_connection,
 )
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
     QueueDecisionRepository,
@@ -1174,3 +1175,63 @@ async def test_fail_stale_active_execution_skips_status_mismatch(
 
     assert ws is not None
     assert ws.status == WorkspaceStatus.running.value
+
+
+@pytest.mark.unit
+async def test_fail_stale_active_execution_restores_primary_failure_row_fields(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_status(
+        factory,
+        WorkspaceStatus.running,
+        title="stale active execution restores primary failure fields",
+    )
+    primary_failure = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "message": "pytest failed before remonitor",
+        "reason_code": "PYTEST_TEST_FAILURE",
+    }
+
+    async def _load_preserved_primary(
+        session: AsyncSession,
+        workspace: object,
+    ) -> SimpleNamespace:
+        del session, workspace
+        return SimpleNamespace(primary_failure=primary_failure, secondary_failures=())
+
+    monkeypatch.setattr(
+        worker_module,
+        "load_failure_causality_snapshot",
+        _load_preserved_primary,
+    )
+    worker = _worker(factory)
+
+    await worker._fail_stale_active_execution(  # noqa: SLF001
+        _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.running,
+            compose_project_name=f"awf_{workspace_id}",
+            repo_url="git@example.com:repo/app.git",
+        ),
+        RuntimeSnapshot(stack_state="stopped", reason="worker restarted"),
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        state_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+        )
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    assert ws.failure_reason == FailureReason.validation_failure.value
+    assert ws.failure_message == "pytest failed before remonitor"
+    latest_failed = next(
+        event for event in state_events if event.new_state == WorkspaceStatus.failed.value
+    )
+    assert latest_failed.reason_code == "PYTEST_TEST_FAILURE"
+    assert latest_failed.payload is not None
+    assert latest_failed.payload["primary_failure"] == primary_failure
+    assert latest_failed.payload["secondary_failure"]["reason_code"] == ("STALE_ACTIVE_EXECUTION")

@@ -1975,6 +1975,8 @@ class ControlWorker:
             if primary_failure is None:
                 ws.failure_reason = FailureReason.infrastructure_failure.value
                 ws.failure_message = message[:2048]
+            else:
+                _restore_primary_failure_row_fields(ws, primary_failure)
             await session.commit()
 
         _log.error(
@@ -2040,6 +2042,8 @@ class ControlWorker:
             if primary_failure is None:
                 ws.failure_reason = FailureReason.infrastructure_failure.value
                 ws.failure_message = message[:2048]
+            else:
+                _restore_primary_failure_row_fields(ws, primary_failure)
             event_payload = attach_primary_failure(
                 _runtime_stranding_event_payload(candidate, snapshot, finding),
                 primary_failure,
@@ -3100,6 +3104,18 @@ def _secondary_stale_active_execution_payload(
         "workspace_status": candidate.status.value,
         "runtime": _runtime_snapshot_payload(snapshot),
     }
+
+
+def _restore_primary_failure_row_fields(
+    workspace: Workspace,
+    primary_failure: dict[str, Any],
+) -> None:
+    failure_reason = primary_failure.get("failure_reason")
+    if isinstance(failure_reason, str) and failure_reason:
+        workspace.failure_reason = failure_reason
+    failure_message = primary_failure.get("message")
+    if isinstance(failure_message, str) and failure_message:
+        workspace.failure_message = failure_message[:2048]
 
 
 def _stale_active_execution_failure_message(
