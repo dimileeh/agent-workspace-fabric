@@ -40,6 +40,12 @@ class FailureCausalitySnapshot:
     secondary_failures: tuple[dict[str, Any], ...] = ()
 
 
+@dataclass(frozen=True)
+class _FailureCausalityEvents:
+    primary_event: WorkspaceEvent
+    latest_failed_event: WorkspaceEvent
+
+
 async def load_primary_failure_snapshot(
     session: AsyncSession,
     workspace: Workspace,
@@ -56,35 +62,48 @@ async def load_failure_causality_snapshot(
 ) -> FailureCausalitySnapshot | None:
     """Return current-epoch primary failure and accumulated secondary evidence."""
 
-    latest_failed_event = await _primary_failure_event_for_current_epoch(session, workspace.id)
-    epoch_reset_event = (
-        await _latest_failure_epoch_reset_before(session, workspace.id, latest_failed_event)
-        if latest_failed_event is not None
-        else None
-    )
-    latest_validation_run = (
-        await _latest_failed_validation_run(
-            session,
-            workspace.id,
-            epoch_started_at=(
-                epoch_reset_event.occurred_at if epoch_reset_event is not None else None
-            ),
+    events = await _failure_causality_events_for_current_epoch(session, workspace.id)
+    if events is None:
+        primary_failure = _primary_failure_snapshot(
+            workspace,
+            latest_failed_event=None,
+            latest_validation_run=None,
+            event_payload=None,
         )
-        if latest_failed_event is not None
-        else None
+        return (
+            FailureCausalitySnapshot(primary_failure=primary_failure)
+            if primary_failure is not None
+            else None
+        )
+
+    epoch_reset_event = await _latest_failure_epoch_reset_before(
+        session,
+        workspace.id,
+        events.primary_event,
     )
-    event_payload = _mapping(latest_failed_event.payload if latest_failed_event else None)
+    latest_validation_run = await _latest_failed_validation_run(
+        session,
+        workspace.id,
+        epoch_started_at=(epoch_reset_event.occurred_at if epoch_reset_event is not None else None),
+    )
+    event_payload = _mapping(events.primary_event.payload)
     primary_failure = _primary_failure_snapshot(
         workspace,
-        latest_failed_event=latest_failed_event,
+        latest_failed_event=events.primary_event,
         latest_validation_run=latest_validation_run,
         event_payload=event_payload,
     )
     if primary_failure is None:
         return None
+    secondary_failures = await _secondary_failure_history_for_current_epoch(
+        session,
+        workspace.id,
+        primary_event=events.primary_event,
+        latest_failed_event=events.latest_failed_event,
+    )
     return FailureCausalitySnapshot(
         primary_failure=primary_failure,
-        secondary_failures=_secondary_failure_history(event_payload),
+        secondary_failures=secondary_failures,
     )
 
 
@@ -225,14 +244,15 @@ def restore_primary_failure_row_fields(
     failure_reason = _string(primary_failure.get("failure_reason"))
     workspace.failure_reason = failure_reason
     failure_message = _string(primary_failure.get("message"))
-    if failure_message:
-        workspace.failure_message = failure_message[:_PRIMARY_FAILURE_MESSAGE_MAX_LENGTH]
+    workspace.failure_message = (
+        failure_message[:_PRIMARY_FAILURE_MESSAGE_MAX_LENGTH] if failure_message else None
+    )
 
 
-async def _primary_failure_event_for_current_epoch(
+async def _failure_causality_events_for_current_epoch(
     session: AsyncSession,
     workspace_id: str,
-) -> WorkspaceEvent | None:
+) -> _FailureCausalityEvents | None:
     latest_failed_event = await _latest_failed_state_event(session, workspace_id)
     if latest_failed_event is None:
         return None
@@ -244,7 +264,10 @@ async def _primary_failure_event_for_current_epoch(
         latest_failed_payload is not None
         and _mapping(latest_failed_payload.get(PRIMARY_FAILURE_KEY)) is not None
     ):
-        return latest_failed_event
+        return _FailureCausalityEvents(
+            primary_event=latest_failed_event,
+            latest_failed_event=latest_failed_event,
+        )
 
     latest_primary_event = await _latest_failed_state_event(
         session,
@@ -252,10 +275,27 @@ async def _primary_failure_event_for_current_epoch(
         require_primary_failure=True,
     )
     if latest_primary_event is None:
-        return latest_failed_event
+        return _FailureCausalityEvents(
+            primary_event=latest_failed_event,
+            latest_failed_event=latest_failed_event,
+        )
     if await _has_failure_epoch_reset_after(session, workspace_id, latest_primary_event):
-        return latest_failed_event
-    return latest_primary_event
+        return _FailureCausalityEvents(
+            primary_event=latest_failed_event,
+            latest_failed_event=latest_failed_event,
+        )
+    return _FailureCausalityEvents(
+        primary_event=latest_primary_event,
+        latest_failed_event=latest_failed_event,
+    )
+
+
+async def _primary_failure_event_for_current_epoch(
+    session: AsyncSession,
+    workspace_id: str,
+) -> WorkspaceEvent | None:
+    events = await _failure_causality_events_for_current_epoch(session, workspace_id)
+    return events.primary_event if events is not None else None
 
 
 async def _latest_failed_state_event(
@@ -339,6 +379,37 @@ async def _latest_failed_validation_run(
         ValidationRun.id.desc(),
     ).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _secondary_failure_history_for_current_epoch(
+    session: AsyncSession,
+    workspace_id: str,
+    *,
+    primary_event: WorkspaceEvent,
+    latest_failed_event: WorkspaceEvent,
+) -> tuple[dict[str, Any], ...]:
+    stmt = (
+        select(WorkspaceEvent)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == "workspace.state_changed",
+            WorkspaceEvent.new_state == WorkspaceStatus.failed.value,
+            _event_occurs_after_or_at_same_tick(primary_event),
+            _event_occurs_before_or_at_same_tick(latest_failed_event),
+        )
+        .order_by(
+            WorkspaceEvent.occurred_at.asc(),
+            WorkspaceEvent.event_order.asc().nullsfirst(),
+        )
+    )
+    events = (await session.execute(stmt)).scalars().all()
+    failures: list[dict[str, Any]] = []
+    for event in events:
+        _append_secondary_failure_history(
+            failures,
+            _secondary_failure_history(_mapping(event.payload)),
+        )
+    return tuple(_bounded_secondary_failure_history(failures))
 
 
 def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bool], ...]:
@@ -473,6 +544,23 @@ def _secondary_failure_history(payload: Mapping[str, Any] | None) -> tuple[dict[
             failures.append(legacy_secondary)
 
     return tuple(_bounded_secondary_failure_history(failures))
+
+
+def _append_secondary_failure_history(
+    failures: list[dict[str, Any]],
+    history: Sequence[dict[str, Any]],
+) -> None:
+    history_items = list(history)
+    if not history_items:
+        return
+
+    overlap = 0
+    max_overlap = min(len(failures), len(history_items))
+    for candidate in range(max_overlap, 0, -1):
+        if failures[-candidate:] == history_items[:candidate]:
+            overlap = candidate
+            break
+    failures.extend(history_items[overlap:])
 
 
 def _bounded_secondary_failure_history(

@@ -1127,6 +1127,9 @@ class WorkspaceControlService:
                     payload=failed_transition_payload,
                 )
             elif workspace_status == WorkspaceStatus.failed:
+                # The workspace is already failed, so transition() is not used
+                # because there is no valid failed -> failed state-machine edge.
+                # Bump version so add_event records the next event_order.
                 workspace.version += 1
                 await repo.add_event(
                     workspace,

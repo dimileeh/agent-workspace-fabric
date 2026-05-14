@@ -101,6 +101,32 @@ def test_restore_primary_failure_row_fields_clears_missing_failure_reason() -> N
 
 
 @pytest.mark.unit
+def test_restore_primary_failure_row_fields_clears_missing_failure_message() -> None:
+    workspace = Workspace(
+        id="ws_restore_primary_missing_message",
+        status=WorkspaceStatus.failed.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="main",
+        task_title="Restore primary failure",
+        task_prompt="Clear stale secondary failure row fields.",
+        agent="codex",
+    )
+    workspace.failure_reason = FailureReason.infrastructure_failure.value
+    workspace.failure_message = "secondary failure"
+
+    restore_primary_failure_row_fields(
+        workspace,
+        {
+            "failure_reason": FailureReason.validation_failure.value,
+            "reason_code": "PRIMARY_FAILED",
+        },
+    )
+
+    assert workspace.failure_reason == FailureReason.validation_failure.value
+    assert workspace.failure_message is None
+
+
+@pytest.mark.unit
 def test_preserved_failure_payload_accumulates_prior_secondary_failures() -> None:
     prior_secondary = {
         "failure_reason": "cleanup_failure",
@@ -1328,6 +1354,85 @@ async def test_failure_causality_snapshot_loads_current_epoch_secondary_history(
 
     assert payload["secondary_failure"] == stale_secondary
     assert payload["secondary_failures"] == [cleanup_secondary, stale_secondary]
+
+
+@pytest.mark.unit
+async def test_failure_causality_snapshot_merges_secondary_history_from_latest_failed_event_without_embedded_primary(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    primary = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "message": "pytest failed before cleanup",
+        "reason_code": "PYTEST_TEST_FAILURE",
+        "validation_run": {
+            "id": "vr_embedded_primary_before_mixed_event",
+            "status": "failed",
+            "reason_code": "PYTEST_TEST_FAILURE",
+        },
+    }
+    cleanup_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "CLEANUP_FAILED",
+    }
+    stale_secondary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": "STALE_ACTIVE_EXECUTION",
+    }
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure causality mixed event regression",
+            task_prompt="Keep secondary history from newer failed events.",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "pytest failed before cleanup"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="CLEANUP_FAILED",
+            payload=build_preserved_failure_payload(
+                primary,
+                secondary_failure=cleanup_secondary,
+            ),
+        )
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.destroying,
+            reason_code="DESTROY_REQUESTED",
+        )
+        workspace.failure_reason = FailureReason.infrastructure_failure.value
+        workspace.failure_message = "stale execution after cleanup"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="STALE_ACTIVE_EXECUTION",
+            payload={
+                "reason_code": "STALE_ACTIVE_EXECUTION",
+                "message": "stale execution after cleanup",
+                "secondary_failure": stale_secondary,
+                "secondary_failures": [cleanup_secondary, stale_secondary],
+            },
+        )
+        workspace_id = workspace.id
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_failure_causality_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot.primary_failure["reason_code"] == "PYTEST_TEST_FAILURE"
+    assert snapshot.secondary_failures == (cleanup_secondary, stale_secondary)
 
 
 @pytest.mark.unit
