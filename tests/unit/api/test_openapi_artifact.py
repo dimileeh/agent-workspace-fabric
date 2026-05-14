@@ -38,10 +38,10 @@ def test_spec_generation_succeeds(openapi_spec: dict) -> None:
 
 @pytest.mark.unit
 def test_spec_is_valid_openapi_3x(openapi_spec: dict) -> None:
-    from openapi_spec_validator import validate_spec
+    from openapi_spec_validator import validate
 
     try:
-        validate_spec(openapi_spec)
+        validate(openapi_spec)
     except Exception as exc:
         pytest.fail(f"OpenAPI spec validation failed: {exc}")
 

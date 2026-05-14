@@ -343,10 +343,13 @@ async def list_workspace_events(
     rows = await WorkspaceEventRepository(session).list(
         workspace_id=workspace_id,
         event_type=event_type,
-        limit=limit,
+        limit=limit + 1,
     )
+    has_more = len(rows) > limit
+    items = rows[:limit]
     return WorkspaceEventListResponse(
-        items=[WorkspaceEventResponse.model_validate(row) for row in rows],
+        items=[WorkspaceEventResponse.model_validate(row) for row in items],
+        has_more=has_more,
         limit=limit,
         cursor=None,
     )
