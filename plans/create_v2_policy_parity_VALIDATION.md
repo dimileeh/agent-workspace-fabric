@@ -18,3 +18,6 @@
 - `tests/unit/contracts/test_surface_metadata_alignment.py::test_create_v2_registry_status_tracks_mcp_payload_parity_gap` resolves to implemented status for v2.
 - `tests/unit/cli/test_cli.py` includes positive and malformed JSON tests for both flags.
 - `tests/unit/mcp/test_mcp_server.py` includes policy persistence and schema coverage for both fields.
+- Edge-case acceptance checks:
+  - CLI malformed policy JSON exits with code 2 before request dispatch.
+  - CLI payload tests cover requests without policy fields and with both policy fields populated.

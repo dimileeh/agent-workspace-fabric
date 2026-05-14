@@ -14,6 +14,7 @@ Complete the remaining plan-conformance gap for this workspace: provide AWF-owne
 3. Ensure CLI parses malformed policy JSON locally before making HTTP request.
 4. Ensure contract docs/status rows report implementation state as `MCP implemented` with backlog slice cleared.
 5. Produce workspace-owned validation evidence in `docs/awf-plans/ws_61e0f7b210fa423faef0b6f3.validation.txt`.
+6. Define edge-case completion criteria for malformed policy JSON and per-field optionality in policy payload forwarding.
 
 ## Implementation steps
 1. Validate current code paths against requirements in existing files:
@@ -34,3 +35,4 @@ Complete the remaining plan-conformance gap for this workspace: provide AWF-owne
 - `uv run --python 3.12 --extra dev pytest tests/unit/cli/test_cli.py tests/unit/mcp/test_mcp_server.py tests/unit/contracts/test_request_payload_alignment.py tests/unit/contracts/test_surface_metadata_alignment.py -q`
 - `uv run --python 3.12 --extra dev ruff check src/awf/cli/main.py src/awf/mcp/server.py tests/unit/cli/test_cli.py tests/unit/mcp/test_mcp_server.py tests/unit/contracts`
 - `uv run --python 3.12 --extra dev mypy src/awf`
+- The required edge cases above are verified through the existing malformed-JSON CLI test and request-shaping parity coverage in the same command set.

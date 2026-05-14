@@ -39,3 +39,7 @@ Implement remaining REST v2 workspace policy parity for `awf_create_workspace_v2
 - Contract tests for request payload and parity metadata pass with v2 marked implemented.
 - Local CLI JSON parse failures return exit code 2 and skip HTTP call.
 - Docs and readiness tracker reflect completion.
+- Edge cases are explicitly included in done criteria and test evidence:
+  - JSON policy flag malformed input is rejected before any request and exits with code 2.
+  - Policy field inclusion is optional per flag: one, both, or neither policy JSON flag may be set.
+  - Requests without either policy flag still pass through normal task payload behavior.
