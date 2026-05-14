@@ -2224,7 +2224,7 @@ class TestTransition:
 
 class TestAddEvents:
     @pytest.mark.unit
-    async def test_batch_assigns_increasing_event_order(
+    async def test_batch_reserves_event_order_and_advances_workspace_version(
         self,
         session: AsyncSession,
     ) -> None:
@@ -2238,6 +2238,7 @@ class TestAddEvents:
             test_commands=[],
         )
         workspace_version = workspace.version
+        workspace_updated_at = workspace.updated_at
 
         events = await repo.add_events(
             workspace,
@@ -2254,10 +2255,22 @@ class TestAddEvents:
         )
 
         assert [event.event_order for event in events] == [
-            workspace_version,
             workspace_version + 1,
+            workspace_version + 2,
         ]
-        assert workspace.version == workspace_version
+        assert workspace.version == workspace_version + 2
+        assert workspace.updated_at == workspace_updated_at
+
+        next_version = workspace.version
+        event = await repo.add_event(
+            workspace,
+            event_type="workspace.phase_finished",
+            reason_code="THIRD",
+        )
+
+        assert event.event_order == next_version + 1
+        assert workspace.version == next_version + 1
+        assert workspace.updated_at == workspace_updated_at
 
 
 class TestListEvents:

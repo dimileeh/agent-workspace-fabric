@@ -1189,7 +1189,6 @@ async def test_remonitor_reset_event_order_precedes_same_tick_failure(
         workspace.status = WorkspaceStatus.monitoring_pr.value
         workspace.failure_reason = None
         workspace.failure_message = None
-        reset_order = workspace.version
         reset_event = await repo.add_event(
             workspace,
             event_type="workspace.remonitor_requested",
@@ -1202,7 +1201,8 @@ async def test_remonitor_reset_event_order_precedes_same_tick_failure(
             },
         )
         reset_event.occurred_at = same_tick
-        assert reset_event.event_order == reset_order
+        assert reset_event.event_order is not None
+        reset_order = reset_event.event_order
 
         workspace.failure_reason = FailureReason.agent_failure.value
         workspace.failure_message = "agent retry failed after ordered remonitor"
@@ -1617,7 +1617,6 @@ async def test_failure_causality_snapshot_reads_secondary_failure_recorded_event
                 "message": "pytest failed before cleanup",
             },
         )
-        workspace.version += 1
         await repo.add_event(
             workspace,
             event_type="workspace.secondary_failure_recorded",

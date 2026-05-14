@@ -288,6 +288,17 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
 
 
 @pytest.mark.unit
+def test_workspace_event_order_migration_has_timeout_guardrails() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = (
+        repo_root / "migrations/versions/e8f9a0b1c2d3_workspace_event_order.py"
+    ).read_text()
+
+    assert "SET LOCAL lock_timeout" in migration
+    assert "SET LOCAL statement_timeout" in migration
+
+
+@pytest.mark.unit
 async def test_workspace_event_order_migration_backfills_existing_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

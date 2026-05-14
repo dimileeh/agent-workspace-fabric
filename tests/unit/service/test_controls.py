@@ -1237,6 +1237,8 @@ async def test_control_service_rejects_idempotency_payload_and_version_conflicts
             stop_stack=False,
             idempotency_key="control-conflict",
         )
+        stale_expected_version = workspace.version + 1
+        actual_version = workspace.version
         with pytest.raises(controls.IdempotencyConflictError):
             await service.stop_workspace(
                 workspace.id,
@@ -1250,12 +1252,12 @@ async def test_control_service_rejects_idempotency_payload_and_version_conflicts
                 remove_volumes=True,
                 remove_worktree=True,
                 idempotency_key="version-conflict",
-                expected_version=workspace.version + 1,
+                expected_version=stale_expected_version,
             )
 
     assert version_error.value.detail == {
-        "expected_version": 3,
-        "actual_version": 2,
+        "expected_version": stale_expected_version,
+        "actual_version": actual_version,
     }
 
 

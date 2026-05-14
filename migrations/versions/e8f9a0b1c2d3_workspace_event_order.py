@@ -19,6 +19,11 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # This migration rewrites historical workspace_events rows. Keep it
+    # transactional, but fail promptly instead of waiting indefinitely behind
+    # production writers or holding locks longer than the deploy budget.
+    op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
+    op.execute(sa.text("SET LOCAL statement_timeout = '10min'"))
     op.add_column("workspace_events", sa.Column("event_order", sa.Integer(), nullable=True))
     op.execute(
         sa.text(

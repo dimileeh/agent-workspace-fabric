@@ -649,7 +649,7 @@ async def test_control_prepare_operation_rejects_missing_conflicting_and_stale_r
         )
 
     assert conflict.value.error_code == "IDEMPOTENCY_CONFLICT"
-    assert version.value.detail == {"expected_version": 999, "actual_version": 2}
+    assert version.value.detail == {"expected_version": 999, "actual_version": 3}
     assert missing.value.error_code == "NOT_FOUND"
     assert stopper.calls == []
 
@@ -927,7 +927,7 @@ async def test_refresh_fresh_key_with_stale_if_match_does_not_coalesce_active_op
         )
 
     assert replay.id == operation.id
-    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 2}
+    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 3}
     assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
 
 
@@ -1096,7 +1096,7 @@ async def test_validate_monitoring_pr_creates_validate_only_operation_and_coales
 
     assert replay.id == operation.id
     assert workspace.status == WorkspaceStatus.ready.value
-    assert workspace.version == 2
+    assert workspace.version == 3
     assert [row.id for row in operations] == [operation.id]
     assert operation.type == OperationType.validate.value
     assert operation.status == OperationStatus.pending.value
@@ -1159,8 +1159,8 @@ async def test_validate_fresh_key_with_stale_if_match_does_not_coalesce_active_o
         )
 
     assert replay.id == operation.id
-    assert workspace.version == 2
-    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 2}
+    assert workspace.version == 3
+    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 3}
     assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
 
 
@@ -1291,7 +1291,7 @@ async def test_rebase_monitoring_pr_creates_rebase_operation_and_replays_exact_k
         "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
     }
     assert workspace.status == WorkspaceStatus.ready.value
-    assert workspace.version == 2
+    assert workspace.version == 3
     assert [row.id for row in operations] == [operation.id]
     assert operation.type == OperationType.rebase.value
     assert operation.status == OperationStatus.pending.value
@@ -1356,8 +1356,8 @@ async def test_rebase_fresh_key_with_stale_if_match_does_not_coalesce_active_ope
         )
 
     assert replay.id == operation.id
-    assert workspace.version == 2
-    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 2}
+    assert workspace.version == 3
+    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 3}
     assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
 
 

@@ -559,7 +559,6 @@ class WorkspaceControlService:
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
-        workspace.version += 1
         event_payload: dict[str, object | None] = {
             "reason": reason,
             "operation_id": operation.id,
@@ -573,6 +572,7 @@ class WorkspaceControlService:
             event_payload["cancelled_recovery_reason_code"] = _OPERATOR_REMONITOR_REASON_CODE
             event_payload["cancelled_recovery_requested_action"] = OperationType.remonitor.value
         if state_reset is not None:
+            workspace.version += 1
             workspace.events.append(
                 WorkspaceEvent(
                     id=new_event_id(),
@@ -1011,10 +1011,9 @@ class WorkspaceControlService:
             )
         )
         cleanup_payload = cleanup_result.to_dict()
-        # The cleanup callback may append an already-failed secondary event
-        # whose event_order is derived from workspace.version. Refresh with a
-        # row lock so that manual same-state event ordering stays serialized
-        # with other workspace mutations.
+        # The cleanup callback may append an already-failed secondary event.
+        # Refresh with a row lock so the terminal/status decision stays
+        # serialized with other workspace mutations.
         await self._session.refresh(workspace, with_for_update=True)
         requested_status = (
             WorkspaceStatus.failed if not cleanup_result.ok else WorkspaceStatus.destroyed
@@ -1134,8 +1133,6 @@ class WorkspaceControlService:
             elif workspace_status == WorkspaceStatus.failed:
                 # The workspace is already failed, so transition() is not used
                 # because there is no valid failed -> failed state-machine edge.
-                # Bump version so add_event records the next causality event_order.
-                workspace.version += 1
                 secondary_failure_recorded_payload = {
                     **failed_transition_payload,
                     "synthetic": True,
