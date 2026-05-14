@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
 
@@ -2275,6 +2275,48 @@ class TestAddEvents:
         assert state_event.event_order == 2
         assert transitioned.version == 2
         assert transitioned.event_sequence == 2
+
+    @pytest.mark.unit
+    async def test_transition_if_current_non_postgres_claim_uses_status_guarded_update(
+        self,
+    ) -> None:
+        class EmptyResult:
+            def one_or_none(self) -> None:
+                return None
+
+            def scalar_one_or_none(self) -> None:
+                return None
+
+        class RecordingSession:
+            info: dict[str, str] = {}
+            bind = None
+
+            def __init__(self) -> None:
+                self.executed: list[object] = []
+
+            async def execute(self, statement: object) -> EmptyResult:
+                self.executed.append(statement)
+                return EmptyResult()
+
+        recording_session = RecordingSession()
+        repo = WorkspaceRepository(recording_session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+        transitioned = await repo.transition_if_current(
+            "ws_claim",
+            from_status=WorkspaceStatus.requested,
+            to=WorkspaceStatus.provisioning,
+            reason_code="CLAIMED",
+        )
+
+        assert transitioned is None
+        assert len(recording_session.executed) == 1
+        sql = " ".join(str(recording_session.executed[0].compile(dialect=sqlite.dialect())).split())
+        assert sql.startswith("UPDATE workspaces SET ")
+        assert "status=?" in sql
+        assert "event_sequence=(workspaces.event_sequence + ?)" in sql
+        assert "version=(workspaces.version + ?)" in sql
+        assert "WHERE workspaces.id = ? AND workspaces.status = ?" in sql
+        assert "RETURNING event_sequence, version" in sql
 
     @pytest.mark.unit
     async def test_batch_reserves_event_order_without_advancing_workspace_version(

@@ -3192,6 +3192,16 @@ class WorkspaceRepository:
         WorkspaceStateMachine.assert_transition(from_status, to)
 
         now = datetime.now(UTC)
+        if self._dialect_name != "postgresql":
+            return await self._transition_if_current_with_atomic_update(
+                workspace_id,
+                from_status=from_status,
+                to=to,
+                reason_code=reason_code,
+                extra_conditions=extra_conditions,
+                now=now,
+            )
+
         stmt = (
             select(Workspace)
             .where(
@@ -3201,8 +3211,7 @@ class WorkspaceRepository:
             )
             .execution_options(populate_existing=True)
         )
-        if self._dialect_name == "postgresql":
-            stmt = stmt.with_for_update(of=Workspace)
+        stmt = stmt.with_for_update(of=Workspace)
         workspace = (await self._session.execute(stmt)).scalar_one_or_none()
         if workspace is None:
             return None
@@ -3215,6 +3224,83 @@ class WorkspaceRepository:
         old_state = workspace.status
         workspace.status = to.value
         workspace.updated_at = now
+        return await self._finish_transition_if_current(
+            workspace,
+            old_state=old_state,
+            to=to,
+            reason_code=reason_code,
+            event_order=event_order,
+            now=now,
+        )
+
+    async def _transition_if_current_with_atomic_update(
+        self,
+        workspace_id: str,
+        *,
+        from_status: WorkspaceStatus,
+        to: WorkspaceStatus,
+        reason_code: str,
+        extra_conditions: tuple[ColumnElement[bool], ...],
+        now: datetime,
+    ) -> Workspace | None:
+        """Claim the transition with one guarded write when row locks are unavailable."""
+        values: dict[str, Any] = {
+            "status": to.value,
+            "updated_at": now,
+            "event_sequence": Workspace.event_sequence + 1,
+            "version": Workspace.version + 1,
+        }
+        if to == WorkspaceStatus.monitoring_pr:
+            values["monitor_started_at"] = case(
+                (Workspace.monitor_started_at.is_(None), now),
+                else_=Workspace.monitor_started_at,
+            )
+
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == from_status.value,
+                *extra_conditions,
+            )
+            .values(**values)
+            .returning(Workspace.event_sequence, Workspace.version)
+            .execution_options(synchronize_session=False)
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+
+        event_order = cast(int, row[0])
+        workspace = (
+            await self._session.execute(
+                select(Workspace)
+                .where(Workspace.id == workspace_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if workspace is None:  # pragma: no cover - protected by the FK/PK update match.
+            return None
+
+        return await self._finish_transition_if_current(
+            workspace,
+            old_state=from_status.value,
+            to=to,
+            reason_code=reason_code,
+            event_order=event_order,
+            now=now,
+        )
+
+    async def _finish_transition_if_current(
+        self,
+        workspace: Workspace,
+        *,
+        old_state: str,
+        to: WorkspaceStatus,
+        reason_code: str,
+        event_order: int,
+        now: datetime,
+    ) -> Workspace:
         attempt = await TaskAttemptRepository(
             self._session,
             dialect_name=self._dialect_name,
