@@ -57,12 +57,19 @@ def _assert_standard_envelope(
 )
 async def test_enveloped_list_endpoints_expose_standard_pagination_metadata(
     client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
     path: str,
     params: dict[str, object],
     expected_limit: int,
     expected_cursor: str | None,
 ) -> None:
-    response = await client.get(path, params=params)
+    from awf.common.config import get_settings
+
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+    get_settings.cache_clear()
+    headers = {"Authorization": "Bearer secret"}
+
+    response = await client.get(path, params=params, headers=headers)
 
     assert response.status_code == 200
     _assert_standard_envelope(
