@@ -149,7 +149,8 @@ from awf.service.workspace_runtime_health import (
 
 
 class RuntimeInspection(Protocol):
-    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot: ...
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        """Inspect container runtime state for the given compose project."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +373,7 @@ class ResourceReservationPlan:
         disk_check: DiskCheck | None = None,
         reserved_resources: ReservedResources | None = None,
     ) -> dict[str, Any]:
+        """Return a serialisable summary of the reservation plan with pressure reasons."""
         capacity = resource_capacity_summary(
             settings=settings,
             reserved=reserved_resources
@@ -443,6 +445,7 @@ class WorkspaceService:
         *,
         idempotency_key: str | None = None,
     ) -> WorkspaceResponse:
+        """Create a workspace from the v1 request contract."""
         async with self._factory() as s:
             repo = WorkspaceRepository(s)
             if idempotency_key is not None:
@@ -478,6 +481,7 @@ class WorkspaceService:
         disk_check: DiskCheck | None = None,
         disk_check_factory: DiskCheckFactory | None = None,
     ) -> WorkspaceResponse:
+        """Create a workspace from the v2 request contract with profile and policy support."""
         async with self._factory() as s:
             repo = WorkspaceRepository(s)
             if idempotency_key is not None:
@@ -514,6 +518,7 @@ class WorkspaceService:
         provider_readiness_override: bool = False,
         provider_readiness_override_reason: str | None = None,
     ) -> WorkspaceRetryResponse:
+        """Retry a failed or cancelled workspace as a fresh attempt."""
         async with self._factory() as s:
             result = await retry_workspace_row(
                 s,
@@ -529,6 +534,7 @@ class WorkspaceService:
         self,
         req: PullRequestMonitorAdoptionRequest,
     ) -> PullRequestMonitorAdoptionResponse:
+        """Adopt an existing GitHub PR into AWF monitoring."""
         async with self._factory() as s:
             result = await PullRequestMonitorAdoptionService(
                 s,
@@ -539,6 +545,7 @@ class WorkspaceService:
             return result
 
     async def get(self, workspace_id: str) -> WorkspaceResponse | None:
+        """Fetch a workspace by ID including validation provenance and egress audit."""
         async with self._factory() as s:
             ws = await WorkspaceRepository(s).get_with_operations(workspace_id)
             if ws is None:
@@ -572,6 +579,7 @@ class WorkspaceService:
         self,
         workspace_id: str | None = None,
     ) -> dict[str, Any] | list[dict[str, Any]] | None:
+        """Return egress audit evidence, optionally scoped to a single workspace."""
         async with self._factory() as s:
             workspace_id = workspace_id.strip() if workspace_id is not None else None
             if not workspace_id:
@@ -599,6 +607,7 @@ class WorkspaceService:
         repo_url: str | None = None,
         limit: int = 50,
     ) -> list[WorkspaceResponse]:
+        """List workspaces, newest first, with optional status/agent/repo filters."""
         async with self._factory() as s:
             rows = await WorkspaceRepository(s).list(
                 status=workspace_status,
@@ -617,6 +626,7 @@ class WorkspaceService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Cancel a workspace, optionally stopping its compose stack."""
         async with self._factory() as s:
             result = await self._controls(s).cancel_workspace(
                 workspace_id,
@@ -636,6 +646,7 @@ class WorkspaceService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Stop a workspace's compose stack without destroying it."""
         async with self._factory() as s:
             result = await self._controls(s).stop_workspace(
                 workspace_id,
@@ -656,6 +667,7 @@ class WorkspaceService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Destroy a workspace, its volumes, and worktree."""
         async with self._factory() as s:
             result = await self._controls(s).destroy_workspace(
                 workspace_id,
@@ -676,6 +688,7 @@ class WorkspaceService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
+        """Re-trigger PR monitor for a workspace."""
         async with self._factory() as s:
             result = await self._controls(s).remonitor_workspace(
                 workspace_id,
@@ -695,6 +708,7 @@ class WorkspaceService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> Operation:
+        """Request re-validation of a workspace."""
         async with self._factory() as s:
             result = await self._controls(s).request_validate_workspace(
                 workspace_id,
@@ -714,6 +728,7 @@ class WorkspaceService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> Operation:
+        """Request a refresh operation on a workspace."""
         async with self._factory() as s:
             result = await self._controls(s).request_refresh_workspace(
                 workspace_id,
@@ -732,6 +747,7 @@ class WorkspaceService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> Operation:
+        """Request a rebase operation on a workspace."""
         async with self._factory() as s:
             result = await self._controls(s).request_rebase_workspace(
                 workspace_id,
@@ -743,6 +759,7 @@ class WorkspaceService:
             return result
 
     async def get_runtime(self, workspace_id: str) -> WorkspaceRuntimeResponse | None:
+        """Fetch compose/container runtime state for one workspace."""
         async with self._factory() as s:
             workspace = await WorkspaceRepository(s).get(workspace_id)
             if workspace is None:
@@ -792,6 +809,7 @@ class WorkspaceService:
         limit: int = 50,
         cursor: str | None = None,
     ) -> builtins.list[OperationResponse] | None:
+        """List operations for a single workspace, returning rows or None if not found."""
         page = await self.list_operations_page(
             workspace_id,
             status=status,
@@ -810,6 +828,7 @@ class WorkspaceService:
         limit: int = 50,
         cursor: str | None = None,
     ) -> OperationRowsPage | None:
+        """Return a paginated operation page for a single workspace."""
         async with self._factory() as s:
             workspace_repo = WorkspaceRepository(s)
             if not await workspace_repo.exists(workspace_id):
@@ -834,6 +853,7 @@ class WorkspaceService:
         limit: int = 50,
         cursor: str | None = None,
     ) -> builtins.list[OperationResponse]:
+        """List operations across all workspaces with optional filters."""
         page = await self.list_all_operations_page(
             workspace_id=workspace_id,
             status=status,
@@ -852,6 +872,7 @@ class WorkspaceService:
         limit: int = 50,
         cursor: str | None = None,
     ) -> OperationRowsPage:
+        """Return a paginated operation page across all workspaces."""
         async with self._factory() as s:
             decoded_cursor = decode_operation_list_cursor(cursor)
             rows = await OperationRepository(s).list_all(
@@ -865,6 +886,7 @@ class WorkspaceService:
             return OperationRowsPage(rows=[OperationResponse.model_validate(row) for row in rows])
 
     async def get_operation(self, operation_id: str) -> OperationResponse | None:
+        """Fetch a single operation by ID."""
         async with self._factory() as s:
             operation = await OperationRepository(s).get(operation_id)
             return OperationResponse.model_validate(operation) if operation is not None else None
@@ -876,6 +898,7 @@ class WorkspaceService:
         limit: int = 50,
         event_type: str | None = None,
     ) -> builtins.list[WorkspaceEventResponse] | None:
+        """List events for a single workspace, returning None if workspace not found."""
         async with self._factory() as s:
             workspace_repo = WorkspaceRepository(s)
             if not await workspace_repo.exists(workspace_id):
@@ -894,7 +917,13 @@ class WorkspaceService:
         event_type: str | None = None,
         limit: int = 50,
     ) -> builtins.list[WorkspaceEventResponse]:
-        """List events across all workspaces, optionally filtered by workspace ID and event type."""
+        """List events across all workspaces with optional filters.
+
+        Supports cross-workspace event listing for the global ``awf_list_events``
+        MCP tool and REST endpoint.  When ``workspace_id`` is provided, results
+        are scoped to that workspace; ``event_type`` further narrows the result
+        set.  Returns up to ``limit`` validated event response objects.
+        """
         async with self._factory() as s:
             rows = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
@@ -906,6 +935,7 @@ class WorkspaceService:
     async def list_logs(
         self, workspace_id: str
     ) -> builtins.list[WorkspaceLogStreamResponse] | None:
+        """List indexed log streams for a workspace, returning None if not found."""
         async with self._factory() as s:
             workspace_repo = WorkspaceRepository(s)
             if not await workspace_repo.exists(workspace_id):
@@ -921,6 +951,7 @@ class WorkspaceService:
         offset: int = 0,
         limit_bytes: int = 65_536,
     ) -> dict[str, Any] | None:
+        """Read a bounded chunk from an indexed durable log stream."""
         async with self._factory() as s:
             workspace_repo = WorkspaceRepository(s)
             if not await workspace_repo.exists(workspace_id):
@@ -1890,10 +1921,12 @@ async def _record_provider_readiness_preflight(
 def workspace_provider_readiness_preflight(
     workspace: Workspace,
 ) -> dict[str, Any] | None:
+    """Extract the provider readiness preflight snapshot from a workspace's task policy."""
     return provider_readiness_preflight_from_task_policy(workspace.task_policy)
 
 
 def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResponse:
+    """Build an API response payload from a retry result."""
     new_workspace_id = result.new_workspace.id
     return WorkspaceRetryResponse(
         source_workspace_id=result.source_workspace_id,
@@ -1943,6 +1976,7 @@ def workspace_response(
     validation_provenance: ValidationFreshnessSummaryResponse | None = None,
     egress_audit: dict[str, Any] | None = None,
 ) -> WorkspaceResponse:
+    """Build a full API response payload for a workspace including computed fields."""
     computed_fields = dict(workspace_observability_payload(workspace))
     computed_fields["is_stale_running"] = is_workspace_stale_running(workspace)
     computed_fields["validation_provenance"] = (
@@ -2112,6 +2146,7 @@ def _loaded_secret_leases(workspace: Workspace) -> list[WorkspaceSecretLease]:
 
 
 def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | None:
+    """Extract structured failure details from a workspace's most recent failed-state event."""
     event = _latest_failed_state_event(workspace)
     if event is None:
         return None
@@ -2554,6 +2589,7 @@ async def _record_owned_path_overlap_risk(
 
 
 def owned_path_overlap_warning_payload(overlaps: list[OwnedPathOverlap]) -> dict[str, Any]:
+    """Build a warning payload dict from a list of owned-path overlap records."""
     workspace_ids: dict[str, None] = {}
     overlap_items: list[dict[str, str]] = []
     for overlap in overlaps:
@@ -2575,6 +2611,7 @@ def owned_path_overlap_warning_payload(overlaps: list[OwnedPathOverlap]) -> dict
 
 
 def overlap_risk_summary(overlaps: list[OwnedPathOverlap]) -> dict[str, Any]:
+    """Build a summary dict describing owned-path overlap risk, or a zero-risk placeholder."""
     if not overlaps:
         return {
             "warning_code": None,
@@ -2592,6 +2629,7 @@ def overlap_risk_summary(overlaps: list[OwnedPathOverlap]) -> dict[str, Any]:
 
 
 def task_class_priority(task_class: str | None) -> int:
+    """Return the scheduler priority bias for a task class."""
     return scheduler_task_class_priority(task_class)
 
 
@@ -2602,6 +2640,7 @@ def computed_priority(
     age_boost: int,
     retry_bonus: int,
 ) -> int:
+    """Compute the effective scheduling priority from base, class bias, age and retry."""
     return base_priority + task_class_bias(task_class) + age_boost + retry_bonus
 
 
@@ -2610,6 +2649,7 @@ def resource_reservation_plan(
     *,
     settings: Settings,
 ) -> ResourceReservationPlan:
+    """Build a resource reservation plan from a v2 create request and settings."""
     resources = payload.resources
     legacy_memory_gb = _parse_memory_gb(resources.memory)
     _, resolved_profile = v2_profile_snapshots(payload)
@@ -2717,6 +2757,7 @@ def _parse_memory_gb(value: str | None) -> float | None:
 
 
 def owned_path_overlap_warnings(workspace: Workspace) -> list[WorkspaceWarningResponse]:
+    """Extract owned-path overlap warning responses from workspace events."""
     warnings: list[WorkspaceWarningResponse] = []
     for event in workspace.events:
         if event.event_type != OWNED_PATH_OVERLAP_RISK_EVENT_TYPE:
@@ -2772,6 +2813,7 @@ def _has_owned_path_overlap_payload_fields(item: Any) -> bool:
 def v2_profile_snapshots(
     payload: WorkspaceCreateV2Request,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve requested and resolved profile snapshots from a v2 create request."""
     requested_profile = (
         payload.workspace.profile.model_dump(mode="json", by_alias=True)
         if payload.workspace.profile is not None
@@ -2796,6 +2838,7 @@ def v2_profile_snapshots(
 
 
 def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]:
+    """Build a task policy dictionary from a v2 create request."""
     policy: dict[str, Any] = {}
     resource_request = _requested_resource_reservation_values(payload)
     # Persist empty requests so idempotent replays do not re-plan against
@@ -2826,6 +2869,7 @@ def profile_with_requested_tier(
     profile: WorkspaceProfile,
     requested_tier: int,
 ) -> WorkspaceProfile:
+    """Return a profile copy with the validation requested_tier overridden."""
     if profile.validation.requested_tier == requested_tier:
         return profile
     return profile.model_copy(

@@ -337,6 +337,7 @@ def build_mcp_server(
         )
 
         async def resolve_disk_check() -> DiskCheck:
+            """Resolve the disk-check provider for workspace admission gating."""
             return await _workspace_admission_disk_check(
                 disk_check_provider=disk_check_provider,
                 settings=settings_value,
