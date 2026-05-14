@@ -518,10 +518,14 @@ _SETUP_DEPENDENCY_COMMAND_TOKENS = frozenset(
         "pip3",
         "pnpm",
         "poetry",
-        "uv",
         "yarn",
     }
 )
+_UV_SETUP_DEPENDENCY_SUBCOMMAND_TOKENS = frozenset({"add", "i", "install", "sync", "update"})
+_UV_SETUP_DEPENDENCY_NESTED_SUBCOMMAND_TOKENS = {
+    "pip": frozenset({"compile", "install", "sync"}),
+    "tool": frozenset({"install", "upgrade"}),
+}
 _SETUP_DEPENDENCY_CONTEXT_RE = re.compile(
     r"(?i)\b("
     r"dependency|dependencies|download|fetch|index|package|packages|pypi|pythonhosted|"
@@ -673,7 +677,43 @@ def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
     token_names = {_command_token_name(token) for token in tokens}
     if token_names & _SETUP_DEPENDENCY_COMMAND_TOKENS:
         return True
+    if _looks_like_uv_dependency_setup_command(tokens):
+        return True
     return bool(_SETUP_DEPENDENCY_CONTEXT_RE.search(output))
+
+
+def _looks_like_uv_dependency_setup_command(tokens: list[str]) -> bool:
+    token_names = [_command_token_name(token) for token in tokens]
+    for index, token_name in enumerate(token_names):
+        if token_name != "uv":
+            continue
+        subcommand_index = _next_uv_subcommand_index(tokens, start=index + 1)
+        if subcommand_index is None:
+            continue
+        subcommand = token_names[subcommand_index]
+        if subcommand in _UV_SETUP_DEPENDENCY_SUBCOMMAND_TOKENS:
+            return True
+        nested_subcommands = _UV_SETUP_DEPENDENCY_NESTED_SUBCOMMAND_TOKENS.get(subcommand)
+        if nested_subcommands is None:
+            continue
+        nested_index = _next_uv_subcommand_index(tokens, start=subcommand_index + 1)
+        if nested_index is not None and token_names[nested_index] in nested_subcommands:
+            return True
+    return False
+
+
+def _next_uv_subcommand_index(tokens: list[str], *, start: int) -> int | None:
+    index = start
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return None
+        if token.startswith("-"):
+            option_name = token.split("=", 1)[0]
+            index += 2 if option_name in _UV_OPTION_VALUE_FLAGS and "=" not in token else 1
+            continue
+        return index
+    return None
 
 
 def _setup_transient_category(text: str) -> str | None:

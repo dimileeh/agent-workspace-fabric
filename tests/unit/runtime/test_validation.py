@@ -207,6 +207,21 @@ def test_setup_dependency_network_classifier_extracts_uv_pypi_dns_failure() -> N
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_uv_run_script_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv run python scripts/bootstrap.py",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stderr", "expected_category"),
     [
