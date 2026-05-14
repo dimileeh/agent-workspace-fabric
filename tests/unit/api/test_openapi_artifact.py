@@ -187,7 +187,8 @@ def test_api_token_routes_are_documented_as_bearer_authenticated(
         auth_header_params = [
             parameter
             for parameter in operation.get("parameters", [])
-            if parameter.get("in") == "header" and parameter.get("name") == "authorization"
+            if parameter.get("in") == "header"
+            and str(parameter.get("name", "")).lower() == "authorization"
         ]
         assert auth_header_params == [], (
             f"{method.upper()} {path} must not model auth as an optional header parameter"
