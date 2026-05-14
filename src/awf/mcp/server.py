@@ -265,8 +265,10 @@ def build_mcp_server(
             default=None,
             description="Optional PRD policy class for scheduling and overlap-risk policy.",
         ),
-        priority: int = Field(default=0, ge=0, le=100, description="Optional priority."),
-        human_boost: int = Field(default=0, ge=0, le=5, description="Optional priority boost."),
+        priority: int | None = Field(default=None, ge=0, le=100, description="Optional priority."),
+        human_boost: int | None = Field(
+            default=None, ge=0, le=5, description="Optional priority boost."
+        ),
         owned_paths: list[OwnedPath] = Field(
             default_factory=list,
             max_length=128,
@@ -333,18 +335,22 @@ def build_mcp_server(
         req = WorkspaceCreateV2Request(
             repo={"url": repo_url, "base_branch": base_branch},
             task={
-                "title": task_title,
-                "prompt": task_prompt,
-                "kind": task_kind,
-                "agent": agent,
-                "model": model,
-                "external_id": task_external_id,
-                "task_class": task_class,
-                "priority": priority,
-                "human_boost": human_boost,
-                "owned_paths": owned_paths,
-                "auto_merge": auto_merge,
-                "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
+                k: v
+                for k, v in {
+                    "title": task_title,
+                    "prompt": task_prompt,
+                    "kind": task_kind,
+                    "agent": agent,
+                    "model": model,
+                    "external_id": task_external_id,
+                    "task_class": task_class,
+                    "priority": priority,
+                    "human_boost": human_boost,
+                    "owned_paths": owned_paths,
+                    "auto_merge": auto_merge,
+                    "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
+                }.items()
+                if v is not None or k not in ("priority", "human_boost")
             },
             workspace={"profile_ref": profile_ref, "profile": profile},
             validation={"commands": validation_commands, "requested_tier": requested_tier},
