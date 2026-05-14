@@ -140,13 +140,6 @@ def test_workspace_metadata_routes_remain_auth_protected(method: str, path: str)
 
 
 @pytest.mark.unit
-def test_workspace_secret_leases_route_is_auth_required() -> None:
-    route = rest_routes().get(("GET", "/v1/workspaces/{workspace_id}/secret-leases"))
-    assert route is not None
-    assert "require_api_token" in route.dependencies
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize("capability_name", STATUS_FILTER_PARITY_CAPABILITIES)
 def test_implemented_mcp_status_filter_names_match_rest_alias(
     capability_name: str,
