@@ -3520,12 +3520,25 @@ class TestExecutorCoverageEdges:
             assert ws.failure_reason == "service_startup_failure"
             assert ws.failure_message == "profile setup failed: uv sync --extra dev"
             events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+            retry_events = [
+                event
+                for event in events
+                if event.event_type == "workspace.setup_dependency_network_retry"
+            ]
             exhausted_events = [
                 event
                 for event in events
                 if event.event_type == "workspace.setup_dependency_network_retry_exhausted"
             ]
+            assert len(retry_events) == 1
             assert len(exhausted_events) == 1
+            retry_payload = retry_events[0].payload
+            assert isinstance(retry_payload, dict)
+            assert retry_events[0].reason_code == SETUP_DEPENDENCY_NETWORK_RETRY
+            assert retry_payload["reason_code"] == SETUP_DEPENDENCY_NETWORK_RETRY
+            assert retry_payload["failure_reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
+            assert retry_payload["retry_count"] == 2
+            assert retry_payload["retry_exhausted"] is True
             exhausted_payload = exhausted_events[0].payload
             assert isinstance(exhausted_payload, dict)
             assert exhausted_events[0].reason_code == SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED
