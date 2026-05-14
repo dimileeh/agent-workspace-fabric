@@ -148,7 +148,6 @@ ProviderFilter = Annotated[str, Field(min_length=1, max_length=64)]
 
 def _resolve_settings(settings: Settings | None) -> Settings:
     """Resolve the settings instance to use."""
-    """Invoke the readiness check."""
     return settings or get_settings()
 
 
