@@ -1070,7 +1070,7 @@ _CAPABILITIES += (
         supports_idempotency_key=False,
         supports_if_match=False,
         rest_response_model="WorkspaceEventListResponse",
-        rest_query_fields=frozenset({"workspace_id", "limit"}),
+        rest_query_fields=frozenset({"workspace_id", "event_type", "limit"}),
         mcp_request_fields=frozenset({"workspace_id", "event_type", "limit"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
     ),

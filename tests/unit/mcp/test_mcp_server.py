@@ -2007,6 +2007,44 @@ class TestWorkspaceEvents:
         assert result.isError is False
         assert result.structuredContent is None
 
+    @pytest.mark.unit
+    async def test_workspace_events_filter_by_event_type(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
+        ws_id = _workspace_id(created)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            await repo.add_event(
+                ws,
+                event_type="workspace.phase_started",
+                reason_code="STARTED",
+                payload={"phase": "agent"},
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.log",
+                reason_code="LOG",
+                payload={"stream": "stdout"},
+            )
+            await session.commit()
+
+        result = await mcp.call_tool(
+            "awf_list_workspace_events",
+            {"workspace_id": ws_id, "event_type": "workspace.phase_started", "limit": 50},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.isError is False
+        payload = result.structuredContent
+        assert payload is not None
+        for item in payload["items"]:
+            assert item["event_type"] == "workspace.phase_started"
+
 
 class TestGlobalEvents:
     @pytest.mark.unit
