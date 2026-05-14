@@ -532,6 +532,17 @@ def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> N
     assert _is_transient_base_fetch_error(
         BaseFetchError("git fetch origin development failed: HTTP 500 server error")
     )
+    assert _is_transient_base_fetch_error(
+        BaseFetchError(
+            "git fetch base failed with exit code 1: error: cannot lock ref "
+            "'refs/remotes/origin/codex/awf-post-merge-fixes': is at "
+            "dffa1db03af61da5db52e16a6e79163c35b88d5d but expected "
+            "cc82a8d265b6d63593417a13d3d9507cc0ede8d5\n"
+            "From https://github.com/dimileeh/aira-agent-workspace-fabric\n"
+            " ! cc82a8d2..dffa1db0  codex/awf-post-merge-fixes -> "
+            "origin/codex/awf-post-merge-fixes  (unable to update local ref)"
+        )
+    )
     assert not _is_transient_base_fetch_error(
         BaseFetchError("git fetch origin development failed: repository not found")
     )
