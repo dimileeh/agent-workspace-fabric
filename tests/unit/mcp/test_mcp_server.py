@@ -1986,7 +1986,8 @@ class TestWorkspaceEvents:
         assert isinstance(result_all, CallToolResult)
         payload_all = result_all.structuredContent
         assert payload_all is not None
-        assert len(payload_all["items"]) >= 3
+        reason_codes = {item["reason_code"] for item in payload_all["items"]}
+        assert {"OLD", "NEW"} <= reason_codes
         assert payload_all["has_more"] is False
         assert payload_all["next_cursor"] is None
 
