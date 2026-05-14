@@ -39,7 +39,10 @@ router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}",
     tags=["workspace-controls"],
     dependencies=[Depends(require_api_token)],
-    responses={401: {"model": ErrorResponse, "description": "Unauthorized"}},
+    responses={
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        503: {"model": ErrorResponse, "description": "Service Unavailable"},
+    },
 )
 
 

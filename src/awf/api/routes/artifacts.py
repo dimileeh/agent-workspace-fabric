@@ -29,7 +29,10 @@ from awf.service.bounded_list import InvalidBoundedListCursorError
 router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}/artifacts",
     tags=["artifacts"],
-    responses={401: {"model": ErrorResponse, "description": "Unauthorized"}},
+    responses={
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        503: {"model": ErrorResponse, "description": "Service Unavailable"},
+    },
 )
 
 __all__ = [

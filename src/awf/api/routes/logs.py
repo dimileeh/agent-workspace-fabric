@@ -21,7 +21,10 @@ from awf.runtime.logs import read_log_chunk
 router = APIRouter(
     prefix="/v1/workspaces/{workspace_id}/logs",
     tags=["logs"],
-    responses={401: {"model": ErrorResponse, "description": "Unauthorized"}},
+    responses={
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        503: {"model": ErrorResponse, "description": "Service Unavailable"},
+    },
 )
 
 

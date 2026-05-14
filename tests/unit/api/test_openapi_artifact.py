@@ -19,6 +19,35 @@ import pytest
 
 from awf.api.app import create_app
 
+_API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
+    {
+        ("get", "/v1/operations"),
+        ("get", "/v1/operations/{operation_id}"),
+        ("get", "/v1/workspaces"),
+        ("post", "/v1/workspaces"),
+        ("post", "/v1/workspaces/adopt-pr"),
+        ("get", "/v1/workspaces/overview"),
+        ("delete", "/v1/workspaces/{workspace_id}"),
+        ("get", "/v1/workspaces/{workspace_id}"),
+        ("get", "/v1/workspaces/{workspace_id}/artifacts"),
+        ("get", "/v1/workspaces/{workspace_id}/artifacts/download"),
+        ("post", "/v1/workspaces/{workspace_id}/cancel"),
+        ("get", "/v1/workspaces/{workspace_id}/events"),
+        ("get", "/v1/workspaces/{workspace_id}/logs"),
+        ("get", "/v1/workspaces/{workspace_id}/logs/{stream_id}"),
+        ("get", "/v1/workspaces/{workspace_id}/operations"),
+        ("post", "/v1/workspaces/{workspace_id}/rebase"),
+        ("post", "/v1/workspaces/{workspace_id}/refresh"),
+        ("post", "/v1/workspaces/{workspace_id}/remonitor"),
+        ("post", "/v1/workspaces/{workspace_id}/retry"),
+        ("get", "/v1/workspaces/{workspace_id}/secret-leases"),
+        ("get", "/v1/workspaces/{workspace_id}/stale-reasons"),
+        ("post", "/v1/workspaces/{workspace_id}/stop"),
+        ("post", "/v1/workspaces/{workspace_id}/validate"),
+        ("post", "/v2/workspaces"),
+    }
+)
+
 
 @pytest.fixture(scope="module")
 def openapi_spec() -> dict:
@@ -137,3 +166,40 @@ def test_spec_round_trips_to_json_and_back(openapi_spec: dict) -> None:
     serialized = json.dumps(openapi_spec, sort_keys=True)
     deserialized = json.loads(serialized)
     assert deserialized == openapi_spec, "Spec changed during JSON round-trip"
+
+
+@pytest.mark.unit
+def test_api_token_routes_are_documented_as_bearer_authenticated(
+    openapi_spec: dict,
+) -> None:
+    security_schemes = openapi_spec.get("components", {}).get("securitySchemes", {})
+    assert security_schemes.get("bearerAuth") == {
+        "scheme": "bearer",
+        "type": "http",
+    }
+
+    paths = openapi_spec.get("paths", {})
+    for method, path in sorted(_API_TOKEN_PROTECTED_REST_OPERATIONS):
+        operation = paths[path][method]
+        assert operation.get("security") == [{"bearerAuth": []}], (
+            f"{method.upper()} {path} must advertise bearer auth"
+        )
+        auth_header_params = [
+            parameter
+            for parameter in operation.get("parameters", [])
+            if parameter.get("in") == "header" and parameter.get("name") == "authorization"
+        ]
+        assert auth_header_params == [], (
+            f"{method.upper()} {path} must not model auth as an optional header parameter"
+        )
+        for status_code, description in (
+            ("401", "Unauthorized"),
+            ("503", "Service Unavailable"),
+        ):
+            response = operation.get("responses", {}).get(status_code)
+            assert response is not None, f"{method.upper()} {path} must document {status_code}"
+            assert response["description"] == description
+            assert (
+                response["content"]["application/json"]["schema"]["$ref"]
+                == "#/components/schemas/ErrorResponse"
+            )

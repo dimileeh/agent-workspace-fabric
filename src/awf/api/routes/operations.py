@@ -18,7 +18,10 @@ from awf.service.workspaces import WorkspaceService
 router = APIRouter(
     tags=["operations"],
     dependencies=[Depends(require_api_token)],
-    responses={401: {"model": ErrorResponse, "description": "Unauthorized"}},
+    responses={
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        503: {"model": ErrorResponse, "description": "Service Unavailable"},
+    },
 )
 _INVALID_OPERATION_CURSOR_DETAIL = {
     "error_code": "INVALID_CURSOR",

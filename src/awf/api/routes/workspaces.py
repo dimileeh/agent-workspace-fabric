@@ -87,15 +87,22 @@ from awf.service.workspaces import (
     workspace_retry_response,
 )
 
+_AUTH_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    401: {"model": ErrorResponse, "description": "Unauthorized"},
+    503: {"model": ErrorResponse, "description": "Service Unavailable"},
+}
+
 router = APIRouter(
     prefix="/v1/workspaces",
     tags=["workspaces"],
     dependencies=[Depends(require_api_token)],
+    responses=_AUTH_ERROR_RESPONSES,
 )
 router_v2 = APIRouter(
     prefix="/v2/workspaces",
     tags=["workspaces-v2"],
     dependencies=[Depends(require_api_token)],
+    responses=_AUTH_ERROR_RESPONSES,
 )
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 _logger = logging.getLogger(__name__)

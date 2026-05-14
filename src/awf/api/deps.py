@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hmac
 from collections.abc import AsyncIterator
+from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings, get_settings
@@ -18,6 +20,7 @@ from awf.common.logging import get_logger
 from awf.db.resilience import invalidate_or_rollback_session
 
 _log = get_logger(__name__)
+_api_token_bearer = HTTPBearer(auto_error=False, scheme_name="bearerAuth")
 
 
 def _get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -71,7 +74,10 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 def require_api_token(
-    authorization: str | None = Header(default=None),
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | str | None,
+        Security(_api_token_bearer),
+    ] = None,
     settings: Settings = Depends(get_settings),
 ) -> None:
     """Require the local AWF bearer token for sensitive operator APIs."""
@@ -84,6 +90,7 @@ def require_api_token(
             },
         )
     expected = f"Bearer {settings.api_token}".encode()
+    authorization = _authorization_header_value(credentials)
     supplied = (authorization or "").encode()
     if not hmac.compare_digest(supplied, expected):
         raise HTTPException(
@@ -91,3 +98,11 @@ def require_api_token(
             detail={"error_code": "UNAUTHORIZED", "message": "Invalid AWF API token."},
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def _authorization_header_value(
+    credentials: HTTPAuthorizationCredentials | str | None,
+) -> str | None:
+    if isinstance(credentials, HTTPAuthorizationCredentials):
+        return f"{credentials.scheme} {credentials.credentials}"
+    return credentials
