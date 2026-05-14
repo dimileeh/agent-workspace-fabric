@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -154,6 +155,77 @@ async def test_primary_failure_snapshot_keeps_validation_run_for_validation_fail
     ]
     assert snapshot["coverage_percent"] == 91.5
     assert snapshot["coverage_minimum_percent"] == 99.0
+
+
+@pytest.mark.unit
+async def test_primary_failure_snapshot_ignores_later_stale_validation_callback_run(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.validation_failure.value,
+        failure_message="pytest failed before stale callback",
+        reason_code="PYTEST_TEST_FAILURE",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+    )
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.record_ignored_stale_callback(
+            workspace,
+            callback_source="executor",
+            callback_action="validate",
+            expected_status=WorkspaceStatus.validating,
+            reason_code="STALE_CALLBACK_IGNORED",
+        )
+        validation_repo = ValidationRunRepository(session)
+        stale_started_at = datetime.now(UTC) + timedelta(minutes=5)
+        stale_run = await validation_repo.start(
+            workspace_id=workspace.id,
+            attempt_id=None,
+            tier=0,
+            commands=[
+                {
+                    "command": "uv run pytest tests/unit/test_example.py::test_stale_callback",
+                    "phase": "validation",
+                }
+            ],
+            base_commit="a" * 40,
+            target_branch="main",
+            target_head_sha="b" * 40,
+            log_stream_refs={"validation": "logs/stale-validation.log"},
+            workspace_head_sha="c" * 40,
+            profile_name="default",
+            profile_version=1,
+            profile_source=".awf/workspace.yml",
+            resolved_profile_digest="d" * 64,
+            environment_identity_digest="e" * 64,
+            environment_identity_inputs={"python": "3.12"},
+            started_at=stale_started_at,
+        )
+        await validation_repo.finish(
+            stale_run.id,
+            status="failed",
+            reason_code="STALE_CALLBACK_IGNORED",
+            finished_at=stale_started_at + timedelta(seconds=1),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["reason_code"] == "PYTEST_TEST_FAILURE"
+    assert snapshot["validation_run"]["id"] == validation_run_id
+    assert snapshot["validation_run"]["reason_code"] == "PYTEST_TEST_FAILURE"
+    assert snapshot["coverage"]["failing_test_node_ids"] == [
+        "tests/unit/test_example.py::test_failure"
+    ]
 
 
 @pytest.mark.unit

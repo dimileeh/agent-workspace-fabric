@@ -16,6 +16,7 @@ from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 PRIMARY_FAILURE_KEY = "primary_failure"
 SECONDARY_FAILURE_KEY = "secondary_failure"
 SECONDARY_FAILURES_KEY = "secondary_failures"
+_IGNORED_PRIMARY_VALIDATION_REASON_CODES = frozenset({"STALE_CALLBACK_IGNORED"})
 _FAILURE_EPOCH_RESET_STATES = frozenset(
     {
         WorkspaceStatus.ready.value,
@@ -277,6 +278,10 @@ async def _latest_failed_validation_run(
         .where(
             ValidationRun.workspace_id == workspace_id,
             ValidationRun.status == "failed",
+            or_(
+                ValidationRun.reason_code.is_(None),
+                ~ValidationRun.reason_code.in_(_IGNORED_PRIMARY_VALIDATION_REASON_CODES),
+            ),
         )
         .order_by(
             ValidationRun.finished_at.desc().nullslast(),
