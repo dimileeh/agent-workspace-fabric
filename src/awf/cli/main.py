@@ -311,6 +311,11 @@ def _emit_pretty_dict(d: dict[str, Any], *, prefix: str = "") -> None:
 
 
 def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
+    """Parse a command-line JSON object option.
+
+    Returns the parsed object for valid JSON maps; exits the CLI with status 2
+    and prints an error when parsing fails or the payload is not an object.
+    """
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
