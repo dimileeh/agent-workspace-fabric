@@ -275,6 +275,9 @@ async def _latest_failed_state_event(
         WorkspaceEvent.new_state == WorkspaceStatus.failed.value,
     )
     if require_primary_failure:
+        # AWF's control-plane database is PostgreSQL. This JSON type predicate
+        # is intentionally not dialect-neutral; add dialect-specific handling
+        # before reusing this helper in SQLite-backed fixtures.
         stmt = stmt.where(func.json_typeof(WorkspaceEvent.payload[PRIMARY_FAILURE_KEY]) == "object")
     stmt = stmt.order_by(
         WorkspaceEvent.occurred_at.desc(),
@@ -353,6 +356,8 @@ def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bo
             ),
             and_(
                 WorkspaceEvent.event_type == "workspace.remonitor_requested",
+                # See _latest_failed_state_event: this PostgreSQL JSON type
+                # check is intentional for AWF's Postgres-backed control plane.
                 func.json_typeof(WorkspaceEvent.payload["state_reset"]) == "object",
                 WorkspaceEvent.payload["state_reset"]["to"]
                 .as_string()
@@ -365,7 +370,10 @@ def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bo
 def _event_occurs_after_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[bool]:
     # Event IDs are uuid4-derived, so equal timestamps must use the persisted
     # workspace-local event order. Legacy rows without that order keep the
-    # conservative same-tick boundary behavior.
+    # conservative same-tick boundary behavior. During the migration tail, a
+    # pre-event_order reset sharing the exact failure timestamp can hide that
+    # legacy failure snapshot; once those rows age out, same-tick comparisons
+    # are ordered by event_order.
     event_order = _event_order(event)
     if event_order is None:
         return WorkspaceEvent.occurred_at >= event.occurred_at
