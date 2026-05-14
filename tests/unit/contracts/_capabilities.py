@@ -1108,6 +1108,7 @@ _CAPABILITIES += (
         rest_query_fields=frozenset({"workspace_id", "event_type", "limit"}),
         mcp_request_fields=frozenset({"workspace_id", "event_type", "limit"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_events",

@@ -8,7 +8,11 @@ import json
 import pytest
 from httpx import AsyncClient
 
+from awf.common.config import get_settings
+
 _ENVELOPE_KEYS = {"items", "next_cursor", "has_more", "limit", "cursor"}
+_API_TOKEN = "secret"
+_AUTH_HEADERS = {"Authorization": f"Bearer {_API_TOKEN}"}
 
 
 def _overview_cursor() -> str:
@@ -88,22 +92,30 @@ async def test_enveloped_list_endpoints_expose_standard_pagination_metadata(
 @pytest.mark.unit
 async def test_enveloped_list_preserves_representative_item_shape(
     client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that list operations preserve the required shape of items inside the envelope."""
-    create = await client.post(
-        "/v1/workspaces",
-        json={
-            "repo_url": "git@github.com:example/envelope.git",
-            "branch_base": "main",
-            "task_title": "Envelope item shape",
-            "task_prompt": "Keep event item fields stable.",
-            "agent": "codex",
-            "test_commands": ["pytest -q"],
-        },
-    )
-    assert create.status_code == 202
+    monkeypatch.setenv("AWF_API_TOKEN", _API_TOKEN)
+    get_settings.cache_clear()
+    try:
+        create = await client.post(
+            "/v1/workspaces",
+            json={
+                "repo_url": "git@github.com:example/envelope.git",
+                "branch_base": "main",
+                "task_title": "Envelope item shape",
+                "task_prompt": "Keep event item fields stable.",
+                "agent": "codex",
+                "test_commands": ["pytest -q"],
+            },
+            headers=_AUTH_HEADERS,
+        )
+        assert create.status_code == 202
 
-    response = await client.get("/v1/events", params={"limit": 3})
+        response = await client.get("/v1/events", params={"limit": 3}, headers=_AUTH_HEADERS)
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
 
     assert response.status_code == 200
     body = response.json()
@@ -123,9 +135,16 @@ async def test_enveloped_list_preserves_representative_item_shape(
 @pytest.mark.unit
 async def test_workspace_list_keeps_legacy_bare_array_by_default(
     client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that the legacy workspace list endpoint returns a bare array by default."""
-    response = await client.get("/v1/workspaces")
+    monkeypatch.setenv("AWF_API_TOKEN", _API_TOKEN)
+    get_settings.cache_clear()
+    try:
+        response = await client.get("/v1/workspaces", headers=_AUTH_HEADERS)
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
 
     assert response.status_code == 200
     assert response.json() == []

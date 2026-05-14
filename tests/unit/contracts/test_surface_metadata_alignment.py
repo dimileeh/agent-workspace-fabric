@@ -58,6 +58,7 @@ OPERATION_TYPE_FILTER_PARITY_CAPABILITIES = (
 )
 
 WORKSPACE_METADATA_ROUTES_REQUIRING_AUTH = (
+    ("GET", "/v1/events"),
     ("POST", "/v1/workspaces"),
     ("POST", "/v2/workspaces"),
     ("GET", "/v1/workspaces"),

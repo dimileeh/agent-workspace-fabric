@@ -28,6 +28,7 @@ _WWW_AUTHENTICATE_HEADER = {
 
 _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
     {
+        ("get", "/v1/events"),
         ("get", "/v1/operations"),
         ("get", "/v1/operations/{operation_id}"),
         ("get", "/v1/workspaces"),

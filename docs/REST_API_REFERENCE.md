@@ -197,8 +197,11 @@ Returns redacted secret lease inventory (`lease_id`, `secret_name`, `target`, `p
 
 ### List workspace events
 
+Auth required (`Authorization: Bearer $AWF_API_TOKEN`).
+
 ```bash
-curl "http://localhost:8000/v1/events?workspace_id=ws_123&limit=50"
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/events?workspace_id=ws_123&limit=50"
 ```
 
 Events response shape:

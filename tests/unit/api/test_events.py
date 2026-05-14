@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.events as events_route
+from awf.common.config import get_settings
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+
+_API_TOKEN = "unit-test-events-api-token"
+_AUTH_HEADERS = {"Authorization": f"Bearer {_API_TOKEN}"}
 
 _MINIMAL_BODY = {
     "repo_url": "git@github.com:dimileeh/aira-agent.git",
@@ -20,8 +26,20 @@ _MINIMAL_BODY = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _event_api_token(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("AWF_API_TOKEN", _API_TOKEN)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 async def _create_workspace(client: AsyncClient, title: str) -> str:
-    response = await client.post("/v1/workspaces", json={**_MINIMAL_BODY, "task_title": title})
+    response = await client.post(
+        "/v1/workspaces",
+        json={**_MINIMAL_BODY, "task_title": title},
+        headers=_AUTH_HEADERS,
+    )
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
@@ -81,7 +99,7 @@ class TestListEvents:
         first_id = await _create_workspace(client, "first")
         second_id = await _create_workspace(client, "second")
 
-        response = await client.get("/v1/events")
+        response = await client.get("/v1/events", headers=_AUTH_HEADERS)
 
         assert response.status_code == 200
         body = response.json()
@@ -109,7 +127,11 @@ class TestListEvents:
         first_id = await _create_workspace(client, "first")
         second_id = await _create_workspace(client, "second")
 
-        response = await client.get("/v1/events", params={"workspace_id": first_id})
+        response = await client.get(
+            "/v1/events",
+            params={"workspace_id": first_id},
+            headers=_AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -121,7 +143,7 @@ class TestListEvents:
         await _create_workspace(client, "first")
         second_id = await _create_workspace(client, "second")
 
-        response = await client.get("/v1/events", params={"limit": 1})
+        response = await client.get("/v1/events", params={"limit": 1}, headers=_AUTH_HEADERS)
 
         assert response.status_code == 200
         body = response.json()
@@ -140,7 +162,7 @@ class TestListEvents:
         await _add_event(engine, ws_id, "workspace.phase_started", reason_code="E1")
         await _add_event(engine, ws_id, "workspace.phase_started", reason_code="E2")
 
-        response = await client.get("/v1/events", params={"limit": 1})
+        response = await client.get("/v1/events", params={"limit": 1}, headers=_AUTH_HEADERS)
 
         assert response.status_code == 200
         body = response.json()
@@ -160,6 +182,7 @@ class TestListEvents:
         response = await client.get(
             "/v1/events",
             params={"workspace_id": ws_id, "event_type": "workspace.phase_started"},
+            headers=_AUTH_HEADERS,
         )
 
         assert response.status_code == 200
@@ -171,13 +194,21 @@ class TestListEvents:
     @pytest.mark.unit
     @pytest.mark.parametrize("limit", [0, 501])
     async def test_validates_limit_bounds(self, client: AsyncClient, limit: int) -> None:
-        response = await client.get("/v1/events", params={"limit": limit})
+        response = await client.get(
+            "/v1/events",
+            params={"limit": limit},
+            headers=_AUTH_HEADERS,
+        )
 
         assert response.status_code == 422
 
     @pytest.mark.unit
     async def test_returns_empty_items_for_no_matches(self, client: AsyncClient) -> None:
-        response = await client.get("/v1/events", params={"workspace_id": "ws_missing"})
+        response = await client.get(
+            "/v1/events",
+            params={"workspace_id": "ws_missing"},
+            headers=_AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         assert response.json() == {
@@ -201,7 +232,7 @@ class TestListWorkspaceEvents:
         await _add_event(engine, second_id, "workspace.phase_started")
         await _add_event(engine, first_id, "workspace.phase_started")
 
-        response = await client.get(f"/v1/workspaces/{first_id}/events")
+        response = await client.get(f"/v1/workspaces/{first_id}/events", headers=_AUTH_HEADERS)
 
         assert response.status_code == 200
         body = response.json()
@@ -225,6 +256,7 @@ class TestListWorkspaceEvents:
         response = await client.get(
             f"/v1/workspaces/{workspace_id}/events",
             params={"event_type": "workspace.phase_started"},
+            headers=_AUTH_HEADERS,
         )
 
         assert response.status_code == 200
@@ -238,7 +270,10 @@ class TestListWorkspaceEvents:
 
     @pytest.mark.unit
     async def test_returns_404_for_unknown_workspace(self, client: AsyncClient) -> None:
-        response = await client.get("/v1/workspaces/ws_missing/events")
+        response = await client.get(
+            "/v1/workspaces/ws_missing/events",
+            headers=_AUTH_HEADERS,
+        )
 
         assert response.status_code == 404
         assert response.json()["detail"]["error_code"] == "NOT_FOUND"
@@ -253,6 +288,7 @@ class TestListWorkspaceEvents:
         response = await client.get(
             "/v1/workspaces/ws_missing/events",
             params={"limit": limit},
+            headers=_AUTH_HEADERS,
         )
 
         assert response.status_code == 422
@@ -270,6 +306,7 @@ class TestListWorkspaceEvents:
         response = await client.get(
             f"/v1/workspaces/{ws_id}/events",
             params={"limit": 1},
+            headers=_AUTH_HEADERS,
         )
 
         assert response.status_code == 200
