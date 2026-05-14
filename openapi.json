@@ -11708,7 +11708,10 @@
             "schema": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/WorkspaceStatus"
+                  "items": {
+                    "$ref": "#/components/schemas/WorkspaceStatus"
+                  },
+                  "type": "array"
                 },
                 {
                   "type": "null"
