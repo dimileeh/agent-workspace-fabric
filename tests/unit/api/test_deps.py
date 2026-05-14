@@ -31,14 +31,26 @@ def test_require_api_token_reports_missing_and_invalid_tokens() -> None:
 
 
 @pytest.mark.unit
+def test_require_api_token_rejects_non_ascii_bearer_as_unauthorized() -> None:
+    settings = Settings(_env_file=None, api_token="secret")
+
+    with pytest.raises(HTTPException) as unauthorized:
+        deps.require_api_token("Bearer caf\u00e9", settings=settings)
+
+    assert unauthorized.value.status_code == 401
+    assert unauthorized.value.detail["error_code"] == "UNAUTHORIZED"
+    assert unauthorized.value.headers == {"WWW-Authenticate": "Bearer"}
+
+
+@pytest.mark.unit
 def test_require_api_token_compares_tokens_with_constant_time_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = Settings(_env_file=None, api_token="secret-token")
-    observed: list[tuple[str, str]] = []
+    observed: list[tuple[object, object]] = []
 
     def _compare(left: object, right: object) -> bool:
-        observed.append((str(left), str(right)))
+        observed.append((left, right))
         return left == right
 
     monkeypatch.setattr(deps.hmac, "compare_digest", _compare)
@@ -49,9 +61,9 @@ def test_require_api_token_compares_tokens_with_constant_time_api(
         deps.require_api_token(None, settings=settings)
     deps.require_api_token("Bearer secret-token", settings=settings)
 
-    assert ("Bearer wrong", "Bearer secret-token") in observed
-    assert ("", "Bearer secret-token") in observed
-    assert ("Bearer secret-token", "Bearer secret-token") in observed
+    assert (b"Bearer wrong", b"Bearer secret-token") in observed
+    assert (b"", b"Bearer secret-token") in observed
+    assert (b"Bearer secret-token", b"Bearer secret-token") in observed
 
 
 @pytest.mark.unit

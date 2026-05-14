@@ -83,8 +83,9 @@ def require_api_token(
                 "message": "Set AWF_API_TOKEN to enable sensitive operator APIs.",
             },
         )
-    expected = f"Bearer {settings.api_token}"
-    if not hmac.compare_digest(authorization or "", expected):
+    expected = f"Bearer {settings.api_token}".encode()
+    supplied = (authorization or "").encode()
+    if not hmac.compare_digest(supplied, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error_code": "UNAUTHORIZED", "message": "Invalid AWF API token."},
