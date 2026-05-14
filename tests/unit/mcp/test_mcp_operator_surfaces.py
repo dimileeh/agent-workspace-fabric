@@ -804,6 +804,7 @@ class TestMcpOperatorSurfaceParity:
         assert empty_payloads["workspace_overview"]["has_more"] is False
         assert empty_payloads["tasks"]["has_more"] is False
         assert empty_payloads["locks"]["has_more"] is False
+        assert empty_payloads["global_events"]["has_more"] is False
         assert metric_payloads["failures"]["total_failed_workspaces"] == 0
         assert metric_payloads["failures"]["failure_groups"] == []
         assert metric_payloads["failures"]["latest_examples"] == []
