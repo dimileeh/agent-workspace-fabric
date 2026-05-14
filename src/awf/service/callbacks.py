@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json as json_module
+import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import CallbackSubscriptionCreateRequest
+from awf.api.schemas import (
+    CallbackSubscriptionCreateRequest,
+    _is_public_callback_target_host,
+)
+from awf.common.config import Settings, get_settings
 from awf.db.enums import CallbackEventKind
 from awf.db.models import (
     CallbackDelivery,
@@ -101,10 +108,12 @@ class CallbackDeliveryService:
         *,
         http_poster: CallbackHttpPoster | None = None,
         clock: Clock | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._factory = session_factory
         self._http_poster = http_poster or _httpx_post_json
         self._clock = clock or _utc_now
+        self._settings = settings or get_settings()
 
     async def enqueue_workspace_event(self, event_id: str) -> list[CallbackDelivery]:
         async with self._factory() as session:
@@ -215,12 +224,26 @@ class CallbackDeliveryService:
                 await repo.mark_attempt_started(delivery, now=self._clock())
                 await repo.sync_envelope_delivery_metadata(delivery)
                 try:
+                    _validate_callback_target(
+                        subscription.target_url,
+                        settings=self._settings,
+                    )
                     result = await self._http_poster(
                         subscription.target_url,
                         json=delivery.envelope,
                         headers=_delivery_headers(delivery),
                         timeout=float(subscription.timeout_seconds),
                     )
+                except ValueError as exc:
+                    await repo.mark_failed_or_retry(
+                        delivery,
+                        error_code="CALLBACK_TARGET_INVALID",
+                        error_message=_bounded_error_message(f"Callback target rejected: {exc}"),
+                        response_status_code=None,
+                        backoff_seconds=subscription.initial_backoff_seconds,
+                        now=self._clock(),
+                    )
+                    continue
                 except Exception as exc:  # noqa: BLE001 - delivery failures are isolated.
                     await repo.mark_failed_or_retry(
                         delivery,
@@ -355,6 +378,66 @@ def _isoformat(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.isoformat()
+
+
+def _validate_callback_target(target_url: str, *, settings: Settings) -> None:
+    parsed = urlsplit(target_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("target_url must use http or https")
+    if not parsed.hostname:
+        raise ValueError("target_url must include a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("target_url must not include userinfo credentials")
+    if parsed.fragment:
+        raise ValueError("target_url must not include a fragment")
+
+    host = _normalize_callback_host(parsed.hostname)
+    if settings.callbacks_require_https and parsed.scheme != "https":
+        raise ValueError("target_url must use https")
+    if settings.callbacks_allowed_hosts and host not in _normalized_allowed_callback_hosts(
+        settings.callbacks_allowed_hosts
+    ):
+        raise ValueError("target_url host is not allowlisted")
+    if not _is_public_callback_target_host(parsed.hostname):
+        raise ValueError("target_url must use a public host")
+    _validate_callback_target_dns(hostname=parsed.hostname)
+
+
+def _normalize_callback_host(hostname: str) -> str:
+    return hostname.lower().rstrip(".")
+
+
+def _normalized_allowed_callback_hosts(
+    allowed_hosts: list[str] | tuple[str, ...],
+) -> set[str]:
+    return {_normalize_callback_host(host) for host in allowed_hosts}
+
+
+def _validate_callback_target_dns(*, hostname: str) -> None:
+    addresses = _resolve_callback_target_ip_addresses(hostname)
+    if not addresses:
+        raise ValueError("target_url host could not be resolved")
+    for address in addresses:
+        if not _is_public_ip(address):
+            raise ValueError("target_url resolved host is not public")
+
+
+def _resolve_callback_target_ip_addresses(hostname: str) -> set[str]:
+    try:
+        records = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError("target_url host resolution failed") from exc
+
+    return {address for _, _, _, _, (address, *_rest) in records if isinstance(address, str)}
+
+
+def _is_public_ip(address: str) -> bool:
+    value = ipaddress.ip_address(address)
+    public_address = value
+    ipv4_mapped = getattr(value, "ipv4_mapped", None)
+    if isinstance(ipv4_mapped, ipaddress.IPv4Address):
+        public_address = ipv4_mapped
+    return public_address.is_global and not public_address.is_multicast
 
 
 def _bounded_error_message(message: str) -> str:

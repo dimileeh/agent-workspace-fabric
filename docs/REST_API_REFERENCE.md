@@ -555,6 +555,17 @@ The internal failure-causality payload keys stored on the workspace event, such
 as `primary_failure`, `secondary_failure`, and `secondary_failures`, are not
 part of the external callback envelope.
 
+For each outbound delivery, callback target URLs are revalidated before the POST
+is sent:
+- target host must still resolve to a public IP address;
+- when `AWF_CALLBACKS_REQUIRE_HTTPS=true`, `https://` is required;
+- when `AWF_CALLBACKS_ALLOWED_HOSTS` is set, the callback host must be in the
+  allowlist.
+
+Policy violations are recorded as delivery failures with
+`error_code = CALLBACK_TARGET_INVALID` and are retried according to normal retry
+settings; they are never sent as successful callbacks.
+
 ---
 
 ## Locks and Overlap

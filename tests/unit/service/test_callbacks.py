@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.api.schemas import CallbackSubscriptionCreateRequest
+from awf.common.config import Settings
 from awf.db.enums import CallbackDeliveryStatus, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import CallbackDelivery, MergeCandidate, WorkspaceEvent
 from awf.db.repositories import (
@@ -35,6 +36,15 @@ from awf.service.callbacks import (
 @pytest.fixture
 async def factory(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     yield make_session_factory(engine)
+
+
+@pytest.fixture(autouse=True)
+def _stub_callback_dns_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: {"1.1.1.1"},
+    )
 
 
 @dataclass
@@ -123,10 +133,11 @@ async def _register_subscription(
     enabled: bool = True,
     idempotency_key: str = "callback-service-subscription",
     max_attempts: int = 3,
+    target_url: str = "https://operator.example.com/events",
 ):
     subscription, _created = await CallbackSubscriptionRepository(session).create_idempotent(
         name="service-test",
-        target_url="https://operator.example.com/events",
+        target_url=target_url,
         event_types=event_types,
         enabled=enabled,
         timeout_seconds=10,
@@ -518,6 +529,8 @@ async def test_operation_event_envelope_excludes_raw_payload_result_and_api_idem
     assert "raw-payload-secret" not in serialized
     assert "raw-result-secret" not in serialized
     assert "api-idempotency-key-must-not-leak" not in serialized
+    assert "payload" not in serialized
+    assert "log_stream_refs" not in serialized
 
 
 @pytest.mark.unit
@@ -727,3 +740,105 @@ async def test_failing_callbacks_record_retry_metadata_without_mutating_awf_stat
         assert operation.status == OperationStatus.failed.value
         assert candidate_snapshot_after == candidate_snapshot_before
         assert event_snapshots_after == event_snapshots_before
+
+
+@pytest.mark.unit
+async def test_drain_due_rejects_callbacks_with_private_delivery_target(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        workspace_id, event_id = await _seed_workspace_event(session)
+        event_snapshots_before = await _workspace_event_snapshots(session)
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+    assert len(deliveries) == 1
+
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: {"127.0.0.1"},
+    )
+    poster = _RecordingPoster()
+    await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert poster.calls == []
+    stored = await _get_delivery(factory, deliveries[0].id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert stored.response_status_code is None
+    assert stored.attempt_count == 1
+    assert stored.envelope["delivery"]["attempt_count"] == 1
+    assert "target_url resolved host is not public" in (stored.error_message or "")
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        event_snapshots_after = await _workspace_event_snapshots(session)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.provisioning.value
+        assert event_snapshots_after == event_snapshots_before
+
+
+@pytest.mark.unit
+async def test_drain_due_enforces_https_only_callback_target_policy(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(
+            session,
+            event_types=["workspace.*"],
+            target_url="http://operator.example.com/events",
+        )
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+    assert len(deliveries) == 1
+
+    poster = _RecordingPoster()
+    await CallbackDeliveryService(
+        factory,
+        http_poster=poster,
+        settings=Settings(_env_file=None, callbacks_require_https=True),
+    ).drain_due(limit=10)
+
+    assert poster.calls == []
+    stored = await _get_delivery(factory, deliveries[0].id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert "target_url must use https" in (stored.error_message or "")
+
+
+@pytest.mark.unit
+async def test_drain_due_enforces_callback_target_allowlist_policy(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(
+            session,
+            event_types=["workspace.*"],
+            target_url="https://callback-disallowed.example.com/events",
+        )
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+    assert len(deliveries) == 1
+
+    poster = _RecordingPoster()
+    await CallbackDeliveryService(
+        factory,
+        http_poster=poster,
+        settings=Settings(
+            _env_file=None,
+            callbacks_allowed_hosts=("operator.example.com",),
+        ),
+    ).drain_due(limit=10)
+
+    assert poster.calls == []
+    stored = await _get_delivery(factory, deliveries[0].id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert "host is not allowlisted" in (stored.error_message or "")

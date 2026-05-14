@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session_factory
+from awf.api.deps import get_db_session_factory, require_api_token
 from awf.api.schemas import (
     CallbackSubscriptionCreateRequest,
     CallbackSubscriptionListResponse,
@@ -24,6 +24,7 @@ _IDEMPOTENCY_KEY_MAX_LENGTH = 128
     "",
     response_model=CallbackSubscriptionResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_api_token)],
 )
 async def register_callback(
     payload: CallbackSubscriptionCreateRequest,
@@ -52,7 +53,11 @@ async def register_callback(
     return CallbackSubscriptionResponse.model_validate(subscription)
 
 
-@router.get("", response_model=CallbackSubscriptionListResponse)
+@router.get(
+    "",
+    response_model=CallbackSubscriptionListResponse,
+    dependencies=[Depends(require_api_token)],
+)
 async def list_callbacks(
     enabled: Annotated[bool | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,

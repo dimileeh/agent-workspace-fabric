@@ -97,6 +97,18 @@ def test_key_endpoint_methods_exist(openapi_spec: dict) -> None:
 
 
 @pytest.mark.unit
+def test_callback_endpoints_expose_authorization_header_in_openapi(openapi_spec: dict) -> None:
+    path = openapi_spec["paths"]["/v1/callbacks"]
+    for method in ("get", "post"):
+        operation = path[method]
+        parameters = operation["parameters"]
+        assert any(
+            param.get("in") == "header" and param.get("name") == "authorization"
+            for param in parameters
+        ), f"{method.upper()} /v1/callbacks is expected to expose Authorization header"
+
+
+@pytest.mark.unit
 def test_no_duplicate_operation_ids(openapi_spec: dict) -> None:
     operation_ids: list[str] = []
     for path_item in openapi_spec.get("paths", {}).values():

@@ -16,6 +16,7 @@ from awf.api.app import configure_database, create_app
 from awf.common.config import Settings, get_settings
 from awf.db.session import make_session_factory
 
+_CALLBACK_TOKEN = "callback-secret"
 _VALID_BODY = {
     "name": "operator-console",
     "target_url": "https://operator.example.com/awf/events",
@@ -39,6 +40,27 @@ async def _subscription_count(engine: AsyncEngine) -> int:
         )
 
 
+def _authorized_headers(
+    *,
+    idempotency_key: str | None = None,
+    authorization: str | None = f"Bearer {_CALLBACK_TOKEN}",
+) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if authorization is not None:
+        headers["Authorization"] = authorization
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    return headers
+
+
+@pytest.fixture(autouse=True)
+def _configure_api_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWF_API_TOKEN", _CALLBACK_TOKEN)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 async def callback_app_and_client(
     engine: AsyncEngine,
@@ -51,7 +73,11 @@ async def callback_app_and_client(
 
 @pytest.mark.unit
 async def test_register_callback_requires_idempotency_key(client: AsyncClient) -> None:
-    response = await client.post("/v1/callbacks", json=_VALID_BODY)
+    response = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers=_authorized_headers(),
+    )
 
     assert response.status_code == 400
     assert response.json()["detail"] == {
@@ -68,7 +94,7 @@ async def test_register_callback_rejects_oversized_idempotency_key(
     response = await client.post(
         "/v1/callbacks",
         json=_VALID_BODY,
-        headers={"Idempotency-Key": "k" * 129},
+        headers=_authorized_headers(idempotency_key="k" * 129),
     )
 
     assert response.status_code == 400
@@ -86,7 +112,7 @@ async def test_register_callback_persists_safe_public_contract(
     response = await client.post(
         "/v1/callbacks",
         json=_VALID_BODY,
-        headers={"Idempotency-Key": "callback-register-1"},
+        headers=_authorized_headers(idempotency_key="callback-register-1"),
     )
 
     assert response.status_code == 201
@@ -128,7 +154,7 @@ async def test_register_callback_validates_url_events_and_extra_fields(
     response = await client.post(
         "/v1/callbacks",
         json=payload,
-        headers={"Idempotency-Key": "callback-invalid"},
+        headers=_authorized_headers(idempotency_key="callback-invalid"),
     )
 
     assert response.status_code == 422
@@ -143,14 +169,15 @@ async def test_callbacks_endpoints_return_unavailable_when_disabled(
     app.dependency_overrides[get_settings] = lambda: Settings(
         _env_file=None,
         callbacks_enabled=False,
+        api_token=_CALLBACK_TOKEN,
     )
 
     register_response = await client.post(
         "/v1/callbacks",
         json=_VALID_BODY,
-        headers={"Idempotency-Key": "callback-disabled"},
+        headers=_authorized_headers(idempotency_key="callback-disabled"),
     )
-    list_response = await client.get("/v1/callbacks")
+    list_response = await client.get("/v1/callbacks", headers=_authorized_headers())
 
     assert register_response.status_code == 503
     assert register_response.json()["detail"] == {
@@ -198,7 +225,7 @@ async def test_register_callback_rejects_internal_target_hosts_without_insert(
     response = await client.post(
         "/v1/callbacks",
         json={**_VALID_BODY, "target_url": target_url},
-        headers={"Idempotency-Key": f"callback-internal-{target_url}"},
+        headers=_authorized_headers(idempotency_key=f"callback-internal-{target_url}"),
     )
 
     assert response.status_code == 422
@@ -285,7 +312,7 @@ async def test_register_callback_rejects_internal_namespaced_event_types_without
     response = await client.post(
         "/v1/callbacks",
         json={**_VALID_BODY, "event_types": [event_type]},
-        headers={"Idempotency-Key": f"callback-invalid-{event_type}"},
+        headers=_authorized_headers(idempotency_key=f"callback-invalid-{event_type}"),
     )
 
     assert response.status_code == 422
@@ -308,7 +335,7 @@ async def test_register_callback_accepts_exact_public_event_types(
                 "workspace.state_changed",
             ],
         },
-        headers={"Idempotency-Key": "callback-public-exact"},
+        headers=_authorized_headers(idempotency_key="callback-public-exact"),
     )
 
     assert response.status_code == 201
@@ -329,7 +356,7 @@ async def test_register_callback_idempotent_replay_returns_original_without_dupl
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    headers = {"Idempotency-Key": "callback-replay"}
+    headers = _authorized_headers(idempotency_key="callback-replay")
 
     first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
     before_count = await _subscription_count(engine)
@@ -356,7 +383,7 @@ async def test_register_callback_same_key_with_changed_body_returns_conflict(
     engine: AsyncEngine,
     changed_body: dict[str, object],
 ) -> None:
-    headers = {"Idempotency-Key": "callback-conflict"}
+    headers = _authorized_headers(idempotency_key="callback-conflict")
 
     first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
     before_count = await _subscription_count(engine)
@@ -380,7 +407,7 @@ async def test_list_callbacks_returns_pagination_envelope_and_enabled_filter(
     enabled = await client.post(
         "/v1/callbacks",
         json={**_VALID_BODY, "name": "enabled"},
-        headers={"Idempotency-Key": "callback-list-enabled"},
+        headers=_authorized_headers(idempotency_key="callback-list-enabled"),
     )
     disabled = await client.post(
         "/v1/callbacks",
@@ -390,13 +417,17 @@ async def test_list_callbacks_returns_pagination_envelope_and_enabled_filter(
             "target_url": "https://operator.example.com/disabled",
             "enabled": False,
         },
-        headers={"Idempotency-Key": "callback-list-disabled"},
+        headers=_authorized_headers(idempotency_key="callback-list-disabled"),
     )
     assert enabled.status_code == 201
     assert disabled.status_code == 201
 
-    all_response = await client.get("/v1/callbacks")
-    enabled_response = await client.get("/v1/callbacks", params={"enabled": True})
+    all_response = await client.get("/v1/callbacks", headers=_authorized_headers())
+    enabled_response = await client.get(
+        "/v1/callbacks",
+        params={"enabled": True},
+        headers=_authorized_headers(),
+    )
 
     assert all_response.status_code == 200
     all_body = all_response.json()
@@ -416,6 +447,56 @@ async def test_list_callbacks_validates_limit_bounds(
     client: AsyncClient,
     limit: int,
 ) -> None:
-    response = await client.get("/v1/callbacks", params={"limit": limit})
+    response = await client.get(
+        "/v1/callbacks",
+        params={"limit": limit},
+        headers=_authorized_headers(),
+    )
 
     assert response.status_code == 422
+
+
+@pytest.mark.unit
+async def test_register_callback_requires_authorization_token(client: AsyncClient) -> None:
+    response = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers={"Idempotency-Key": "callback-no-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
+async def test_register_callback_rejects_invalid_authorization_token(client: AsyncClient) -> None:
+    response = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers=_authorized_headers(
+            idempotency_key="callback-bad-token",
+            authorization="Bearer wrong",
+        ),
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
+async def test_list_callbacks_requires_authorization_token(client: AsyncClient) -> None:
+    response = await client.get("/v1/callbacks")
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
+async def test_list_callbacks_rejects_invalid_authorization_token(client: AsyncClient) -> None:
+    response = await client.get(
+        "/v1/callbacks",
+        headers={"Authorization": "Bearer wrong"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"

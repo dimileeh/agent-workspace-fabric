@@ -66,6 +66,17 @@ class Settings(BaseSettings):
         default=True,
         description="Whether local external callback delivery registration is enabled.",
     )
+    callbacks_require_https: bool = Field(
+        default=False,
+        description="Require callback targets to use https:// scheme.",
+    )
+    callbacks_allowed_hosts: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Optional allowlist of callback target hostnames (normalized to lowercase "
+            "without trailing dots). Empty means no callback host restriction."
+        ),
+    )
     callback_delivery_timeout_seconds: int = Field(default=10, ge=1, le=120)
     callback_delivery_max_attempts: int = Field(default=3, ge=1, le=20)
     callback_delivery_initial_backoff_seconds: int = Field(default=5, ge=1, le=3600)
@@ -197,6 +208,22 @@ class Settings(BaseSettings):
             "pressure reporting. When unset, DinD availability is reported as unknown."
         ),
     )
+
+    @field_validator("callbacks_allowed_hosts", mode="before")
+    @classmethod
+    def _normalize_callback_allowed_hosts(cls, value: Any) -> tuple[str, ...]:
+        if value is None or value == "":
+            return ()
+        if isinstance(value, str):
+            values = value.split(",")
+        elif isinstance(value, (list, tuple)):
+            values = list(value)
+        else:
+            raise TypeError(
+                "callbacks_allowed_hosts must be a comma-separated string, list, or tuple"
+            )
+
+        return tuple(str(host).strip().rstrip(".").lower() for host in values if str(host).strip())
 
     @field_validator(
         "local_capacity_cpu_cores",
