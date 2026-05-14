@@ -2045,6 +2045,14 @@ class TestWorkspaceEvents:
         for item in payload["items"]:
             assert item["event_type"] == "workspace.phase_started"
 
+    @pytest.mark.unit
+    async def test_workspace_events_event_type_validation_bounds(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        props = tools["awf_list_workspace_events"].inputSchema["properties"]
+        string_schema = next(s for s in props["event_type"]["anyOf"] if s.get("type") == "string")
+        assert string_schema["minLength"] == 1
+        assert string_schema["maxLength"] == 64
+
 
 class TestGlobalEvents:
     @pytest.mark.unit
@@ -2246,6 +2254,14 @@ class TestGlobalEvents:
         assert props["limit"]["default"] == 50
         assert props["limit"]["minimum"] == 1
         assert props["limit"]["maximum"] == 500
+
+    @pytest.mark.unit
+    async def test_list_events_event_type_validation_bounds(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        props = tools["awf_list_events"].inputSchema["properties"]
+        string_schema = next(s for s in props["event_type"]["anyOf"] if s.get("type") == "string")
+        assert string_schema["minLength"] == 1
+        assert string_schema["maxLength"] == 64
 
 
 class TestWorkspaceRuntime:

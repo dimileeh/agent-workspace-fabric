@@ -583,7 +583,12 @@ def build_mcp_server(
     async def awf_list_workspace_events(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
         limit: int = Field(default=50, ge=1, le=500),
-        event_type: str | None = Field(default=None, description="Optional event-type filter."),
+        event_type: str | None = Field(
+            default=None,
+            description="Optional event-type filter.",
+            min_length=1,
+            max_length=64,
+        ),
     ) -> CallToolResult:
         """Read-only operator observability: list workspace events with REST envelope."""
         rows = await service.list_events(
@@ -612,6 +617,8 @@ def build_mcp_server(
         event_type: str | None = Field(
             default=None,
             description="Optional event-type filter.",
+            min_length=1,
+            max_length=64,
         ),
         limit: int = Field(default=50, ge=1, le=500),
     ) -> StructuredToolResult:
