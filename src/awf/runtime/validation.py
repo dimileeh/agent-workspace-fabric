@@ -95,6 +95,7 @@ DB_GENERATED_SETUP_PHASE = "db_generated_setup"
 DB_REFRESH_PHASE = "db_refresh"
 _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT = 1000
 _SETUP_DEPENDENCY_NETWORK_COMMAND_LIMIT = 500
+_SETUP_DEPENDENCY_NETWORK_FAILURE_BLOCK_RADIUS = 6
 _SETUP_DEPENDENCY_NETWORK_DEFAULT_RETRY_BUDGET = 2
 _SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS = (1.0, 3.0)
 _UV_DEV_VALIDATION_TOOLS = frozenset({"mypy", "pre-commit", "pytest", "ruff"})
@@ -666,6 +667,16 @@ _SETUP_HOST_FALLBACK_RE = re.compile(
     r"(?i)\b([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)\b"
 )
+_SETUP_DEPENDENCY_FAILURE_CONTEXT_RE = re.compile(
+    r"(?i)\b("
+    r"could not (?:download|fetch|install|resolve)|"
+    r"error sending request for url|"
+    r"failed .{0,80}\b(?:download|fetch|install|resolve)|"
+    r"failed to (?:download|fetch|install|resolve)|"
+    r"package index .{0,160}\breturned http(?:s)?(?:/\d+(?:\.\d+)?)?|"
+    r"unable to (?:download|fetch|install|resolve)"
+    r")\b"
+)
 
 
 def _classify_setup_dependency_network_failure(
@@ -768,12 +779,34 @@ def _setup_dependency_output_has_specific_context(output: str) -> bool:
 
 
 def _setup_dependency_output_has_specific_transient_context(output: str) -> bool:
-    for line in output.splitlines():
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
         if _setup_transient_category(line) is None:
             continue
         if _setup_dependency_output_has_specific_context(line):
             return True
+        if _setup_dependency_failure_block_has_specific_context(
+            _setup_dependency_bounded_failure_block(lines=lines, transient_index=index)
+        ):
+            return True
     return False
+
+
+def _setup_dependency_bounded_failure_block(*, lines: list[str], transient_index: int) -> list[str]:
+    start = max(0, transient_index - _SETUP_DEPENDENCY_NETWORK_FAILURE_BLOCK_RADIUS)
+    end = min(len(lines), transient_index + _SETUP_DEPENDENCY_NETWORK_FAILURE_BLOCK_RADIUS + 1)
+    return lines[start:end]
+
+
+def _setup_dependency_failure_block_has_specific_context(lines: list[str]) -> bool:
+    return any(_setup_dependency_line_has_specific_failure_context(line) for line in lines)
+
+
+def _setup_dependency_line_has_specific_failure_context(line: str) -> bool:
+    return (
+        _setup_dependency_output_has_specific_context(line)
+        and _SETUP_DEPENDENCY_FAILURE_CONTEXT_RE.search(line) is not None
+    )
 
 
 def _is_setup_dependency_index_host(host: str | None) -> bool:

@@ -425,6 +425,22 @@ def test_setup_dependency_network_classifier_accepts_chained_dependency_output()
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_accepts_chained_multiline_dependency_output() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev && ./bootstrap",
+        returncode=1,
+        stdout="",
+        stderr=_uv_pypi_dns_failure(),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "command",
     [
