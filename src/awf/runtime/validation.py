@@ -618,7 +618,8 @@ _SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"no address associated with hostname|"
             r"nodename nor servname provided|"
             r"name or service not known|"
-            r"dns error"
+            r"dns error|"
+            r"\bEAI_AGAIN\b"
             r")"
         ),
     ),
@@ -628,11 +629,21 @@ _SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     (
         "read_timeout",
-        re.compile(r"(?i)(read timed out|read timeout|idle timeout|timeout while reading)"),
+        re.compile(
+            r"(?i)("
+            r"read timed out|read timeout|idle timeout|timeout while reading|"
+            r"\bread +E(?:SOCKET)?TIMEDOUT\b"
+            r")"
+        ),
     ),
     (
         "connect_timeout",
-        re.compile(r"(?i)(connection timed out|connect timeout|timed out connecting)"),
+        re.compile(
+            r"(?i)("
+            r"connection timed out|connect timeout|timed out connecting|"
+            r"\b(?:connect +)?E(?:SOCKET)?TIMEDOUT\b"
+            r")"
+        ),
     ),
     (
         "connection",
@@ -640,7 +651,8 @@ _SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(?i)("
             r"connection reset|connection refused|connection aborted|"
             r"connection closed|connection error|network is unreachable|"
-            r"proxy error|temporary network failure|tunnel error"
+            r"proxy error|temporary network failure|tunnel error|"
+            r"\bECONNRESET\b"
             r")"
         ),
     ),
@@ -667,7 +679,7 @@ _SETUP_PACKAGE_SPEC_RE = re.compile(
 _SETUP_PACKAGE_NAME_VERSION_RE = re.compile(
     r"(?i)\b(?P<name>[A-Za-z0-9][A-Za-z0-9_.-]*)-"
     r"(?P<version>\d+(?:\.\d+)+(?:[A-Za-z0-9_.!+\-]*))"
-    r"(?:\.tar\.gz|\.zip|\.whl)\b"
+    r"(?:\.tar\.gz|\.tgz|\.zip|\.whl)\b"
 )
 _SETUP_URL_RE = re.compile(r"https?://[^\s`'\"<>)]+", re.IGNORECASE)
 _SETUP_HOST_FALLBACK_RE = re.compile(

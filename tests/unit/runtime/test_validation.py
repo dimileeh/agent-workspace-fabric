@@ -516,6 +516,60 @@ def test_setup_dependency_network_classifier_accepts_install_package_manager_ver
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "stderr", "expected_category", "expected_package", "expected_host"),
+    [
+        (
+            "npm ci",
+            "npm ERR! request to "
+            "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz "
+            "failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org",
+            "dns",
+            "left-pad==1.3.0",
+            "registry.npmjs.org",
+        ),
+        (
+            "pnpm install --frozen-lockfile",
+            "ERR_PNPM_FETCH_ request to "
+            "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz "
+            "failed, reason: connect ETIMEDOUT 104.16.25.34:443",
+            "connect_timeout",
+            "is-odd==3.0.1",
+            "registry.npmjs.org",
+        ),
+        (
+            "yarn install --frozen-lockfile",
+            "error Error: https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz: "
+            "read ECONNRESET",
+            "connection",
+            "lodash==4.17.21",
+            "registry.yarnpkg.com",
+        ),
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_node_transient_error_codes(
+    command: str,
+    stderr: str,
+    expected_category: str,
+    expected_package: str,
+    expected_host: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr=stderr,
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == expected_category
+    assert classification.package == expected_package
+    assert classification.host == expected_host
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_accepts_go_mod_download_proxy_failure() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="go mod download",
