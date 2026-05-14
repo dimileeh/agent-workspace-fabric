@@ -16,6 +16,14 @@ from awf.cli.main import app
 _runner = CliRunner()
 
 
+@pytest.mark.unit
+def test_init_profile_marker_paths_are_shared_with_smoke_service() -> None:
+    from awf.cli import main as cli_main
+    from awf.service import smoke
+
+    assert cli_main._PROJECT_PROFILE_MARKER_PATHS is smoke._PROFILE_MARKER_PATHS
+
+
 def _docker_diagnostic(status: str = "ok") -> Any:
     from awf.service.doctor.models import DoctorDiagnostic
 

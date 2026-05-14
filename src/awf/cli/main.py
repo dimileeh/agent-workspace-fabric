@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
+from awf.service.smoke import _PROFILE_MARKER_PATHS as _PROJECT_PROFILE_MARKER_PATHS
 
 _DX_FIRST_PATH_HELP = """
 For first-time users: the recommended first path is to run `awf init`
@@ -92,12 +93,6 @@ class OutputFormat(StrEnum):
 
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
-_PROJECT_PROFILE_MARKER_PATHS = (
-    ".awf/workspace.yml",
-    ".awf/workspace.yaml",
-    "awf.workspace.yml",
-    "awf.workspace.yaml",
-)
 
 
 def _base_url(override: str | None) -> str:
