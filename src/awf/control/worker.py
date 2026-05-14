@@ -1599,7 +1599,6 @@ class ControlWorker:
                 ws.execution_claimed_by = None
                 ws.execution_claim_expires_at = None
             ws.subphase = _ACTIVE_EXECUTION_PRESERVED_SUBPHASE
-            ws.version += 1
             payload = _active_execution_preservation_payload(
                 candidate,
                 snapshot,

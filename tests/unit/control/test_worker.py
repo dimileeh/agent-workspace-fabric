@@ -5536,6 +5536,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
             status,
             compose_project_name=compose_project,
         )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            initial_version = ws.version
+
         inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
         cleaner = _RecordingRuntimeCleaner()
         executor = _RecordingExecutor()
@@ -5555,6 +5560,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert ws is not None
             assert ws.status == status.value
             assert ws.subphase == PRESERVED_EXECUTION_SUBPHASE
+            assert ws.version == initial_version + 1
             assert ws.failure_reason is None
             preserved_events = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
@@ -5566,6 +5572,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             )
 
         assert len(preserved_events) == 1
+        assert preserved_events[0].event_order == initial_version + 1
         assert preserved_events[0].payload is not None
         assert preserved_events[0].payload["workspace_status"] == status.value
         assert preserved_events[0].payload["decision"] == "preserve_runtime"
