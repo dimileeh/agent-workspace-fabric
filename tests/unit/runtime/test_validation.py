@@ -29,6 +29,7 @@ from awf.runtime.validation import (
     ValidationResult,
     ValidationRunner,
     _classify_setup_dependency_network_failure,
+    _classify_setup_dependency_network_result,
     _coverage_reason_code,
     _coverage_status,
     _healthcheck_attempt_timeout,
@@ -206,6 +207,32 @@ def test_setup_dependency_network_classifier_extracts_uv_pypi_dns_failure() -> N
     assert classification.metadata["retryable"] is True
     assert classification.metadata["diagnostic"]
     assert len(str(classification.metadata["diagnostic"])) <= 1000 + len("...[truncated]")
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_result_reads_missing_captured_stream_from_artifact(
+    tmp_path: Path,
+) -> None:
+    stderr_path = tmp_path / "setup.stderr"
+    stderr_path.write_text(_uv_pypi_dns_failure(), encoding="utf-8")
+    result = ValidationCommandResult(
+        command="uv sync --extra dev",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=tmp_path / "setup.stdout",
+        stderr_path=stderr_path,
+        phase="setup",
+        captured_stdout="",
+        captured_stderr=None,
+    )
+
+    classification = _classify_setup_dependency_network_result(result)
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
 
 
 @pytest.mark.unit

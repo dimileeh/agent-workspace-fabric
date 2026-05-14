@@ -693,12 +693,16 @@ def _classify_setup_dependency_network_failure(
 def _classify_setup_dependency_network_result(
     result: ValidationCommandResult,
 ) -> SetupDependencyNetworkClassification | None:
-    if result.captured_stdout is not None or result.captured_stderr is not None:
-        stdout = result.captured_stdout or ""
-        stderr = result.captured_stderr or ""
-    else:
-        stdout = _read_text_if_present(result.stdout_path) or ""
-        stderr = _read_text_if_present(result.stderr_path) or ""
+    stdout = (
+        result.captured_stdout
+        if result.captured_stdout is not None
+        else (_read_text_if_present(result.stdout_path) or "")
+    )
+    stderr = (
+        result.captured_stderr
+        if result.captured_stderr is not None
+        else (_read_text_if_present(result.stderr_path) or "")
+    )
     return _classify_setup_dependency_network_failure(
         command=result.command,
         returncode=result.returncode,
