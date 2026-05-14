@@ -1,0 +1,23 @@
+# Validation run for ws_61e0f7b210fa423faef0b6f3
+Date: 2026-05-14 19:14:11 UTC
+
+## Command
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_cli.py tests/unit/mcp/test_mcp_server.py tests/unit/contracts/test_request_payload_alignment.py tests/unit/contracts/test_surface_metadata_alignment.py -q
+## Output
+........................................................................ [ 22%]
+........................................................................ [ 44%]
+........................................................................ [ 66%]
+........................................................................ [ 89%]
+...................................                                      [100%]
+323 passed in 295.91s (0:04:55)
+## Exit: 0
+## Command
+uv run --python 3.12 --extra dev ruff check src/awf/cli/main.py src/awf/mcp/server.py tests/unit/cli/test_cli.py tests/unit/mcp/test_mcp_server.py tests/unit/contracts
+## Output
+All checks passed!
+## Exit: 0
+## Command
+uv run --python 3.12 --extra dev mypy src/awf
+## Output
+Success: no issues found in 154 source files
+## Exit: 0

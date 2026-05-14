@@ -125,7 +125,6 @@ RuntimeHealthSummaryProvider = Callable[
 
 _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
 _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
-_TASK_NON_NULLABLE_INT_FIELDS = frozenset({"priority", "human_boost"})
 
 
 class ReadinessProvider(Protocol):
@@ -277,6 +276,14 @@ def build_mcp_server(
         human_boost: int | None = Field(
             default=None, ge=0, le=5, description="Optional priority boost."
         ),
+        out_of_scope_changes: dict[str, Any] | None = Field(
+            default=None,
+            description="Optional out-of-scope change policy payload.",
+        ),
+        provider_recovery: dict[str, Any] | None = Field(
+            default=None,
+            description="Optional provider-recovery policy payload.",
+        ),
         owned_paths: list[OwnedPath] = Field(
             default_factory=list,
             max_length=128,
@@ -354,11 +361,13 @@ def build_mcp_server(
                     "task_class": task_class,
                     "priority": priority,
                     "human_boost": human_boost,
+                    "out_of_scope_changes": out_of_scope_changes,
+                    "provider_recovery": provider_recovery,
                     "owned_paths": owned_paths,
                     "auto_merge": auto_merge,
                     "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
                 }.items()
-                if v is not None or k not in _TASK_NON_NULLABLE_INT_FIELDS
+                if v is not None
             },
             workspace={"profile_ref": profile_ref, "profile": profile},
             validation={"commands": validation_commands, "requested_tier": requested_tier},
