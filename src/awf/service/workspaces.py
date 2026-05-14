@@ -894,6 +894,7 @@ class WorkspaceService:
         event_type: str | None = None,
         limit: int = 50,
     ) -> builtins.list[WorkspaceEventResponse]:
+        """List events across all workspaces, optionally filtered by workspace ID and event type."""
         async with self._factory() as s:
             rows = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
