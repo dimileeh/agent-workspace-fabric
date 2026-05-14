@@ -2878,7 +2878,11 @@ class WorkspaceRepository:
     async def list(
         self,
         *,
-        status: WorkspaceStatus | str | None = None,
+        status: WorkspaceStatus
+        | str
+        | builtins.list[WorkspaceStatus]
+        | builtins.list[str]
+        | None = None,
         agent: AgentRuntime | str | None = None,
         repo_url: str | None = None,
         before_created_at: datetime | None = None,
@@ -2887,7 +2891,14 @@ class WorkspaceRepository:
     ) -> builtins.list[Workspace]:
         stmt = select(Workspace)
         if status is not None:
-            stmt = stmt.where(Workspace.status == status)
+            if isinstance(status, builtins.list):
+                stmt = stmt.where(
+                    Workspace.status.in_(
+                        [s.value if isinstance(s, WorkspaceStatus) else s for s in status]
+                    )
+                )
+            else:
+                stmt = stmt.where(Workspace.status == status)
         if agent is not None:
             stmt = stmt.where(Workspace.agent == agent)
         if repo_url is not None:

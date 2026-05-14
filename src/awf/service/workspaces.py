@@ -613,7 +613,7 @@ class WorkspaceService:
     async def list(
         self,
         *,
-        workspace_status: WorkspaceStatus | None = None,
+        workspace_status: WorkspaceStatus | list[WorkspaceStatus] | None = None,
         agent: AgentRuntime | None = None,
         repo_url: str | None = None,
         limit: int = 50,

@@ -130,6 +130,51 @@ class TestWorkspaceCreate:
         mock.assert_not_called()
 
     @pytest.mark.unit
+    def test_emits_new_v2_flags_to_post(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_abc"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Add docs",
+                    "--prompt",
+                    "Add docstrings everywhere.",
+                    "--model",
+                    "gemini-test",
+                    "--task-class",
+                    "docs_task",
+                    "--priority",
+                    "10",
+                    "--human-boost",
+                    "2",
+                    "--owned-path",
+                    "src/awf/**",
+                    "--external-id",
+                    "ext_123",
+                    "--cpu",
+                    "2.5",
+                    "--memory",
+                    "4GB",
+                ],
+            )
+
+        assert result.exit_code == 0
+        kwargs = mock.call_args.kwargs
+        assert kwargs["json"]["task"]["model"] == "gemini-test"
+        assert kwargs["json"]["task"]["task_class"] == "docs_task"
+        assert kwargs["json"]["task"]["priority"] == 10
+        assert kwargs["json"]["task"]["human_boost"] == 2
+        assert kwargs["json"]["task"]["owned_paths"] == ["src/awf/**"]
+        assert kwargs["json"]["task"]["external_id"] == "ext_123"
+        assert kwargs["json"]["resources"]["cpu"] == 2.5
+        assert kwargs["json"]["resources"]["memory"] == "4GB"
+
+    @pytest.mark.unit
     def test_idempotency_key_forwarded_as_header(self) -> None:
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_idem"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
@@ -979,7 +1024,7 @@ class TestWorkspaceList:
 
         assert result.exit_code == 0
         kwargs = mock.call_args.kwargs
-        assert kwargs["params"] == {"limit": 7}
+        assert kwargs["params"] == [("limit", 7)]
 
     @pytest.mark.unit
     def test_forwards_fleet_filters_as_query_params(self) -> None:
@@ -1003,12 +1048,36 @@ class TestWorkspaceList:
 
         assert result.exit_code == 0
         kwargs = mock.call_args.kwargs
-        assert kwargs["params"] == {
-            "limit": 9,
-            "status": "ready",
-            "agent": "gemini",
-            "repo_url": "git@github.com:example/app.git",
-        }
+        assert kwargs["params"] == [
+            ("limit", 9),
+            ("status", "ready"),
+            ("agent", "gemini"),
+            ("repo_url", "git@github.com:example/app.git"),
+        ]
+
+    @pytest.mark.unit
+    def test_repeated_status_flags_passed(self) -> None:
+        response = _mock_response(status_code=200, payload=[])
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "list",
+                    "--status",
+                    "running",
+                    "--status",
+                    "monitoring_pr",
+                ],
+            )
+
+        assert result.exit_code == 0
+        kwargs = mock.call_args.kwargs
+        assert kwargs["params"] == [
+            ("limit", 50),
+            ("status", "running"),
+            ("status", "monitoring_pr"),
+        ]
 
     @pytest.mark.unit
     def test_pretty_prints_separators_between_items(self) -> None:
