@@ -742,6 +742,7 @@ _CAPABILITIES += (
         mcp_request_fields=frozenset({"workspace_id", "limit", "cursor"}),
         mcp_required_fields=frozenset({"workspace_id"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_stale_reasons",
@@ -990,6 +991,7 @@ _CAPABILITIES += (
         cli_arguments=frozenset({"workspace_id"}),
         cli_options=frozenset({"--api-token"}),
         response_fields=frozenset({"workspace_id", "stack_state", "services"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_operations",

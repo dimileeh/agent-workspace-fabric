@@ -48,10 +48,12 @@ _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
         ("post", "/v1/workspaces/{workspace_id}/refresh"),
         ("post", "/v1/workspaces/{workspace_id}/remonitor"),
         ("post", "/v1/workspaces/{workspace_id}/retry"),
+        ("get", "/v1/workspaces/{workspace_id}/runtime"),
         ("get", "/v1/workspaces/{workspace_id}/secret-leases"),
         ("get", "/v1/workspaces/{workspace_id}/stale-reasons"),
         ("post", "/v1/workspaces/{workspace_id}/stop"),
         ("post", "/v1/workspaces/{workspace_id}/validate"),
+        ("get", "/v1/workspaces/{workspace_id}/validation"),
         ("post", "/v2/workspaces"),
     }
 )

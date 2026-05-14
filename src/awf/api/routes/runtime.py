@@ -7,11 +7,17 @@ from typing import cast
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session_factory
+from awf.api.deps import get_db_session_factory, require_api_token
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import WorkspaceRuntimeResponse
 from awf.service.workspaces import RuntimeInspection, WorkspaceService
 
-router = APIRouter(prefix="/v1/workspaces/{workspace_id}/runtime", tags=["runtime"])
+router = APIRouter(
+    prefix="/v1/workspaces/{workspace_id}/runtime",
+    tags=["runtime"],
+    dependencies=[Depends(require_api_token)],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
+)
 
 
 @router.get("", response_model=WorkspaceRuntimeResponse)
