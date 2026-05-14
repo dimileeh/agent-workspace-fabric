@@ -128,6 +128,8 @@ _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 
 
 class ReadinessProvider(Protocol):
+    """Protocol for readiness-check providers used during workspace admission."""
+
     def __call__(
         self,
         settings: Settings,
@@ -144,6 +146,7 @@ ProviderFilter = Annotated[str, Field(min_length=1, max_length=64)]
 
 
 def _resolve_settings(settings: Settings | None) -> Settings:
+    """Return *settings* if provided, otherwise resolve the global default."""
     return settings or get_settings()
 
 
@@ -182,6 +185,7 @@ def build_mcp_server(
     settings_value = _resolve_settings(settings)
 
     def _safe_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+        """Redact sensitive data from *payload* and wrap in a ``CallToolResult``."""
         redacted = _redact_sensitive_payload(payload, settings_value)
         return _tool_result(redacted, is_error=is_error)
 
@@ -1548,6 +1552,7 @@ def build_mcp_server(
 
 
 def _tool_error(exc: WorkspaceControlError) -> CallToolResult:
+    """Convert a ``WorkspaceControlError`` into a structured MCP error result."""
     return _workspace_error_result(exc)
 
 
@@ -1558,16 +1563,19 @@ class _WorkspaceErrorSource(Protocol):
 
 
 def _workspace_retry_error_result(exc: WorkspaceRetryError) -> CallToolResult:
+    """Convert a ``WorkspaceRetryError`` into a structured MCP error result."""
     return _workspace_error_result(exc)
 
 
 def _provider_readiness_blocked_result(
     exc: WorkspaceProviderReadinessBlockedError,
 ) -> CallToolResult:
+    """Convert a provider-readiness preflight failure into a structured MCP error result."""
     return _workspace_error_result(exc)
 
 
 def _task_external_id_conflict_result(exc: TaskExternalIdConflictError) -> CallToolResult:
+    """Return a ``TASK_EXTERNAL_ID_CONFLICT`` error result for duplicate external ID."""
     error = ErrorResponse(
         error_code="TASK_EXTERNAL_ID_CONFLICT",
         message=(
@@ -1581,6 +1589,7 @@ def _task_external_id_conflict_result(exc: TaskExternalIdConflictError) -> CallT
 
 
 def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
+    """Convert any workspace error with ``error_code``/``message``/``detail`` into a structured MCP error."""
     error = ErrorResponse(
         error_code=exc.error_code,
         message=exc.message,
@@ -1592,17 +1601,20 @@ def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
 def _error_result(
     error_code: str, message: str, *, detail: dict[str, Any] | None = None
 ) -> CallToolResult:
+    """Build a ``CallToolResult`` error from an error code, message, and optional detail."""
     error = ErrorResponse(error_code=error_code, message=message, detail=detail)
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
 def _required_idempotency_key(idempotency_key: str | None) -> str | None:
+    """Return the key if non-empty, otherwise ``None`` to signal a missing required key."""
     if idempotency_key is None:
         return None
     return idempotency_key if idempotency_key.strip() else None
 
 
 def _normalize_mcp_idempotency_key(idempotency_key: str | None) -> str | None:
+    """Strip whitespace from the idempotency key; return ``None`` if blank or absent."""
     if idempotency_key is None:
         return None
     normalized = idempotency_key.strip()
@@ -1610,10 +1622,12 @@ def _normalize_mcp_idempotency_key(idempotency_key: str | None) -> str | None:
 
 
 def _idempotency_key_error() -> CallToolResult:
+    """Return the standard ``INVALID_REQUEST`` error for a missing idempotency key."""
     return _error_result("INVALID_REQUEST", _IDEMPOTENCY_KEY_REQUIRED_MESSAGE)
 
 
 def _workspace_accepted_payload(ws: Any) -> dict[str, Any]:
+    """Extract the accepted-workspace response fields from a workspace object."""
     workspace_id = ws.id
     warnings = [
         warning.model_dump(mode="json") if hasattr(warning, "model_dump") else warning
@@ -1632,6 +1646,7 @@ def _workspace_accepted_payload(ws: Any) -> dict[str, Any]:
 
 
 def _null_tool_result() -> CallToolResult:
+    """Return an empty ``CallToolResult`` with no content."""
     return CallToolResult(content=[], structuredContent=None)
 
 
@@ -1640,6 +1655,7 @@ async def _provided_disk_check(
     disk_check_provider: DiskCheckProvider | None,
     settings: Settings,
 ) -> DiskCheck | None:
+    """Invoke the injected disk-check provider if given, otherwise return ``None``."""
     if disk_check_provider is None:
         return None
     result = disk_check_provider(settings)
@@ -1653,6 +1669,7 @@ async def _workspace_admission_disk_check(
     disk_check_provider: DiskCheckProvider | None,
     settings: Settings,
 ) -> DiskCheck:
+    """Resolve a disk-check result, falling back to the real filesystem check."""
     provided = await _provided_disk_check(
         disk_check_provider=disk_check_provider,
         settings=settings,
@@ -1671,6 +1688,7 @@ async def _provided_local_capacity(
     local_capacity_provider: LocalCapacityProvider | None,
     settings: Settings,
 ) -> LocalCapacityLimits:
+    """Invoke the injected local-capacity provider or detect capacity from settings."""
     if local_capacity_provider is not None:
         result = local_capacity_provider(settings)
         if inspect.isawaitable(result):
@@ -1690,6 +1708,7 @@ async def _provided_orphan_resources(
     settings: Settings,
     session: AsyncSession,
 ) -> OrphanResourceSummary | None:
+    """Invoke the injected orphan-resource summary provider if given."""
     if orphan_resource_summary_provider is None:
         return None
     result = orphan_resource_summary_provider(settings, session)
@@ -1705,6 +1724,7 @@ async def _provided_runtime_health(
     session: AsyncSession,
     orphan_resources: OrphanResourceSummary | None,
 ) -> WorkspaceRuntimeHealthSummary | None:
+    """Invoke the injected runtime-health summary provider if given."""
     if runtime_health_summary_provider is None:
         return None
     if orphan_resources is None:
@@ -1722,6 +1742,7 @@ async def _provided_readiness(
     session_factory: Any | None = None,
     validated_strict_providers: set[ProviderName] | None = None,
 ) -> dict[str, Any]:
+    """Invoke the readiness provider or fall back to the built-in readiness check."""
     if readiness_provider is not None:
         result = readiness_provider(
             settings,
@@ -1838,6 +1859,7 @@ async def _provided_health(
     *,
     health_provider: HealthProvider | None,
 ) -> dict[str, Any]:
+    """Invoke the health provider or fall back to the built-in health response."""
     if health_provider is not None:
         result = health_provider()
         if inspect.isawaitable(result):
@@ -1851,6 +1873,7 @@ async def _provided_health(
 
 
 def _redact_sensitive_payload(payload: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    """Redact secrets from a JSON payload dict using application settings."""
     service_settings = service_config.resolve_service_settings(settings)
     redacted = _redact_sensitive_value(payload, settings, service_settings=service_settings)
     return redacted if isinstance(redacted, dict) else {}
@@ -1862,6 +1885,7 @@ def _redact_sensitive_value(
     *,
     service_settings: ServiceSettings,
 ) -> Any:
+    """Recursively redact secrets from an arbitrary value (dict, list, or string)."""
     if isinstance(value, str):
         return _redact_sensitive_text(value, settings, service_settings=service_settings)
     if isinstance(value, list):
@@ -1885,6 +1909,7 @@ def _contains_secret_bytes(
     *,
     service_settings: ServiceSettings,
 ) -> bool:
+    """Check whether binary content contains configured secrets or recognizable token patterns."""
     for secret in (settings.api_token, settings.github_token, service_settings.github_token):
         if secret and len(secret) >= 4 and secret.encode() in content:
             return True
@@ -1963,6 +1988,7 @@ def _redact_sensitive_text(
     *,
     service_settings: ServiceSettings,
 ) -> str:
+    """Redact known secrets and provider tokens from a text string."""
     redacted = value
     for secret in (settings.api_token, settings.github_token):
         if secret and len(secret) >= 4:
@@ -1971,6 +1997,7 @@ def _redact_sensitive_text(
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+    """Wrap a JSON payload in a ``CallToolResult`` with text and structured content."""
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
         structuredContent=payload,
