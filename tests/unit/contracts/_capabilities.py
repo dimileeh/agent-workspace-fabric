@@ -512,6 +512,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "--provider-readiness-override",
                 "--provider-readiness-override-reason",
                 "--idempotency-key",
+                "--api-token",
             }
         ),
         response_fields=frozenset({"workspace_id", "status", "version", "status_url"}),
@@ -610,6 +611,7 @@ _CAPABILITIES += (
         mcp_request_fields=frozenset({"workspace_id"}),
         mcp_required_fields=frozenset({"workspace_id"}),
         cli_arguments=frozenset({"workspace_id"}),
+        cli_options=frozenset({"--api-token"}),
         response_fields=frozenset({"id", "status", "version"}),
         auth_required=True,
     ),
@@ -627,7 +629,7 @@ _CAPABILITIES += (
         rest_response_model="list[WorkspaceResponse]",
         rest_query_fields=frozenset({"status", "agent", "repo_url", "limit"}),
         mcp_request_fields=frozenset({"status", "agent", "repo_url", "limit"}),
-        cli_options=frozenset({"--status", "--agent", "--repo-url", "--limit"}),
+        cli_options=frozenset({"--status", "--agent", "--repo-url", "--limit", "--api-token"}),
         auth_required=True,
     ),
     ContractCapability(
