@@ -238,6 +238,12 @@ _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON = "GIT_BASE_FETCH_TRANSIENT_RET
 _GIT_BASE_BEHIND_FAILED_REASON = "GIT_BASE_BEHIND_FAILED"
 _GIT_MIRROR_BROKEN_REF_REMOVED_REASON = "GIT_MIRROR_BROKEN_REF_REMOVED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
+_REMOTE_TRACKING_REF_LOCK_RACE_RE = re.compile(
+    r"cannot lock ref ['\"]?refs/remotes/[^'\"]+['\"]?: is at "
+    r"[0-9a-f]{7,40} but expected [0-9a-f]{7,40}.*"
+    r"unable to update local ref",
+    re.IGNORECASE | re.DOTALL,
+)
 _CI_TRANSIENT_RERUN_REASON = "CI_TRANSIENT_RERUN"
 _CI_TRANSIENT_RERUN_FAILED_REASON = "CI_TRANSIENT_RERUN_FAILED"
 _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
@@ -6257,6 +6263,8 @@ def _is_transient_base_fetch_error(exc: BaseFetchError) -> bool:
     text = str(exc).lower()
     if any(marker in text for marker in _NON_TRANSIENT_GITHUB_ERROR_MARKERS):
         return False
+    if _REMOTE_TRACKING_REF_LOCK_RACE_RE.search(str(exc)):
+        return True
     return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)
 
 
