@@ -343,6 +343,18 @@ def test_setup_dependency_network_classifier_does_not_use_command_for_context_fa
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_plain_simple_context_fallback() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./build.sh",
+        returncode=1,
+        stdout="",
+        stderr="simple error: temporary failure in name resolution",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "command",
     [
@@ -403,6 +415,47 @@ def test_setup_dependency_network_classifier_retries_503_temporarily_forbidden_b
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_retries_dependency_simple_index_fallback() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./bootstrap-deps.sh",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple/: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("port", ["401", "403"])
+def test_setup_dependency_network_classifier_does_not_treat_index_port_as_http_auth_status(
+    port: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=f"pip install docker==7.1.0 --index-url http://pypi.internal:{port}/simple/",
+        returncode=1,
+        stdout="",
+        stderr=(
+            f"Failed to download docker==7.1.0 from http://pypi.internal:{port}/simple/: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "pypi.internal"
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_keeps_403_forbidden_deterministic() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="pip install docker==7.1.0",
@@ -411,6 +464,24 @@ def test_setup_dependency_network_classifier_keeps_403_forbidden_deterministic()
         stderr=(
             "Package index https://files.pythonhosted.org/simple returned HTTP status code 403 "
             "Forbidden while fetching docker==7.1.0: temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status_code", ["401", "403"])
+def test_setup_dependency_network_classifier_keeps_http_auth_status_deterministic(
+    status_code: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            f"Package index https://files.pythonhosted.org/simple returned HTTP status code "
+            f"{status_code} while fetching docker==7.1.0: temporary failure in name resolution"
         ),
     )
 

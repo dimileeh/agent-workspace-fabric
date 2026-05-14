@@ -559,9 +559,10 @@ _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _SETUP_DEPENDENCY_CONTEXT_RE = re.compile(
     r"(?i)\b("
     r"dependency|dependencies|download|fetch|index|package|packages|pypi|pythonhosted|"
-    r"registry|resolver|simple|wheel"
+    r"registry|resolver|wheel"
     r")\b"
 )
+_SETUP_DEPENDENCY_SIMPLE_INDEX_RE = re.compile(r"(?i)/simple(?:[/?#:\s]|$)")
 _SETUP_DETERMINISTIC_FAILURE_RE = re.compile(
     r"(?i)("
     r"\bauth(?:entication)? (?:failed|required)\b|"
@@ -569,8 +570,7 @@ _SETUP_DETERMINISTIC_FAILURE_RE = re.compile(
     r"\b(?:"
     r"http(?:s)?(?:/\d+(?:\.\d+)?)? +403|"
     r"http(?:s)? status(?: code)?[:= ]+403|"
-    r"status(?: code)?[:= ]+403|"
-    r"403"
+    r"status code[:= ]+403"
     r")\b[^\n]{0,80}\bforbidden\b|"
     r"\binvalid credentials\b|"
     r"\blockfile\b.*\b(out of date|conflict|mismatch)\b|"
@@ -585,8 +585,11 @@ _SETUP_DETERMINISTIC_FAILURE_RE = re.compile(
     r"\btoml\b.*\b(parse|invalid)\b|"
     r"\bunauthorized\b|"
     r"\bversion solving failed\b|"
-    r"\b401\b|"
-    r"\b403\b"
+    r"\b(?:"
+    r"http(?:s)?(?:/\d+(?:\.\d+)?)? +(?:401|403)|"
+    r"http(?:s)? status(?: code)?[:= ]+(?:401|403)|"
+    r"status code[:= ]+(?:401|403)"
+    r")\b"
     r")"
 )
 _SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -714,7 +717,10 @@ def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
         return dependency_command_match
     if _looks_like_uv_dependency_setup_command(tokens):
         return True
-    return bool(_SETUP_DEPENDENCY_CONTEXT_RE.search(output))
+    return bool(
+        _SETUP_DEPENDENCY_CONTEXT_RE.search(output)
+        or _SETUP_DEPENDENCY_SIMPLE_INDEX_RE.search(output)
+    )
 
 
 def _non_uv_dependency_setup_command_match(tokens: list[str]) -> bool | None:
