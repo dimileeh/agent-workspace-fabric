@@ -563,6 +563,7 @@ async def test_epoch_reset_detection_treats_same_timestamp_reset_as_epoch_bounda
             reason_code="PYTEST_TEST_FAILURE",
             payload={"reason_code": "PYTEST_TEST_FAILURE"},
             occurred_at=same_tick,
+            event_order=1,
         )
         reset_event = WorkspaceEvent(
             id="evt_aaaaaaaaaaaaaaaaaaaaaaaa",
@@ -573,6 +574,7 @@ async def test_epoch_reset_detection_treats_same_timestamp_reset_as_epoch_bounda
             reason_code="MONITORING_PR",
             payload=None,
             occurred_at=same_tick,
+            event_order=2,
         )
         session.add_all([failed_event, reset_event])
         await session.flush()
@@ -585,6 +587,65 @@ async def test_epoch_reset_detection_treats_same_timestamp_reset_as_epoch_bounda
         )
 
     assert reset_detected is True
+
+
+@pytest.mark.unit
+async def test_epoch_reset_detection_ignores_same_tick_reset_when_reference_event_is_unordered(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    same_tick = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure epoch unordered reference regression",
+            task_prompt="Do not drop primary evidence for ambiguous same-tick resets.",
+            agent="codex",
+            test_commands=[],
+        )
+        failed_event = WorkspaceEvent(
+            id="evt_unordered_failure",
+            workspace_id=workspace.id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.running.value,
+            new_state=WorkspaceStatus.failed.value,
+            reason_code="AGENT_AUTH_FAILED",
+            payload={
+                "reason_code": "AGENT_AUTH_FAILED",
+                "message": "agent auth failed before ambiguous reset",
+            },
+            occurred_at=same_tick,
+            event_order=None,
+        )
+        reset_event = WorkspaceEvent(
+            id="evt_ordered_reset_same_tick",
+            workspace_id=workspace.id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.failed.value,
+            new_state=WorkspaceStatus.monitoring_pr.value,
+            reason_code="MONITORING_PR",
+            payload=None,
+            occurred_at=same_tick,
+            event_order=2,
+        )
+        session.add_all([failed_event, reset_event])
+        workspace.status = WorkspaceStatus.failed.value
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "agent auth failed before ambiguous reset"
+        workspace_id = workspace.id
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.agent_failure.value
+    assert snapshot["message"] == "agent auth failed before ambiguous reset"
+    assert snapshot["reason_code"] == "AGENT_AUTH_FAILED"
 
 
 @pytest.mark.unit

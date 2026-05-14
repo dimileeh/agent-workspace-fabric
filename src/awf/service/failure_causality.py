@@ -440,7 +440,10 @@ def _event_occurs_after_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[
     # position is ambiguous.
     event_order = _event_order(event)
     if event_order is None:
-        return WorkspaceEvent.occurred_at >= event.occurred_at
+        return or_(
+            WorkspaceEvent.occurred_at > event.occurred_at,
+            WorkspaceEvent.id == event.id,
+        )
     return or_(
         WorkspaceEvent.occurred_at > event.occurred_at,
         and_(
@@ -453,7 +456,10 @@ def _event_occurs_after_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[
 def _event_occurs_before_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[bool]:
     event_order = _event_order(event)
     if event_order is None:
-        return WorkspaceEvent.occurred_at <= event.occurred_at
+        return or_(
+            WorkspaceEvent.occurred_at < event.occurred_at,
+            WorkspaceEvent.id == event.id,
+        )
     return or_(
         WorkspaceEvent.occurred_at < event.occurred_at,
         and_(

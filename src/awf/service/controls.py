@@ -1131,11 +1131,15 @@ class WorkspaceControlService:
                 # because there is no valid failed -> failed state-machine edge.
                 # Bump version so add_event records the next event_order.
                 workspace.version += 1
+                synthetic_failed_transition_payload = {
+                    **failed_transition_payload,
+                    "synthetic": True,
+                }
                 await repo.add_event(
                     workspace,
                     event_type="workspace.state_changed",
                     reason_code=failed_reason_code,
-                    payload=failed_transition_payload,
+                    payload=synthetic_failed_transition_payload,
                 )
             result_payload: dict[str, Any] = {
                 "status": workspace.status,

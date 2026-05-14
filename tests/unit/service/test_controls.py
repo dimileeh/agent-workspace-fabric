@@ -876,6 +876,7 @@ async def test_destroy_cleanup_failure_records_secondary_when_workspace_already_
     assert latest_failed.old_state == WorkspaceStatus.failed.value
     assert latest_failed.reason_code == "PYTEST_TEST_FAILURE"
     assert latest_failed.payload is not None
+    assert latest_failed.payload["synthetic"] is True
     assert latest_failed.payload["primary_failure"]["validation_run"]["id"] == validation_run_id
     assert latest_failed.payload["secondary_failure"]["reason_code"] == "CLEANUP_FAILED"
     assert latest_failed.payload["secondary_failures"][-1]["reason_code"] == "CLEANUP_FAILED"
