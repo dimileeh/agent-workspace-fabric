@@ -222,6 +222,11 @@ def test_setup_dependency_network_classifier_extracts_uv_pypi_dns_failure() -> N
         ),
         (
             "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "client error (Connect): tunnel error: unsuccessful",
+            "connection",
+        ),
+        (
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple: "
             "connect timeout",
             "connect_timeout",
         ),
