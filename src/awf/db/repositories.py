@@ -3186,6 +3186,7 @@ class WorkspaceRepository:
         from_status: WorkspaceStatus,
         to: WorkspaceStatus,
         reason_code: str,
+        payload: dict[str, Any] | None = None,
         extra_conditions: tuple[ColumnElement[bool], ...] = (),
     ) -> Workspace | None:
         """Atomically transition a row only if it is still in ``from_status``."""
@@ -3198,6 +3199,7 @@ class WorkspaceRepository:
                 from_status=from_status,
                 to=to,
                 reason_code=reason_code,
+                payload=payload,
                 extra_conditions=extra_conditions,
                 now=now,
             )
@@ -3229,6 +3231,7 @@ class WorkspaceRepository:
             old_state=old_state,
             to=to,
             reason_code=reason_code,
+            payload=payload,
             event_order=event_order,
             now=now,
         )
@@ -3240,6 +3243,7 @@ class WorkspaceRepository:
         from_status: WorkspaceStatus,
         to: WorkspaceStatus,
         reason_code: str,
+        payload: dict[str, Any] | None,
         extra_conditions: tuple[ColumnElement[bool], ...],
         now: datetime,
     ) -> Workspace | None:
@@ -3287,6 +3291,7 @@ class WorkspaceRepository:
             old_state=from_status.value,
             to=to,
             reason_code=reason_code,
+            payload=payload,
             event_order=event_order,
             now=now,
         )
@@ -3298,6 +3303,7 @@ class WorkspaceRepository:
         old_state: str,
         to: WorkspaceStatus,
         reason_code: str,
+        payload: dict[str, Any] | None,
         event_order: int,
         now: datetime,
     ) -> Workspace:
@@ -3323,6 +3329,7 @@ class WorkspaceRepository:
                 old_state=old_state,
                 new_state=to.value,
                 reason_code=reason_code,
+                payload=payload,
                 event_order=event_order,
             )
         )
