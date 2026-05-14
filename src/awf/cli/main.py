@@ -310,15 +310,22 @@ def _emit_pretty_dict(d: dict[str, Any], *, prefix: str = "") -> None:
         typer.echo(f"  {pretty_key}: {value}")
 
 
-def _parse_json_option(flag: str, value: str) -> Any:
+def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
     try:
-        return json.loads(value)
+        parsed = json.loads(value)
     except json.JSONDecodeError as exc:
         typer.echo(
             f"error: invalid value for {flag}; must be valid JSON: {exc}",
             err=True,
         )
         raise typer.Exit(code=2) from exc
+    if not isinstance(parsed, dict):
+        typer.echo(
+            f"error: invalid value for {flag}; must be a JSON object",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    return parsed
 
 
 def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:

@@ -236,6 +236,8 @@ class TestWorkspaceCreate:
             )
 
         assert result.exit_code == 2
+        assert flag in result.stderr
+        assert "json" in result.stderr.lower()
         assert not mock.called
 
     @pytest.mark.unit
