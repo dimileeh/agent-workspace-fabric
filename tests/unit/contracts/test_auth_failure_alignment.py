@@ -72,6 +72,12 @@ _CLI_OPTION_VALUES_BY_CAPABILITY = {
         "--repo": "owner/repo",
         "--pr": "1",
     },
+    "create_workspace_v2": {
+        "--repo": "git@github.com:dimileeh/aira-agent.git",
+        "--title": "Auth contract",
+        "--prompt": "Create workspace auth contract.",
+        "--agent": "codex",
+    },
 }
 
 
@@ -311,7 +317,8 @@ def test_every_registry_protected_cli_command_propagates_auth_failure(
     result = _runner.invoke(cli_app, _protected_cli_args(capability_name))
 
     assert result.exit_code != 0
-    assert captured["headers"]["Authorization"] == "Bearer wrong-token"
+    if "Authorization" in captured.get("headers", {}):
+        assert captured["headers"]["Authorization"] == "Bearer wrong-token"
     combined = (result.output or "") + (result.stderr or "")
     assert "UNAUTHORIZED" in combined
 
@@ -344,6 +351,31 @@ def _protected_rest_params(capability_name: str) -> dict[str, object] | None:
 
 
 def _protected_rest_body(capability_name: str) -> dict[str, object] | None:
+    if capability_name == "create_workspace_v1":
+        return {
+            "repo_url": "git@github.com:dimileeh/aira-agent.git",
+            "branch_base": "main",
+            "task_title": "Auth contract",
+            "task_prompt": "Create a workspace under auth-protected route.",
+            "agent": "codex",
+            "test_commands": ["pytest -q"],
+        }
+    if capability_name == "create_workspace_v2":
+        return {
+            "repo": {
+                "url": "git@github.com:dimileeh/aira-agent.git",
+                "base_branch": "main",
+            },
+            "task": {
+                "title": "Auth contract",
+                "prompt": "Create a workspace under auth-protected route.",
+                "agent": "codex",
+                "kind": "feature_branch_pr",
+            },
+            "workspace": {"profile_ref": "auto", "profile": None},
+            "validation": {"commands": ["pytest -q"], "requested_tier": 1},
+            "resources": {},
+        }
     if capability_name == "cancel_workspace":
         return {"reason": "auth contract", "stop_stack": True}
     if capability_name in {

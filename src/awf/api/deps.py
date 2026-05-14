@@ -7,6 +7,7 @@ without monkeypatching module-level globals.
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import AsyncIterator
 
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -83,7 +84,7 @@ def require_api_token(
             },
         )
     expected = f"Bearer {settings.api_token}"
-    if authorization != expected:
+    if not hmac.compare_digest(authorization or "", expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error_code": "UNAUTHORIZED", "message": "Invalid AWF API token."},

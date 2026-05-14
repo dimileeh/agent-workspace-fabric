@@ -90,10 +90,31 @@ _PROVIDER_AUTH_ENV_KEYS = (
     "GOOGLE_API_KEY",
 )
 
+_WORKSPACE_API_TOKEN = "unit-test-workspace-api-token"
+_WORKSPACE_AUTH_HEADER = f"Bearer {_WORKSPACE_API_TOKEN}"
+
 
 @pytest.fixture(autouse=True)
 def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
+    monkeypatch.setenv("AWF_API_TOKEN", _WORKSPACE_API_TOKEN)
+
+
+@pytest.fixture
+async def client(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[AsyncClient]:
+    app = create_app(use_lifespan=False)
+    configure_database(app, make_session_factory(engine))
+    app.state.workspace_admission_disk_check = lambda settings: _disk_check(
+        free_bytes=settings.min_free_disk_bytes + 1,
+        threshold_bytes=settings.min_free_disk_bytes,
+        ok=True,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        c.headers["Authorization"] = _WORKSPACE_AUTH_HEADER
+        yield c
 
 
 def _set_codex_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -291,6 +312,62 @@ async def test_workspace_stale_reasons_route_maps_invalid_cursor(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("authorization", ["Bearer wrong-token", None])
+async def test_workspace_metadata_routes_require_authorization(
+    client: AsyncClient,
+    authorization: str | None,
+) -> None:
+    workspace_id = await _create_workspace(client)
+    default_authorization = client.headers.get("Authorization")
+    checks = [
+        ("POST", "/v1/workspaces", _MINIMAL_BODY),
+        ("POST", "/v2/workspaces", _v2_body()),
+        ("GET", "/v1/workspaces", None),
+        ("GET", f"/v1/workspaces/{workspace_id}", None),
+        ("GET", "/v1/workspaces/overview", None),
+        ("GET", f"/v1/workspaces/{workspace_id}/events", None),
+        ("GET", f"/v1/workspaces/{workspace_id}/stale-reasons", None),
+        ("GET", f"/v1/workspaces/{workspace_id}/secret-leases", None),
+    ]
+
+    for method, path, body in checks:
+        kwargs: dict[str, object] = {}
+        sent_wrong_token = False
+        if authorization is not None:
+            kwargs["headers"] = {"Authorization": authorization}
+            sent_wrong_token = True
+        if body is not None:
+            kwargs["json"] = body
+        if not sent_wrong_token and default_authorization is not None:
+            del client.headers["Authorization"]
+        try:
+            response = await client.request(method, path, **kwargs)
+        finally:
+            if not sent_wrong_token and default_authorization is not None:
+                client.headers["Authorization"] = default_authorization
+        assert response.status_code == 401, (authorization, method, path, response.text)
+
+
+@pytest.mark.unit
+async def test_workspace_metadata_routes_accept_authorized_requests(client: AsyncClient) -> None:
+    workspace_id = await _create_workspace(client)
+
+    assert (await client.post("/v1/workspaces", json=_MINIMAL_BODY)).status_code == 202
+    assert (
+        await client.post(
+            "/v2/workspaces",
+            json=_v2_body(owned_paths=["src/**", "tests/**"]),
+        )
+    ).status_code == 202
+
+    assert (await client.get("/v1/workspaces", params={"limit": 1})).status_code == 200
+    assert (await client.get(f"/v1/workspaces/{workspace_id}")).status_code == 200
+    assert (await client.get(f"/v1/workspaces/{workspace_id}/events")).status_code == 200
+    assert (await client.get(f"/v1/workspaces/{workspace_id}/stale-reasons")).status_code == 200
+    assert (await client.get(f"/v1/workspaces/{workspace_id}/secret-leases")).status_code == 200
+
+
+@pytest.mark.unit
 async def test_adopt_pr_route_maps_service_errors_to_json_response(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -442,6 +519,7 @@ async def disk_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[Any, A
         ok=True,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        c.headers["Authorization"] = _WORKSPACE_AUTH_HEADER
         yield app, c
 
 

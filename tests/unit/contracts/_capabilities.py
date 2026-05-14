@@ -425,6 +425,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         ),
         mcp_required_fields=frozenset({"repo_url", "task_title", "task_prompt"}),
         response_fields=frozenset({"workspace_id", "status", "version", "status_url"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="create_workspace_v2",
@@ -514,6 +515,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
             }
         ),
         response_fields=frozenset({"workspace_id", "status", "version", "status_url"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="adopt_pr_monitor",
@@ -609,6 +611,7 @@ _CAPABILITIES += (
         mcp_required_fields=frozenset({"workspace_id"}),
         cli_arguments=frozenset({"workspace_id"}),
         response_fields=frozenset({"id", "status", "version"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="list_workspaces",
@@ -625,6 +628,7 @@ _CAPABILITIES += (
         rest_query_fields=frozenset({"status", "agent", "repo_url", "limit"}),
         mcp_request_fields=frozenset({"status", "agent", "repo_url", "limit"}),
         cli_options=frozenset({"--status", "--agent", "--repo-url", "--limit"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="wait_for_workspace",
@@ -644,6 +648,7 @@ _CAPABILITIES += (
         ),
         mcp_required_fields=frozenset({"workspace_id"}),
         response_fields=frozenset({"id", "status", "version"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_overview",
@@ -660,6 +665,7 @@ _CAPABILITIES += (
         rest_query_fields=frozenset({"status", "agent", "repo_url", "limit", "cursor"}),
         mcp_request_fields=frozenset({"status", "agent", "repo_url", "limit", "cursor"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="merge_queue",
@@ -748,6 +754,7 @@ _CAPABILITIES += (
         mcp_request_fields=frozenset({"workspace_id", "include_resolved", "limit", "cursor"}),
         mcp_required_fields=frozenset({"workspace_id"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
     ContractCapability(
         name="workspace_artifacts",
@@ -1115,6 +1122,7 @@ _CAPABILITIES += (
         cli_arguments=frozenset({"workspace_id"}),
         cli_options=frozenset({"--limit", "--event-type", "--api-token"}),
         response_fields=frozenset({"items", "next_cursor", "has_more", "limit", "cursor"}),
+        auth_required=True,
     ),
 )
 

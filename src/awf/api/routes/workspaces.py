@@ -87,8 +87,16 @@ from awf.service.workspaces import (
     workspace_retry_response,
 )
 
-router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
-router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
+router = APIRouter(
+    prefix="/v1/workspaces",
+    tags=["workspaces"],
+    dependencies=[Depends(require_api_token)],
+)
+router_v2 = APIRouter(
+    prefix="/v2/workspaces",
+    tags=["workspaces-v2"],
+    dependencies=[Depends(require_api_token)],
+)
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 _logger = logging.getLogger(__name__)
 

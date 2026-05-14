@@ -105,6 +105,27 @@ def test_rest_query_metadata_uses_public_aliases() -> None:
 
 
 @pytest.mark.unit
+def test_health_route_is_public_for_service_probing() -> None:
+    route = rest_routes().get(("GET", "/healthz"))
+    assert route is not None
+    assert "require_api_token" not in route.dependencies
+
+
+@pytest.mark.unit
+def test_readiness_route_is_public_for_service_probing() -> None:
+    route = rest_routes().get(("GET", "/readyz"))
+    assert route is not None
+    assert "require_api_token" not in route.dependencies
+
+
+@pytest.mark.unit
+def test_workspace_secret_leases_route_is_auth_required() -> None:
+    route = rest_routes().get(("GET", "/v1/workspaces/{workspace_id}/secret-leases"))
+    assert route is not None
+    assert "require_api_token" in route.dependencies
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("capability_name", STATUS_FILTER_PARITY_CAPABILITIES)
 def test_implemented_mcp_status_filter_names_match_rest_alias(
     capability_name: str,
