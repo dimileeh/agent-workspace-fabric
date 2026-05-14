@@ -44,7 +44,7 @@ FORBIDDEN_MCP_INPUTS = {
     "token",
 }
 
-CREATE_V2_FULL_PARITY_FIELDS = frozenset({"cpu", "priority", "human_boost"})
+CREATE_V2_FULL_PARITY_FIELDS = frozenset({"cpu", "priority", "human_boost", "memory"})
 CREATE_V2_FULL_PARITY_BACKLOG = "TODO§P1-mcp-create-v2-full-parity"
 STATUS_FILTER_PARITY_CAPABILITIES = (
     "workspace_overview",
