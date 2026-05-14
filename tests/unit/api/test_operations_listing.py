@@ -968,27 +968,28 @@ async def test_unauthenticated_operation_reads_rejected(
 ) -> None:
     ws1, _ = sample_data
 
-    get_settings.cache_clear()
-    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
-    for path in [
-        "/v1/operations",
-        "/v1/operations/op_missing",
-        f"/v1/workspaces/{ws1.id}/operations",
-    ]:
-        response = await client.get(path)
-        assert response.status_code == 503
+    try:
+        get_settings.cache_clear()
+        monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+        for path in [
+            "/v1/operations",
+            "/v1/operations/op_missing",
+            f"/v1/workspaces/{ws1.id}/operations",
+        ]:
+            response = await client.get(path)
+            assert response.status_code == 503
 
-    get_settings.cache_clear()
-    monkeypatch.setenv("AWF_API_TOKEN", "test-token")
-    for path in [
-        "/v1/operations",
-        "/v1/operations/op_missing",
-        f"/v1/workspaces/{ws1.id}/operations",
-    ]:
-        response = await client.get(path)
-        assert response.status_code == 401
-
-    get_settings.cache_clear()
+        get_settings.cache_clear()
+        monkeypatch.setenv("AWF_API_TOKEN", "test-token")
+        for path in [
+            "/v1/operations",
+            "/v1/operations/op_missing",
+            f"/v1/workspaces/{ws1.id}/operations",
+        ]:
+            response = await client.get(path)
+            assert response.status_code == 401
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.unit
