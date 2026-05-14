@@ -1091,6 +1091,8 @@ class WorkspaceControlService:
                 "cleanup": cleanup_payload,
             }
             failed_transition_payload: dict[str, Any]
+            preserved_secondary_failure: dict[str, Any] = {}
+            preserved_secondary_failures: list[dict[str, Any]] = []
             if primary_failure is not None:
                 failed_transition_payload = build_preserved_failure_payload(
                     primary_failure,

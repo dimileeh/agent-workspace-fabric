@@ -60,10 +60,16 @@ async def load_failure_causality_snapshot(
         if latest_failed_event is not None
         else None
     )
-    latest_validation_run = await _latest_failed_validation_run(
-        session,
-        workspace.id,
-        epoch_started_at=epoch_reset_event.occurred_at if epoch_reset_event is not None else None,
+    latest_validation_run = (
+        await _latest_failed_validation_run(
+            session,
+            workspace.id,
+            epoch_started_at=(
+                epoch_reset_event.occurred_at if epoch_reset_event is not None else None
+            ),
+        )
+        if latest_failed_event is not None
+        else None
     )
     event_payload = _mapping(latest_failed_event.payload if latest_failed_event else None)
     primary_failure = _primary_failure_snapshot(

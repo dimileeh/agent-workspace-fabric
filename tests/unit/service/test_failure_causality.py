@@ -633,6 +633,68 @@ async def test_primary_failure_snapshot_ignores_same_timestamp_epoch_reset_witho
 
 
 @pytest.mark.unit
+async def test_primary_failure_snapshot_omits_stale_validation_run_without_current_epoch_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    same_tick = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    workspace_id, validation_run_id = await _seed_failed_workspace(
+        session_factory,
+        failure_reason=FailureReason.validation_failure.value,
+        failure_message="old validation failed before same-timestamp remonitor reset",
+        reason_code="OLD_VALIDATION_FAILURE",
+        validation_reason_code="OLD_VALIDATION_FAILURE",
+    )
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        stale_failed_event = next(
+            event
+            for event in workspace.events
+            if event.new_state == WorkspaceStatus.failed.value
+            and event.reason_code == "OLD_VALIDATION_FAILURE"
+        )
+        stale_failed_event.occurred_at = same_tick
+
+        workspace.status = WorkspaceStatus.monitoring_pr.value
+        workspace.failure_reason = None
+        workspace.failure_message = None
+        reset_event = await repo.add_event(
+            workspace,
+            event_type="workspace.state_changed",
+            reason_code="OPERATOR_REMONITOR",
+            payload={
+                "state_reset": {
+                    "from": WorkspaceStatus.failed.value,
+                    "to": WorkspaceStatus.monitoring_pr.value,
+                },
+            },
+        )
+        reset_event.old_state = WorkspaceStatus.failed.value
+        reset_event.new_state = WorkspaceStatus.monitoring_pr.value
+        reset_event.occurred_at = same_tick
+
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "live validation failure after remonitor reset"
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.validation_failure.value
+    assert snapshot["message"] == "live validation failure after remonitor reset"
+    assert snapshot.get("validation_run", {}).get("id") != validation_run_id
+    assert "validation_run" not in snapshot
+    assert "coverage" not in snapshot
+    assert "coverage_percent" not in snapshot
+
+
+@pytest.mark.unit
 async def test_primary_failure_snapshot_uses_current_failure_after_remonitor_reset(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
