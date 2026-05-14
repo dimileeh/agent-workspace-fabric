@@ -1734,10 +1734,17 @@ class WorkspaceExecutor:
                 phase_names=("setup", "pre_agent"),
                 worktree_path=worktree_path,
             )
-            await self._record_setup_dependency_network_events(
-                workspace_id=workspace_id,
-                result=setup_result,
-            )
+            try:
+                await self._record_setup_dependency_network_events(
+                    workspace_id=workspace_id,
+                    result=setup_result,
+                )
+            except Exception:
+                _log.exception(
+                    "executor.setup_dependency_network_event_record_failed",
+                    workspace_id=workspace_id,
+                    setup_all_passed=setup_result.all_passed,
+                )
             if not setup_result.all_passed:
                 first_fail = setup_result.first_failure
                 setup_dependency_details = _setup_dependency_network_failure_details(first_fail)

@@ -216,6 +216,36 @@ def _setup_dependency_exhausted_result(tmp_path: Path) -> ValidationCommandResul
     )
 
 
+def _setup_dependency_retry_success_result(tmp_path: Path) -> ValidationCommandResult:
+    stdout_path = tmp_path / "setup-success.stdout"
+    stderr_path = tmp_path / "setup-success.stderr"
+    stdout_path.write_text("setup stdout\n", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    return ValidationCommandResult(
+        command="uv sync --extra dev",
+        returncode=0,
+        duration_seconds=0.1,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        phase="setup",
+        reason_code="COMMAND_OK",
+        retry_count=1,
+        metadata={
+            SETUP_DEPENDENCY_NETWORK_METADATA_KEY: {
+                "reason_code": "COMMAND_OK",
+                "command": "uv sync --extra dev",
+                "package": "docker==7.1.0",
+                "host": "files.pythonhosted.org",
+                "transient_category": "dns",
+                "retryable": True,
+                "retry_count": 1,
+                "retry_budget": 2,
+                "diagnostic": "temporary lookup failure recovered",
+            }
+        },
+    )
+
+
 async def _seed_ready_workspace_with_recovery(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -1085,6 +1115,54 @@ async def test_setup_dependency_exhaustion_during_recovery_preserves_monitor_rea
     assert terminal_event.payload is not None
     assert terminal_event.payload["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
     assert terminal_event.payload["details"]["package"] == "docker==7.1.0"
+
+
+@pytest.mark.unit
+async def test_setup_dependency_event_recording_failure_does_not_block_agent_run(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validation = _SetupFailureValidation(
+        ValidationResult(commands=[_setup_dependency_retry_success_result(tmp_path)])
+    )
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        validation=validation,
+    )
+    ws_id = await _seed_ready_workspace_no_recovery(factory)
+
+    async def _raise_event_recording_failure(**_kwargs: Any) -> None:
+        raise RuntimeError("setup dependency event commit failed")
+
+    monkeypatch.setattr(
+        executor,
+        "_record_setup_dependency_network_events",
+        _raise_event_recording_failure,
+    )
+
+    fake.queue_result(returncode=0, stdout="codex finished")  # adapter
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add
+    fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+    _queue_validation_head(fake)
+    _queue_push_and_pr(fake)
+
+    await executor.execute(ws_id)
+
+    assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
+    assert len(_all_adapter_args(fake)) == 1
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+        assert ws.failure_message is None
 
 
 @pytest.mark.unit
