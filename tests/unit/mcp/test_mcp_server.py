@@ -2069,24 +2069,28 @@ class TestGlobalEvents:
         first_id = _workspace_id(first)
         second_id = _workspace_id(second)
 
+        base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
+
         async with factory() as session:
             repo = WorkspaceRepository(session)
             first_ws = await repo.get(first_id)
             second_ws = await repo.get(second_id)
             assert first_ws is not None
             assert second_ws is not None
-            await repo.add_event(
+            first_event = await repo.add_event(
                 first_ws,
                 event_type="workspace.phase_started",
                 reason_code="FIRST",
                 payload={"phase": "agent"},
             )
-            await repo.add_event(
+            first_event.occurred_at = base
+            second_event = await repo.add_event(
                 second_ws,
                 event_type="workspace.phase_started",
                 reason_code="SECOND",
                 payload={"phase": "agent"},
             )
+            second_event.occurred_at = base + timedelta(seconds=2)
             await session.commit()
 
         result = await mcp.call_tool("awf_list_events", {"limit": 50})
