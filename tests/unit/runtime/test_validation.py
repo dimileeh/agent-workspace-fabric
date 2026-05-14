@@ -528,6 +528,18 @@ def test_setup_dependency_network_classifier_ignores_unrelated_5xx_numbers() -> 
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_bare_5xx_phrase_without_http_context() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="installing docker==7.1.0 from local cache\n",
+        stderr="dependency setup worker reported service unavailable after pool shutdown\n",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_retries_503_temporarily_forbidden_body() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="pip install docker==7.1.0",
@@ -536,6 +548,26 @@ def test_setup_dependency_network_classifier_retries_503_temporarily_forbidden_b
         stderr=(
             "Package index https://files.pythonhosted.org/simple returned HTTP status code 503: "
             "access temporarily forbidden by rate limit while fetching docker==7.1.0"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == "http_5xx"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_retries_5xx_phrase_with_http_context() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Package index https://files.pythonhosted.org/simple returned 503 Service Unavailable "
+            "while fetching docker==7.1.0"
         ),
     )
 

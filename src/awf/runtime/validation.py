@@ -647,7 +647,11 @@ _SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(?i)("
             r"http(?:s)?(?:/\d+(?:\.\d+)?)? +5\d\d\b|"
             r"http(?:s)? status(?: code)?[:= ]+5\d\d|"
-            r"server error|bad gateway|service unavailable|gateway timeout"
+            r"status code[:= ]+5\d\d|"
+            r"(?:http(?:s)?|status code|package index|response)\b[^\n]{0,120}\b"
+            r"(?:server error|bad gateway|service unavailable|gateway timeout)\b|"
+            r"\b(?:server error|bad gateway|service unavailable|gateway timeout)\b"
+            r"[^\n]{0,120}\b(?:http(?:s)?|status code|package index|response)\b"
             r")"
         ),
     ),
