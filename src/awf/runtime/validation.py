@@ -20,7 +20,9 @@ import shlex
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from urllib.parse import urlparse
 
+from awf.common.audit import redact_audit_text
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
@@ -85,8 +87,16 @@ DATABASE_GENERATED_SETUP_FAILED = "DATABASE_GENERATED_SETUP_FAILED"
 DATABASE_GENERATED_SETUP_TIMEOUT = "DATABASE_GENERATED_SETUP_TIMEOUT"
 DATABASE_REFRESH_FAILED = "DATABASE_REFRESH_FAILED"
 DATABASE_REFRESH_TIMEOUT = "DATABASE_REFRESH_TIMEOUT"
+SETUP_DEPENDENCY_NETWORK_FAILURE = "SETUP_DEPENDENCY_NETWORK_FAILURE"
+SETUP_DEPENDENCY_NETWORK_RETRY = "SETUP_DEPENDENCY_NETWORK_RETRY"
+SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED = "SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED"
+SETUP_DEPENDENCY_NETWORK_METADATA_KEY = "setup_dependency_network"
 DB_GENERATED_SETUP_PHASE = "db_generated_setup"
 DB_REFRESH_PHASE = "db_refresh"
+_SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT = 1000
+_SETUP_DEPENDENCY_NETWORK_COMMAND_LIMIT = 500
+_SETUP_DEPENDENCY_NETWORK_DEFAULT_RETRY_BUDGET = 2
+_SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS = (1.0, 3.0)
 _UV_DEV_VALIDATION_TOOLS = frozenset({"mypy", "pre-commit", "pytest", "ruff"})
 _UV_OPTION_VALUE_FLAGS = frozenset(
     {
@@ -181,6 +191,34 @@ class ProfileValidationToolPreflightFinding:
 
 
 @dataclass(frozen=True)
+class SetupDependencyNetworkClassification:
+    """A transient dependency/index network failure detected in setup output."""
+
+    reason_code: str
+    transient_category: str
+    retryable: bool
+    command: str
+    package: str | None
+    host: str | None
+    diagnostic: str
+
+    @property
+    def metadata(self) -> dict[str, object]:
+        metadata: dict[str, object] = {
+            "reason_code": self.reason_code,
+            "command": self.command,
+            "transient_category": self.transient_category,
+            "retryable": self.retryable,
+            "diagnostic": self.diagnostic,
+        }
+        if self.package is not None:
+            metadata["package"] = self.package
+        if self.host is not None:
+            metadata["host"] = self.host
+        return metadata
+
+
+@dataclass(frozen=True)
 class ValidationCommandResult:
     """One phase command's outcome + captured artifact paths."""
 
@@ -195,6 +233,8 @@ class ValidationCommandResult:
     retry_count: int = 0
     policy_failed: bool = False
     metadata: dict[str, object] = field(default_factory=dict)
+    captured_stdout: str | None = field(default=None, repr=False, compare=False)
+    captured_stderr: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def ok(self) -> bool:
@@ -463,6 +503,272 @@ def _shell_tokens(command: str) -> list[str] | None:
         return None
 
 
+_SETUP_DEPENDENCY_COMMAND_TOKENS = frozenset(
+    {
+        "bun",
+        "bundle",
+        "cargo",
+        "composer",
+        "gem",
+        "go",
+        "gradle",
+        "mvn",
+        "npm",
+        "pip",
+        "pip3",
+        "pnpm",
+        "poetry",
+        "uv",
+        "yarn",
+    }
+)
+_SETUP_DEPENDENCY_CONTEXT_RE = re.compile(
+    r"(?i)\b("
+    r"dependency|dependencies|download|fetch|index|package|packages|pypi|pythonhosted|"
+    r"registry|resolver|simple|wheel"
+    r")\b"
+)
+_SETUP_DETERMINISTIC_FAILURE_RE = re.compile(
+    r"(?i)("
+    r"\bauth(?:entication)? (?:failed|required)\b|"
+    r"\bcommand not found\b|"
+    r"\bforbidden\b|"
+    r"\binvalid credentials\b|"
+    r"\blockfile\b.*\b(out of date|conflict|mismatch)\b|"
+    r"\bmissing local\b|"
+    r"\bno matching distribution\b|"
+    r"\bno solution found\b|"
+    r"\bno such file or directory\b|"
+    r"\bpermission denied\b|"
+    r"\brequires python\b|"
+    r"\bresolution failed\b|"
+    r"\bsyntaxerror\b|"
+    r"\btoml\b.*\b(parse|invalid)\b|"
+    r"\bunauthorized\b|"
+    r"\bversion solving failed\b|"
+    r"\b401\b|"
+    r"\b403\b"
+    r")"
+)
+_SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "dns",
+        re.compile(
+            r"(?i)("
+            r"failed to lookup address information|"
+            r"temporary failure in name resolution|"
+            r"no address associated with hostname|"
+            r"nodename nor servname provided|"
+            r"name or service not known|"
+            r"dns error"
+            r")"
+        ),
+    ),
+    (
+        "tls",
+        re.compile(r"(?i)(tls handshake timeout|ssl handshake timeout|handshake timed out)"),
+    ),
+    (
+        "read_timeout",
+        re.compile(r"(?i)(read timed out|read timeout|idle timeout|timeout while reading)"),
+    ),
+    (
+        "connect_timeout",
+        re.compile(r"(?i)(connection timed out|connect timeout|timed out connecting)"),
+    ),
+    (
+        "connection",
+        re.compile(
+            r"(?i)("
+            r"connection reset|connection refused|connection aborted|"
+            r"connection closed|connection error|network is unreachable|"
+            r"temporary network failure"
+            r")"
+        ),
+    ),
+    (
+        "http_5xx",
+        re.compile(
+            r"(?i)("
+            r"\b5\d\d\b|"
+            r"http(?:s)? status(?: code)?[:= ]+5\d\d|"
+            r"server error|bad gateway|service unavailable|gateway timeout"
+            r")"
+        ),
+    ),
+)
+_SETUP_PACKAGE_SPEC_RE = re.compile(
+    r"(?i)(?:`|['\"])?(?P<package>[A-Za-z0-9][A-Za-z0-9_.-]*"
+    r"(?:==|~=|!=|<=|>=|=|@)[A-Za-z0-9][A-Za-z0-9_.!+\-]*)"
+    r"(?:`|['\"])?"
+)
+_SETUP_PACKAGE_NAME_VERSION_RE = re.compile(
+    r"(?i)\b(?P<name>[A-Za-z0-9][A-Za-z0-9_.-]*)-"
+    r"(?P<version>\d+(?:\.\d+)+(?:[A-Za-z0-9_.!+\-]*))"
+    r"(?:\.tar\.gz|\.zip|\.whl)\b"
+)
+_SETUP_URL_RE = re.compile(r"https?://[^\s`'\"<>)]+", re.IGNORECASE)
+_SETUP_HOST_FALLBACK_RE = re.compile(
+    r"(?i)\b([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)\b"
+)
+
+
+def _classify_setup_dependency_network_failure(
+    *,
+    command: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> SetupDependencyNetworkClassification | None:
+    """Classify transient dependency/index fetch failures from setup output."""
+
+    if returncode == 0 or returncode == 127:
+        return None
+    raw_output = _combined_setup_dependency_output(stdout=stdout, stderr=stderr)
+    raw_context = f"{command}\n{raw_output}"
+    if _SETUP_DETERMINISTIC_FAILURE_RE.search(raw_context):
+        return None
+    if not _looks_like_dependency_setup(command=command, output=raw_context):
+        return None
+    transient_category = _setup_transient_category(raw_context)
+    if transient_category is None:
+        return None
+    safe_command = redact_audit_text(command, limit=_SETUP_DEPENDENCY_NETWORK_COMMAND_LIMIT)
+    diagnostic = _setup_dependency_network_diagnostic(stdout=stdout, stderr=stderr)
+    return SetupDependencyNetworkClassification(
+        reason_code=SETUP_DEPENDENCY_NETWORK_FAILURE,
+        transient_category=transient_category,
+        retryable=True,
+        command=safe_command,
+        package=_extract_setup_dependency_package(raw_context),
+        host=_extract_setup_dependency_host(raw_context),
+        diagnostic=diagnostic,
+    )
+
+
+def _classify_setup_dependency_network_result(
+    result: ValidationCommandResult,
+) -> SetupDependencyNetworkClassification | None:
+    if result.captured_stdout is not None or result.captured_stderr is not None:
+        stdout = result.captured_stdout or ""
+        stderr = result.captured_stderr or ""
+    else:
+        stdout = _read_text_if_present(result.stdout_path) or ""
+        stderr = _read_text_if_present(result.stderr_path) or ""
+    return _classify_setup_dependency_network_failure(
+        command=result.command,
+        returncode=result.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _combined_setup_dependency_output(*, stdout: str, stderr: str) -> str:
+    return "\n".join(part for part in (stdout, stderr) if part)
+
+
+def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
+    tokens = _shell_tokens(command) or []
+    token_names = {_command_token_name(token) for token in tokens}
+    if token_names & _SETUP_DEPENDENCY_COMMAND_TOKENS:
+        return True
+    return bool(_SETUP_DEPENDENCY_CONTEXT_RE.search(output))
+
+
+def _setup_transient_category(text: str) -> str | None:
+    for category, pattern in _SETUP_TRANSIENT_PATTERNS:
+        if pattern.search(text):
+            return category
+    return None
+
+
+def _extract_setup_dependency_package(text: str) -> str | None:
+    match = _SETUP_PACKAGE_SPEC_RE.search(text)
+    if match is not None:
+        return match.group("package")
+    match = _SETUP_PACKAGE_NAME_VERSION_RE.search(text)
+    if match is None:
+        return None
+    return f"{match.group('name')}=={match.group('version')}"
+
+
+def _extract_setup_dependency_host(text: str) -> str | None:
+    for match in _SETUP_URL_RE.finditer(text):
+        host = urlparse(match.group(0)).hostname
+        if host:
+            return host
+    for match in _SETUP_HOST_FALLBACK_RE.finditer(text):
+        candidate = match.group(1).strip(".")
+        if not candidate.endswith((".py", ".toml", ".lock")):
+            return candidate
+    return None
+
+
+def _setup_dependency_network_diagnostic(*, stdout: str, stderr: str) -> str:
+    output = _combined_setup_dependency_output(stdout=stdout, stderr=stderr)
+    normalized = re.sub(r"\s+", " ", output).strip()
+    return redact_audit_text(
+        normalized,
+        limit=_SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT,
+    )
+
+
+def _setup_dependency_retry_output_prefix(*, retry_number: int) -> str:
+    return f"\n[setup dependency network retry {retry_number}]\n"
+
+
+def _setup_dependency_attempt_metadata(
+    *,
+    classification: SetupDependencyNetworkClassification,
+    attempt: int,
+    retry_number: int | None,
+) -> dict[str, object]:
+    metadata = dict(classification.metadata)
+    metadata["attempt"] = attempt
+    if retry_number is not None:
+        metadata["retry_number"] = retry_number
+    return metadata
+
+
+def _with_setup_dependency_network_metadata(
+    result: ValidationCommandResult,
+    *,
+    step: ProfileExecutionCommand,
+    classification: SetupDependencyNetworkClassification,
+    retry_count: int,
+    retry_budget: int,
+    retry_exhausted: bool,
+    recovered: bool,
+    attempts: list[dict[str, object]],
+) -> ValidationCommandResult:
+    metadata = _execution_command_metadata(step)
+    setup_metadata = dict(classification.metadata)
+    setup_metadata.update(
+        {
+            "retry_count": retry_count,
+            "retry_budget": retry_budget,
+            "retry_exhausted": retry_exhausted,
+            "recovered": recovered,
+            "attempts": attempts,
+            "stream_ids": dict(result.stream_ids),
+        }
+    )
+    metadata[SETUP_DEPENDENCY_NETWORK_METADATA_KEY] = setup_metadata
+    return replace(
+        result,
+        reason_code=(SETUP_DEPENDENCY_NETWORK_FAILURE if retry_exhausted else result.reason_code),
+        retry_count=retry_count,
+        metadata=metadata,
+        captured_stdout=None,
+        captured_stderr=None,
+    )
+
+
+def _setup_dependency_retry_applies(step: ProfileExecutionCommand) -> bool:
+    return step.phase == "setup" and not step.database_hook and step.command.required
+
+
 class ValidationRunner:
     """Runs profile phases inside the per-workspace agent container."""
 
@@ -472,10 +778,18 @@ class ValidationRunner:
         runner: AsyncCommandRunner,
         artifacts_dir: Path,
         log_store: LogStore | None = None,
+        setup_retry_budget: int = _SETUP_DEPENDENCY_NETWORK_DEFAULT_RETRY_BUDGET,
+        setup_retry_backoff_seconds: tuple[float, ...] = (
+            _SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS
+        ),
     ) -> None:
         self._runner = runner
         self._artifacts_dir = artifacts_dir
         self._log_store = log_store
+        self._setup_retry_budget = max(0, setup_retry_budget)
+        self._setup_retry_backoff_seconds = tuple(
+            max(0.0, seconds) for seconds in setup_retry_backoff_seconds
+        )
 
     async def run(
         self,
@@ -726,6 +1040,8 @@ class ValidationRunner:
                 label = f"{phase_indices[phase]:02d}_{phase}"
 
             attempts = 0
+            setup_dependency_attempts: list[dict[str, object]] = []
+            last_setup_dependency_classification: SetupDependencyNetworkClassification | None = None
             while True:
                 result = await self._exec(
                     compose_project=compose_project,
@@ -736,11 +1052,92 @@ class ValidationRunner:
                     phase=phase,
                     timeout_seconds=command.timeout_seconds,
                     is_retry=(attempts > 0),
+                    output_prefix=(
+                        _setup_dependency_retry_output_prefix(retry_number=attempts)
+                        if setup_dependency_attempts and attempts > 0
+                        else None
+                    ),
                 )
 
                 if result.ok or not command.required:
-                    results.append(_final_command_result(result, step=step, attempts=attempts))
+                    final = _final_command_result(result, step=step, attempts=attempts)
+                    if (
+                        setup_dependency_attempts
+                        and last_setup_dependency_classification is not None
+                    ):
+                        final = _with_setup_dependency_network_metadata(
+                            final,
+                            step=step,
+                            classification=last_setup_dependency_classification,
+                            retry_count=attempts,
+                            retry_budget=self._setup_retry_budget,
+                            retry_exhausted=False,
+                            recovered=result.ok,
+                            attempts=setup_dependency_attempts,
+                        )
+                    results.append(final)
                     break
+
+                setup_dependency_classification = (
+                    _classify_setup_dependency_network_result(result)
+                    if _setup_dependency_retry_applies(step)
+                    else None
+                )
+                if setup_dependency_classification is not None:
+                    failed_attempt = attempts + 1
+                    can_retry = attempts < self._setup_retry_budget
+                    setup_dependency_attempts.append(
+                        _setup_dependency_attempt_metadata(
+                            classification=setup_dependency_classification,
+                            attempt=failed_attempt,
+                            retry_number=failed_attempt if can_retry else None,
+                        )
+                    )
+                    last_setup_dependency_classification = setup_dependency_classification
+                    if can_retry:
+                        attempts += 1
+                        _log.info(
+                            "validation.setup_dependency_network_retry",
+                            workspace_id=workspace_id,
+                            phase=phase,
+                            command=command.command,
+                            package=setup_dependency_classification.package,
+                            host=setup_dependency_classification.host,
+                            transient_category=(setup_dependency_classification.transient_category),
+                            attempt=failed_attempt,
+                            retry=attempts,
+                            budget=self._setup_retry_budget,
+                            reason_code=SETUP_DEPENDENCY_NETWORK_RETRY,
+                        )
+                        delay = self._setup_dependency_retry_delay(attempts)
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        continue
+
+                    result = _with_setup_dependency_network_metadata(
+                        result,
+                        step=step,
+                        classification=setup_dependency_classification,
+                        retry_count=attempts,
+                        retry_budget=self._setup_retry_budget,
+                        retry_exhausted=True,
+                        recovered=False,
+                        attempts=setup_dependency_attempts,
+                    )
+                    results.append(result)
+                    _log.info(
+                        "validation.setup_dependency_network_retry_exhausted",
+                        workspace_id=workspace_id,
+                        phase=phase,
+                        command=command.command,
+                        package=setup_dependency_classification.package,
+                        host=setup_dependency_classification.host,
+                        transient_category=setup_dependency_classification.transient_category,
+                        retry_count=attempts,
+                        budget=self._setup_retry_budget,
+                        reason_code=SETUP_DEPENDENCY_NETWORK_FAILURE,
+                    )
+                    return ValidationResult(commands=results)
 
                 # 124: command timeout. > 128: killed by signal (e.g., 137 OOM kill).
                 # We treat most signal exits as potentially flaky infrastructure events,
@@ -818,6 +1215,12 @@ class ValidationRunner:
             )
 
         return ValidationResult(commands=results, coverage=coverage_result)
+
+    def _setup_dependency_retry_delay(self, retry_number: int) -> float:
+        if not self._setup_retry_backoff_seconds:
+            return 0.0
+        index = min(max(retry_number - 1, 0), len(self._setup_retry_backoff_seconds) - 1)
+        return self._setup_retry_backoff_seconds[index]
 
     async def _run_healthchecks(
         self,
@@ -1350,11 +1753,22 @@ class ValidationRunner:
             phase=phase,
             reason_code=reason_code,
             stream_ids=stream_ids,
+            captured_stdout=result.stdout,
+            captured_stderr=result.stderr,
         )
 
 
 def _compose_exec_timed_out(result: CommandResult) -> bool:
     return result.reason_code in {COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON}
+
+
+def _read_text_if_present(path: Path) -> str | None:
+    try:
+        if path.is_file():
+            return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return None
 
 
 def _alembic_policy_missing_worktree_metadata(
@@ -1415,6 +1829,8 @@ def _final_command_result(
         reason_code=reason_code,
         retry_count=attempts,
         metadata=_execution_command_metadata(step),
+        captured_stdout=None,
+        captured_stderr=None,
     )
 
 

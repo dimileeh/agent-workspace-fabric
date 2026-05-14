@@ -20,10 +20,12 @@ from awf.runtime.validation import (
     HEALTHCHECK_HTTP_STATUS_MISMATCH,
     HEALTHCHECK_INVALID_CONFIGURATION,
     PROFILE_VALIDATION_TOOL_UNAVAILABLE,
+    SETUP_DEPENDENCY_NETWORK_FAILURE,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
     ValidationRunner,
+    _classify_setup_dependency_network_failure,
     _coverage_reason_code,
     _coverage_status,
     _healthcheck_attempt_timeout,
@@ -47,6 +49,16 @@ from awf.service.alembic_resolver import (
 
 _COMPOSE_PROJECT = "awf_ws_val"
 _COMPOSE_FILE = Path("/fake/compose.yml")
+
+
+def _uv_pypi_dns_failure(*, package: str = "docker==7.1.0") -> str:
+    return f"""
+  x Failed to download `{package}`
+  |- Failed to fetch: `https://files.pythonhosted.org/packages/aa/bb/docker-7.1.0.whl`
+  |- Request failed after 3 retries
+  |- error sending request for url (https://files.pythonhosted.org/packages/aa/bb/docker-7.1.0.whl)
+  `- client error (Connect): dns error: failed to lookup address information: No address associated with hostname
+""".strip()
 
 
 class _CountingLogStore(LogStore):
@@ -171,6 +183,205 @@ def _identity_profile_with_endpoint(**endpoint_overrides: object) -> WorkspacePr
     }
     endpoint.update(endpoint_overrides)
     return _identity_profile(app_endpoints=[endpoint])
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_extracts_uv_pypi_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="",
+        stderr=_uv_pypi_dns_failure(),
+    )
+
+    assert classification is not None
+    assert classification.retryable is True
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+    assert classification.metadata["retryable"] is True
+    assert classification.metadata["diagnostic"]
+    assert len(str(classification.metadata["diagnostic"])) <= 1000 + len("...[truncated]")
+
+
+@pytest.mark.unit
+async def test_setup_dependency_network_failure_retries_and_succeeds_on_cache_hit(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+        }
+    )
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+    fake.queue_result(returncode=0, stdout="Using cached docker==7.1.0\n")
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert result.all_passed
+    assert len(fake.calls) == 2
+    command = result.commands[0]
+    assert command.retry_count == 1
+    retry_metadata = command.metadata["setup_dependency_network"]
+    assert retry_metadata["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert retry_metadata["retry_count"] == 1
+    assert retry_metadata["retry_exhausted"] is False
+    assert retry_metadata["package"] == "docker==7.1.0"
+    assert retry_metadata["host"] == "files.pythonhosted.org"
+    assert _uv_pypi_dns_failure() in command.stderr_path.read_text(encoding="utf-8")
+    assert "Using cached docker==7.1.0" in command.stdout_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+async def test_setup_dependency_network_failure_exhaustion_has_precise_reason(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=2,
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+        }
+    )
+    for _ in range(3):
+        fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert not result.all_passed
+    assert len(fake.calls) == 3
+    command = result.commands[0]
+    assert command.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert command.retry_count == 2
+    retry_metadata = command.metadata["setup_dependency_network"]
+    assert retry_metadata["retry_count"] == 2
+    assert retry_metadata["retry_budget"] == 2
+    assert retry_metadata["retry_exhausted"] is True
+    assert len(str(retry_metadata["diagnostic"])) <= 1000 + len("...[truncated]")
+
+
+@pytest.mark.unit
+async def test_deterministic_setup_failure_is_not_retried(tmp_path: Path) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=2,
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+        }
+    )
+    fake.queue_result(
+        returncode=1,
+        stderr=(
+            "error: Failed to resolve dependencies\n"
+            "  Caused by: No solution found when resolving dependencies\n"
+            "  lockfile is out of date"
+        ),
+    )
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert not result.all_passed
+    assert len(fake.calls) == 1
+    assert result.commands[0].reason_code == "COMMAND_FAILED"
+    assert "setup_dependency_network" not in result.commands[0].metadata
+
+
+@pytest.mark.unit
+async def test_setup_dependency_retry_reclassifies_only_current_attempt(tmp_path: Path) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=2,
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+        }
+    )
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+    fake.queue_result(returncode=1, stderr="local post-install hook failed")
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert not result.all_passed
+    assert len(fake.calls) == 2
+    assert result.commands[0].reason_code == "COMMAND_FAILED"
+    assert result.commands[0].retry_count == 1
+    assert "setup_dependency_network" not in result.commands[0].metadata
+
+
+@pytest.mark.unit
+def test_setup_dependency_diagnostics_redact_and_truncate_secret_output() -> None:
+    raw_secret = "ghp_1234567890abcdef"
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="",
+        stderr=(
+            _uv_pypi_dns_failure()
+            + "\nhttps://user:pass@files.pythonhosted.org/simple/docker/"
+            + f"\nAuthorization: Bearer {raw_secret}"
+            + "\nPIP_INDEX_URL=https://token:secret@files.pythonhosted.org/simple"
+            + "\n"
+            + ("DNS timeout while downloading docker==7.1.0 " * 200)
+        ),
+    )
+
+    assert classification is not None
+    diagnostic = str(classification.metadata["diagnostic"])
+    assert raw_secret not in diagnostic
+    assert "user:pass" not in diagnostic
+    assert "token:secret" not in diagnostic
+    assert "[redacted]" in diagnostic
+    assert diagnostic.endswith("...[truncated]")
+    assert len(diagnostic) <= 1000 + len("...[truncated]")
 
 
 @pytest.mark.unit
