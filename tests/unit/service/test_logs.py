@@ -239,7 +239,7 @@ def test_service_logs_finds_default_compose_file_from_parent_directory(
 
 
 @pytest.mark.unit
-def test_service_logs_defaults_to_absolute_compose_path_in_cwd(
+def test_service_logs_defaults_to_relative_compose_path_in_cwd(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
@@ -259,7 +259,7 @@ def test_service_logs_defaults_to_absolute_compose_path_in_cwd(
             "docker",
             "compose",
             "-f",
-            str(compose_file.resolve()),
+            str(compose_file.relative_to(tmp_path)),
             "logs",
             "--tail",
             str(DEFAULT_LOG_TAIL),
