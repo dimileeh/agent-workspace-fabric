@@ -314,6 +314,39 @@ def test_setup_dependency_network_classifier_skips_uv_run_script_dns_failure() -
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_chained_bootstrap_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="python -m pip install -r requirements.txt && ./bootstrap",
+        returncode=1,
+        stdout="Requirement already satisfied: pytest\n",
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_accepts_chained_dependency_output() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="python -m pip install -r requirements.txt && ./bootstrap",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "command",
     [

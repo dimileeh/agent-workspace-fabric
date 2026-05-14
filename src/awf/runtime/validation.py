@@ -556,6 +556,7 @@ _UV_SETUP_DEPENDENCY_NESTED_SUBCOMMAND_TOKENS = {
     "tool": frozenset({"install", "upgrade"}),
 }
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+_SHELL_COMPOUND_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "|&", "&"})
 _SETUP_DEPENDENCY_CONTEXT_RE = re.compile(
     r"(?i)\b("
     r"dependency|dependencies|download|fetch|index|package|packages|pypi|pythonhosted|"
@@ -712,15 +713,33 @@ def _combined_setup_dependency_output(*, stdout: str, stderr: str) -> str:
 
 def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
     tokens = _shell_tokens(command) or []
+    output_has_dependency_context = _setup_dependency_output_has_context(output)
+    compound_command = _has_shell_compound_control_operator(command)
     dependency_command_match = _non_uv_dependency_setup_command_match(tokens)
     if dependency_command_match is not None:
+        if dependency_command_match and compound_command:
+            return output_has_dependency_context
         return dependency_command_match
     if _looks_like_uv_dependency_setup_command(tokens):
-        return True
+        return output_has_dependency_context if compound_command else True
+    return output_has_dependency_context
+
+
+def _setup_dependency_output_has_context(output: str) -> bool:
     return bool(
         _SETUP_DEPENDENCY_CONTEXT_RE.search(output)
         or _SETUP_DEPENDENCY_SIMPLE_INDEX_RE.search(output)
     )
+
+
+def _has_shell_compound_control_operator(command: str) -> bool:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    return any(token in _SHELL_COMPOUND_CONTROL_TOKENS for token in tokens)
 
 
 def _non_uv_dependency_setup_command_match(tokens: list[str]) -> bool | None:
