@@ -67,6 +67,26 @@ test("desktop theme screenshots cover dashboard, details, and fullscreen logs", 
   await page.screenshot({ path: testInfo.outputPath("desktop-fullscreen-logs.png"), fullPage: true });
 });
 
+test("task details modal scrolls long prompts without moving the dashboard", async ({ page }) => {
+  await page.setViewportSize({ width: 947, height: 982 });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  const backgroundScrollBefore = await page.evaluate(() => window.scrollY);
+
+  await page.getByRole("button", { name: "Details" }).first().click();
+  await expect(page.getByRole("dialog", { name: /Task details/i })).toBeVisible();
+  const detailsScroll = page.getByTestId("task-details-scroll");
+  await expect(detailsScroll).toBeVisible();
+  const modalScrollBefore = await detailsScroll.evaluate((node) => node.scrollTop);
+
+  await detailsScroll.hover();
+  await page.mouse.wheel(0, 900);
+
+  await expect.poll(async () => detailsScroll.evaluate((node) => node.scrollTop)).toBeGreaterThan(modalScrollBefore + 20);
+  await expect.poll(async () => page.evaluate(() => window.scrollY)).toBe(backgroundScrollBefore);
+});
+
 test("mobile theme screenshots cover dashboard, workspace, and logs views", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await seedDarkAccessiblePreferences(page);
@@ -262,7 +282,7 @@ function workspaceOverview(id: string, status = "running") {
     workspace_id: id,
     task_id: `task-${id}`,
     title: id === workspaceId ? "Dark theme verification workspace" : "Completed monitor verification",
-    task_prompt: "# Task\n- Verify dark mode\n- Exercise high contrast and large font",
+    task_prompt: id === workspaceId ? longTaskPrompt() : "# Task\n- Verify dark mode\n- Exercise high contrast and large font",
     repo_url: "https://github.com/example/awf",
     base_branch: "codex/awf-post-merge-fixes",
     branch_name: `codex/${id}`,
@@ -287,6 +307,15 @@ function workspaceOverview(id: string, status = "running") {
     created_at: now,
     updated_at: now,
   };
+}
+
+function longTaskPrompt() {
+  const steps = Array.from(
+    { length: 48 },
+    (_, index) =>
+      `- Step ${index + 1}: verify that the task details dialog keeps prompt scrolling inside the modal viewport.`,
+  );
+  return ["# Task", "This prompt is intentionally long for modal scroll coverage.", ...steps].join("\n");
 }
 
 function workspaceDetail(id: string) {
