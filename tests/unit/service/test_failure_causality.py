@@ -14,6 +14,7 @@ from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service import failure_causality as failure_causality_service
 from awf.service.failure_causality import (
+    attach_primary_failure,
     build_preserved_failure_payload,
     load_failure_causality_snapshot,
     load_primary_failure_snapshot,
@@ -213,6 +214,26 @@ def test_preserved_failure_payload_ignores_secondary_history_in_extra_payload() 
 
     assert payload["secondary_failure"] == current_secondary
     assert payload["secondary_failures"] == [prior_secondary, current_secondary]
+
+
+@pytest.mark.unit
+def test_attach_primary_failure_preserves_existing_primary_failure_key() -> None:
+    existing_primary = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "reason_code": "PYTEST_TEST_FAILURE",
+    }
+    loaded_primary = {
+        "failure_reason": FailureReason.infrastructure_failure.value,
+        "reason_code": "STALE_ACTIVE_EXECUTION",
+    }
+
+    payload = attach_primary_failure(
+        {"primary_failure": existing_primary, "message": "keep existing evidence"},
+        loaded_primary,
+    )
+
+    assert payload["primary_failure"] == existing_primary
+    assert payload["message"] == "keep existing evidence"
 
 
 @pytest.mark.unit

@@ -211,7 +211,7 @@ def attach_primary_failure(
     primary_failure: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     updated = _jsonable_mapping(payload)
-    if primary_failure is not None:
+    if primary_failure is not None and PRIMARY_FAILURE_KEY not in updated:
         updated[PRIMARY_FAILURE_KEY] = _jsonable_mapping(primary_failure)
     return updated
 

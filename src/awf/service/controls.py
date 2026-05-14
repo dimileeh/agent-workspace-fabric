@@ -1014,9 +1014,13 @@ class WorkspaceControlService:
         requested_status = (
             WorkspaceStatus.failed if not cleanup_result.ok else WorkspaceStatus.destroyed
         )
+        already_failed_cleanup_failure = (
+            not cleanup_result.ok and workspace.status == WorkspaceStatus.failed.value
+        )
         if (
             workspace.status != WorkspaceStatus.destroying.value
             and WorkspaceStateMachine.is_callback_terminal(WorkspaceStatus(workspace.status))
+            and not already_failed_cleanup_failure
         ):
             ignored_event = await repo.record_ignored_stale_callback(
                 workspace,
@@ -1110,16 +1114,24 @@ class WorkspaceControlService:
                 workspace.failure_message = bounded_cleanup_message
             else:
                 restore_primary_failure_row_fields(workspace, primary_failure)
-            if WorkspaceStateMachine.can_transition(
-                WorkspaceStatus(workspace.status), WorkspaceStatus.failed
-            ):
+            workspace_status = WorkspaceStatus(workspace.status)
+            failed_reason_code = primary_failure_reason_code(
+                primary_failure,
+                fallback="CLEANUP_FAILED",
+            )
+            if WorkspaceStateMachine.can_transition(workspace_status, WorkspaceStatus.failed):
                 await repo.transition(
                     workspace,
                     to=WorkspaceStatus.failed,
-                    reason_code=primary_failure_reason_code(
-                        primary_failure,
-                        fallback="CLEANUP_FAILED",
-                    ),
+                    reason_code=failed_reason_code,
+                    payload=failed_transition_payload,
+                )
+            elif workspace_status == WorkspaceStatus.failed:
+                workspace.version += 1
+                await repo.add_event(
+                    workspace,
+                    event_type="workspace.state_changed",
+                    reason_code=failed_reason_code,
                     payload=failed_transition_payload,
                 )
             result_payload: dict[str, Any] = {
