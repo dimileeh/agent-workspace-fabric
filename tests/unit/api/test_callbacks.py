@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api import schemas as api_schemas
 from awf.api.app import configure_database, create_app
+from awf.common import callback_targets
 from awf.common.config import Settings, get_settings
 from awf.db.session import make_session_factory
 
@@ -244,7 +245,7 @@ def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
     monkeypatch: pytest.MonkeyPatch,
     target_url: str,
 ) -> None:
-    real_ip_address = api_schemas.ipaddress.ip_address
+    real_ip_address = callback_targets.ipaddress.ip_address
 
     class LegacyIPv4MappedAddress:
         is_global = True
@@ -260,7 +261,7 @@ def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
             return address
         return LegacyIPv4MappedAddress(ipv4_mapped)
 
-    monkeypatch.setattr(api_schemas.ipaddress, "ip_address", legacy_ip_address)
+    monkeypatch.setattr(callback_targets.ipaddress, "ip_address", legacy_ip_address)
 
     with pytest.raises(ValidationError, match="target_url must use a public host"):
         api_schemas.CallbackSubscriptionCreateRequest.model_validate(
@@ -271,14 +272,14 @@ def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
 @pytest.mark.unit
 def test_legacy_ipv4_literal_detector_rejects_malformed_legacy_hosts() -> None:
     assert (
-        api_schemas._looks_like_legacy_ipv4_literal(  # type: ignore[arg-type]
+        callback_targets.looks_like_legacy_ipv4_literal(  # type: ignore[arg-type]
             _NoLegacyIPv4Labels()
         )
         is False
     )
-    assert api_schemas._looks_like_legacy_ipv4_literal("192.168..1") is False
-    assert api_schemas._looks_like_legacy_ipv4_literal("0xg.168.1.1") is False
-    assert api_schemas._looks_like_legacy_ipv4_literal("0x7f.0.0.1") is True
+    assert callback_targets.looks_like_legacy_ipv4_literal("192.168..1") is False
+    assert callback_targets.looks_like_legacy_ipv4_literal("0xg.168.1.1") is False
+    assert callback_targets.looks_like_legacy_ipv4_literal("0x7f.0.0.1") is True
 
 
 @pytest.mark.unit
@@ -287,7 +288,7 @@ def test_legacy_ipv4_literal_detector_rejects_malformed_legacy_hosts() -> None:
     ["0x7f.0x0.0x0.0x1", "0x.0.0.1", "0xgg.0.0.1", "127..0.1"],
 )
 def test_legacy_ipv4_literal_detection_handles_hex_and_malformed_labels(hostname: str) -> None:
-    result = api_schemas._looks_like_legacy_ipv4_literal(hostname)
+    result = callback_targets.looks_like_legacy_ipv4_literal(hostname)
 
     if hostname == "0x7f.0x0.0x0.0x1":
         assert result is True

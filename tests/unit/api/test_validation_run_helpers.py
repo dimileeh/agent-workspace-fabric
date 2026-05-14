@@ -8,7 +8,6 @@ import pytest
 
 from awf.api.schemas import (
     _log_stream_ids,
-    _looks_like_legacy_ipv4_literal,
     _merge_log_stream_ref_value,
 )
 from awf.api.validation_runs import (
@@ -17,6 +16,7 @@ from awf.api.validation_runs import (
     validation_freshness_status,
     validation_run_summary,
 )
+from awf.common.callback_targets import looks_like_legacy_ipv4_literal
 from awf.db.models import ValidationRun
 
 
@@ -170,16 +170,16 @@ def test_validation_freshness_status_maps_computed_freshness_to_reason() -> None
 
 
 @pytest.mark.unit
-def test_schema_private_helpers_handle_legacy_ipv4_and_stream_ref_edges() -> None:
+def test_schema_helpers_handle_legacy_ipv4_and_stream_ref_edges() -> None:
     class EmptySplitHostname(str):
         def split(self, _separator: str | None = None, _maxsplit: int = -1) -> list[str]:
             return []
 
-    assert not _looks_like_legacy_ipv4_literal(EmptySplitHostname("ignored"))
-    assert not _looks_like_legacy_ipv4_literal("127..1")
-    assert not _looks_like_legacy_ipv4_literal("0x")
-    assert not _looks_like_legacy_ipv4_literal("0xz")
-    assert _looks_like_legacy_ipv4_literal("0x7f.1")
+    assert not looks_like_legacy_ipv4_literal(EmptySplitHostname("ignored"))
+    assert not looks_like_legacy_ipv4_literal("127..1")
+    assert not looks_like_legacy_ipv4_literal("0x")
+    assert not looks_like_legacy_ipv4_literal("0xz")
+    assert looks_like_legacy_ipv4_literal("0x7f.1")
 
     assert _merge_log_stream_ref_value("validation.01.stdout", ["validation.01.stdout"]) == [
         "validation.01.stdout"

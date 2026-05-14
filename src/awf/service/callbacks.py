@@ -15,10 +15,8 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import (
-    CallbackSubscriptionCreateRequest,
-    _is_public_callback_target_host,
-)
+from awf.api.schemas import CallbackSubscriptionCreateRequest
+from awf.common.callback_targets import is_public_callback_target_host
 from awf.common.config import Settings, get_settings
 from awf.db.enums import CallbackEventKind
 from awf.db.models import (
@@ -426,7 +424,7 @@ def _validate_callback_target(target_url: str, *, settings: Settings) -> Validat
         settings.callbacks_allowed_hosts
     ):
         raise ValueError("target_url host is not allowlisted")
-    if not _is_public_callback_target_host(parsed.hostname):
+    if not is_public_callback_target_host(parsed.hostname):
         raise ValueError("target_url must use a public host")
     connect_ip_address = _validate_callback_target_dns(hostname=parsed.hostname)
     return ValidatedCallbackTarget(connect_ip_address=connect_ip_address)
