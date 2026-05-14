@@ -239,6 +239,36 @@ def test_service_logs_finds_default_compose_file_from_parent_directory(
 
 
 @pytest.mark.unit
+def test_service_logs_defaults_to_absolute_compose_path_in_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}")
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.chdir(tmp_path)
+    run_service_logs(services=[ServiceLogName.api], run_subprocess=_run)
+
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(compose_file.resolve()),
+            "logs",
+            "--tail",
+            str(DEFAULT_LOG_TAIL),
+            "api",
+        ]
+    ]
+
+
+@pytest.mark.unit
 def test_service_logs_default_file_missing_returns_scoped_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
