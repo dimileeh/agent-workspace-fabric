@@ -620,10 +620,12 @@ def test_planning_scope_retry_prompt_discards_premature_implementation() -> None
     assert "- `docs/awf-plans/ws_retry.md`" in prompt
     assert "Create or update only `docs/awf-plans/ws_retry.md`" not in prompt
     assert "Aside from creating or updating the configured plan artifact" in prompt
+    assert "during this retry planning phase" in prompt
+    assert "phase-scoped" in prompt
     assert "or any other file during this retry planning phase" not in prompt
     assert "src/awf/runtime/planning.py" in prompt
     assert "tests/unit/test_planning.py" in prompt
-    assert "After writing the plan, stop" in prompt
+    assert "After writing the plan, stop" not in prompt
     assert "Add the feature after planning." in prompt
 
 
@@ -646,7 +648,11 @@ def test_composed_planning_scope_retry_prompt_has_one_authoritative_plan_artifac
         "Create or update only the configured plan artifact "
         "`docs/awf-plans/ws_scope_new.md`" in composed_prompt
     )
+    assert "After writing the plan, stop. Do not perform implementation work in this phase." in (
+        composed_prompt
+    )
     assert composed_prompt.count("Create or update only") == 1
+    assert composed_prompt.count("After writing the plan, stop") == 1
     assert "Create or update only `docs/awf-plans/ws_scope_old.md`" not in composed_prompt
     assert "Prior source required plan paths from the failed planning attempt" in composed_prompt
     assert "- `docs/awf-plans/ws_scope_old.md`" in composed_prompt
