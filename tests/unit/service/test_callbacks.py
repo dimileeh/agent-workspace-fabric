@@ -44,7 +44,7 @@ def _stub_callback_dns_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         callback_service_module,
         "_resolve_callback_target_ip_addresses",
-        lambda _hostname: {"1.1.1.1"},
+        lambda _hostname: ("1.1.1.1",),
     )
 
 
@@ -882,7 +882,7 @@ async def test_drain_due_rejects_callbacks_with_private_delivery_target(
     monkeypatch.setattr(
         callback_service_module,
         "_resolve_callback_target_ip_addresses",
-        lambda _hostname: {"127.0.0.1"},
+        lambda _hostname: ("127.0.0.1",),
     )
     poster = _RecordingPoster()
     await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
