@@ -595,6 +595,80 @@ async def test_destroy_workspace_records_cleanup_failures(
 
 
 @pytest.mark.unit
+async def test_destroy_cleanup_failure_without_primary_evidence_skips_secondary_event(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.failed)
+
+        class _FailingWithoutPrimaryEvidenceCleaner(_RecordingCleaner):
+            async def cleanup(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                compose_project_name: str | None = None,
+                compose_file_path: Path | None = None,
+                worktree_host_path: Path | None = None,
+                remove_volumes: bool = True,
+                remove_worktree: bool = True,
+            ) -> list[str]:
+                failures = await super().cleanup(
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    compose_project_name=compose_project_name,
+                    compose_file_path=compose_file_path,
+                    worktree_host_path=worktree_host_path,
+                    remove_volumes=remove_volumes,
+                    remove_worktree=remove_worktree,
+                )
+                await WorkspaceRepository(session).transition(
+                    workspace,
+                    to=WorkspaceStatus.failed,
+                    reason_code="RUNTIME_FAILED_WITHOUT_PRIMARY",
+                    payload={
+                        "reason_code": "RUNTIME_FAILED_WITHOUT_PRIMARY",
+                        "message": "runtime failed without durable row evidence",
+                    },
+                )
+                await session.flush()
+                return failures
+
+        cleaner = _FailingWithoutPrimaryEvidenceCleaner(failures=["volume busy"])
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: cleaner,
+        )
+
+        response = await service.destroy_workspace(
+            workspace.id,
+            force=False,
+            remove_volumes=True,
+            remove_worktree=False,
+            idempotency_key="destroy-failed-cleanup-without-primary",
+        )
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace.id,
+            operation_type=OperationType.destroy,
+        )
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+
+    secondary_failure_events = [
+        event for event in events if event.event_type == "workspace.secondary_failure_recorded"
+    ]
+    assert secondary_failure_events == []
+    assert response.status == WorkspaceStatus.failed
+    assert response.operation_status == OperationStatus.failed.value
+    assert workspace.failure_reason == "cleanup_failure"
+    assert workspace.failure_message == "volume busy"
+    assert operations[0].result is not None
+    assert "primary_failure" not in operations[0].result
+    assert "secondary_failure" not in operations[0].result
+
+
+@pytest.mark.unit
 async def test_destroy_cleanup_failure_preserves_existing_validation_failure(
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,

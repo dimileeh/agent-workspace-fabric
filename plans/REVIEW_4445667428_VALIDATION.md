@@ -4,43 +4,64 @@ Plan reference: `plans/REVIEW_4445667428_PLAN.md`
 
 ## Requirement Status
 
-- Add service-level coverage for the shared row-restoration helper before implementation: Complete.
-  - Added `test_restore_primary_failure_row_fields_preserves_bounded_primary_message` in `tests/unit/service/test_failure_causality.py`.
-  - Confirmed the test failed before implementation with `ImportError: cannot import name 'restore_primary_failure_row_fields'`.
-- Keep existing failure-causality behavior unchanged for worker stale execution, runtime stranding, and control cleanup failures: Complete.
-  - Worker and controls now call the shared helper without changing transition payload logic.
-- Replace worker/control local helper definitions with imports from `failure_causality.py`: Complete.
-  - Added `restore_primary_failure_row_fields` in `src/awf/service/failure_causality.py`.
-  - Imported it in `src/awf/control/worker.py` and `src/awf/service/controls.py`.
-  - Removed both duplicate local helper definitions.
-- Remove `_claim_recheck_conditions` and its only test/import reference without weakening claim-staleness coverage: Complete.
-  - Removed `_claim_recheck_conditions` from `src/awf/control/worker.py`.
-  - Removed its import and assertion from `tests/unit/control/test_worker.py`; the test still covers `_candidate_claim_is_stale` for non-runtime statuses.
-- Commit the fix locally on the current AWF-managed branch: Complete.
-  - This validation file is included in the local review-comment fix commit.
-- Print the required `AWF-VERDICT` line after the fix is complete: Complete.
-  - The verdict is emitted after the local commit as required by the AWF comment-handling contract.
+- Add a regression test proving cleanup failure on an already-failed workspace
+  without primary evidence does not emit malformed
+  `workspace.secondary_failure_recorded` events: Complete.
+  - Added
+    `test_destroy_cleanup_failure_without_primary_evidence_skips_secondary_event`
+    in `tests/unit/service/test_controls.py`.
+  - The tightened regression failed before implementation because the malformed
+    secondary event was emitted.
+- Keep existing preservation behavior for already-failed workspaces that do have
+  primary evidence: Complete.
+  - Re-ran
+    `test_destroy_cleanup_failure_records_secondary_when_workspace_already_failed`;
+    it still records the structured secondary event with embedded primary
+    evidence.
+- Add or update migration regression coverage so same-timestamp historical
+  events are backfilled by persisted insertion chronology rather than random
+  uuid-derived IDs: Complete.
+  - Updated
+    `test_workspace_event_order_migration_backfills_existing_events` to expect
+    insertion chronology for same-timestamp events whose IDs sort differently.
+  - The test failed before implementation under the old `id ASC` tie-breaker.
+- Update the migration backfill ordering without introducing branch changes,
+  pushes, or unrelated refactors: Complete.
+  - `migrations/versions/e8f9a0b1c2d3_workspace_event_order.py` now uses
+    `ctid ASC` as the one-time historical same-timestamp tie-breaker.
+- Commit the scoped fix locally: Complete.
+  - The scoped files are staged and committed after validation as the final
+    local fix step.
 
 ## Evidence
 
 Files changed:
 
-- `src/awf/service/failure_causality.py`
-- `src/awf/control/worker.py`
 - `src/awf/service/controls.py`
-- `tests/unit/service/test_failure_causality.py`
-- `tests/unit/control/test_worker.py`
+- `migrations/versions/e8f9a0b1c2d3_workspace_event_order.py`
+- `tests/unit/service/test_controls.py`
+- `tests/unit/db/test_migration_graph.py`
 - `plans/REVIEW_4445667428_PLAN.md`
 - `plans/REVIEW_4445667428_VALIDATION.md`
 
 Commands run:
 
-- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_failure_causality.py -q` failed before implementation as expected because the new helper was missing.
-- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_failure_causality.py -q` passed: 24 passed.
-- `uv run --python 3.12 --extra dev pytest tests/unit/control/test_worker.py -q` passed: 176 passed.
-- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_controls_lifecycle.py -q` passed: 50 passed.
-- `uv run --python 3.12 --extra dev ruff check src/awf/control/worker.py src/awf/service/controls.py src/awf/service/failure_causality.py tests/unit/control/test_worker.py tests/unit/service/test_failure_causality.py` passed.
-- `uv run --python 3.12 --extra dev mypy src/awf` passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_controls.py::test_destroy_cleanup_failure_without_primary_evidence_skips_secondary_event -q`
+  - Initial regression attempt passed because it did not exercise the
+    already-failed callback path; after tightening the scenario, it failed
+    before implementation as expected and passed after implementation.
+- `uv run --python 3.12 --extra dev pytest tests/unit/db/test_migration_graph.py::test_workspace_event_order_migration_backfills_existing_events -q`
+  - Failed before implementation as expected and passed after implementation.
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_controls.py::test_destroy_cleanup_failure_without_primary_evidence_skips_secondary_event tests/unit/service/test_controls.py::test_destroy_cleanup_failure_records_secondary_when_workspace_already_failed -q`
+  - Passed: 2 passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/db/test_migration_graph.py::test_workspace_event_order_migration_backfills_existing_events -q`
+  - Passed: 1 passed.
+- `uv run --python 3.12 --extra dev ruff check src/awf/service/controls.py tests/unit/service/test_controls.py tests/unit/db/test_migration_graph.py migrations/versions/e8f9a0b1c2d3_workspace_event_order.py`
+  - Passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_controls.py -q`
+  - Passed: 34 passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/db/test_migration_graph.py -q`
+  - Passed: 6 passed.
 
 ## Gaps
 

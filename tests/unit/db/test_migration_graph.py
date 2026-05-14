@@ -537,9 +537,9 @@ async def test_workspace_event_order_migration_backfills_existing_events(
             await engine.dispose()
 
     assert rows == [
-        ("ws_event_order_a", "evt_a_first_a", 1),
-        ("ws_event_order_a", "evt_a_first_b", 2),
-        ("ws_event_order_a", "evt_a_first_c", 3),
+        ("ws_event_order_a", "evt_a_first_b", 1),
+        ("ws_event_order_a", "evt_a_first_c", 2),
+        ("ws_event_order_a", "evt_a_first_a", 3),
         ("ws_event_order_a", "evt_a_second", 4),
         ("ws_event_order_b", "evt_b_only", 1),
     ]

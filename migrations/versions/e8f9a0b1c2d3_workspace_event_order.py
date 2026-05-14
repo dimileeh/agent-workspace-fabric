@@ -27,6 +27,9 @@ def upgrade() -> None:
     op.execute(
         sa.text("ALTER TABLE workspace_events ADD COLUMN IF NOT EXISTS event_order INTEGER")
     )
+    # Event IDs are uuid4-derived, so they cannot recover chronology when old
+    # rows share an occurred_at tick. workspace_events is append-only; ctid is
+    # the best stored hint of heap insertion order for this one-time backfill.
     op.execute(
         sa.text(
             """
@@ -35,7 +38,7 @@ def upgrade() -> None:
                     id,
                     (row_number() OVER (
                         PARTITION BY workspace_id
-                        ORDER BY occurred_at ASC, id ASC
+                        ORDER BY occurred_at ASC, ctid ASC
                     ))::integer AS backfilled_event_order
                 FROM workspace_events
             )

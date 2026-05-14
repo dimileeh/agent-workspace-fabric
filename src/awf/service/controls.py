@@ -1130,9 +1130,11 @@ class WorkspaceControlService:
                     reason_code=failed_reason_code,
                     payload=failed_transition_payload,
                 )
-            elif workspace_status == WorkspaceStatus.failed:
+            elif workspace_status == WorkspaceStatus.failed and primary_failure is not None:
                 # The workspace is already failed, so transition() is not used
                 # because there is no valid failed -> failed state-machine edge.
+                # Emit the public secondary-failure event only when it can
+                # carry the primary evidence that subscribers expect.
                 secondary_failure_recorded_payload = {
                     **failed_transition_payload,
                     "synthetic": True,
