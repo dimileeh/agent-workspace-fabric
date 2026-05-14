@@ -31,7 +31,7 @@ runtime state, worktree, and artifacts). For cleanup, use explicit GC workflows
 
 Run these checks after `awf init` or `awf service bootstrap` exits with an error:
 
-If you installed `awf` from a wheel (for example with `uv tool install aira-awf`), run the bootstrap commands from an AWF source checkout. `awf service bootstrap` needs `docker/compose/local-service.yml` and `docker/agent-runtime.Dockerfile`, which are not available in the installed package alone.
+If you installed `awf` from a wheel (for example with `uv tool install <your-awf-package>`), run the bootstrap commands from an AWF source checkout. `awf service bootstrap` needs `docker/compose/local-service.yml` and `docker/agent-runtime.Dockerfile`, which are not available in the installed package alone.
 
 1. Run the bootstrap and collect the full error output:
 
