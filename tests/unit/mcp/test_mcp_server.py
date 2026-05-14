@@ -1951,29 +1951,34 @@ class TestWorkspaceEvents:
             assert first_ws is not None
             old = await repo.add_event(
                 first_ws,
-                event_type="workspace.phase_started",
+                event_type="test.workspace_events.pagination",
                 reason_code="OLD",
                 payload={"phase": "agent"},
             )
             new = await repo.add_event(
                 first_ws,
-                event_type="workspace.phase_started",
+                event_type="test.workspace_events.pagination",
                 reason_code="NEW",
                 payload={"phase": "validation"},
             )
-            old.occurred_at = base
-            new.occurred_at = base + timedelta(seconds=2)
+            old.occurred_at = base + timedelta(days=30)
+            new.occurred_at = base + timedelta(days=30, seconds=2)
             await session.commit()
 
         result = await mcp.call_tool(
             "awf_list_workspace_events",
-            {"workspace_id": first_id, "limit": 1},
+            {
+                "workspace_id": first_id,
+                "event_type": "test.workspace_events.pagination",
+                "limit": 1,
+            },
         )
         assert isinstance(result, CallToolResult)
         assert result.isError is False
         assert result.structuredContent is not None
         payload = result.structuredContent
         assert len(payload["items"]) == 1
+        assert payload["items"][0]["reason_code"] == "NEW"
         assert payload["has_more"] is True
         assert payload["limit"] == 1
         assert payload["cursor"] is None
@@ -2174,18 +2179,22 @@ class TestGlobalEvents:
             for i in range(5):
                 event = await repo.add_event(
                     ws,
-                    event_type="workspace.phase_started",
+                    event_type="test.global_events.pagination",
                     reason_code=f"EVENT_{i}",
                     payload={"i": i},
                 )
-                event.occurred_at = base + timedelta(seconds=i)
+                event.occurred_at = base + timedelta(days=30, seconds=i)
             await session.commit()
 
-        result = await mcp.call_tool("awf_list_events", {"limit": 2})
+        result = await mcp.call_tool(
+            "awf_list_events",
+            {"event_type": "test.global_events.pagination", "limit": 2},
+        )
         assert isinstance(result, CallToolResult)
         payload = result.structuredContent
         assert payload is not None
         assert len(payload["items"]) == 2
+        assert [item["reason_code"] for item in payload["items"]] == ["EVENT_4", "EVENT_3"]
         assert payload["has_more"] is True
         assert payload["limit"] == 2
         assert payload["cursor"] is None
