@@ -10700,15 +10700,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -10783,15 +10777,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -11540,15 +11528,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -11608,15 +11590,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -11988,15 +11964,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -12270,15 +12240,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -12409,15 +12373,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -12486,15 +12444,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -12584,15 +12536,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -12734,15 +12680,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -12834,15 +12774,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -12963,15 +12897,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -13063,15 +12991,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -13173,15 +13095,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -13283,15 +13199,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -13388,15 +13298,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -13685,15 +13589,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],
@@ -13795,15 +13693,9 @@
             "name": "authorization",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
+              "minLength": 1,
+              "title": "Authorization",
+              "type": "string"
             }
           }
         ],

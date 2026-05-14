@@ -183,3 +183,14 @@ def _mark_authorization_header_parameters_required(
                     and parameter.get("name") == "authorization"
                 ):
                     parameter["required"] = True
+                    parameter["schema"] = _authorization_header_schema(parameter)
+
+
+def _authorization_header_schema(parameter: dict[str, Any]) -> dict[str, Any]:
+    schema = parameter.get("schema")
+    title = (
+        schema.get("title")
+        if isinstance(schema, dict) and isinstance(schema.get("title"), str)
+        else "Authorization"
+    )
+    return {"minLength": 1, "title": title, "type": "string"}

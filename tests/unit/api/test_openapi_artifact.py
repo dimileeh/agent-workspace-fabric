@@ -155,6 +155,36 @@ def test_authorization_headers_are_required_in_openapi(openapi_spec: dict) -> No
 
 
 @pytest.mark.unit
+def test_required_authorization_headers_are_non_nullable_strings_in_openapi(
+    openapi_spec: dict,
+) -> None:
+    invalid_auth_headers: list[str] = []
+    for path, path_item in openapi_spec.get("paths", {}).items():
+        for method, operation in path_item.items():
+            if not isinstance(operation, dict):
+                continue
+            for parameter in operation.get("parameters", []):
+                if not isinstance(parameter, dict):
+                    continue
+                if (
+                    parameter.get("in") != "header"
+                    or parameter.get("name") != "authorization"
+                    or parameter.get("required") is not True
+                ):
+                    continue
+                schema = parameter.get("schema")
+                if (
+                    not isinstance(schema, dict)
+                    or schema.get("type") != "string"
+                    or schema.get("minLength") != 1
+                    or "anyOf" in schema
+                ):
+                    invalid_auth_headers.append(f"{method.upper()} {path}")
+
+    assert invalid_auth_headers == []
+
+
+@pytest.mark.unit
 def test_no_duplicate_operation_ids(openapi_spec: dict) -> None:
     operation_ids: list[str] = []
     for path_item in openapi_spec.get("paths", {}).values():
