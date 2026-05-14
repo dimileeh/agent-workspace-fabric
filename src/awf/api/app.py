@@ -15,11 +15,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf import __version__
+from awf.api.deps import require_api_token
 from awf.api.routes import (
     artifacts,
     callbacks,
@@ -116,4 +119,67 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     app.include_router(controls.router)
     app.include_router(ws.router)
 
+    _install_openapi_auth_contract(app)
+
     return app
+
+
+def _install_openapi_auth_contract(app: FastAPI) -> None:
+    """Keep the OpenAPI auth contract aligned with AWF auth dependency semantics."""
+    default_openapi = app.openapi
+    auth_required_operations = _auth_required_operations(app)
+
+    def openapi_with_auth_contract() -> dict[str, Any]:
+        openapi_schema = default_openapi()
+        _mark_authorization_header_parameters_required(
+            openapi_schema,
+            auth_required_operations,
+        )
+        return openapi_schema
+
+    app.openapi = openapi_with_auth_contract  # type: ignore[method-assign]
+
+
+def _auth_required_operations(app: FastAPI) -> set[tuple[str, str]]:
+    operations: set[tuple[str, str]] = set()
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if not any(dependency.dependency is require_api_token for dependency in route.dependencies):
+            continue
+        for method in route.methods:
+            operations.add((route.path_format, method.lower()))
+    return operations
+
+
+def _mark_authorization_header_parameters_required(
+    openapi_schema: dict[str, Any],
+    auth_required_operations: set[tuple[str, str]],
+) -> None:
+    paths = openapi_schema.get("paths")
+    if not isinstance(paths, dict):
+        return
+
+    for path, path_item in paths.items():
+        if not isinstance(path, str):
+            continue
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if (
+                not isinstance(method, str)
+                or (path, method.lower()) not in auth_required_operations
+            ):
+                continue
+            if not isinstance(operation, dict):
+                continue
+            parameters = operation.get("parameters")
+            if not isinstance(parameters, list):
+                continue
+            for parameter in parameters:
+                if (
+                    isinstance(parameter, dict)
+                    and parameter.get("in") == "header"
+                    and parameter.get("name") == "authorization"
+                ):
+                    parameter["required"] = True

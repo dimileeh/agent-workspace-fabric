@@ -10698,7 +10698,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -10761,7 +10761,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -11478,7 +11478,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -11546,7 +11546,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -11926,7 +11926,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -12208,7 +12208,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -12347,7 +12347,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -12424,7 +12424,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -12522,7 +12522,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -12672,7 +12672,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -12772,7 +12772,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -12901,7 +12901,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -13001,7 +13001,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -13111,7 +13111,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -13221,7 +13221,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -13326,7 +13326,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -13623,7 +13623,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {
@@ -13733,7 +13733,7 @@
           {
             "in": "header",
             "name": "authorization",
-            "required": false,
+            "required": true,
             "schema": {
               "anyOf": [
                 {

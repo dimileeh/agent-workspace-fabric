@@ -102,10 +102,37 @@ def test_callback_endpoints_expose_authorization_header_in_openapi(openapi_spec:
     for method in ("get", "post"):
         operation = path[method]
         parameters = operation["parameters"]
-        assert any(
-            param.get("in") == "header" and param.get("name") == "authorization"
+        authorization_params = [
+            param
             for param in parameters
-        ), f"{method.upper()} /v1/callbacks is expected to expose Authorization header"
+            if param.get("in") == "header" and param.get("name") == "authorization"
+        ]
+        assert authorization_params, (
+            f"{method.upper()} /v1/callbacks is expected to expose Authorization header"
+        )
+        assert all(param.get("required") is True for param in authorization_params), (
+            f"{method.upper()} /v1/callbacks Authorization header must be required"
+        )
+
+
+@pytest.mark.unit
+def test_authorization_headers_are_required_in_openapi(openapi_spec: dict) -> None:
+    optional_auth_headers: list[str] = []
+    for path, path_item in openapi_spec.get("paths", {}).items():
+        for method, operation in path_item.items():
+            if not isinstance(operation, dict):
+                continue
+            for parameter in operation.get("parameters", []):
+                if not isinstance(parameter, dict):
+                    continue
+                if (
+                    parameter.get("in") == "header"
+                    and parameter.get("name") == "authorization"
+                    and parameter.get("required") is not True
+                ):
+                    optional_auth_headers.append(f"{method.upper()} {path}")
+
+    assert optional_auth_headers == []
 
 
 @pytest.mark.unit
