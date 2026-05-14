@@ -364,11 +364,9 @@ def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bo
 
 def _event_occurs_after_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[bool]:
     # Event IDs are uuid4-derived, so equal timestamps must use the persisted
-    # workspace-local event order. Legacy rows without that order keep the
-    # conservative same-tick boundary behavior. During the migration tail, a
-    # pre-event_order reset sharing the exact failure timestamp can hide that
-    # legacy failure snapshot; once those rows age out, same-tick comparisons
-    # are ordered by event_order.
+    # workspace-local event order. If the reference event is ordered, unordered
+    # same-tick rows are ignored at the boundary because their chronological
+    # position is ambiguous.
     event_order = _event_order(event)
     if event_order is None:
         return WorkspaceEvent.occurred_at >= event.occurred_at
@@ -376,10 +374,7 @@ def _event_occurs_after_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[
         WorkspaceEvent.occurred_at > event.occurred_at,
         and_(
             WorkspaceEvent.occurred_at == event.occurred_at,
-            or_(
-                WorkspaceEvent.event_order.is_(None),
-                WorkspaceEvent.event_order >= event_order,
-            ),
+            WorkspaceEvent.event_order >= event_order,
         ),
     )
 
@@ -392,10 +387,7 @@ def _event_occurs_before_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement
         WorkspaceEvent.occurred_at < event.occurred_at,
         and_(
             WorkspaceEvent.occurred_at == event.occurred_at,
-            or_(
-                WorkspaceEvent.event_order.is_(None),
-                WorkspaceEvent.event_order <= event_order,
-            ),
+            WorkspaceEvent.event_order <= event_order,
         ),
     )
 

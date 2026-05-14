@@ -496,7 +496,7 @@ async def test_primary_failure_snapshot_ignores_stale_embedded_primary_after_res
 async def test_epoch_reset_detection_treats_same_timestamp_reset_as_epoch_boundary(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    same_tick = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    same_tick = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
 
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).create(
@@ -675,7 +675,7 @@ async def test_primary_failure_snapshot_uses_current_failure_after_provisioning_
 async def test_primary_failure_snapshot_ignores_same_timestamp_epoch_reset_without_id_order(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    same_tick = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    same_tick = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
     workspace_id, _validation_run_id = await _seed_failed_workspace(
         session_factory,
         failure_reason=FailureReason.infrastructure_failure.value,
@@ -749,7 +749,7 @@ async def test_primary_failure_snapshot_ignores_same_timestamp_epoch_reset_witho
 async def test_primary_failure_snapshot_omits_stale_validation_run_without_current_epoch_event(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    same_tick = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    same_tick = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
     workspace_id, validation_run_id = await _seed_failed_workspace(
         session_factory,
         failure_reason=FailureReason.validation_failure.value,
@@ -870,6 +870,181 @@ async def test_primary_failure_snapshot_uses_current_failure_after_remonitor_res
     assert snapshot is not None
     assert snapshot["failure_reason"] == FailureReason.agent_failure.value
     assert snapshot["message"] == "agent retry failed after remonitor"
+    assert snapshot["reason_code"] == "AGENT_AUTH_FAILED"
+    assert "validation_run" not in snapshot
+
+
+@pytest.mark.unit
+async def test_primary_failure_snapshot_ignores_null_order_same_tick_reset_for_ordered_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    same_tick = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure causality null event order regression",
+            task_prompt="Do not let unordered same-tick resets hide ordered failures.",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
+
+        validation_repo = ValidationRunRepository(session)
+        validation_run = await validation_repo.start(
+            workspace_id=workspace.id,
+            attempt_id=None,
+            tier=0,
+            commands=[
+                {
+                    "command": "uv run pytest tests/unit/test_example.py::test_failure",
+                    "phase": "validation",
+                }
+            ],
+            base_commit="a" * 40,
+            target_branch="main",
+            target_head_sha="b" * 40,
+            log_stream_refs={"validation": "logs/validation.log"},
+            workspace_head_sha="c" * 40,
+            profile_name="default",
+            profile_version=1,
+            profile_source=".awf/workspace.yml",
+            resolved_profile_digest="d" * 64,
+            environment_identity_digest="e" * 64,
+            environment_identity_inputs={"python": "3.12"},
+            started_at=same_tick - timedelta(minutes=2),
+        )
+        await validation_repo.finish(
+            validation_run.id,
+            status="failed",
+            reason_code="CURRENT_VALIDATION_FAILURE",
+            finished_at=same_tick - timedelta(minutes=1),
+        )
+
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "current validation failed before legacy reset"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="CURRENT_VALIDATION_FAILURE",
+            payload={
+                "reason_code": "CURRENT_VALIDATION_FAILURE",
+                "message": "current validation failed before legacy reset",
+            },
+        )
+        failed_event = next(
+            event
+            for event in workspace.events
+            if event.new_state == WorkspaceStatus.failed.value
+            and event.reason_code == "CURRENT_VALIDATION_FAILURE"
+        )
+        failed_event.occurred_at = same_tick
+        assert failed_event.event_order is not None
+
+        reset_event = await repo.add_event(
+            workspace,
+            event_type="workspace.remonitor_requested",
+            reason_code="OPERATOR_REMONITOR",
+            payload={
+                "state_reset": {
+                    "from": WorkspaceStatus.failed.value,
+                    "to": WorkspaceStatus.monitoring_pr.value,
+                },
+            },
+        )
+        reset_event.occurred_at = same_tick
+        reset_event.event_order = None
+        workspace_id = workspace.id
+        validation_run_id = validation_run.id
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.validation_failure.value
+    assert snapshot["message"] == "current validation failed before legacy reset"
+    assert snapshot["reason_code"] == "CURRENT_VALIDATION_FAILURE"
+    assert snapshot["validation_run"]["id"] == validation_run_id
+
+
+@pytest.mark.unit
+async def test_remonitor_reset_event_order_precedes_same_tick_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    same_tick = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure causality remonitor event order regression",
+            task_prompt="Order remonitor reset events against same-tick failures.",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
+
+        workspace.status = WorkspaceStatus.monitoring_pr.value
+        workspace.failure_reason = None
+        workspace.failure_message = None
+        reset_order = workspace.version
+        reset_event = await repo.add_event(
+            workspace,
+            event_type="workspace.remonitor_requested",
+            reason_code="OPERATOR_REMONITOR",
+            payload={
+                "state_reset": {
+                    "from": WorkspaceStatus.failed.value,
+                    "to": WorkspaceStatus.monitoring_pr.value,
+                },
+            },
+        )
+        reset_event.occurred_at = same_tick
+        assert reset_event.event_order == reset_order
+
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "agent retry failed after ordered remonitor"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="AGENT_AUTH_FAILED",
+            payload={
+                "reason_code": "AGENT_AUTH_FAILED",
+                "message": "agent retry failed after ordered remonitor",
+            },
+        )
+        failed_event = next(
+            event
+            for event in workspace.events
+            if event.new_state == WorkspaceStatus.failed.value
+            and event.reason_code == "AGENT_AUTH_FAILED"
+        )
+        failed_event.occurred_at = same_tick
+        assert failed_event.event_order is not None
+        assert failed_event.event_order > reset_order
+        workspace_id = workspace.id
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_primary_failure_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot["failure_reason"] == FailureReason.agent_failure.value
+    assert snapshot["message"] == "agent retry failed after ordered remonitor"
     assert snapshot["reason_code"] == "AGENT_AUTH_FAILED"
     assert "validation_run" not in snapshot
 

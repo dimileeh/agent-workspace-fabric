@@ -3527,6 +3527,7 @@ class WorkspaceRepository:
                 new_state=workspace.status,
                 reason_code=event.reason_code,
                 payload=event.payload,
+                event_order=workspace.version,
             )
             for event in events
         ]
