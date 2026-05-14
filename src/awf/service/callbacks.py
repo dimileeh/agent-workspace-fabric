@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import json as json_module
@@ -228,7 +229,8 @@ class CallbackDeliveryService:
                 await repo.mark_attempt_started(delivery, now=self._clock())
                 await repo.sync_envelope_delivery_metadata(delivery)
                 try:
-                    validated_target = _validate_callback_target(
+                    validated_target = await asyncio.to_thread(
+                        _validate_callback_target,
                         subscription.target_url,
                         settings=self._settings,
                     )

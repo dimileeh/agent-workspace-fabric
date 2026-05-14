@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -653,6 +653,47 @@ async def test_successful_delivery_posts_sanitized_json_and_marks_succeeded(
     assert stored.attempt_count == 1
     assert stored.envelope["delivery"]["attempt_count"] == 1
     assert stored.delivered_at is not None
+
+
+@pytest.mark.unit
+async def test_drain_due_offloads_callback_target_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    settings = Settings(_env_file=None)
+    poster = _RecordingPoster(status_code=202)
+    to_thread_calls: list[tuple[Callable[..., object], tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_to_thread(
+        function: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        to_thread_calls.append((function, args, kwargs))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr("asyncio.to_thread", fake_to_thread)
+
+    await CallbackDeliveryService(
+        factory,
+        http_poster=poster,
+        settings=settings,
+    ).drain_due(limit=10)
+
+    assert len(to_thread_calls) == 1
+    function, args, kwargs = to_thread_calls[0]
+    assert function is callback_service_module._validate_callback_target
+    assert args == ("https://operator.example.com/events",)
+    assert kwargs == {"settings": settings}
+    assert [call.connect_ip_address for call in poster.calls] == ["1.1.1.1"]
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.succeeded.value
 
 
 @pytest.mark.unit
