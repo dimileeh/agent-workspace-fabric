@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -205,13 +206,14 @@ async def _register_subscription(
     idempotency_key: str = "callback-service-subscription",
     max_attempts: int = 3,
     target_url: str = "https://operator.example.com/events",
+    timeout_seconds: int = 10,
 ):
     subscription, _created = await CallbackSubscriptionRepository(session).create_idempotent(
         name="service-test",
         target_url=target_url,
         event_types=event_types,
         enabled=enabled,
-        timeout_seconds=10,
+        timeout_seconds=timeout_seconds,
         max_attempts=max_attempts,
         initial_backoff_seconds=5,
         idempotency_key=idempotency_key,
@@ -926,6 +928,78 @@ async def test_drain_due_offloads_callback_target_validation(
     assert args == ("https://operator.example.com/events",)
     assert kwargs == {"settings": settings}
     assert [call.connect_ip_address for call in poster.calls] == ["1.1.1.1"]
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.succeeded.value
+
+
+@pytest.mark.unit
+async def test_drain_due_marks_callback_target_validation_timeout_as_request_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    poster = _RecordingPoster(status_code=202)
+    wait_for_timeouts: list[float | None] = []
+
+    async def fake_wait_for(awaitable: object, timeout: float | None) -> object:
+        wait_for_timeouts.append(timeout)
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise TimeoutError("callback target validation timed out")
+
+    monkeypatch.setattr("asyncio.wait_for", fake_wait_for)
+
+    await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert wait_for_timeouts == [10.0]
+    assert poster.calls == []
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_REQUEST_FAILED"
+    assert "validation timed out" in (stored.error_message or "")
+
+
+@pytest.mark.unit
+async def test_drain_due_counts_callback_target_validation_against_delivery_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(
+            session,
+            event_types=["workspace.*"],
+            timeout_seconds=1,
+        )
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    settings = Settings(_env_file=None)
+    poster = _RecordingPoster(status_code=202)
+
+    async def delayed_to_thread(
+        function: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        await asyncio.sleep(0.05)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr("asyncio.to_thread", delayed_to_thread)
+
+    await CallbackDeliveryService(
+        factory,
+        http_poster=poster,
+        settings=settings,
+    ).drain_due(limit=10)
+
+    assert len(poster.calls) == 1
+    assert 0.0 < poster.calls[0].timeout <= 0.98
     stored = await _get_delivery(factory, delivery.id)
     assert stored.status == CallbackDeliveryStatus.succeeded.value
 

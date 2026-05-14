@@ -233,43 +233,53 @@ class CallbackDeliveryService:
 
                 await repo.mark_attempt_started(delivery, now=self._clock())
                 await repo.sync_envelope_delivery_metadata(delivery)
+                delivery_timeout = float(subscription.timeout_seconds)
+                monotonic_clock = asyncio.get_running_loop().time
+                delivery_deadline = monotonic_clock() + delivery_timeout
                 try:
-                    validated_target = await asyncio.to_thread(
-                        _validate_callback_target,
-                        subscription.target_url,
-                        settings=self._settings,
-                    )
-                except ValueError as exc:
-                    _log.warning(
-                        "callback.delivery_target_invalid",
-                        delivery_id=delivery.id,
-                        subscription_id=subscription.id,
-                        event_kind=delivery.event_kind,
-                        event_type=delivery.event_type,
-                        source_id=delivery.source_id,
-                        workspace_id=delivery.workspace_id,
-                        operation_id=delivery.operation_id,
-                        merge_candidate_id=delivery.merge_candidate_id,
-                        error_code="CALLBACK_TARGET_INVALID",
-                        error_message=redact_audit_text(str(exc), limit=256),
-                    )
-                    await repo.mark_failed_or_retry(
-                        delivery,
-                        error_code="CALLBACK_TARGET_INVALID",
-                        error_message=_bounded_error_message(f"Callback target rejected: {exc}"),
-                        response_status_code=None,
-                        backoff_seconds=subscription.initial_backoff_seconds,
-                        now=self._clock(),
-                    )
-                    continue
+                    try:
+                        validated_target = await _validate_callback_target_with_timeout(
+                            subscription.target_url,
+                            settings=self._settings,
+                            timeout=delivery_timeout,
+                        )
+                    except ValueError as exc:
+                        _log.warning(
+                            "callback.delivery_target_invalid",
+                            delivery_id=delivery.id,
+                            subscription_id=subscription.id,
+                            event_kind=delivery.event_kind,
+                            event_type=delivery.event_type,
+                            source_id=delivery.source_id,
+                            workspace_id=delivery.workspace_id,
+                            operation_id=delivery.operation_id,
+                            merge_candidate_id=delivery.merge_candidate_id,
+                            error_code="CALLBACK_TARGET_INVALID",
+                            error_message=redact_audit_text(str(exc), limit=256),
+                        )
+                        await repo.mark_failed_or_retry(
+                            delivery,
+                            error_code="CALLBACK_TARGET_INVALID",
+                            error_message=_bounded_error_message(
+                                f"Callback target rejected: {exc}"
+                            ),
+                            response_status_code=None,
+                            backoff_seconds=subscription.initial_backoff_seconds,
+                            now=self._clock(),
+                        )
+                        continue
 
-                try:
+                    remaining_timeout = delivery_deadline - monotonic_clock()
+                    if remaining_timeout <= 0:
+                        raise TimeoutError(
+                            "Callback delivery timeout expired after target validation."
+                        )
                     result = await _post_to_validated_callback_addresses(
                         self._http_poster,
                         subscription.target_url,
                         json=delivery.envelope,
                         headers=_delivery_headers(delivery),
-                        timeout=float(subscription.timeout_seconds),
+                        timeout=remaining_timeout,
                         connect_ip_addresses=validated_target.connect_ip_addresses,
                     )
                 except Exception as exc:  # noqa: BLE001 - delivery failures are isolated.
@@ -505,6 +515,27 @@ def _validate_callback_target(target_url: str, *, settings: Settings) -> Validat
         raise ValueError("target_url must use a public host")
     connect_ip_addresses = _validate_callback_target_dns(hostname=parsed.hostname)
     return ValidatedCallbackTarget(connect_ip_addresses=connect_ip_addresses)
+
+
+async def _validate_callback_target_with_timeout(
+    target_url: str,
+    *,
+    settings: Settings,
+    timeout: float,
+) -> ValidatedCallbackTarget:
+    if timeout <= 0:
+        raise TimeoutError("Callback target validation timed out before it started.")
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _validate_callback_target,
+                target_url,
+                settings=settings,
+            ),
+            timeout=timeout,
+        )
+    except TimeoutError as exc:
+        raise TimeoutError(f"Callback target validation timed out after {timeout:g}s.") from exc
 
 
 def _validate_callback_target_dns(*, hostname: str) -> tuple[str, ...]:
