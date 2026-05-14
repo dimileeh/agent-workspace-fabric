@@ -559,10 +559,50 @@ async def test_setup_dependency_retry_does_not_consume_flaky_retry_budget(
     assert command.retry_count == 2
     retry_metadata = command.metadata["setup_dependency_network"]
     assert retry_metadata["retry_count"] == 2
-    assert retry_metadata["retry_budget"] == 3
+    assert retry_metadata["retry_budget"] == 2
     assert retry_metadata["retry_exhausted"] is False
     assert retry_metadata["attempts"][0]["attempt"] == 1
     assert retry_metadata["attempts"][0]["retry_number"] == 1
+
+
+@pytest.mark.unit
+async def test_setup_dependency_network_exhaustion_reports_setup_retry_budget_only(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=1,
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+            "validation": {"retry_budget": 3},
+        }
+    )
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert not result.all_passed
+    assert len(fake.calls) == 2
+    command = result.commands[0]
+    assert command.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert command.retry_count == 1
+    retry_metadata = command.metadata["setup_dependency_network"]
+    assert retry_metadata["retry_count"] == 1
+    assert retry_metadata["retry_budget"] == 1
+    assert retry_metadata["retry_exhausted"] is True
 
 
 @pytest.mark.unit
