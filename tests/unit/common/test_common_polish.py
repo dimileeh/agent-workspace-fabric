@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from awf.common.callback_events import (
     callback_subscription_matches_event_type,
@@ -118,6 +119,14 @@ class TestSettings:
         )
 
         assert settings.network_posture_open_legacy_cutoff is None
+
+    @pytest.mark.unit
+    def test_invalid_callback_allowed_hosts_raises_validation_error(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="callbacks_allowed_hosts must be a comma-separated string, list, or tuple",
+        ):
+            Settings(_env_file=None, callbacks_allowed_hosts=123)
 
 
 class TestRedaction:

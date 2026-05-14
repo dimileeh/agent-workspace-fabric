@@ -219,7 +219,7 @@ class Settings(BaseSettings):
         elif isinstance(value, (list, tuple)):
             values = list(value)
         else:
-            raise TypeError(
+            raise ValueError(
                 "callbacks_allowed_hosts must be a comma-separated string, list, or tuple"
             )
 
