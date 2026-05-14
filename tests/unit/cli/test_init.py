@@ -225,7 +225,10 @@ def test_init_existing_profile_does_not_suggest_profile_write(
     assert "profile already exists" in result.output
     assert "awf profile preview" in result.output
     assert "awf smoke run --mocked-local --format pretty" in result.output
-    assert "awf profile init <path> --write" not in result.output
+    assert not any(
+        line.strip().startswith("awf profile init") and "--write" in line
+        for line in result.output.splitlines()
+    )
 
 
 @pytest.mark.unit
