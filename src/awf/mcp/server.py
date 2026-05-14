@@ -349,13 +349,17 @@ def build_mcp_server(
             workspace={"profile_ref": profile_ref, "profile": profile},
             validation={"commands": validation_commands, "requested_tier": requested_tier},
             resources={
-                "cpu": cpu,
-                "memory": memory,
-                "steady_state_cpu_cores": steady_state_cpu_cores,
-                "steady_state_memory_gb": steady_state_memory_gb,
-                "peak_cpu_cores": peak_cpu_cores,
-                "peak_memory_gb": peak_memory_gb,
-                "disk_mb": disk_mb,
+                k: v
+                for k, v in {
+                    "cpu": cpu,
+                    "memory": memory,
+                    "steady_state_cpu_cores": steady_state_cpu_cores,
+                    "steady_state_memory_gb": steady_state_memory_gb,
+                    "peak_cpu_cores": peak_cpu_cores,
+                    "peak_memory_gb": peak_memory_gb,
+                    "disk_mb": disk_mb,
+                }.items()
+                if v is not None
             },
             preflight={
                 "provider_readiness_override": provider_readiness_override,
