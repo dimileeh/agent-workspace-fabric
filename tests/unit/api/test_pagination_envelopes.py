@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Iterator
 
 import pytest
 from httpx import AsyncClient
@@ -13,6 +14,14 @@ from awf.common.config import get_settings
 _ENVELOPE_KEYS = {"items", "next_cursor", "has_more", "limit", "cursor"}
 _API_TOKEN = "secret"
 _AUTH_HEADERS = {"Authorization": f"Bearer {_API_TOKEN}"}
+
+
+@pytest.fixture(autouse=True)
+def _api_token_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("AWF_API_TOKEN", _API_TOKEN)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _overview_cursor() -> str:
@@ -63,23 +72,13 @@ def _assert_standard_envelope(
 )
 async def test_enveloped_list_endpoints_expose_standard_pagination_metadata(
     client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
     path: str,
     params: dict[str, object],
     expected_limit: int,
     expected_cursor: str | None,
 ) -> None:
     """Test that listing endpoints return a standard pagination metadata envelope."""
-    from awf.common.config import get_settings
-
-    monkeypatch.setenv("AWF_API_TOKEN", "secret")
-    get_settings.cache_clear()
-    try:
-        headers = {"Authorization": "Bearer secret"}
-        response = await client.get(path, params=params, headers=headers)
-    finally:
-        monkeypatch.undo()
-        get_settings.cache_clear()
+    response = await client.get(path, params=params, headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     _assert_standard_envelope(
@@ -92,30 +91,23 @@ async def test_enveloped_list_endpoints_expose_standard_pagination_metadata(
 @pytest.mark.unit
 async def test_enveloped_list_preserves_representative_item_shape(
     client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that list operations preserve the required shape of items inside the envelope."""
-    monkeypatch.setenv("AWF_API_TOKEN", _API_TOKEN)
-    get_settings.cache_clear()
-    try:
-        create = await client.post(
-            "/v1/workspaces",
-            json={
-                "repo_url": "git@github.com:example/envelope.git",
-                "branch_base": "main",
-                "task_title": "Envelope item shape",
-                "task_prompt": "Keep event item fields stable.",
-                "agent": "codex",
-                "test_commands": ["pytest -q"],
-            },
-            headers=_AUTH_HEADERS,
-        )
-        assert create.status_code == 202
+    create = await client.post(
+        "/v1/workspaces",
+        json={
+            "repo_url": "git@github.com:example/envelope.git",
+            "branch_base": "main",
+            "task_title": "Envelope item shape",
+            "task_prompt": "Keep event item fields stable.",
+            "agent": "codex",
+            "test_commands": ["pytest -q"],
+        },
+        headers=_AUTH_HEADERS,
+    )
+    assert create.status_code == 202
 
-        response = await client.get("/v1/events", params={"limit": 3}, headers=_AUTH_HEADERS)
-    finally:
-        monkeypatch.undo()
-        get_settings.cache_clear()
+    response = await client.get("/v1/events", params={"limit": 3}, headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     body = response.json()
@@ -135,16 +127,9 @@ async def test_enveloped_list_preserves_representative_item_shape(
 @pytest.mark.unit
 async def test_workspace_list_keeps_legacy_bare_array_by_default(
     client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that the legacy workspace list endpoint returns a bare array by default."""
-    monkeypatch.setenv("AWF_API_TOKEN", _API_TOKEN)
-    get_settings.cache_clear()
-    try:
-        response = await client.get("/v1/workspaces", headers=_AUTH_HEADERS)
-    finally:
-        monkeypatch.undo()
-        get_settings.cache_clear()
+    response = await client.get("/v1/workspaces", headers=_AUTH_HEADERS)
 
     assert response.status_code == 200
     assert response.json() == []
