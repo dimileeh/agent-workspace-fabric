@@ -1251,7 +1251,7 @@ def workspace_create(
     provider_recovery_json: str | None = typer.Option(
         None,
         "--provider-recovery-json",
-        help="JSON payload for task provider_recovery policy.",
+        help="JSON payload for task provider-recovery policy.",
     ),
     owned_paths: list[str] | None = typer.Option(None, "--owned-path", help="Repeatable."),
     external_id: str | None = typer.Option(None, "--external-id"),
