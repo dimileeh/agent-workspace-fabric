@@ -138,6 +138,7 @@ class TestListEvents:
     ) -> None:
         ws_id = await _create_workspace(client, "has-more-global")
         await _add_event(engine, ws_id, "workspace.phase_started", reason_code="E1")
+        await _add_event(engine, ws_id, "workspace.phase_started", reason_code="E2")
 
         response = await client.get("/v1/events", params={"limit": 1})
 
@@ -264,6 +265,7 @@ class TestListWorkspaceEvents:
     ) -> None:
         ws_id = await _create_workspace(client, "has-more-ws")
         await _add_event(engine, ws_id, "workspace.phase_started", reason_code="E1")
+        await _add_event(engine, ws_id, "workspace.phase_started", reason_code="E2")
 
         response = await client.get(
             f"/v1/workspaces/{ws_id}/events",
