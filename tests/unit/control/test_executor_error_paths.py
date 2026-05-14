@@ -271,7 +271,7 @@ def _setup_dependency_command_result(
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         phase="setup",
-        reason_code=(SETUP_DEPENDENCY_NETWORK_FAILURE if returncode else "COMMAND_FAILED"),
+        reason_code=(SETUP_DEPENDENCY_NETWORK_FAILURE if returncode else "VALIDATION_OK"),
         retry_count=2 if retry_exhausted else 1,
         metadata={
             "setup_dependency_network": _setup_dependency_metadata(retry_exhausted=retry_exhausted)
