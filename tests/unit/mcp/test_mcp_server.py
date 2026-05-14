@@ -260,27 +260,7 @@ class TestToolRegistration:
             "awf_get_service_health",
             "awf_list_events",
         } <= names
-        assert {
-            "awf_list_merge_queue",
-            "awf_list_workspace_overview",
-            "awf_list_workspace_validation",
-            "awf_list_workspace_stale_reasons",
-            "awf_list_workspace_artifacts",
-            "awf_read_workspace_artifact",
-            "awf_get_failure_analysis_summary",
-            "awf_get_workspace_reliability_summary",
-            "awf_get_resource_saturation_summary",
-            "awf_get_slo_metrics_summary",
-            "awf_get_core_release_readiness",
-            "awf_list_operations",
-            "awf_get_operation",
-            "awf_get_overlap_graph",
-            "awf_list_tasks",
-            "awf_list_task_attempts",
-            "awf_list_locks",
-            "awf_get_service_readiness",
-            "awf_get_service_health",
-        } <= names
+        # Covered by the block above (which is a superset including awf_list_events)
 
     @pytest.mark.unit
     async def test_control_tools_are_described_as_operator_controls(
