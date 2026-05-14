@@ -1652,7 +1652,7 @@ function WorkspaceList({
             }`}
           >
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
-              <div className="flex min-w-0 items-start gap-2 overflow-hidden">
+              <div className="flex min-w-0 items-start gap-2">
                 <input
                   type="checkbox"
                   checked={selectedSet.has(item.workspace_id)}
@@ -1663,23 +1663,33 @@ function WorkspaceList({
                 <button
                   type="button"
                   onClick={() => onSelect(item.workspace_id)}
-                  className="grid min-w-0 flex-1 gap-2 overflow-hidden text-left"
+                  className="grid min-w-0 flex-1 gap-2 text-left"
                 >
-                  <span className="line-clamp-2 text-sm font-semibold text-slate-950">{item.title}</span>
-                  <div className="mono truncate text-[11px] text-[var(--muted)]">{item.workspace_id}</div>
-                  <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
-                    <span className="truncate">created {formatDateTime(item.created_at)}</span>
-                    <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
+                  <span
+                    className="whitespace-normal break-words text-sm font-semibold text-slate-950"
+                    data-testid={`workspace-title-${item.workspace_id}`}
+                  >
+                    {item.title}
+                  </span>
+                  <div className="mono break-all text-[11px] text-[var(--muted)]">{item.workspace_id}</div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
+                    <span>created {formatDateTime(item.created_at)}</span>
+                    <span>updated {formatDateTime(item.updated_at)}</span>
                   </div>
-                  <div className="flex items-center gap-2 text-xs text-slate-600">
-                    <Bot size={13} aria-hidden />
-                    <span className="truncate" title={formatAgentTitle(item)}>
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
+                    <Bot size={13} aria-hidden className="shrink-0" />
+                    <span className="break-words" title={formatAgentTitle(item)}>
                       {formatAgentLabel(item)}
                     </span>
                     <span className="text-slate-300">/</span>
-                    <span className="truncate">{item.base_branch}</span>
+                    <span className="min-w-0 break-words">{item.base_branch}</span>
                   </div>
-                  <div className="truncate text-xs text-[var(--muted)]">{item.repo_url}</div>
+                  <div
+                    className="break-words text-xs text-[var(--muted)]"
+                    data-testid={`workspace-repo-${item.workspace_id}`}
+                  >
+                    {item.repo_url}
+                  </div>
                 </button>
               </div>
               <div className="flex w-28 shrink-0 flex-col items-end gap-1 sm:w-32">

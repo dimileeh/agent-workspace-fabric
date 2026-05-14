@@ -87,6 +87,33 @@ test("task details modal scrolls long prompts without moving the dashboard", asy
   await expect.poll(async () => page.evaluate(() => window.scrollY)).toBe(backgroundScrollBefore);
 });
 
+test("workspace list cards wrap long text without clipping", async ({ page }) => {
+  await page.setViewportSize({ width: 1358, height: 982 });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const title = page.getByTestId(`workspace-title-${workspaceId}`);
+  await expect(title).toContainText("policy parity title should wrap");
+  const metrics = await title.evaluate((node) => ({
+    clientHeight: node.clientHeight,
+    scrollHeight: node.scrollHeight,
+    lineHeight: Number.parseFloat(window.getComputedStyle(node).lineHeight),
+  }));
+
+  expect(metrics.clientHeight).toBeGreaterThan(metrics.lineHeight * 2.4);
+  expect(metrics.scrollHeight - metrics.clientHeight).toBeLessThanOrEqual(1);
+
+  const repo = page.getByTestId(`workspace-repo-${workspaceId}`);
+  const repoMetrics = await repo.evaluate((node) => ({
+    clientWidth: node.clientWidth,
+    scrollWidth: node.scrollWidth,
+    clientHeight: node.clientHeight,
+    scrollHeight: node.scrollHeight,
+  }));
+  expect(repoMetrics.scrollWidth - repoMetrics.clientWidth).toBeLessThanOrEqual(1);
+  expect(repoMetrics.scrollHeight - repoMetrics.clientHeight).toBeLessThanOrEqual(1);
+});
+
 test("mobile theme screenshots cover dashboard, workspace, and logs views", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await seedDarkAccessiblePreferences(page);
@@ -281,7 +308,10 @@ function workspaceOverview(id: string, status = "running") {
   return {
     workspace_id: id,
     task_id: `task-${id}`,
-    title: id === workspaceId ? "Dark theme verification workspace" : "Completed monitor verification",
+    title:
+      id === workspaceId
+        ? "P1: complete workspace create v2 CLI and MCP policy parity title should wrap fully inside the list row"
+        : "Completed monitor verification",
     task_prompt: id === workspaceId ? longTaskPrompt() : "# Task\n- Verify dark mode\n- Exercise high contrast and large font",
     repo_url: "https://github.com/example/awf",
     base_branch: "codex/awf-post-merge-fixes",
