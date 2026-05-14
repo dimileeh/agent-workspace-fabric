@@ -1340,19 +1340,15 @@ def workspace_create(
     if human_boost is not None:
         body["task"]["human_boost"] = human_boost
     if out_of_scope_changes_json is not None:
-        out_of_scope_changes = _parse_json_option(
+        body["task"]["out_of_scope_changes"] = _parse_json_option(
             "--out-of-scope-changes-json",
             out_of_scope_changes_json,
         )
-        if out_of_scope_changes is not None:
-            body["task"]["out_of_scope_changes"] = out_of_scope_changes
     if provider_recovery_json is not None:
-        provider_recovery = _parse_json_option(
+        body["task"]["provider_recovery"] = _parse_json_option(
             "--provider-recovery-json",
             provider_recovery_json,
         )
-        if provider_recovery is not None:
-            body["task"]["provider_recovery"] = provider_recovery
     if owned_paths is not None:
         body["task"]["owned_paths"] = owned_paths
 
