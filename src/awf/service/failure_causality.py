@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 
@@ -322,10 +323,7 @@ async def _latest_failed_state_event(
         WorkspaceEvent.new_state == WorkspaceStatus.failed.value,
     )
     if require_primary_failure:
-        # AWF's control-plane database is PostgreSQL. This JSON type predicate
-        # is intentionally not dialect-neutral; add dialect-specific handling
-        # before reusing this helper in SQLite-backed fixtures.
-        stmt = stmt.where(func.json_typeof(WorkspaceEvent.payload[PRIMARY_FAILURE_KEY]) == "object")
+        stmt = stmt.where(_json_payload_object_predicate(session, PRIMARY_FAILURE_KEY))
     stmt = stmt.order_by(
         WorkspaceEvent.occurred_at.desc(),
         WorkspaceEvent.event_order.desc().nullslast(),
@@ -341,7 +339,7 @@ async def _has_failure_epoch_reset_after(
     stmt = (
         select(WorkspaceEvent.id)
         .where(
-            *_failure_epoch_reset_conditions(workspace_id),
+            *_failure_epoch_reset_conditions(session, workspace_id),
             _event_occurs_after_or_at_same_tick(event),
         )
         .limit(1)
@@ -357,7 +355,7 @@ async def _latest_failure_epoch_reset_before(
     stmt = (
         select(WorkspaceEvent)
         .where(
-            *_failure_epoch_reset_conditions(workspace_id),
+            *_failure_epoch_reset_conditions(session, workspace_id),
             _event_occurs_before_or_at_same_tick(event),
         )
         .order_by(
@@ -427,7 +425,10 @@ async def _secondary_failure_history_for_current_epoch(
     return tuple(_bounded_secondary_failure_history(failures))
 
 
-def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bool], ...]:
+def _failure_epoch_reset_conditions(
+    session: AsyncSession,
+    workspace_id: str,
+) -> tuple[ColumnElement[bool], ...]:
     return (
         WorkspaceEvent.workspace_id == workspace_id,
         or_(
@@ -437,15 +438,38 @@ def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bo
             ),
             and_(
                 WorkspaceEvent.event_type == "workspace.remonitor_requested",
-                # See _latest_failed_state_event: this PostgreSQL JSON type
-                # check is intentional for AWF's Postgres-backed control plane.
-                func.json_typeof(WorkspaceEvent.payload["state_reset"]) == "object",
+                _json_payload_object_predicate(session, "state_reset"),
                 WorkspaceEvent.payload["state_reset"]["to"]
                 .as_string()
                 .in_(_FAILURE_EPOCH_RESET_STATES),
             ),
         ),
     )
+
+
+def _json_payload_object_predicate(
+    session: AsyncSession,
+    key: str,
+) -> ColumnElement[bool]:
+    dialect_name = _session_dialect_name(session)
+    if dialect_name == "postgresql":
+        return func.json_typeof(WorkspaceEvent.payload[key]) == "object"
+    if dialect_name == "sqlite":
+        return func.json_type(WorkspaceEvent.payload, f"$.{key}") == "object"
+    return false()
+
+
+def _session_dialect_name(session: AsyncSession) -> str | None:
+    info_value = session.info.get(SESSION_DIALECT_NAME_KEY)
+    if isinstance(info_value, str):
+        return info_value
+
+    bind = getattr(session, "bind", None)
+    if bind is None:
+        return None
+    dialect = getattr(bind, "dialect", None)
+    name = getattr(dialect, "name", None)
+    return name if isinstance(name, str) else None
 
 
 def _event_occurs_after_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[bool]:

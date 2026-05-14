@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.sql import Select
 
+from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
@@ -20,6 +24,22 @@ from awf.service.failure_causality import (
     load_primary_failure_snapshot,
     restore_primary_failure_row_fields,
 )
+
+
+class _ScalarNoneResult:
+    def scalar_one_or_none(self) -> None:
+        return None
+
+
+class _RecordingSession:
+    def __init__(self, dialect_name: str) -> None:
+        self.info = {SESSION_DIALECT_NAME_KEY: dialect_name}
+        self.bind = None
+        self.statements: list[Select[Any]] = []
+
+    async def execute(self, statement: Select[Any]) -> _ScalarNoneResult:
+        self.statements.append(statement)
+        return _ScalarNoneResult()
 
 
 @pytest.fixture
@@ -124,6 +144,61 @@ def test_restore_primary_failure_row_fields_clears_missing_failure_message() -> 
 
     assert workspace.failure_reason == FailureReason.validation_failure.value
     assert workspace.failure_message is None
+
+
+@pytest.mark.unit
+async def test_latest_failed_state_event_uses_sqlite_json_type_for_primary_filter() -> None:
+    session = _RecordingSession("sqlite")
+
+    await failure_causality_service._latest_failed_state_event(
+        session,  # type: ignore[arg-type]
+        "ws_sqlite_primary_filter",
+        require_primary_failure=True,
+    )
+
+    sql = str(session.statements[0].compile(dialect=sqlite.dialect()))
+    assert "json_typeof" not in sql
+    assert "json_type" in sql
+
+
+@pytest.mark.unit
+async def test_failure_epoch_reset_detection_uses_sqlite_json_type_for_remonitor_reset() -> None:
+    session = _RecordingSession("sqlite")
+    failed_event = WorkspaceEvent(
+        id="evt_sqlite_failed_event",
+        workspace_id="ws_sqlite_reset_filter",
+        event_type="workspace.state_changed",
+        old_state=WorkspaceStatus.running.value,
+        new_state=WorkspaceStatus.failed.value,
+        reason_code="PYTEST_TEST_FAILURE",
+        payload={"reason_code": "PYTEST_TEST_FAILURE"},
+        occurred_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        event_order=1,
+    )
+
+    await failure_causality_service._has_failure_epoch_reset_after(
+        session,  # type: ignore[arg-type]
+        "ws_sqlite_reset_filter",
+        failed_event,
+    )
+
+    sql = str(session.statements[0].compile(dialect=sqlite.dialect()))
+    assert "json_typeof" not in sql
+    assert "json_type" in sql
+
+
+@pytest.mark.unit
+async def test_failure_causality_json_object_filters_keep_postgresql_json_typeof() -> None:
+    session = _RecordingSession("postgresql")
+
+    await failure_causality_service._latest_failed_state_event(
+        session,  # type: ignore[arg-type]
+        "ws_postgresql_primary_filter",
+        require_primary_failure=True,
+    )
+
+    sql = str(session.statements[0].compile(dialect=postgresql.dialect()))
+    assert "json_typeof" in sql
 
 
 @pytest.mark.unit

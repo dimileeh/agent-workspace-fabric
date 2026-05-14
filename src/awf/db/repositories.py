@@ -3631,7 +3631,13 @@ class WorkspaceRepository:
         )
 
     async def advance_workspace_version(self, workspace: Workspace) -> int:
-        """Advance the optimistic-control version for a real workspace mutation."""
+        """Advance the optimistic-control version for a real workspace mutation.
+
+        ``updated_at`` is intentionally preserved for this helper's atomic
+        UPDATE. Callers that also mutate workspace content fields rely on their
+        ORM writes and the Workspace ``onupdate`` hook to record the actual
+        content-change timestamp.
+        """
         result = await self._session.execute(
             update(Workspace)
             .where(Workspace.id == workspace.id)
