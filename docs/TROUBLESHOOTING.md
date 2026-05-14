@@ -373,8 +373,11 @@ If you installed `awf` outside the source tree, inspect those containers directl
 
 ```bash
 export AWF_LOCAL_SERVICE_PROJECT="awf-local-service"
-docker ps --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --format "{{.Names}}"
-docker logs -f $(docker ps --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --format "{{.ID}}" | head -n 1)
+docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
+docker logs -f $(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=api" --format "{{.ID}}" | head -n 1)
+docker logs -f $(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=worker" --format "{{.ID}}" | head -n 1)
+docker logs -f $(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=migrate" --format "{{.ID}}" | head -n 1)
+docker logs -f $(docker ps -a --filter "label=com.docker.compose.project=${AWF_LOCAL_SERVICE_PROJECT}" --filter "label=com.docker.compose.service=postgres" --format "{{.ID}}" | head -n 1)
 ```
 
 Workspace-level logs:
