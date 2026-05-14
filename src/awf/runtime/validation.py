@@ -557,12 +557,6 @@ _UV_SETUP_DEPENDENCY_NESTED_SUBCOMMAND_TOKENS = {
 }
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _SHELL_COMPOUND_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "|&", "&"})
-_SETUP_DEPENDENCY_CONTEXT_RE = re.compile(
-    r"(?i)\b("
-    r"dependency|dependencies|download|fetch|index|package|packages|pypi|pythonhosted|"
-    r"registry|resolver|wheel"
-    r")\b"
-)
 _SETUP_DEPENDENCY_SIMPLE_INDEX_RE = re.compile(r"(?i)/simple(?:[/?#:\s]|$)")
 _SETUP_DEPENDENCY_KNOWN_INDEX_HOSTS = frozenset(
     {
@@ -734,28 +728,16 @@ def _combined_setup_dependency_output(*, stdout: str, stderr: str) -> str:
 
 def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
     tokens = _shell_tokens(command) or []
-    output_has_dependency_context = _setup_dependency_output_has_context(output)
     compound_command = _has_shell_compound_control_operator(command)
-    compound_output_has_dependency_context = _setup_dependency_output_has_specific_context(output)
+    specific_output_has_dependency_context = _setup_dependency_output_has_specific_context(output)
     dependency_command_match = _non_uv_dependency_setup_command_match(tokens)
     if dependency_command_match is not None:
         if dependency_command_match and compound_command:
-            return compound_output_has_dependency_context
+            return specific_output_has_dependency_context
         return dependency_command_match
     if _looks_like_uv_dependency_setup_command(tokens):
-        return compound_output_has_dependency_context if compound_command else True
-    return (
-        compound_output_has_dependency_context
-        if compound_command
-        else output_has_dependency_context
-    )
-
-
-def _setup_dependency_output_has_context(output: str) -> bool:
-    return bool(
-        _SETUP_DEPENDENCY_CONTEXT_RE.search(output)
-        or _SETUP_DEPENDENCY_SIMPLE_INDEX_RE.search(output)
-    )
+        return specific_output_has_dependency_context if compound_command else True
+    return specific_output_has_dependency_context
 
 
 def _setup_dependency_output_has_specific_context(output: str) -> bool:
