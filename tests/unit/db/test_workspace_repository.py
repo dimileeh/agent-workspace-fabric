@@ -2322,6 +2322,7 @@ class TestAddEvents:
     async def test_batch_reserves_event_order_without_advancing_workspace_version(
         self,
         session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         repo = WorkspaceRepository(session)
         workspace = await repo.create(
@@ -2334,6 +2335,19 @@ class TestAddEvents:
         )
         workspace_version = workspace.version
         workspace_updated_at = workspace.updated_at
+        committed_attrs: list[str] = []
+        original_set_committed_value = repositories.set_committed_value
+
+        def _record_committed_value(target: object, key: str, value: object) -> None:
+            if target is workspace:
+                committed_attrs.append(key)
+            original_set_committed_value(target, key, value)
+
+        monkeypatch.setattr(
+            repositories,
+            "set_committed_value",
+            _record_committed_value,
+        )
 
         events = await repo.add_events(
             workspace,
@@ -2368,6 +2382,7 @@ class TestAddEvents:
         assert workspace.version == workspace_version
         assert workspace.event_sequence == next_event_sequence + 1
         assert workspace.updated_at == workspace_updated_at
+        assert committed_attrs == ["event_sequence", "event_sequence"]
 
     @pytest.mark.unit
     async def test_add_event_with_states_reserves_order_and_uses_explicit_states(

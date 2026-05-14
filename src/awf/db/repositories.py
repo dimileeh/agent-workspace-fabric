@@ -3682,9 +3682,10 @@ class WorkspaceRepository:
         )
         row = result.one()
         new_event_sequence = cast(int, row[0])
-        new_version = cast(int, row[1])
         set_committed_value(workspace, "event_sequence", new_event_sequence)
-        set_committed_value(workspace, "version", new_version)
+        if bump_version:
+            new_version = cast(int, row[1])
+            set_committed_value(workspace, "version", new_version)
         return new_event_sequence - count + 1
 
     async def add_events(
