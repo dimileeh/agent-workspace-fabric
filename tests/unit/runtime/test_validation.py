@@ -516,6 +516,26 @@ def test_setup_dependency_network_classifier_accepts_install_package_manager_ver
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_accepts_go_mod_download_proxy_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="go mod download",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "go: golang.org/x/text@v0.3.7: Get "
+            '"https://proxy.golang.org/golang.org/x/text/@v/v0.3.7.mod": '
+            "dial tcp: lookup proxy.golang.org: temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == "dns"
+    assert classification.host == "proxy.golang.org"
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_ignores_unrelated_5xx_numbers() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="uv sync --extra dev",

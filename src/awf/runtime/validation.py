@@ -520,6 +520,9 @@ _SETUP_DEPENDENCY_COMMAND_VERBS: dict[str, frozenset[str]] = {
     "poetry": frozenset({"add", "install", "lock", "sync", "update"}),
     "yarn": frozenset({"add", "install", "up", "upgrade"}),
 }
+_SETUP_DEPENDENCY_NESTED_COMMAND_VERBS: dict[str, dict[str, frozenset[str]]] = {
+    "go": {"mod": frozenset({"download"})},
+}
 _SETUP_DEPENDENCY_OPTION_VALUE_FLAGS = frozenset(
     {
         "--cache",
@@ -882,7 +885,19 @@ def _direct_dependency_setup_command_match(tokens: list[str], *, start: int) -> 
     if subcommand_index is None:
         return False
     subcommand = _command_token_name(tokens[subcommand_index]).lower()
-    return subcommand in allowed_verbs
+    if subcommand in allowed_verbs:
+        return True
+    nested_allowed_verbs = _SETUP_DEPENDENCY_NESTED_COMMAND_VERBS.get(command, {}).get(subcommand)
+    if nested_allowed_verbs is None:
+        return False
+    nested_subcommand_index = _next_dependency_tool_subcommand_index(
+        tokens,
+        start=subcommand_index + 1,
+    )
+    if nested_subcommand_index is None:
+        return False
+    nested_subcommand = _command_token_name(tokens[nested_subcommand_index]).lower()
+    return nested_subcommand in nested_allowed_verbs
 
 
 def _python_module_pip_dependency_setup_command_match(
