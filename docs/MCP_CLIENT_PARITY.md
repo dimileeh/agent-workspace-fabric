@@ -28,6 +28,8 @@ The key maps to REST `Idempotency-Key`: same key and same effective create
 payload returns the existing workspace, while same key and changed payload
 returns structured `IDEMPOTENCY_CONFLICT`.
 
+**MCP create effort field note:** The agent `effort` field is intentionally excluded from `awf_create_workspace`, `awf_create_workspace_v2`, and the CLI `awf workspace create` command. It is explicitly provider-derived and resolved via the workspace profile or provider defaults, not supplied as a direct user input flag.
+
 **MCP log and operation response migration note:** MCP log and operation tools
 now use REST-compatible response models. `awf_read_workspace_log` returns
 `WorkspaceLogReadResponse`, so clients should read log content from `data`

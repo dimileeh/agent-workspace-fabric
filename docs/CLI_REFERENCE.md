@@ -128,6 +128,8 @@ uv run --python 3.12 --extra dev awf workspace create \
   --test "pytest -q"
 ```
 
+*Note: The agent `effort` field is explicitly provider-derived (resolved from the workspace profile or provider default) and is not exposed as a direct input flag on the CLI or MCP tools.*
+
 Add `--no-auto-merge` to keep monitoring after AWF posts the ready-for-human
 comment, and `--initial-review-grace-period-seconds 0` only for explicit
 fast-path tests.

@@ -1,0 +1,7 @@
+{
+  "status": "needs_iteration",
+  "summary": "The implementation successfully adds the v2 CLI parity flags, updates MCP create with the missing resource and priority fields, and implements multi-status filtering across the CLI, API, service, and DB layers. The test coverage validates these changes correctly. However, the requirement to document that `effort` is a provider-derived field rather than a direct CLI flag was missed.",
+  "gaps": [
+    "The plan requires updating `docs/CLI_REFERENCE.md` and/or `docs/MCP_CLIENT_PARITY.md` to note that `effort` is explicitly provider-derived and not a direct input flag, but the word `effort` is missing from both files."
+  ]
+}
