@@ -3499,6 +3499,24 @@ class TestListWorkspaces:
         assert response.json() == []
 
     @pytest.mark.unit
+    async def test_list_workspaces_multi_status(self, client: AsyncClient) -> None:
+        ws_requested1 = await _create_workspace(client, task_title="Requested ws 1")
+        ws_requested2 = await _create_workspace(client, task_title="Requested ws 2")
+
+        # By default, a newly created workspace is 'requested'. Let's search for 'requested'.
+        response = await client.get("/v1/workspaces?status=requested&status=running")
+
+        assert response.status_code == 200
+        result_ids = [item["id"] for item in response.json()]
+        assert ws_requested1 in result_ids
+        assert ws_requested2 in result_ids
+
+        # also test one that matches nothing
+        response2 = await client.get("/v1/workspaces?status=completed&status=failed")
+        assert response2.status_code == 200
+        assert response2.json() == []
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("param", "value"),
         [("status", "not-a-status"), ("agent", "not-an-agent")],

@@ -265,6 +265,8 @@ def build_mcp_server(
             default=None,
             description="Optional PRD policy class for scheduling and overlap-risk policy.",
         ),
+        priority: int = Field(default=0, ge=0, le=100, description="Optional priority."),
+        human_boost: int = Field(default=0, ge=0, le=5, description="Optional priority boost."),
         owned_paths: list[OwnedPath] = Field(
             default_factory=list,
             max_length=128,
@@ -288,6 +290,21 @@ def build_mcp_server(
             le=3,
             description="Requested validation tier hint.",
         ),
+        cpu: float | None = Field(default=None, gt=0, description="Optional CPU request."),
+        memory: str | None = Field(
+            default=None, max_length=32, description="Optional memory request."
+        ),
+        steady_state_cpu_cores: float | None = Field(
+            default=None, gt=0, description="Optional steady-state CPU."
+        ),
+        steady_state_memory_gb: float | None = Field(
+            default=None, gt=0, description="Optional steady-state memory."
+        ),
+        peak_cpu_cores: float | None = Field(default=None, gt=0, description="Optional peak CPU."),
+        peak_memory_gb: float | None = Field(
+            default=None, gt=0, description="Optional peak memory."
+        ),
+        disk_mb: int | None = Field(default=None, gt=0, description="Optional disk MB request."),
         auto_merge: bool = Field(
             default=True,
             description="Whether AWF may merge once gates are green.",
@@ -323,12 +340,23 @@ def build_mcp_server(
                 "model": model,
                 "external_id": task_external_id,
                 "task_class": task_class,
+                "priority": priority,
+                "human_boost": human_boost,
                 "owned_paths": owned_paths,
                 "auto_merge": auto_merge,
                 "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
             },
             workspace={"profile_ref": profile_ref, "profile": profile},
             validation={"commands": validation_commands, "requested_tier": requested_tier},
+            resources={
+                "cpu": cpu,
+                "memory": memory,
+                "steady_state_cpu_cores": steady_state_cpu_cores,
+                "steady_state_memory_gb": steady_state_memory_gb,
+                "peak_cpu_cores": peak_cpu_cores,
+                "peak_memory_gb": peak_memory_gb,
+                "disk_mb": disk_mb,
+            },
             preflight={
                 "provider_readiness_override": provider_readiness_override,
                 "provider_readiness_override_reason": provider_readiness_override_reason,
@@ -400,9 +428,9 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_list_workspaces")
     async def awf_list_workspaces(
-        status: WorkspaceStatus | None = Field(
+        status: list[WorkspaceStatus] | WorkspaceStatus | None = Field(
             default=None,
-            description="Optional workspace status filter.",
+            description="Optional workspace status filter. Can be a single status or a list of statuses.",
         ),
         agent: AgentRuntime | None = Field(
             default=None,

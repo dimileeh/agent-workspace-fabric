@@ -1842,6 +1842,82 @@ class TestGetAndList:
         assert [row["id"] for row in listed] == [_workspace_id(matching)]
         assert _workspace_id(wrong_status) not in [row["id"] for row in listed]
 
+    @pytest.mark.unit
+    async def test_awf_list_workspaces_multi_status(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        repo_url = "git@github.com:example/filtered.git"
+        ws1 = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": repo_url,
+                "task_title": "ws1",
+            },
+        )
+        ws2 = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": repo_url,
+                "task_title": "ws2",
+            },
+        )
+        ws3 = await _call(
+            mcp,
+            "awf_create_workspace",
+            {
+                **_CREATE_ARGS,
+                "repo_url": repo_url,
+                "task_title": "ws3",
+            },
+        )
+
+        assert isinstance(ws1, dict)
+        assert isinstance(ws2, dict)
+        assert isinstance(ws3, dict)
+
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            w1 = await repo.get(str(_workspace_id(ws1)))
+            assert w1 is not None
+            await repo.transition(w1, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            await repo.transition(w1, to=WorkspaceStatus.ready, reason_code="TEST")
+            await repo.transition(w1, to=WorkspaceStatus.running, reason_code="TEST")
+
+            w2 = await repo.get(str(_workspace_id(ws2)))
+            assert w2 is not None
+            await repo.transition(w2, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            await repo.transition(w2, to=WorkspaceStatus.ready, reason_code="TEST")
+            await repo.transition(w2, to=WorkspaceStatus.running, reason_code="TEST")
+            await repo.transition(w2, to=WorkspaceStatus.validating, reason_code="TEST")
+            await repo.transition(w2, to=WorkspaceStatus.monitoring_pr, reason_code="TEST")
+
+            w3 = await repo.get(str(_workspace_id(ws3)))
+            assert w3 is not None
+            # ws3 stays at requested
+
+            await session.commit()
+
+        listed = await _call(
+            mcp,
+            "awf_list_workspaces",
+            {
+                "status": ["running", "monitoring_pr"],
+                "limit": 10,
+            },
+        )
+
+        assert isinstance(listed, list)
+        listed_ids = [row["id"] for row in listed]
+        assert _workspace_id(ws1) in listed_ids
+        assert _workspace_id(ws2) in listed_ids
+        assert _workspace_id(ws3) not in listed_ids
+
 
 class TestWaitForWorkspace:
     @pytest.mark.unit

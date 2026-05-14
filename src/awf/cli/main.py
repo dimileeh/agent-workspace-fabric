@@ -1228,6 +1228,19 @@ def workspace_create(
     task_prompt: str = typer.Option(..., "--prompt"),
     branch_base: str = typer.Option("development", "--base"),
     agent: str = typer.Option("codex", "--agent"),
+    model: str | None = typer.Option(None, "--model"),
+    task_class: TaskClass | None = typer.Option(None, "--task-class"),
+    priority: int = typer.Option(0, "--priority"),
+    human_boost: int = typer.Option(0, "--human-boost"),
+    owned_paths: list[str] = typer.Option([], "--owned-path", help="Repeatable."),
+    external_id: str | None = typer.Option(None, "--external-id"),
+    cpu: float | None = typer.Option(None, "--cpu"),
+    memory: str | None = typer.Option(None, "--memory"),
+    steady_state_cpu_cores: float | None = typer.Option(None, "--steady-state-cpu-cores"),
+    steady_state_memory_gb: float | None = typer.Option(None, "--steady-state-memory-gb"),
+    peak_cpu_cores: float | None = typer.Option(None, "--peak-cpu-cores"),
+    peak_memory_gb: float | None = typer.Option(None, "--peak-memory-gb"),
+    disk_mb: int | None = typer.Option(None, "--disk-mb"),
     profile_ref: str = typer.Option("auto", "--profile"),
     test_commands: list[str] = typer.Option([], "--test", help="Repeatable."),
     requires_database: bool = typer.Option(
@@ -1262,7 +1275,7 @@ def workspace_create(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Submit a workspace creation request."""
-    body = {
+    body: dict[str, Any] = {
         "repo": {"url": repo_url, "base_branch": branch_base},
         "task": {
             "title": task_title,
@@ -1271,6 +1284,9 @@ def workspace_create(
             "kind": "feature_branch_pr",
             "auto_merge": auto_merge,
             "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
+            "priority": priority,
+            "human_boost": human_boost,
+            "owned_paths": owned_paths,
         },
         "workspace": {"profile_ref": "aira" if requires_database else profile_ref, "profile": None},
         "validation": {"commands": test_commands, "requested_tier": 1},
@@ -1280,6 +1296,29 @@ def workspace_create(
             "provider_readiness_override_reason": provider_readiness_override_reason,
         },
     }
+
+    if model is not None:
+        body["task"]["model"] = model
+    if task_class is not None:
+        body["task"]["task_class"] = task_class.value
+    if external_id is not None:
+        body["task"]["external_id"] = external_id
+
+    if cpu is not None:
+        body["resources"]["cpu"] = cpu
+    if memory is not None:
+        body["resources"]["memory"] = memory
+    if steady_state_cpu_cores is not None:
+        body["resources"]["steady_state_cpu_cores"] = steady_state_cpu_cores
+    if steady_state_memory_gb is not None:
+        body["resources"]["steady_state_memory_gb"] = steady_state_memory_gb
+    if peak_cpu_cores is not None:
+        body["resources"]["peak_cpu_cores"] = peak_cpu_cores
+    if peak_memory_gb is not None:
+        body["resources"]["peak_memory_gb"] = peak_memory_gb
+    if disk_mb is not None:
+        body["resources"]["disk_mb"] = disk_mb
+
     headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
     response = _call(
         "POST",
@@ -1650,7 +1689,7 @@ def workspace_adopt_pr(
 
 @workspace_app.command("list")
 def workspace_list(
-    status: WorkspaceStatus | None = typer.Option(None, "--status"),
+    status: list[WorkspaceStatus] = typer.Option(None, "--status"),
     agent: AgentRuntime | None = typer.Option(None, "--agent"),
     repo_url: str | None = typer.Option(None, "--repo-url"),
     limit: int = typer.Option(50, "--limit"),
@@ -1658,18 +1697,20 @@ def workspace_list(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """List workspaces (newest first)."""
-    params: dict[str, Any] = {"limit": limit}
-    if status is not None:
-        params["status"] = status.value
+    params_list: list[tuple[str, Any]] = [("limit", limit)]
+    if status:
+        for s in status:
+            params_list.append(("status", s.value))
     if agent is not None:
-        params["agent"] = agent.value
+        params_list.append(("agent", agent.value))
     if repo_url is not None:
-        params["repo_url"] = repo_url
+        params_list.append(("repo_url", repo_url))
+
     response = _call(
         "GET",
         "/v1/workspaces",
         base_url=_base_url(base_url),
-        params=params,
+        params=params_list,
     )
     _handle_response(response, fmt)
 
