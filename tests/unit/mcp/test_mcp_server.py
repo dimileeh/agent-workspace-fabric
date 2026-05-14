@@ -688,6 +688,7 @@ class TestToolRegistration:
         assert workspace_events_props["limit"]["default"] == 50
         assert workspace_events_props["limit"]["minimum"] == 1
         assert workspace_events_props["limit"]["maximum"] == 500
+        assert "cursor" not in workspace_events_props
         readiness_props = tools["awf_get_service_readiness"].inputSchema["properties"]
         assert "limit" not in readiness_props
         assert "providers" in readiness_props
