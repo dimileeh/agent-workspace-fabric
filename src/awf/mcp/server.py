@@ -125,7 +125,6 @@ RuntimeHealthSummaryProvider = Callable[
 
 _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
 _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
-_TASK_NON_NULLABLE_INT_FIELDS = frozenset({"priority", "human_boost"})
 
 
 class ReadinessProvider(Protocol):
@@ -368,7 +367,7 @@ def build_mcp_server(
                     "auto_merge": auto_merge,
                     "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
                 }.items()
-                if v is not None or k not in _TASK_NON_NULLABLE_INT_FIELDS
+                if v is not None
             },
             workspace={"profile_ref": profile_ref, "profile": profile},
             validation={"commands": validation_commands, "requested_tier": requested_tier},
