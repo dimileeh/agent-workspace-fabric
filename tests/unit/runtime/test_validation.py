@@ -207,6 +207,24 @@ def test_setup_dependency_network_classifier_extracts_uv_pypi_dns_failure() -> N
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_version_like_fallback_host() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Failed to download docker==7.1.0 after request retries: "
+            "dns error: failed to lookup address information"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.package == "docker==7.1.0"
+    assert classification.host is None
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_skips_uv_run_script_dns_failure() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="uv run python scripts/bootstrap.py",

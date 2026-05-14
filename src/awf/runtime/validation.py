@@ -740,8 +740,11 @@ def _extract_setup_dependency_host(text: str) -> str | None:
             return host
     for match in _SETUP_HOST_FALLBACK_RE.finditer(text):
         candidate = match.group(1).strip(".")
-        if not candidate.endswith((".py", ".toml", ".lock")):
-            return candidate
+        if candidate.endswith((".py", ".toml", ".lock")):
+            continue
+        if re.fullmatch(r"[\d.]+", candidate):
+            continue
+        return candidate
     return None
 
 
