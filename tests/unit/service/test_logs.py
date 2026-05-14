@@ -21,6 +21,17 @@ from awf.service.logs import (
 )
 
 
+@pytest.fixture
+def _default_local_service_compose_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services: {}")
+    monkeypatch.chdir(tmp_path)
+
+
 @pytest.mark.unit
 def test_service_logs_command_defaults_and_follow_flag() -> None:
     command = service_logs_command(services=[], tail=25, compose_file=Path("compose.yml"))
@@ -55,6 +66,7 @@ def test_service_logs_command_defaults_and_follow_flag() -> None:
     ]
 
 
+@pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_returns_captured_output_for_non_follow_success() -> None:
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -68,6 +80,7 @@ def test_service_logs_returns_captured_output_for_non_follow_success() -> None:
     assert result.stderr == "err"
 
 
+@pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_follow_failure_mentions_terminal_output() -> None:
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -88,6 +101,7 @@ def test_service_logs_follow_failure_mentions_terminal_output() -> None:
     )
 
 
+@pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 @pytest.mark.parametrize("returncode", [128 + signal.SIGINT, -signal.SIGINT])
 def test_service_logs_follow_interrupt_return_codes_are_success(returncode: int) -> None:
@@ -104,6 +118,7 @@ def test_service_logs_follow_interrupt_return_codes_are_success(returncode: int)
     assert result.stderr == ""
 
 
+@pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_follow_keyboard_interrupt_returns_empty_result() -> None:
     def _run(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -119,6 +134,7 @@ def test_service_logs_follow_keyboard_interrupt_returns_empty_result() -> None:
     assert result.stderr == ""
 
 
+@pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_non_follow_keyboard_interrupt_propagates() -> None:
     def _run(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -132,6 +148,7 @@ def test_service_logs_non_follow_keyboard_interrupt_propagates() -> None:
         )
 
 
+@pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("raised", "returncode", "detail"),
@@ -155,6 +172,7 @@ def test_service_logs_subprocess_start_errors_become_structured_failures(
     assert exc_info.value.detail == detail
 
 
+@pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_failure_prefers_stderr_then_stdout_then_generic_detail() -> None:
     def stderr_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -178,6 +196,7 @@ def test_service_logs_failure_prefers_stderr_then_stdout_then_generic_detail() -
     assert empty_error.value.detail == "docker compose returned a non-zero exit status"
 
 
+@pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
 def test_service_logs_follow_success_discards_uncaptured_output() -> None:
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
