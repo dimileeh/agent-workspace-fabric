@@ -437,7 +437,7 @@ def _validate_callback_target(target_url: str, *, settings: Settings) -> Validat
     if parsed.fragment:
         raise ValueError("target_url must not include a fragment")
 
-    host = _normalize_callback_host(parsed.hostname)
+    host = parsed.hostname.rstrip(".")
     if settings.callbacks_require_https and parsed.scheme != "https":
         raise ValueError("target_url must use https")
     if settings.callbacks_allowed_hosts and host not in settings.callbacks_allowed_hosts:
@@ -446,10 +446,6 @@ def _validate_callback_target(target_url: str, *, settings: Settings) -> Validat
         raise ValueError("target_url must use a public host")
     connect_ip_address = _validate_callback_target_dns(hostname=parsed.hostname)
     return ValidatedCallbackTarget(connect_ip_address=connect_ip_address)
-
-
-def _normalize_callback_host(hostname: str) -> str:
-    return hostname.lower().rstrip(".")
 
 
 def _validate_callback_target_dns(*, hostname: str) -> str:
