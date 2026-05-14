@@ -21,7 +21,7 @@ def _resolve_local_service_compose_file(compose_file: Path) -> Path:
     if compose_file != LOCAL_SERVICE_COMPOSE_FILE:
         return compose_file
     if compose_file.exists():
-        return compose_file
+        return compose_file.resolve()
     for root in Path.cwd().parents:
         candidate = root / compose_file
         if candidate.exists():

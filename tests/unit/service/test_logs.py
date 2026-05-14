@@ -259,7 +259,7 @@ def test_service_logs_defaults_to_relative_compose_path_in_cwd(
             "docker",
             "compose",
             "-f",
-            str(compose_file.relative_to(tmp_path)),
+            str(compose_file),
             "logs",
             "--tail",
             str(DEFAULT_LOG_TAIL),
