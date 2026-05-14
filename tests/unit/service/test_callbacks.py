@@ -478,6 +478,39 @@ async def test_default_httpx_poster_pins_connection_to_validated_callback_addres
 
 
 @pytest.mark.unit
+async def test_default_httpx_poster_uses_no_extensions_for_pinned_http_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeAsyncClient.instances = []
+    monkeypatch.setattr(callback_service_module.httpx, "AsyncClient", _FakeAsyncClient)
+
+    result = await callback_service_module._httpx_post_json(
+        "http://operator.example.com:8080/events?attempt=1",
+        json={"event": {"type": "workspace.state_changed"}},
+        headers={"Idempotency-Key": "callback-delivery:test"},
+        timeout=3.5,
+        connect_ip_address="1.1.1.1",
+    )
+
+    assert result == CallbackPostResult(status_code=207)
+    assert len(_FakeAsyncClient.instances) == 1
+    client = _FakeAsyncClient.instances[0]
+    assert client.exited
+    assert client.posts == [
+        _FakeHttpxPost(
+            url="http://1.1.1.1:8080/events?attempt=1",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={
+                "Idempotency-Key": "callback-delivery:test",
+                "Host": "operator.example.com:8080",
+            },
+            timeout=3.5,
+            extensions=None,
+        )
+    ]
+
+
+@pytest.mark.unit
 async def test_workspace_event_envelope_is_sanitized_and_replay_safe(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -686,7 +719,7 @@ async def test_successful_delivery_posts_sanitized_json_and_marks_succeeded(
 
 
 @pytest.mark.unit
-async def test_successful_delivery_falls_back_across_validated_callback_addresses(
+async def test_successful_delivery_prefers_ipv4_then_falls_back_across_validated_callback_addresses(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -701,15 +734,15 @@ async def test_successful_delivery_falls_back_across_validated_callback_addresse
         await session.commit()
     delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
     poster = _AddressFallbackPoster(
-        failing_addresses={"2606:4700:4700::1111"},
+        failing_addresses={"1.1.1.1"},
         status_code=202,
     )
 
     await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
 
     assert [call.connect_ip_address for call in poster.calls] == [
-        "2606:4700:4700::1111",
         "1.1.1.1",
+        "2606:4700:4700::1111",
     ]
     stored = await _get_delivery(factory, delivery.id)
     assert stored.status == CallbackDeliveryStatus.succeeded.value
@@ -946,9 +979,23 @@ async def test_drain_due_rejects_callbacks_with_private_delivery_target(
         lambda _hostname: ("127.0.0.1",),
     )
     poster = _RecordingPoster()
-    await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
 
     assert poster.calls == []
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_target_invalid"
+    )
+    assert log_entry["delivery_id"] == deliveries[0].id
+    assert log_entry["subscription_id"] == deliveries[0].subscription_id
+    assert log_entry["event_kind"] == "workspace"
+    assert log_entry["event_type"] == "workspace.state_changed"
+    assert log_entry["source_id"] == deliveries[0].source_id
+    assert log_entry["workspace_id"] == workspace_id
+    assert log_entry["operation_id"] is None
+    assert log_entry["merge_candidate_id"] is None
+    assert log_entry["error_code"] == "CALLBACK_TARGET_INVALID"
+    assert log_entry["error_message"] == "target_url resolved host is not public"
     stored = await _get_delivery(factory, deliveries[0].id)
     assert stored.status == CallbackDeliveryStatus.pending.value
     assert stored.error_code == "CALLBACK_TARGET_INVALID"

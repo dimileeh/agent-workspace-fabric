@@ -248,6 +248,19 @@ class CallbackDeliveryService:
                         connect_ip_addresses=validated_target.connect_ip_addresses,
                     )
                 except ValueError as exc:
+                    _log.warning(
+                        "callback.delivery_target_invalid",
+                        delivery_id=delivery.id,
+                        subscription_id=subscription.id,
+                        event_kind=delivery.event_kind,
+                        event_type=delivery.event_type,
+                        source_id=delivery.source_id,
+                        workspace_id=delivery.workspace_id,
+                        operation_id=delivery.operation_id,
+                        merge_candidate_id=delivery.merge_candidate_id,
+                        error_code="CALLBACK_TARGET_INVALID",
+                        error_message=redact_audit_text(str(exc), limit=256),
+                    )
                     await repo.mark_failed_or_retry(
                         delivery,
                         error_code="CALLBACK_TARGET_INVALID",
@@ -330,8 +343,7 @@ async def _httpx_post_json(
         request_headers = {name: value for name, value in headers.items() if name.lower() != "host"}
         request_headers["Host"] = _callback_host_header(url)
         parsed = urlsplit(url)
-        if parsed.scheme == "https":
-            extensions = {"sni_hostname": parsed.hostname}
+        extensions = {"sni_hostname": parsed.hostname} if parsed.scheme == "https" else None
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -483,7 +495,7 @@ def _validate_callback_target_dns(*, hostname: str) -> tuple[str, ...]:
     for address in addresses:
         if not _is_public_ip(address):
             raise ValueError("target_url resolved host is not public")
-    return addresses
+    return tuple(sorted(addresses, key=_callback_address_family_sort_key))
 
 
 def _resolve_callback_target_ip_addresses(hostname: str) -> tuple[str, ...]:
@@ -546,6 +558,10 @@ def _is_public_ip(address: str) -> bool:
     if isinstance(ipv4_mapped, ipaddress.IPv4Address):
         public_address = ipv4_mapped
     return public_address.is_global and not public_address.is_multicast
+
+
+def _callback_address_family_sort_key(address: str) -> int:
+    return 0 if ipaddress.ip_address(address).version == 4 else 1
 
 
 def _bounded_error_message(message: str) -> str:
