@@ -1079,10 +1079,13 @@ class ValidationRunner:
                 phase_indices[phase] = phase_indices.get(phase, 0) + 1
                 label = f"{phase_indices[phase]:02d}_{phase}"
 
-            attempts = 0
+            flaky_retry_count = 0
+            setup_retry_count = 0
             setup_dependency_attempts: list[dict[str, object]] = []
             last_setup_dependency_classification: SetupDependencyNetworkClassification | None = None
+            setup_dependency_output_prefix: str | None = None
             while True:
+                total_retry_count = setup_retry_count + flaky_retry_count
                 result = await self._exec(
                     compose_project=compose_project,
                     compose_file=compose_file,
@@ -1091,16 +1094,14 @@ class ValidationRunner:
                     artifacts_dir=workspace_artifacts,
                     phase=phase,
                     timeout_seconds=command.timeout_seconds,
-                    is_retry=(attempts > 0),
-                    output_prefix=(
-                        _setup_dependency_retry_output_prefix(retry_number=attempts)
-                        if setup_dependency_attempts and attempts > 0
-                        else None
-                    ),
+                    is_retry=(total_retry_count > 0),
+                    output_prefix=setup_dependency_output_prefix,
                 )
+                setup_dependency_output_prefix = None
 
                 if result.ok or not command.required:
-                    final = _final_command_result(result, step=step, attempts=attempts)
+                    total_retry_count = setup_retry_count + flaky_retry_count
+                    final = _final_command_result(result, step=step, attempts=total_retry_count)
                     if (
                         setup_dependency_attempts
                         and last_setup_dependency_classification is not None
@@ -1109,8 +1110,8 @@ class ValidationRunner:
                             final,
                             step=step,
                             classification=last_setup_dependency_classification,
-                            retry_count=attempts,
-                            retry_budget=self._setup_retry_budget,
+                            retry_count=total_retry_count,
+                            retry_budget=self._setup_retry_budget + retry_budget,
                             retry_exhausted=False,
                             recovered=result.ok,
                             attempts=setup_dependency_attempts,
@@ -1124,8 +1125,8 @@ class ValidationRunner:
                     else None
                 )
                 if setup_dependency_classification is not None:
-                    failed_attempt = attempts + 1
-                    can_retry = attempts < self._setup_retry_budget
+                    failed_attempt = setup_retry_count + 1
+                    can_retry = setup_retry_count < self._setup_retry_budget
                     setup_dependency_attempts.append(
                         _setup_dependency_attempt_metadata(
                             classification=setup_dependency_classification,
@@ -1135,7 +1136,10 @@ class ValidationRunner:
                     )
                     last_setup_dependency_classification = setup_dependency_classification
                     if can_retry:
-                        attempts += 1
+                        setup_retry_count += 1
+                        setup_dependency_output_prefix = _setup_dependency_retry_output_prefix(
+                            retry_number=setup_retry_count
+                        )
                         _log.info(
                             "validation.setup_dependency_network_retry",
                             workspace_id=workspace_id,
@@ -1145,21 +1149,22 @@ class ValidationRunner:
                             host=setup_dependency_classification.host,
                             transient_category=(setup_dependency_classification.transient_category),
                             attempt=failed_attempt,
-                            retry=attempts,
+                            retry=setup_retry_count,
                             budget=self._setup_retry_budget,
                             reason_code=SETUP_DEPENDENCY_NETWORK_RETRY,
                         )
-                        delay = self._setup_dependency_retry_delay(attempts)
+                        delay = self._setup_dependency_retry_delay(setup_retry_count)
                         if delay > 0:
                             await asyncio.sleep(delay)
                         continue
 
+                    total_retry_count = setup_retry_count + flaky_retry_count
                     result = _with_setup_dependency_network_metadata(
                         result,
                         step=step,
                         classification=setup_dependency_classification,
-                        retry_count=attempts,
-                        retry_budget=self._setup_retry_budget,
+                        retry_count=total_retry_count,
+                        retry_budget=self._setup_retry_budget + retry_budget,
                         retry_exhausted=True,
                         recovered=False,
                         attempts=setup_dependency_attempts,
@@ -1173,7 +1178,7 @@ class ValidationRunner:
                         package=setup_dependency_classification.package,
                         host=setup_dependency_classification.host,
                         transient_category=setup_dependency_classification.transient_category,
-                        retry_count=attempts,
+                        retry_count=setup_retry_count,
                         budget=self._setup_retry_budget,
                         reason_code=SETUP_DEPENDENCY_NETWORK_FAILURE,
                     )
@@ -1184,22 +1189,23 @@ class ValidationRunner:
                 # accepting the trade-off that deterministic failures like SIGILL or SIGABRT
                 # might be needlessly retried.
                 is_flaky = result.returncode == 124 or result.returncode > 128
-                if is_flaky and attempts < retry_budget:
-                    attempts += 1
+                if is_flaky and flaky_retry_count < retry_budget:
+                    flaky_retry_count += 1
                     _log.info(
                         "validation.phase_command_flaky_retry",
                         workspace_id=workspace_id,
                         phase=phase,
                         command=command.command,
                         returncode=result.returncode,
-                        attempt=attempts,
+                        attempt=flaky_retry_count,
                         budget=retry_budget,
                     )
                     continue
 
+                total_retry_count = setup_retry_count + flaky_retry_count
                 if (
                     is_flaky
-                    and attempts >= retry_budget
+                    and flaky_retry_count >= retry_budget
                     and retry_budget > 0
                     and not step.database_hook
                 ):
@@ -1212,10 +1218,14 @@ class ValidationRunner:
                         phase=result.phase,
                         reason_code="VALIDATION_RETRY_EXHAUSTED",
                         stream_ids=result.stream_ids,
-                        retry_count=attempts,
+                        retry_count=total_retry_count,
                     )
                 else:
-                    result = _final_command_result(result, step=step, attempts=attempts)
+                    result = _final_command_result(
+                        result,
+                        step=step,
+                        attempts=total_retry_count,
+                    )
 
                 results.append(result)
                 _log.info(
