@@ -127,12 +127,16 @@ _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 
 
 class ReadinessProvider(Protocol):
+    """Protocol for checking service provider readiness."""
+
     def __call__(
         self,
         settings: Settings,
         *,
         validated_strict_providers: set[ProviderName] | None = None,
-    ) -> dict[str, Any] | Awaitable[dict[str, Any]]: ...
+    ) -> dict[str, Any] | Awaitable[dict[str, Any]]:
+        """Invoke the readiness check."""
+        ...
 
 
 HealthProvider = Callable[
@@ -143,6 +147,8 @@ ProviderFilter = Annotated[str, Field(min_length=1, max_length=64)]
 
 
 def _resolve_settings(settings: Settings | None) -> Settings:
+    """Resolve the settings instance to use."""
+    """Invoke the readiness check."""
     return settings or get_settings()
 
 
@@ -181,6 +187,7 @@ def build_mcp_server(
     settings_value = _resolve_settings(settings)
 
     def _safe_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+        """Format a payload as an MCP tool result, redacting secrets."""
         redacted = _redact_sensitive_payload(payload, settings_value)
         return _tool_result(redacted, is_error=is_error)
 
@@ -374,6 +381,7 @@ def build_mcp_server(
         )
 
         async def resolve_disk_check() -> DiskCheck:
+            """Resolve the local capacity disk check."""
             return await _workspace_admission_disk_check(
                 disk_check_provider=disk_check_provider,
                 settings=settings_value,
@@ -1546,26 +1554,32 @@ def build_mcp_server(
 
 
 def _tool_error(exc: WorkspaceControlError) -> CallToolResult:
+    """Format a workspace control error as an MCP tool result."""
     return _workspace_error_result(exc)
 
 
 class _WorkspaceErrorSource(Protocol):
+    """Protocol for error sources that provide a code, message, and detail."""
+
     error_code: str
     message: str
     detail: dict[str, Any] | None
 
 
 def _workspace_retry_error_result(exc: WorkspaceRetryError) -> CallToolResult:
+    """Format a workspace retry error as an MCP tool result."""
     return _workspace_error_result(exc)
 
 
 def _provider_readiness_blocked_result(
     exc: WorkspaceProviderReadinessBlockedError,
 ) -> CallToolResult:
+    """Format a provider readiness error as an MCP tool result."""
     return _workspace_error_result(exc)
 
 
 def _task_external_id_conflict_result(exc: TaskExternalIdConflictError) -> CallToolResult:
+    """Format a task external ID conflict error as an MCP tool result."""
     error = ErrorResponse(
         error_code="TASK_EXTERNAL_ID_CONFLICT",
         message=(
@@ -1579,6 +1593,7 @@ def _task_external_id_conflict_result(exc: TaskExternalIdConflictError) -> CallT
 
 
 def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
+    """Format a generic workspace error as an MCP tool result."""
     error = ErrorResponse(
         error_code=exc.error_code,
         message=exc.message,
@@ -1590,17 +1605,20 @@ def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
 def _error_result(
     error_code: str, message: str, *, detail: dict[str, Any] | None = None
 ) -> CallToolResult:
+    """Format an explicit error code and message as an MCP tool result."""
     error = ErrorResponse(error_code=error_code, message=message, detail=detail)
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
 def _required_idempotency_key(idempotency_key: str | None) -> str | None:
+    """Validate and normalize an idempotency key string, returning None if empty."""
     if idempotency_key is None:
         return None
     return idempotency_key if idempotency_key.strip() else None
 
 
 def _normalize_mcp_idempotency_key(idempotency_key: str | None) -> str | None:
+    """Normalize an idempotency key string, returning None if empty."""
     if idempotency_key is None:
         return None
     normalized = idempotency_key.strip()
@@ -1608,10 +1626,12 @@ def _normalize_mcp_idempotency_key(idempotency_key: str | None) -> str | None:
 
 
 def _idempotency_key_error() -> CallToolResult:
+    """Format a missing idempotency key error as an MCP tool result."""
     return _error_result("INVALID_REQUEST", _IDEMPOTENCY_KEY_REQUIRED_MESSAGE)
 
 
 def _workspace_accepted_payload(ws: Any) -> dict[str, Any]:
+    """Format a workspace accepted payload from a workspace model."""
     workspace_id = ws.id
     warnings = [
         warning.model_dump(mode="json") if hasattr(warning, "model_dump") else warning
@@ -1630,6 +1650,7 @@ def _workspace_accepted_payload(ws: Any) -> dict[str, Any]:
 
 
 def _null_tool_result() -> CallToolResult:
+    """Return an empty MCP tool result."""
     return CallToolResult(content=[], structuredContent=None)
 
 
@@ -1638,6 +1659,7 @@ async def _provided_disk_check(
     disk_check_provider: DiskCheckProvider | None,
     settings: Settings,
 ) -> DiskCheck | None:
+    """Invoke the provided disk check if configured."""
     if disk_check_provider is None:
         return None
     result = disk_check_provider(settings)
@@ -1651,6 +1673,7 @@ async def _workspace_admission_disk_check(
     disk_check_provider: DiskCheckProvider | None,
     settings: Settings,
 ) -> DiskCheck:
+    """Check disk space for workspace admission."""
     provided = await _provided_disk_check(
         disk_check_provider=disk_check_provider,
         settings=settings,
@@ -1669,6 +1692,7 @@ async def _provided_local_capacity(
     local_capacity_provider: LocalCapacityProvider | None,
     settings: Settings,
 ) -> LocalCapacityLimits:
+    """Invoke the provided local capacity check if configured."""
     if local_capacity_provider is not None:
         result = local_capacity_provider(settings)
         if inspect.isawaitable(result):
@@ -1688,6 +1712,7 @@ async def _provided_orphan_resources(
     settings: Settings,
     session: AsyncSession,
 ) -> OrphanResourceSummary | None:
+    """Invoke the provided orphan resources check if configured."""
     if orphan_resource_summary_provider is None:
         return None
     result = orphan_resource_summary_provider(settings, session)
@@ -1703,6 +1728,7 @@ async def _provided_runtime_health(
     session: AsyncSession,
     orphan_resources: OrphanResourceSummary | None,
 ) -> WorkspaceRuntimeHealthSummary | None:
+    """Invoke the provided runtime health check if configured."""
     if runtime_health_summary_provider is None:
         return None
     if orphan_resources is None:
@@ -1720,6 +1746,7 @@ async def _provided_readiness(
     session_factory: Any | None = None,
     validated_strict_providers: set[ProviderName] | None = None,
 ) -> dict[str, Any]:
+    """Invoke the provided readiness check if configured."""
     if readiness_provider is not None:
         result = readiness_provider(
             settings,
@@ -1836,6 +1863,7 @@ async def _provided_health(
     *,
     health_provider: HealthProvider | None,
 ) -> dict[str, Any]:
+    """Invoke the provided health check if configured."""
     if health_provider is not None:
         result = health_provider()
         if inspect.isawaitable(result):
@@ -1849,6 +1877,7 @@ async def _provided_health(
 
 
 def _redact_sensitive_payload(payload: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    """Redact sensitive information from a payload dictionary."""
     service_settings = service_config.resolve_service_settings(settings)
     redacted = _redact_sensitive_value(payload, settings, service_settings=service_settings)
     return redacted if isinstance(redacted, dict) else {}
@@ -1860,6 +1889,7 @@ def _redact_sensitive_value(
     *,
     service_settings: ServiceSettings,
 ) -> Any:
+    """Redact sensitive information from an arbitrary value."""
     if isinstance(value, str):
         return _redact_sensitive_text(value, settings, service_settings=service_settings)
     if isinstance(value, list):
@@ -1883,6 +1913,7 @@ def _contains_secret_bytes(
     *,
     service_settings: ServiceSettings,
 ) -> bool:
+    """Check if a byte array contains known sensitive secrets."""
     for secret in (settings.api_token, settings.github_token, service_settings.github_token):
         if secret and len(secret) >= 4 and secret.encode() in content:
             return True
@@ -1961,6 +1992,7 @@ def _redact_sensitive_text(
     *,
     service_settings: ServiceSettings,
 ) -> str:
+    """Redact sensitive information from a text string."""
     redacted = value
     for secret in (settings.api_token, settings.github_token):
         if secret and len(secret) >= 4:
@@ -1969,6 +2001,7 @@ def _redact_sensitive_text(
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+    """Format a payload dictionary as a successful MCP tool result."""
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
         structuredContent=payload,
