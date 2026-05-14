@@ -730,18 +730,27 @@ def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
     tokens = _shell_tokens(command) or []
     compound_command = _has_shell_compound_control_operator(command)
     specific_output_has_dependency_context = _setup_dependency_output_has_specific_context(output)
+    compound_output_has_dependency_failure_context = (
+        _setup_dependency_output_has_specific_transient_context(output)
+        if compound_command
+        else specific_output_has_dependency_context
+    )
     dependency_command_match = _non_uv_dependency_setup_command_match(tokens)
     if dependency_command_match is not None:
         if dependency_command_match and compound_command:
-            return specific_output_has_dependency_context
+            return compound_output_has_dependency_failure_context
         return dependency_command_match
     if _looks_like_uv_dependency_setup_command(tokens):
-        return specific_output_has_dependency_context if compound_command else True
+        return compound_output_has_dependency_failure_context if compound_command else True
     # Unknown setup wrappers still get the bounded dependency-network retry only
     # when their output names package or package-index evidence. This keeps
     # profile-specific bootstrap scripts covered without expanding retries to
     # every transient setup failure.
-    return specific_output_has_dependency_context
+    return (
+        compound_output_has_dependency_failure_context
+        if compound_command
+        else specific_output_has_dependency_context
+    )
 
 
 def _setup_dependency_output_has_specific_context(output: str) -> bool:
@@ -754,6 +763,15 @@ def _setup_dependency_output_has_specific_context(output: str) -> bool:
             return True
     for match in _SETUP_HOST_FALLBACK_RE.finditer(output):
         if _is_setup_dependency_index_host(match.group(1).strip(".")):
+            return True
+    return False
+
+
+def _setup_dependency_output_has_specific_transient_context(output: str) -> bool:
+    for line in output.splitlines():
+        if _setup_transient_category(line) is None:
+            continue
+        if _setup_dependency_output_has_specific_context(line):
             return True
     return False
 
