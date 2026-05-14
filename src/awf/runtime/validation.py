@@ -564,6 +564,23 @@ _SETUP_DEPENDENCY_CONTEXT_RE = re.compile(
     r")\b"
 )
 _SETUP_DEPENDENCY_SIMPLE_INDEX_RE = re.compile(r"(?i)/simple(?:[/?#:\s]|$)")
+_SETUP_DEPENDENCY_KNOWN_INDEX_HOSTS = frozenset(
+    {
+        "crates.io",
+        "files.pythonhosted.org",
+        "index.crates.io",
+        "packagist.org",
+        "plugins.gradle.org",
+        "proxy.golang.org",
+        "pypi.org",
+        "registry.npmjs.org",
+        "registry.yarnpkg.com",
+        "repo.maven.apache.org",
+        "repo.packagist.org",
+        "rubygems.org",
+        "sum.golang.org",
+    }
+)
 _SETUP_DETERMINISTIC_FAILURE_RE = re.compile(
     r"(?i)("
     r"\bauth(?:entication)? (?:failed|required)\b|"
@@ -719,20 +736,49 @@ def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
     tokens = _shell_tokens(command) or []
     output_has_dependency_context = _setup_dependency_output_has_context(output)
     compound_command = _has_shell_compound_control_operator(command)
+    compound_output_has_dependency_context = _setup_dependency_output_has_specific_context(output)
     dependency_command_match = _non_uv_dependency_setup_command_match(tokens)
     if dependency_command_match is not None:
         if dependency_command_match and compound_command:
-            return output_has_dependency_context
+            return compound_output_has_dependency_context
         return dependency_command_match
     if _looks_like_uv_dependency_setup_command(tokens):
-        return output_has_dependency_context if compound_command else True
-    return output_has_dependency_context
+        return compound_output_has_dependency_context if compound_command else True
+    return (
+        compound_output_has_dependency_context
+        if compound_command
+        else output_has_dependency_context
+    )
 
 
 def _setup_dependency_output_has_context(output: str) -> bool:
     return bool(
         _SETUP_DEPENDENCY_CONTEXT_RE.search(output)
         or _SETUP_DEPENDENCY_SIMPLE_INDEX_RE.search(output)
+    )
+
+
+def _setup_dependency_output_has_specific_context(output: str) -> bool:
+    if _extract_setup_dependency_package(output) is not None:
+        return True
+    if _SETUP_DEPENDENCY_SIMPLE_INDEX_RE.search(output):
+        return True
+    for match in _SETUP_URL_RE.finditer(output):
+        if _is_setup_dependency_index_host(urlparse(match.group(0)).hostname):
+            return True
+    for match in _SETUP_HOST_FALLBACK_RE.finditer(output):
+        if _is_setup_dependency_index_host(match.group(1).strip(".")):
+            return True
+    return False
+
+
+def _is_setup_dependency_index_host(host: str | None) -> bool:
+    if host is None:
+        return False
+    normalized = host.lower().strip(".")
+    return any(
+        normalized == known_host or normalized.endswith(f".{known_host}")
+        for known_host in _SETUP_DEPENDENCY_KNOWN_INDEX_HOSTS
     )
 
 
