@@ -25,6 +25,8 @@ _WWW_AUTHENTICATE_HEADER = {
     "description": "Bearer challenge for the API token.",
     "schema": {"type": "string"},
 }
+_HTTP_EXCEPTION_ERROR_RESPONSE_REF = "#/components/schemas/HttpExceptionErrorResponse"
+_ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
 
 _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
     {
@@ -210,14 +212,30 @@ def test_api_token_routes_are_documented_as_bearer_authenticated(
             response = operation.get("responses", {}).get(status_code)
             assert response is not None, f"{method.upper()} {path} must document {status_code}"
             assert response["description"] == description
-            assert (
-                response["content"]["application/json"]["schema"]["$ref"]
-                == "#/components/schemas/ErrorResponse"
-            )
+            schema = response["content"]["application/json"]["schema"]
+            refs = _schema_refs(schema)
+            assert _HTTP_EXCEPTION_ERROR_RESPONSE_REF in refs
             if status_code == "401":
+                assert refs == {_HTTP_EXCEPTION_ERROR_RESPONSE_REF}
                 assert (
                     response.get("headers", {}).get("WWW-Authenticate") == _WWW_AUTHENTICATE_HEADER
                 )
+            if status_code == "503" and _ERROR_RESPONSE_REF in refs:
+                assert refs == {_HTTP_EXCEPTION_ERROR_RESPONSE_REF, _ERROR_RESPONSE_REF}
+
+    schemas = openapi_spec.get("components", {}).get("schemas", {})
+    auth_error_schema = schemas.get("HttpExceptionErrorResponse", {})
+    assert auth_error_schema.get("required") == ["detail"]
+    assert (
+        auth_error_schema.get("properties", {}).get("detail", {}).get("$ref") == _ERROR_RESPONSE_REF
+    )
+
+
+def _schema_refs(schema: dict) -> set[str]:
+    direct_ref = schema.get("$ref")
+    if isinstance(direct_ref, str):
+        return {direct_ref}
+    return {item["$ref"] for item in schema.get("anyOf", []) if isinstance(item.get("$ref"), str)}
 
 
 @pytest.mark.unit

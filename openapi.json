@@ -1144,6 +1144,19 @@
         "title": "HostHomeAuthMountPolicy",
         "type": "object"
       },
+      "HttpExceptionErrorResponse": {
+        "description": "FastAPI HTTPException envelope carrying AWF's structured error detail.",
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "HttpExceptionErrorResponse",
+        "type": "object"
+      },
       "MergeCandidateReadinessResponse": {
         "properties": {
           "completed": {
@@ -10853,7 +10866,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -10881,7 +10894,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -11498,7 +11511,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -11526,7 +11539,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -11573,7 +11586,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -11601,7 +11614,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -11860,7 +11873,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -11888,7 +11901,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -11950,7 +11963,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -11988,7 +12001,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12034,7 +12047,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12092,7 +12105,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12209,7 +12222,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12237,7 +12250,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12346,7 +12359,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12374,7 +12387,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12419,7 +12432,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12447,7 +12460,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12525,7 +12538,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12553,7 +12566,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12607,7 +12620,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12635,7 +12648,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12724,7 +12737,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12752,7 +12765,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12829,7 +12842,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12857,7 +12870,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12904,7 +12917,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -12932,7 +12945,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13011,7 +13024,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13039,7 +13052,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13147,7 +13160,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13175,7 +13188,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13264,7 +13277,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13292,7 +13305,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13381,7 +13394,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13409,7 +13422,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13498,7 +13511,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13526,7 +13539,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13600,7 +13613,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13648,7 +13661,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
                 }
               }
             },
@@ -13695,7 +13715,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13723,7 +13743,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13770,7 +13790,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13798,7 +13818,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13886,7 +13906,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -13914,7 +13934,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -14003,7 +14023,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -14031,7 +14051,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -14120,7 +14140,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -14148,7 +14168,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -14226,7 +14246,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -14254,7 +14274,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -14318,7 +14338,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
                 }
               }
             },
@@ -14356,7 +14376,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
                 }
               }
             },

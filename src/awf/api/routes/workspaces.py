@@ -24,7 +24,7 @@ from awf.api.deps import get_db_session, get_db_session_factory, require_api_tok
 from awf.api.responses import (
     API_TOKEN_AUTH_ERROR_RESPONSES,
     API_TOKEN_UNAUTHORIZED_RESPONSE,
-    SERVICE_UNAVAILABLE_ERROR_RESPONSE,
+    PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
 )
 from awf.api.schemas import (
     EgressAuditRecordResponse,
@@ -175,7 +175,7 @@ async def create_workspace(
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         409: {"model": ErrorResponse},
-        503: SERVICE_UNAVAILABLE_ERROR_RESPONSE,
+        503: PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
     },
 )
 async def create_workspace_v2(
@@ -456,7 +456,7 @@ async def adopt_pull_request_monitor(
         401: API_TOKEN_UNAUTHORIZED_RESPONSE,
         404: {"model": ErrorResponse},
         409: {"model": ErrorResponse},
-        503: SERVICE_UNAVAILABLE_ERROR_RESPONSE,
+        503: PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
     },
 )
 async def retry_workspace(

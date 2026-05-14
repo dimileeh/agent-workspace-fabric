@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from awf.api.schemas import ErrorResponse
+from awf.api.schemas import ErrorResponse, HttpExceptionErrorResponse
 
 WWW_AUTHENTICATE_HEADER: dict[str, Any] = {
     "WWW-Authenticate": {
@@ -14,15 +14,32 @@ WWW_AUTHENTICATE_HEADER: dict[str, Any] = {
 }
 
 API_TOKEN_UNAUTHORIZED_RESPONSE: dict[str, Any] = {
-    "model": ErrorResponse,
+    "model": HttpExceptionErrorResponse,
     "description": "Unauthorized",
     "headers": WWW_AUTHENTICATE_HEADER,
+}
+API_TOKEN_SERVICE_UNAVAILABLE_RESPONSE: dict[str, Any] = {
+    "model": HttpExceptionErrorResponse,
+    "description": "Service Unavailable",
 }
 SERVICE_UNAVAILABLE_ERROR_RESPONSE: dict[str, Any] = {
     "model": ErrorResponse,
     "description": "Service Unavailable",
 }
+PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE: dict[str, Any] = {
+    "description": "Service Unavailable",
+    "content": {
+        "application/json": {
+            "schema": {
+                "anyOf": [
+                    {"$ref": "#/components/schemas/HttpExceptionErrorResponse"},
+                    {"$ref": "#/components/schemas/ErrorResponse"},
+                ]
+            }
+        }
+    },
+}
 API_TOKEN_AUTH_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     401: API_TOKEN_UNAUTHORIZED_RESPONSE,
-    503: SERVICE_UNAVAILABLE_ERROR_RESPONSE,
+    503: API_TOKEN_SERVICE_UNAVAILABLE_RESPONSE,
 }
