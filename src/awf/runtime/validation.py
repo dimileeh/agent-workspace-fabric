@@ -673,7 +673,7 @@ _SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 _SETUP_PACKAGE_SPEC_RE = re.compile(
     r"(?i)(?:`|['\"])?(?P<package>[A-Za-z0-9][A-Za-z0-9_.-]*"
-    r"(?:==|~=|!=|<=|>=|=|@)[A-Za-z0-9][A-Za-z0-9_.!+\-]*)"
+    r"(?P<operator>==|~=|!=|<=|>=|=|@)[A-Za-z0-9][A-Za-z0-9_.!+\-]*)"
     r"(?:`|['\"])?"
 )
 _SETUP_PACKAGE_NAME_VERSION_RE = re.compile(
@@ -1013,6 +1013,8 @@ def _extract_setup_dependency_package(text: str) -> str | None:
     safe_text = _setup_dependency_package_search_text(text)
     for match in _SETUP_PACKAGE_SPEC_RE.finditer(safe_text):
         package = match.group("package")
+        if _is_assignment_like_setup_package_spec(match):
+            continue
         if _is_safe_setup_dependency_package(package):
             return package
     for match in _SETUP_PACKAGE_NAME_VERSION_RE.finditer(safe_text):
@@ -1020,6 +1022,13 @@ def _extract_setup_dependency_package(text: str) -> str | None:
         if _is_safe_setup_dependency_package(package):
             return package
     return None
+
+
+def _is_assignment_like_setup_package_spec(match: re.Match[str]) -> bool:
+    return (
+        match.group("operator") == "="
+        and _ENV_ASSIGNMENT_RE.fullmatch(match.group("package")) is not None
+    )
 
 
 def _setup_dependency_package_search_text(text: str) -> str:

@@ -407,6 +407,21 @@ def test_setup_dependency_network_classifier_skips_standalone_bootstrap_fetch_fa
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_assignment_like_fetch_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./bootstrap",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "bootstrap failed to fetch CONFIG_URL=https://api.internal.example/config: "
+            "connection timed out"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_accepts_chained_dependency_output() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="python -m pip install -r requirements.txt && ./bootstrap",
