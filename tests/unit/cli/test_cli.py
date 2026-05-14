@@ -189,9 +189,9 @@ class TestWorkspaceCreate:
                     "Policy create",
                     "--prompt",
                     "Verify policy flags.",
-                    "--out-of-scope-changes-json",
+                    "--out_of_scope_changes_json",
                     '{"mode":"block","allowlist_patterns":["docs/**"]}',
-                    "--provider-recovery-json",
+                    "--provider_recovery_json",
                     '{"max_fallback_attempts":1,"fallbacks":[{"agent":"codex","provider":"openai","model":"gpt-5.5"}]}',
                 ],
             )
@@ -213,8 +213,8 @@ class TestWorkspaceCreate:
     @pytest.mark.parametrize(
         "flag, value",
         (
-            ("--out-of-scope-changes-json", "{mode:block}"),
-            ("--provider-recovery-json", "{fallbacks:[{agent:codex}]}"),
+            ("--out_of_scope_changes_json", "{mode:block}"),
+            ("--provider_recovery_json", "{fallbacks:[{agent:codex}]}"),
         ),
     )
     def test_invalid_json_policy_flags_do_not_request(self, flag: str, value: str) -> None:
