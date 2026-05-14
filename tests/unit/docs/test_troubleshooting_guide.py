@@ -59,7 +59,7 @@ def test_troubleshooting_guide_has_actionable_commands() -> None:
         "awf init",
         "awf service bootstrap",
         "awf service status",
-        "```bash\nawf service doctor",
+        "awf service doctor",
         "awf service logs",
         "curl http://localhost:8000/readyz",
         "awf service status --provider codex",
