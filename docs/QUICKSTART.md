@@ -29,7 +29,11 @@ uv tool install .
 
 ## Bootstrap AWF
 
+For PR creation and monitoring, export a GitHub token before bootstrapping so
+the API and worker containers receive it when they are created:
+
 ```bash
+export AWF_GITHUB_TOKEN="$(gh auth token)"
 awf init
 awf service status --format pretty
 ```
@@ -38,10 +42,12 @@ awf service status --format pretty
 directory, writes `.env` from `.env.example` when needed, and starts the local
 Postgres, migration, API, and worker stack.
 
-For PR creation and monitoring, export a GitHub token visible to the worker:
+If you set or refresh the GitHub token after `awf init`, rerun the service
+bootstrap so Compose recreates the service containers with the updated
+environment:
 
 ```bash
-export AWF_GITHUB_TOKEN="$(gh auth token)"
+awf service bootstrap
 ```
 
 ## Open The Console
