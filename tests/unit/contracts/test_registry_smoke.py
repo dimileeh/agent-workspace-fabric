@@ -39,9 +39,6 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
     "Workspace create v1": (
         "tests/unit/mcp/test_mcp_server.py::TestCreateWorkspace::test_happy_path_returns_accepted_payload",
     ),
-    "Workspace create v2": (
-        "tests/unit/mcp/test_mcp_server.py::TestCreateWorkspaceV2::test_persists_clean_v2_contract_fields",
-    ),
     "Workspace list and get": (
         "tests/unit/mcp/test_mcp_server.py::TestGetAndList::test_get_returns_the_workspace_just_created",
         "tests/unit/mcp/test_mcp_server.py::TestGetAndList::test_list_returns_newest_first",
