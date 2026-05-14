@@ -20,6 +20,12 @@ routes. Runtime token validation semantics must remain unchanged.
       protected operations by modeling auth through FastAPI security utilities.
 - [ ] Ensure protected REST operations advertise both 401 Unauthorized and 503
       Service Unavailable error responses using `ErrorResponse`.
+- [ ] Ensure documented 401 Unauthorized responses expose the
+      `WWW-Authenticate` bearer challenge header emitted by `require_api_token`.
+- [ ] Add runtime auth regression coverage for `require_api_token` through the
+      named `HTTPBearer` dependency: missing token and wrong token return 401,
+      unset `AWF_API_TOKEN` returns 503, and public routes such as `/healthz`
+      remain accessible without a token.
 - [ ] Regenerate `openapi.json` and verify it has no spec drift.
 - [ ] Run the narrowest relevant unit checks for dependency behavior and the
       OpenAPI contract.
@@ -31,10 +37,12 @@ routes. Runtime token validation semantics must remain unchanged.
    parameter, and 401/503 responses.
 2. Run the new test to confirm it fails against the current contract.
 3. Change `require_api_token` to use a named `HTTPBearer` security dependency
-   while preserving direct-call compatibility for existing unit tests.
+   with an `HTTPAuthorizationCredentials | None` dependency signature.
 4. Add 401/503 response metadata to API-token-protected REST routers and routes.
-5. Regenerate `openapi.json`.
-6. Run focused validation, then create the validation document.
+5. Add the `WWW-Authenticate` header metadata to documented 401 responses.
+6. Add runtime auth regression checks beside the OpenAPI contract checks.
+7. Regenerate `openapi.json`.
+8. Run focused validation, then create the validation document.
 
 ## Verification Commands and Pass Criteria
 

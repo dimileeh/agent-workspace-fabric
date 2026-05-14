@@ -22,6 +22,17 @@ Plan reference: `plans/OPENAPI_AUTH_CONTRACT_PLAN.md`
   503 Service Unavailable error responses using `ErrorResponse`. Evidence:
   protected routers in `workspaces.py`, `artifacts.py`, `logs.py`,
   `operations.py`, and `controls.py` declare 401/503 response metadata.
+- Complete: Ensure documented 401 Unauthorized responses expose the
+  `WWW-Authenticate` bearer challenge header emitted by `require_api_token`.
+  Evidence: `src/awf/api/responses.py` centralizes the 401 response metadata,
+  protected routers/routes use it, `tests/unit/api/test_openapi_artifact.py`
+  asserts the header for every protected REST operation, and regenerated
+  `openapi.json` includes the header.
+- Complete: Add runtime auth regression coverage for `require_api_token`
+  through the named `HTTPBearer` dependency. Evidence:
+  `test_api_token_runtime_failures_match_documented_contract` verifies missing
+  and wrong tokens return 401 with the bearer challenge, unset `AWF_API_TOKEN`
+  returns 503, and `/healthz` remains public.
 - Complete: Regenerate `openapi.json` and verify it has no spec drift. Evidence:
   `uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check`
   passed.
@@ -31,6 +42,7 @@ Plan reference: `plans/OPENAPI_AUTH_CONTRACT_PLAN.md`
 ## Files Changed
 
 - `src/awf/api/deps.py`
+- `src/awf/api/responses.py`
 - `src/awf/api/routes/artifacts.py`
 - `src/awf/api/routes/controls.py`
 - `src/awf/api/routes/logs.py`
@@ -43,16 +55,18 @@ Plan reference: `plans/OPENAPI_AUTH_CONTRACT_PLAN.md`
 
 ## Commands Run
 
-- Red check: `uv run --python 3.12 --extra dev pytest tests/unit/api/test_openapi_artifact.py::test_api_token_routes_are_documented_as_bearer_authenticated -q`
+- Original red check: `uv run --python 3.12 --extra dev pytest tests/unit/api/test_openapi_artifact.py::test_api_token_routes_are_documented_as_bearer_authenticated -q`
   failed with `AssertionError: assert None == {'scheme': 'bearer', 'type': 'http'}`.
-- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_openapi_artifact.py tests/unit/api/test_deps.py -q`
-  passed: `18 passed`.
+- Red check for review fix: `uv run --python 3.12 --extra dev pytest tests/unit/api/test_openapi_artifact.py::test_api_token_routes_are_documented_as_bearer_authenticated -q`
+  failed because 401 responses did not include `headers.WWW-Authenticate`.
+- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_openapi_artifact.py tests/unit/api/test_deps.py tests/unit/api/test_health.py::test_healthz_does_not_require_auth -q`
+  passed: `21 passed`.
 - `uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check`
   passed: `OK: openapi.json matches the current app spec.`
 - `uv run --python 3.12 --extra dev ruff check src/awf tests` passed:
   `All checks passed!`
 - `uv run --python 3.12 --extra dev mypy src/awf` passed:
-  `Success: no issues found in 154 source files`.
+  `Success: no issues found in 155 source files`.
 
 ## Notes
 

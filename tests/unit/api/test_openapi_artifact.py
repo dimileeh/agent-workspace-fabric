@@ -16,8 +16,15 @@ import json
 from collections import Counter
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from awf.api.app import create_app
+from awf.common.config import get_settings
+
+_WWW_AUTHENTICATE_HEADER = {
+    "description": "Bearer challenge for the API token.",
+    "schema": {"type": "string"},
+}
 
 _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
     {
@@ -204,3 +211,44 @@ def test_api_token_routes_are_documented_as_bearer_authenticated(
                 response["content"]["application/json"]["schema"]["$ref"]
                 == "#/components/schemas/ErrorResponse"
             )
+            if status_code == "401":
+                assert (
+                    response.get("headers", {}).get("WWW-Authenticate") == _WWW_AUTHENTICATE_HEADER
+                )
+
+
+@pytest.mark.unit
+async def test_api_token_runtime_failures_match_documented_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(use_lifespan=False)
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            monkeypatch.setenv("AWF_API_TOKEN", "secret")
+            get_settings.cache_clear()
+
+            missing = await client.get("/v1/operations")
+            assert missing.status_code == 401
+            assert missing.headers["WWW-Authenticate"] == "Bearer"
+            assert missing.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+            wrong = await client.get(
+                "/v1/operations",
+                headers={"Authorization": "Bearer wrong"},
+            )
+            assert wrong.status_code == 401
+            assert wrong.headers["WWW-Authenticate"] == "Bearer"
+            assert wrong.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+            monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+            get_settings.cache_clear()
+
+            unconfigured = await client.get("/v1/operations")
+            assert unconfigured.status_code == 503
+            assert unconfigured.json()["detail"]["error_code"] == "API_TOKEN_NOT_CONFIGURED"
+
+            health = await client.get("/healthz")
+            assert health.status_code == 200
+    finally:
+        get_settings.cache_clear()

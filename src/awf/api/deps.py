@@ -75,7 +75,7 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 def require_api_token(
     credentials: Annotated[
-        HTTPAuthorizationCredentials | str | None,
+        HTTPAuthorizationCredentials | None,
         Security(_api_token_bearer),
     ] = None,
     settings: Settings = Depends(get_settings),
@@ -101,9 +101,9 @@ def require_api_token(
 
 
 def _authorization_header_value(
-    credentials: HTTPAuthorizationCredentials | str | None,
+    credentials: HTTPAuthorizationCredentials | None,
 ) -> str | None:
-    if isinstance(credentials, HTTPAuthorizationCredentials):
-        scheme = "Bearer" if credentials.scheme.lower() == "bearer" else credentials.scheme
-        return f"{scheme} {credentials.credentials}"
-    return credentials
+    if credentials is None:
+        return None
+    scheme = "Bearer" if credentials.scheme.lower() == "bearer" else credentials.scheme
+    return f"{scheme} {credentials.credentials}"
