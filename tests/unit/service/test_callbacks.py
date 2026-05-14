@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+import structlog.testing
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -829,6 +830,39 @@ async def test_failing_callbacks_record_retry_metadata_without_mutating_awf_stat
         assert operation.status == OperationStatus.failed.value
         assert candidate_snapshot_after == candidate_snapshot_before
         assert event_snapshots_after == event_snapshots_before
+
+
+@pytest.mark.unit
+async def test_callback_request_failures_log_redacted_traceback(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    secret = "ghp_callbacktracebacksecret123456"
+    poster = _RecordingPoster(exc=RuntimeError(f"transport failed Authorization: Bearer {secret}"))
+
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_request_failed"
+    )
+    assert log_entry["delivery_id"] == delivery.id
+    assert log_entry["subscription_id"] == delivery.subscription_id
+    assert log_entry["event_type"] == "workspace.state_changed"
+    assert log_entry["error_code"] == "CALLBACK_REQUEST_FAILED"
+    assert "exc_info" not in log_entry
+    redacted_traceback = log_entry["redacted_traceback"]
+    assert "Traceback" in redacted_traceback
+    assert "RuntimeError: transport failed Authorization: Bearer [redacted]" in (redacted_traceback)
+    assert secret not in redacted_traceback
+
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_REQUEST_FAILED"
 
 
 @pytest.mark.unit

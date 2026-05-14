@@ -7,6 +7,7 @@ import hashlib
 import ipaddress
 import json as json_module
 import socket
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,8 +18,10 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import CallbackSubscriptionCreateRequest
+from awf.common.audit import redact_audit_text
 from awf.common.callback_targets import is_public_callback_target_host
 from awf.common.config import Settings, get_settings
+from awf.common.logging import get_logger
 from awf.db.enums import CallbackEventKind
 from awf.db.models import (
     CallbackDelivery,
@@ -34,6 +37,8 @@ from awf.db.repositories import (
 )
 
 CALLBACK_USER_AGENT = "AWF-Callback-Delivery/1.0"
+_CALLBACK_EXCEPTION_TRACEBACK_LIMIT = 4000
+_log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -252,6 +257,19 @@ class CallbackDeliveryService:
                     )
                     continue
                 except Exception as exc:  # noqa: BLE001 - delivery failures are isolated.
+                    _log.error(
+                        "callback.delivery_request_failed",
+                        delivery_id=delivery.id,
+                        subscription_id=subscription.id,
+                        event_kind=delivery.event_kind,
+                        event_type=delivery.event_type,
+                        source_id=delivery.source_id,
+                        workspace_id=delivery.workspace_id,
+                        operation_id=delivery.operation_id,
+                        merge_candidate_id=delivery.merge_candidate_id,
+                        error_code="CALLBACK_REQUEST_FAILED",
+                        redacted_traceback=_redacted_exception_traceback(exc),
+                    )
                     await repo.mark_failed_or_retry(
                         delivery,
                         error_code="CALLBACK_REQUEST_FAILED",
@@ -516,6 +534,11 @@ def _is_public_ip(address: str) -> bool:
 
 def _bounded_error_message(message: str) -> str:
     return message[:512]
+
+
+def _redacted_exception_traceback(exc: BaseException) -> str:
+    formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return redact_audit_text(formatted, limit=_CALLBACK_EXCEPTION_TRACEBACK_LIMIT)
 
 
 def _utc_now() -> datetime:
