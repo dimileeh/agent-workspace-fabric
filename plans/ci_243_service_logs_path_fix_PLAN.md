@@ -17,7 +17,7 @@ PR #243 is failing CI because `awf service logs` now invokes `docker compose` wi
 
 1. Update `src/awf/service/logs.py` compose-file resolution helper to return the default relative path when present in the current working directory, while still resolving absolute paths when discovered from parent directories.
 2. Run focused reproduction tests for:
-   - `tests/unit/cli/test_openapi_artifact.py::test_spec_is_valid_openapi_3x`
+   - `tests/unit/api/test_openapi_artifact.py::test_spec_is_valid_openapi_3x`
    - `tests/unit/cli/test_service_cli.py::test_service_logs_defaults_to_tail_api_and_worker_logs`
    - `tests/unit/cli/test_service_cli.py::test_service_logs_accepts_repeated_service_filters`
    - `tests/unit/cli/test_service_cli.py::test_service_logs_follow_streams_without_capturing_subprocess_output`
