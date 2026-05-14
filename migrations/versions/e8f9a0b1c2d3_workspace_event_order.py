@@ -39,6 +39,24 @@ def upgrade() -> None:
             """
         )
     )
+    op.execute(
+        sa.text(
+            """
+            WITH event_order_bounds AS (
+                SELECT
+                    workspace_id,
+                    max(event_order) AS max_event_order
+                FROM workspace_events
+                GROUP BY workspace_id
+            )
+            UPDATE workspaces
+            SET version = event_order_bounds.max_event_order
+            FROM event_order_bounds
+            WHERE workspaces.id = event_order_bounds.workspace_id
+              AND workspaces.version < event_order_bounds.max_event_order
+            """
+        )
+    )
     op.create_index(
         "ix_workspace_events_workspace_occurred_order",
         "workspace_events",

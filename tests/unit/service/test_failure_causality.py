@@ -1642,6 +1642,111 @@ async def test_failure_causality_snapshot_reads_secondary_failure_recorded_event
 
 
 @pytest.mark.unit
+async def test_failure_causality_snapshot_orders_same_timestamp_secondary_history_null_event_orders_last(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    primary_at = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
+    secondary_at = datetime(2100, 1, 1, 12, 1, tzinfo=UTC)
+    latest_at = datetime(2100, 1, 1, 12, 2, tzinfo=UTC)
+    primary_failure = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "message": "pytest failed before cleanup",
+        "reason_code": "PYTEST_TEST_FAILURE",
+    }
+    ordered_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "ORDERED_CLEANUP_FAILED",
+    }
+    legacy_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "LEGACY_CLEANUP_FAILED",
+    }
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure causality null order regression",
+            task_prompt="Keep legacy null-order secondary history after ordered rows.",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.failed.value
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "pytest failed before cleanup"
+        session.add_all(
+            [
+                WorkspaceEvent(
+                    id="evt_primary_failure",
+                    workspace_id=workspace.id,
+                    event_type="workspace.state_changed",
+                    old_state=WorkspaceStatus.running.value,
+                    new_state=WorkspaceStatus.failed.value,
+                    reason_code="PYTEST_TEST_FAILURE",
+                    payload={
+                        "reason_code": "PYTEST_TEST_FAILURE",
+                        "message": "pytest failed before cleanup",
+                        "primary_failure": primary_failure,
+                    },
+                    occurred_at=primary_at,
+                    event_order=1,
+                ),
+                WorkspaceEvent(
+                    id="evt_ordered_secondary",
+                    workspace_id=workspace.id,
+                    event_type="workspace.secondary_failure_recorded",
+                    old_state=WorkspaceStatus.failed.value,
+                    new_state=WorkspaceStatus.failed.value,
+                    reason_code="ORDERED_CLEANUP_FAILED",
+                    payload={
+                        "secondary_failure": ordered_secondary,
+                        "secondary_failures": [ordered_secondary],
+                    },
+                    occurred_at=secondary_at,
+                    event_order=2,
+                ),
+                WorkspaceEvent(
+                    id="evt_legacy_secondary",
+                    workspace_id=workspace.id,
+                    event_type="workspace.secondary_failure_recorded",
+                    old_state=WorkspaceStatus.failed.value,
+                    new_state=WorkspaceStatus.failed.value,
+                    reason_code="LEGACY_CLEANUP_FAILED",
+                    payload={
+                        "secondary_failure": legacy_secondary,
+                        "secondary_failures": [legacy_secondary],
+                    },
+                    occurred_at=secondary_at,
+                    event_order=None,
+                ),
+                WorkspaceEvent(
+                    id="evt_latest_failed",
+                    workspace_id=workspace.id,
+                    event_type="workspace.state_changed",
+                    old_state=WorkspaceStatus.failed.value,
+                    new_state=WorkspaceStatus.failed.value,
+                    reason_code="LATEST_FAILURE",
+                    payload={"reason_code": "LATEST_FAILURE"},
+                    occurred_at=latest_at,
+                    event_order=3,
+                ),
+            ]
+        )
+        workspace_id = workspace.id
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_failure_causality_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot.primary_failure["reason_code"] == "PYTEST_TEST_FAILURE"
+    assert snapshot.secondary_failures == (ordered_secondary, legacy_secondary)
+
+
+@pytest.mark.unit
 async def test_failure_causality_snapshot_orders_same_timestamp_failures_by_event_order(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

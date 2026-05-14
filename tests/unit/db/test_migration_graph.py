@@ -361,6 +361,12 @@ async def test_workspace_event_order_migration_backfills_existing_events(
                                 '2026-05-01 00:00:01+00'
                             ),
                             (
+                                'evt_a_first_c', 'ws_event_order_a',
+                                'workspace.phase_started', 'running',
+                                'running', 'PHASE', '{}'::json,
+                                '2026-05-01 00:00:01+00'
+                            ),
+                            (
                                 'evt_a_first_a', 'ws_event_order_a',
                                 'workspace.state_changed', 'requested',
                                 'ready', 'READY', '{}'::json,
@@ -394,12 +400,29 @@ async def test_workspace_event_order_migration_backfills_existing_events(
                         )
                     )
                 ).all()
+                versions = (
+                    await conn.execute(
+                        text(
+                            """
+                            SELECT id, version
+                            FROM workspaces
+                            WHERE id IN ('ws_event_order_a', 'ws_event_order_b')
+                            ORDER BY id
+                            """
+                        )
+                    )
+                ).all()
         finally:
             await engine.dispose()
 
     assert rows == [
         ("ws_event_order_a", "evt_a_first_a", 1),
         ("ws_event_order_a", "evt_a_first_b", 2),
-        ("ws_event_order_a", "evt_a_second", 3),
+        ("ws_event_order_a", "evt_a_first_c", 3),
+        ("ws_event_order_a", "evt_a_second", 4),
         ("ws_event_order_b", "evt_b_only", 1),
+    ]
+    assert versions == [
+        ("ws_event_order_a", 4),
+        ("ws_event_order_b", 2),
     ]

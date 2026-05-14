@@ -407,7 +407,7 @@ async def _secondary_failure_history_for_current_epoch(
         )
         .order_by(
             WorkspaceEvent.occurred_at.asc(),
-            WorkspaceEvent.event_order.asc().nullsfirst(),
+            WorkspaceEvent.event_order.asc().nullslast(),
         )
     )
     events = (await session.execute(stmt)).scalars().all()
