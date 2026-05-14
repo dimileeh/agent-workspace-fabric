@@ -597,7 +597,7 @@ def build_mcp_server(
             limit=limit,
             cursor=None,
         )
-        return _tool_result(response.model_dump(mode="json"))
+        return _safe_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_list_events")
     async def awf_list_events(
@@ -625,7 +625,7 @@ def build_mcp_server(
             limit=limit,
             cursor=None,
         )
-        return _tool_result(response.model_dump(mode="json"))
+        return _safe_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_workspace_runtime")
     async def awf_get_workspace_runtime(
