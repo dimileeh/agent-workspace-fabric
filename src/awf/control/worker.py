@@ -3040,7 +3040,7 @@ def _stale_active_execution_failure_message(
         "active execution was lost after a service or Docker restart. "
         f"The workspace is still marked {candidate.status.value!r}, but this worker has "
         f"no in-process execution task and {runtime_detail}. "
-        "AWF marked the workspace failed without cleanup; logs, the worktree, and any "
-        "surviving files were preserved for inspection. Inspect the workspace, then "
-        "cancel and redispatch the task when ready."
+        "AWF stopped the stale runtime before marking the workspace failed; logs, the "
+        "worktree, and retained evidence were preserved for inspection. Inspect the "
+        "workspace, then redispatch the task from a clean base when ready."
     )
