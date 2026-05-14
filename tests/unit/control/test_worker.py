@@ -29,7 +29,6 @@ from awf.control.worker import (
     _active_execution_preservation_claim_cleanup_payload,
     _ActiveExecutionCandidate,
     _candidate_claim_is_stale,
-    _claim_recheck_conditions,
     _execution_claim_is_stale,
     _has_running_agent_runtime,
     _json_datetime,
@@ -7397,7 +7396,6 @@ def test_stale_execution_helper_defaults_for_non_runtime_statuses() -> None:
         monitor_claim_expires_at=now + timedelta(minutes=5),
     )
 
-    assert _claim_recheck_conditions(WorkspaceStatus.ready) == ()
     assert _candidate_claim_is_stale(workspace, WorkspaceStatus.ready, now) is True
 
     message = _stale_active_execution_failure_message(

@@ -59,6 +59,7 @@ from awf.service.failure_causality import (
     load_failure_causality_snapshot,
     load_primary_failure_snapshot,
     primary_failure_reason_code,
+    restore_primary_failure_row_fields,
 )
 from awf.service.provider_recovery import (
     provider_cooldown_not_before,
@@ -1976,7 +1977,7 @@ class ControlWorker:
                 ws.failure_reason = FailureReason.infrastructure_failure.value
                 ws.failure_message = message[:2048]
             else:
-                _restore_primary_failure_row_fields(ws, primary_failure)
+                restore_primary_failure_row_fields(ws, primary_failure)
             await session.commit()
 
         _log.error(
@@ -2043,7 +2044,7 @@ class ControlWorker:
                 ws.failure_reason = FailureReason.infrastructure_failure.value
                 ws.failure_message = message[:2048]
             else:
-                _restore_primary_failure_row_fields(ws, primary_failure)
+                restore_primary_failure_row_fields(ws, primary_failure)
             event_payload = attach_primary_failure(
                 _runtime_stranding_event_payload(candidate, snapshot, finding),
                 primary_failure,
@@ -2776,15 +2777,6 @@ def _exception_chain_has_sqlalchemy_error(exc: BaseException) -> bool:
     return False
 
 
-def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:
-    now = datetime.now(UTC)
-    if status in _ACTIVE_EXECUTION_STATUSES:
-        return (_stale_execution_claim_filter(now),)
-    if status == WorkspaceStatus.monitoring_pr:
-        return (_stale_monitor_claim_filter(now),)
-    return ()
-
-
 def _workspace_claim_recheck_passes(
     workspace: Workspace,
     status: WorkspaceStatus,
@@ -3104,18 +3096,6 @@ def _secondary_stale_active_execution_payload(
         "workspace_status": candidate.status.value,
         "runtime": _runtime_snapshot_payload(snapshot),
     }
-
-
-def _restore_primary_failure_row_fields(
-    workspace: Workspace,
-    primary_failure: dict[str, Any],
-) -> None:
-    failure_reason = primary_failure.get("failure_reason")
-    if isinstance(failure_reason, str) and failure_reason:
-        workspace.failure_reason = failure_reason
-    failure_message = primary_failure.get("message")
-    if isinstance(failure_message, str) and failure_message:
-        workspace.failure_message = failure_message[:2048]
 
 
 def _stale_active_execution_failure_message(

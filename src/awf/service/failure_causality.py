@@ -18,6 +18,7 @@ PRIMARY_FAILURE_KEY = "primary_failure"
 SECONDARY_FAILURE_KEY = "secondary_failure"
 SECONDARY_FAILURES_KEY = "secondary_failures"
 _SECONDARY_FAILURE_HISTORY_LIMIT: Final = 20
+_PRIMARY_FAILURE_MESSAGE_MAX_LENGTH: Final = 2048
 _IGNORED_PRIMARY_VALIDATION_REASON_CODES = frozenset({"STALE_CALLBACK_IGNORED"})
 _FAILURE_EPOCH_RESET_STATES = frozenset(
     {
@@ -217,6 +218,20 @@ def attach_primary_failure(
     if primary_failure is not None:
         updated[PRIMARY_FAILURE_KEY] = _jsonable_mapping(primary_failure)
     return updated
+
+
+def restore_primary_failure_row_fields(
+    workspace: Workspace,
+    primary_failure: Mapping[str, Any],
+) -> None:
+    """Restore live workspace row fields from preserved primary failure evidence."""
+
+    failure_reason = _string(primary_failure.get("failure_reason"))
+    if failure_reason:
+        workspace.failure_reason = failure_reason
+    failure_message = _string(primary_failure.get("message"))
+    if failure_message:
+        workspace.failure_message = failure_message[:_PRIMARY_FAILURE_MESSAGE_MAX_LENGTH]
 
 
 async def _primary_failure_event_for_current_epoch(

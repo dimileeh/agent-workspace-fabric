@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.models import WorkspaceEvent
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service import failure_causality as failure_causality_service
@@ -17,6 +17,7 @@ from awf.service.failure_causality import (
     build_preserved_failure_payload,
     load_failure_causality_snapshot,
     load_primary_failure_snapshot,
+    restore_primary_failure_row_fields,
 )
 
 
@@ -45,6 +46,31 @@ def test_preserved_failure_payload_keeps_latest_secondary_and_history() -> None:
     assert payload["reason_code"] == "PYTEST_TEST_FAILURE"
     assert payload["secondary_failure"] == secondary_failure
     assert payload["secondary_failures"] == [secondary_failure]
+
+
+@pytest.mark.unit
+def test_restore_primary_failure_row_fields_preserves_bounded_primary_message() -> None:
+    workspace = Workspace(
+        id="ws_restore_primary",
+        status=WorkspaceStatus.failed.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="main",
+        task_title="Restore primary failure",
+        task_prompt="Preserve primary failure row fields.",
+        agent="codex",
+    )
+    message = "validation failed: " + ("x" * 4096)
+
+    restore_primary_failure_row_fields(
+        workspace,
+        {
+            "failure_reason": FailureReason.validation_failure.value,
+            "message": message,
+        },
+    )
+
+    assert workspace.failure_reason == FailureReason.validation_failure.value
+    assert workspace.failure_message == message[:2048]
 
 
 @pytest.mark.unit
