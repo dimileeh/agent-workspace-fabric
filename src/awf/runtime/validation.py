@@ -503,29 +503,59 @@ def _shell_tokens(command: str) -> list[str] | None:
         return None
 
 
-_SETUP_DEPENDENCY_COMMAND_TOKENS = frozenset(
+_SETUP_DEPENDENCY_COMMAND_VERBS: dict[str, frozenset[str]] = {
+    "bun": frozenset({"add", "i", "install", "update", "upgrade"}),
+    "bundle": frozenset({"install", "update"}),
+    "cargo": frozenset({"fetch", "install", "update"}),
+    "composer": frozenset({"install", "require", "update"}),
+    "gem": frozenset({"install", "update"}),
+    "go": frozenset({"get", "install"}),
+    "gradle": frozenset({"dependencies"}),
+    "mvn": frozenset({"dependency:go-offline", "dependency:resolve", "dependency:resolve-plugins"}),
+    "npm": frozenset({"add", "ci", "i", "install", "up", "update"}),
+    "pip": frozenset({"download", "install", "wheel"}),
+    "pip3": frozenset({"download", "install", "wheel"}),
+    "pnpm": frozenset({"add", "fetch", "i", "install", "up", "update"}),
+    "poetry": frozenset({"add", "install", "lock", "sync", "update"}),
+    "yarn": frozenset({"add", "install", "up", "upgrade"}),
+}
+_SETUP_DEPENDENCY_OPTION_VALUE_FLAGS = frozenset(
     {
-        "bun",
-        "bundle",
-        "cargo",
-        "composer",
-        "gem",
-        "go",
-        "gradle",
-        "mvn",
-        "npm",
-        "pip",
-        "pip3",
-        "pnpm",
-        "poetry",
-        "yarn",
+        "--cache",
+        "--config",
+        "--cwd",
+        "--directory",
+        "--file",
+        "--globalconfig",
+        "--home",
+        "--index-url",
+        "--jobs",
+        "--prefix",
+        "--project-dir",
+        "--project-directory",
+        "--python",
+        "--registry",
+        "--repository",
+        "--root",
+        "--settings",
+        "--settings-file",
+        "--store-dir",
+        "--timeout",
+        "--trusted-host",
+        "--userconfig",
+        "-C",
+        "-b",
+        "-f",
+        "-p",
     }
 )
+_PYTHON_OPTION_VALUE_FLAGS = frozenset({"-W", "-X"})
 _UV_SETUP_DEPENDENCY_SUBCOMMAND_TOKENS = frozenset({"add", "i", "install", "sync", "update"})
 _UV_SETUP_DEPENDENCY_NESTED_SUBCOMMAND_TOKENS = {
     "pip": frozenset({"compile", "install", "sync"}),
     "tool": frozenset({"install", "upgrade"}),
 }
+_ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _SETUP_DEPENDENCY_CONTEXT_RE = re.compile(
     r"(?i)\b("
     r"dependency|dependencies|download|fetch|index|package|packages|pypi|pythonhosted|"
@@ -674,12 +704,92 @@ def _combined_setup_dependency_output(*, stdout: str, stderr: str) -> str:
 
 def _looks_like_dependency_setup(*, command: str, output: str) -> bool:
     tokens = _shell_tokens(command) or []
-    token_names = {_command_token_name(token) for token in tokens}
-    if token_names & _SETUP_DEPENDENCY_COMMAND_TOKENS:
-        return True
+    dependency_command_match = _non_uv_dependency_setup_command_match(tokens)
+    if dependency_command_match is not None:
+        return dependency_command_match
     if _looks_like_uv_dependency_setup_command(tokens):
         return True
     return bool(_SETUP_DEPENDENCY_CONTEXT_RE.search(output))
+
+
+def _non_uv_dependency_setup_command_match(tokens: list[str]) -> bool | None:
+    start = _first_non_assignment_token_index(tokens)
+    match = _direct_dependency_setup_command_match(tokens, start=start)
+    if match is not None:
+        return match
+    return _python_module_pip_dependency_setup_command_match(tokens, start=start)
+
+
+def _direct_dependency_setup_command_match(tokens: list[str], *, start: int) -> bool | None:
+    if start >= len(tokens):
+        return None
+    command = _command_token_name(tokens[start]).lower()
+    allowed_verbs = _SETUP_DEPENDENCY_COMMAND_VERBS.get(command)
+    if allowed_verbs is None:
+        return None
+    if len(tokens) == start + 1:
+        return True
+    subcommand_index = _next_dependency_tool_subcommand_index(tokens, start=start + 1)
+    if subcommand_index is None:
+        return False
+    subcommand = _command_token_name(tokens[subcommand_index]).lower()
+    return subcommand in allowed_verbs
+
+
+def _python_module_pip_dependency_setup_command_match(
+    tokens: list[str], *, start: int
+) -> bool | None:
+    if start >= len(tokens) or not _is_python_command_token(tokens[start]):
+        return None
+    index = start + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return None
+        if token == "-m":
+            if index + 1 >= len(tokens):
+                return False
+            module_name = _command_token_name(tokens[index + 1]).lower()
+            if module_name not in {"pip", "pip3"}:
+                return None
+            return _direct_dependency_setup_command_match(tokens, start=index + 1)
+        if token.startswith("-"):
+            option_name = token.split("=", 1)[0]
+            index += 2 if option_name in _PYTHON_OPTION_VALUE_FLAGS and "=" not in token else 1
+            continue
+        return None
+    return None
+
+
+def _first_non_assignment_token_index(tokens: list[str]) -> int:
+    index = 0
+    while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
+        index += 1
+    return index
+
+
+def _next_dependency_tool_subcommand_index(tokens: list[str], *, start: int) -> int | None:
+    index = start
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return index + 1 if index + 1 < len(tokens) else None
+        if token.startswith("-"):
+            option_name = token.split("=", 1)[0]
+            index += (
+                2 if option_name in _SETUP_DEPENDENCY_OPTION_VALUE_FLAGS and "=" not in token else 1
+            )
+            continue
+        return index
+    return None
+
+
+def _is_python_command_token(token: str) -> bool:
+    command = _command_token_name(token).lower()
+    return (
+        command in {"python", "python3"}
+        or re.fullmatch(r"python\d+(?:\.\d+)?", command) is not None
+    )
 
 
 def _looks_like_uv_dependency_setup_command(tokens: list[str]) -> bool:

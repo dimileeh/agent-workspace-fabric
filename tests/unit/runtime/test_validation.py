@@ -257,6 +257,57 @@ def test_setup_dependency_network_classifier_skips_uv_run_script_dns_failure() -
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npm run build",
+        "poetry run python scripts/bootstrap.py",
+        "bundle exec rake assets:precompile",
+        "go test ./...",
+    ],
+)
+def test_setup_dependency_network_classifier_skips_non_install_package_manager_verbs(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npm ci",
+        "poetry install",
+        "bundle install",
+        "go install example.com/acme/tool@latest",
+        "gradle --no-daemon dependencies",
+        "mvn -B -DskipTests dependency:go-offline",
+        "python -m pip install -r requirements.txt",
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_install_package_manager_verbs(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_ignores_unrelated_5xx_numbers() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="uv sync --extra dev",
