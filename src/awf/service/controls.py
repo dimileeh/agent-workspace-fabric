@@ -1011,7 +1011,11 @@ class WorkspaceControlService:
             )
         )
         cleanup_payload = cleanup_result.to_dict()
-        await self._session.refresh(workspace)
+        # The cleanup callback may append an already-failed secondary event
+        # whose event_order is derived from workspace.version. Refresh with a
+        # row lock so that manual same-state event ordering stays serialized
+        # with other workspace mutations.
+        await self._session.refresh(workspace, with_for_update=True)
         requested_status = (
             WorkspaceStatus.failed if not cleanup_result.ok else WorkspaceStatus.destroyed
         )

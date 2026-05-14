@@ -882,6 +882,12 @@ async def test_destroy_cleanup_failure_records_secondary_when_workspace_already_
     assert secondary_failure_event.old_state == WorkspaceStatus.failed.value
     assert secondary_failure_event.new_state == WorkspaceStatus.failed.value
     assert secondary_failure_event.reason_code == "PYTEST_TEST_FAILURE"
+    failed_event_orders = [
+        event.event_order for event in state_failed_events if event.event_order is not None
+    ]
+    assert secondary_failure_event.event_order is not None
+    assert failed_event_orders
+    assert secondary_failure_event.event_order > max(failed_event_orders)
     assert secondary_failure_event.payload is not None
     assert secondary_failure_event.payload["synthetic"] is True
     assert secondary_failure_event.payload["primary_failure"]["validation_run"]["id"] == (

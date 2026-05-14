@@ -351,22 +351,9 @@ async def _seed_primary_failure_evidence(
         repo = WorkspaceRepository(s)
         ws = await repo.get(workspace_id)
         assert ws is not None
-        ws.failure_reason = failure_reason
-        ws.failure_message = failure_message
-        event = await repo.add_event(
-            ws,
-            event_type="workspace.state_changed",
-            reason_code=reason_code,
-            payload={
-                "reason_code": reason_code,
-                "message": failure_message,
-                "details": {
-                    "recommended_action": "fix the primary failure before retrying",
-                    "recovery_strategy": "retry_after_fix",
-                },
-            },
-        )
-        event.new_state = WorkspaceStatus.failed.value
+        original_status = WorkspaceStatus(ws.status)
+        if original_status == WorkspaceStatus.failed:
+            await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="SEED")
         validation_run_id: str | None = None
         if include_validation_run:
             validation_repo = ValidationRunRepository(s)
@@ -409,6 +396,32 @@ async def _seed_primary_failure_evidence(
                 },
             )
             validation_run_id = run.id
+        ws.failure_reason = failure_reason
+        ws.failure_message = failure_message
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.failed,
+            reason_code=reason_code,
+            payload={
+                "reason_code": reason_code,
+                "message": failure_message,
+                "details": {
+                    "recommended_action": "fix the primary failure before retrying",
+                    "recovery_strategy": "retry_after_fix",
+                },
+            },
+        )
+        if original_status in {
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+        }:
+            # The worker paths under test require an active row, while the
+            # causality evidence itself must come from a real failed
+            # transition. Do not write a remonitor state_reset here: that would
+            # deliberately start a new failure epoch and suppress the primary
+            # evidence these secondary-path tests exercise.
+            ws.status = original_status.value
         await s.commit()
         return validation_run_id
 
