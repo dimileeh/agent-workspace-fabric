@@ -922,7 +922,9 @@ class WorkspaceService:
         Supports cross-workspace event listing for the global ``awf_list_events``
         MCP tool and REST endpoint.  When ``workspace_id`` is provided, results
         are scoped to that workspace; ``event_type`` further narrows the result
-        set.  Returns up to ``limit`` validated event response objects.
+        set.  The ``limit`` parameter is proxied directly to the repository
+        without adjustment; callers that need a ``has_more`` sentinel should
+        pass ``limit + 1`` themselves and trim the extra row.
         """
         async with self._factory() as s:
             rows = await WorkspaceEventRepository(s).list(

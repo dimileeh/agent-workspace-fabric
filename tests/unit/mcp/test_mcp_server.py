@@ -2008,7 +2008,6 @@ class TestGlobalEvents:
     async def test_list_events_returns_empty_list(
         self,
         mcp,
-        factory: async_sessionmaker[AsyncSession],
     ) -> None:  # type: ignore[no-untyped-def]
         result = await mcp.call_tool("awf_list_events", {"limit": 50})
         assert isinstance(result, CallToolResult)
@@ -2067,6 +2066,8 @@ class TestGlobalEvents:
         workspace_ids = {item["workspace_id"] for item in payload["items"]}
         assert first_id in workspace_ids
         assert second_id in workspace_ids
+        occurred_at_times = [item["occurred_at"] for item in payload["items"]]
+        assert occurred_at_times == sorted(occurred_at_times, reverse=True)
 
     @pytest.mark.unit
     async def test_list_events_filters_by_workspace_id(
