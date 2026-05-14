@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from awf.db.session import make_engine
 from tests.postgres import postgres_empty_test_url
@@ -285,3 +285,121 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "attempt_count",
         "next_attempt_at",
     } <= callback_delivery_columns
+
+
+@pytest.mark.unit
+async def test_workspace_event_order_migration_backfills_existing_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    async with postgres_empty_test_url() as database_url:
+        env = {
+            **os.environ,
+            "AWF_DATABASE_URL": database_url,
+        }
+
+        def _alembic(*args: str) -> None:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                cwd=repo_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        monkeypatch.chdir(repo_root)
+        _alembic("upgrade", "d6e7f8a9b0c1")
+
+        engine = make_engine(database_url)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO workspaces (
+                            id, status, version, repo_url, branch_base,
+                            task_title, task_prompt, agent, test_commands,
+                            requires_database, created_at, updated_at
+                        )
+                        VALUES
+                            (
+                                'ws_event_order_a', 'failed', 3,
+                                'git@example.com:repo-a.git', 'main',
+                                'old row a', 'do work', 'codex', '[]'::json,
+                                false, '2026-05-01 00:00:00+00',
+                                '2026-05-01 00:00:00+00'
+                            ),
+                            (
+                                'ws_event_order_b', 'failed', 2,
+                                'git@example.com:repo-b.git', 'main',
+                                'old row b', 'do work', 'codex', '[]'::json,
+                                false, '2026-05-01 00:00:00+00',
+                                '2026-05-01 00:00:00+00'
+                            )
+                        """
+                    )
+                )
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO workspace_events (
+                            id, workspace_id, event_type, old_state,
+                            new_state, reason_code, payload, occurred_at
+                        )
+                        VALUES
+                            (
+                                'evt_a_second', 'ws_event_order_a',
+                                'workspace.state_changed', 'running',
+                                'failed', 'SECOND_FAILURE', '{}'::json,
+                                '2026-05-01 00:00:02+00'
+                            ),
+                            (
+                                'evt_a_first_b', 'ws_event_order_a',
+                                'workspace.state_changed', 'ready',
+                                'running', 'STARTED', '{}'::json,
+                                '2026-05-01 00:00:01+00'
+                            ),
+                            (
+                                'evt_a_first_a', 'ws_event_order_a',
+                                'workspace.state_changed', 'requested',
+                                'ready', 'READY', '{}'::json,
+                                '2026-05-01 00:00:01+00'
+                            ),
+                            (
+                                'evt_b_only', 'ws_event_order_b',
+                                'workspace.state_changed', 'running',
+                                'failed', 'ONLY_FAILURE', '{}'::json,
+                                '2026-05-01 00:00:01+00'
+                            )
+                        """
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+        _alembic("upgrade", "head")
+
+        engine = make_engine(database_url)
+        try:
+            async with engine.connect() as conn:
+                rows = (
+                    await conn.execute(
+                        text(
+                            """
+                            SELECT workspace_id, id, event_order
+                            FROM workspace_events
+                            ORDER BY workspace_id, event_order
+                            """
+                        )
+                    )
+                ).all()
+        finally:
+            await engine.dispose()
+
+    assert rows == [
+        ("ws_event_order_a", "evt_a_first_a", 1),
+        ("ws_event_order_a", "evt_a_first_b", 2),
+        ("ws_event_order_a", "evt_a_second", 3),
+        ("ws_event_order_b", "evt_b_only", 1),
+    ]

@@ -20,6 +20,25 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("workspace_events", sa.Column("event_order", sa.Integer(), nullable=True))
+    op.execute(
+        sa.text(
+            """
+            WITH ordered_events AS (
+                SELECT
+                    id,
+                    (row_number() OVER (
+                        PARTITION BY workspace_id
+                        ORDER BY occurred_at ASC, id ASC
+                    ))::integer AS backfilled_event_order
+                FROM workspace_events
+            )
+            UPDATE workspace_events
+            SET event_order = ordered_events.backfilled_event_order
+            FROM ordered_events
+            WHERE workspace_events.id = ordered_events.id
+            """
+        )
+    )
     op.create_index(
         "ix_workspace_events_workspace_occurred_order",
         "workspace_events",
