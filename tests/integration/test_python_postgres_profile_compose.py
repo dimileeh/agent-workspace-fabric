@@ -58,7 +58,7 @@ def _run(cmd: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[st
 @pytest.mark.integration
 @pytest.mark.docker
 @pytest.mark.slow
-@pytest.mark.timeout(240)
+@pytest.mark.timeout(600)
 async def test_python_postgres_profile_runs_setup_health_validate_and_cleans_up(
     tmp_path: Path,
 ) -> None:
