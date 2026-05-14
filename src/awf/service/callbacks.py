@@ -544,7 +544,7 @@ def _validate_callback_target_dns(*, hostname: str) -> tuple[str, ...]:
         raise ValueError("target_url host could not be resolved")
     for address in addresses:
         if not _is_public_ip(address):
-            raise ValueError("target_url resolved host is not public")
+            raise ValueError(f"target_url resolved host is not public: {address}")
     return tuple(sorted(addresses, key=_callback_address_family_sort_key))
 
 

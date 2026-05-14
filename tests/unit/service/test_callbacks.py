@@ -1249,7 +1249,7 @@ async def test_callback_poster_value_error_is_request_failure(
 
 
 @pytest.mark.unit
-async def test_drain_due_rejects_callbacks_with_private_delivery_target(
+async def test_drain_due_rejects_callbacks_with_private_delivery_target_includes_rejected_ip(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1265,7 +1265,7 @@ async def test_drain_due_rejects_callbacks_with_private_delivery_target(
     monkeypatch.setattr(
         callback_service_module,
         "_resolve_callback_target_ip_addresses",
-        lambda _hostname: ("127.0.0.1",),
+        lambda _hostname: ("1.1.1.1", "127.0.0.1"),
     )
     poster = _RecordingPoster()
     with structlog.testing.capture_logs() as captured:
@@ -1284,14 +1284,14 @@ async def test_drain_due_rejects_callbacks_with_private_delivery_target(
     assert log_entry["operation_id"] is None
     assert log_entry["merge_candidate_id"] is None
     assert log_entry["error_code"] == "CALLBACK_TARGET_INVALID"
-    assert log_entry["error_message"] == "target_url resolved host is not public"
+    assert log_entry["error_message"] == "target_url resolved host is not public: 127.0.0.1"
     stored = await _get_delivery(factory, deliveries[0].id)
     assert stored.status == CallbackDeliveryStatus.pending.value
     assert stored.error_code == "CALLBACK_TARGET_INVALID"
     assert stored.response_status_code is None
     assert stored.attempt_count == 1
     assert stored.envelope["delivery"]["attempt_count"] == 1
-    assert "target_url resolved host is not public" in (stored.error_message or "")
+    assert "target_url resolved host is not public: 127.0.0.1" in (stored.error_message or "")
 
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
