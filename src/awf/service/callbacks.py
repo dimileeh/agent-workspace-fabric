@@ -239,14 +239,6 @@ class CallbackDeliveryService:
                         subscription.target_url,
                         settings=self._settings,
                     )
-                    result = await _post_to_validated_callback_addresses(
-                        self._http_poster,
-                        subscription.target_url,
-                        json=delivery.envelope,
-                        headers=_delivery_headers(delivery),
-                        timeout=float(subscription.timeout_seconds),
-                        connect_ip_addresses=validated_target.connect_ip_addresses,
-                    )
                 except ValueError as exc:
                     _log.warning(
                         "callback.delivery_target_invalid",
@@ -270,6 +262,16 @@ class CallbackDeliveryService:
                         now=self._clock(),
                     )
                     continue
+
+                try:
+                    result = await _post_to_validated_callback_addresses(
+                        self._http_poster,
+                        subscription.target_url,
+                        json=delivery.envelope,
+                        headers=_delivery_headers(delivery),
+                        timeout=float(subscription.timeout_seconds),
+                        connect_ip_addresses=validated_target.connect_ip_addresses,
+                    )
                 except Exception as exc:  # noqa: BLE001 - delivery failures are isolated.
                     _log.error(
                         "callback.delivery_request_failed",

@@ -960,6 +960,37 @@ async def test_callback_request_failures_log_redacted_traceback(
 
 
 @pytest.mark.unit
+async def test_callback_poster_value_error_is_request_failure(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+    delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
+    poster = _RecordingPoster(exc=ValueError("poster rejected request payload"))
+
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert len(poster.calls) == 1
+    assert [
+        event for event in captured if event.get("event") == "callback.delivery_target_invalid"
+    ] == []
+    log_entries = [
+        event for event in captured if event.get("event") == "callback.delivery_request_failed"
+    ]
+    assert len(log_entries) == 1
+    assert log_entries[0]["delivery_id"] == delivery.id
+    assert log_entries[0]["error_code"] == "CALLBACK_REQUEST_FAILED"
+
+    stored = await _get_delivery(factory, delivery.id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_REQUEST_FAILED"
+    assert "poster rejected request payload" in (stored.error_message or "")
+
+
+@pytest.mark.unit
 async def test_drain_due_rejects_callbacks_with_private_delivery_target(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
