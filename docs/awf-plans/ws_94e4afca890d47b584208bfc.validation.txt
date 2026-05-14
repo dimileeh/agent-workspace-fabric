@@ -1,0 +1,13 @@
+Validation evidence for ws_94e4afca890d47b584208bfc (REST Authentication Parity for Operation Read Endpoints)
+
+Commands run:
+1. uv run --python 3.12 --extra dev pytest tests/unit/api/test_operations.py tests/unit/api/test_operations_listing.py tests/unit/api/test_deps.py -q
+   - Result: 44 passed in 26.72s.
+
+2. uv run --python 3.12 --extra dev ruff check src/awf tests
+   - Result: All checks passed!
+
+3. uv run --python 3.12 --extra dev mypy src/awf
+   - Result: Success: no issues found in 153 source files.
+
+Gap closed: validation evidence now exists in the workspace.

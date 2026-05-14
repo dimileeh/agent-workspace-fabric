@@ -1,6 +1,6 @@
 import base64
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -8,6 +8,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from awf.api.schemas import OperationResponse
+from awf.common.config import get_settings
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -109,11 +110,11 @@ async def sample_data(session: AsyncSession):
 
 
 @pytest.mark.unit
-async def test_list_operations_global(client: AsyncClient, sample_data):
+async def test_list_operations_global(authed_client: AsyncClient, sample_data):
     ws1, ws2 = sample_data
 
     # Test global list
-    response = await client.get("/v1/operations")
+    response = await authed_client.get("/v1/operations")
     assert response.status_code == 200
     body = response.json()
     assert len(body["items"]) == 3
@@ -123,7 +124,7 @@ async def test_list_operations_global(client: AsyncClient, sample_data):
     assert body["cursor"] is None
 
     # Test filter by workspace_id
-    response = await client.get(f"/v1/operations?workspace_id={ws1.id}&limit=2")
+    response = await authed_client.get(f"/v1/operations?workspace_id={ws1.id}&limit=2")
     assert response.status_code == 200
     body = response.json()
     assert len(body["items"]) == 2
@@ -131,13 +132,13 @@ async def test_list_operations_global(client: AsyncClient, sample_data):
     assert body["cursor"] is None
 
     # Test filter by status
-    response = await client.get("/v1/operations?status=running")
+    response = await authed_client.get("/v1/operations?status=running")
     assert response.status_code == 200
     assert len(response.json()["items"]) == 1
     assert response.json()["items"][0]["status"] == "running"
 
     # Test filter by type
-    response = await client.get("/v1/operations?type=validate")
+    response = await authed_client.get("/v1/operations?type=validate")
     assert response.status_code == 200
     assert len(response.json()["items"]) == 1
     assert response.json()["items"][0]["type"] == "validate"
@@ -145,10 +146,10 @@ async def test_list_operations_global(client: AsyncClient, sample_data):
 
 @pytest.mark.unit
 async def test_list_operations_reports_has_more_when_limit_truncates(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     sample_data,
 ) -> None:
-    response = await client.get("/v1/operations?limit=2")
+    response = await authed_client.get("/v1/operations?limit=2")
 
     assert response.status_code == 200
     body = response.json()
@@ -161,12 +162,12 @@ async def test_list_operations_reports_has_more_when_limit_truncates(
 
 @pytest.mark.unit
 async def test_list_workspace_operations_reports_has_more_when_limit_truncates(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     sample_data,
 ) -> None:
     ws1, _ws2 = sample_data
 
-    response = await client.get(f"/v1/workspaces/{ws1.id}/operations?limit=1")
+    response = await authed_client.get(f"/v1/workspaces/{ws1.id}/operations?limit=1")
 
     assert response.status_code == 200
     body = response.json()
@@ -179,7 +180,7 @@ async def test_list_workspace_operations_reports_has_more_when_limit_truncates(
 
 @pytest.mark.unit
 async def test_list_operations_next_cursor_fetches_second_page(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     session: AsyncSession,
 ) -> None:
     ws_repo = WorkspaceRepository(session)
@@ -213,14 +214,14 @@ async def test_list_operations_next_cursor_fetches_second_page(
     newest.created_at = base + timedelta(seconds=2)
     await session.commit()
 
-    first_response = await client.get("/v1/operations?limit=1")
+    first_response = await authed_client.get("/v1/operations?limit=1")
     assert first_response.status_code == 200
     first_body = first_response.json()
     assert [item["id"] for item in first_body["items"]] == [newest.id]
     assert first_body["has_more"] is True
     assert first_body["next_cursor"] is not None
 
-    second_response = await client.get(
+    second_response = await authed_client.get(
         "/v1/operations",
         params={"limit": 1, "cursor": first_body["next_cursor"]},
     )
@@ -234,7 +235,7 @@ async def test_list_operations_next_cursor_fetches_second_page(
 
 @pytest.mark.unit
 async def test_list_operations_cursor_is_stable_when_newer_operations_arrive(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     session: AsyncSession,
 ) -> None:
     ws_repo = WorkspaceRepository(session)
@@ -268,7 +269,7 @@ async def test_list_operations_cursor_is_stable_when_newer_operations_arrive(
     newest.created_at = base + timedelta(seconds=2)
     await session.commit()
 
-    first_response = await client.get(
+    first_response = await authed_client.get(
         "/v1/operations",
         params={"workspace_id": workspace.id, "limit": 1},
     )
@@ -284,7 +285,7 @@ async def test_list_operations_cursor_is_stable_when_newer_operations_arrive(
     inserted.created_at = base + timedelta(seconds=3)
     await session.commit()
 
-    second_response = await client.get(
+    second_response = await authed_client.get(
         "/v1/operations",
         params={
             "workspace_id": workspace.id,
@@ -300,7 +301,7 @@ async def test_list_operations_cursor_is_stable_when_newer_operations_arrive(
 
 @pytest.mark.unit
 async def test_list_workspace_operations_cursor_is_stable_when_newer_operations_arrive(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     session: AsyncSession,
 ) -> None:
     ws_repo = WorkspaceRepository(session)
@@ -334,7 +335,7 @@ async def test_list_workspace_operations_cursor_is_stable_when_newer_operations_
     newest.created_at = base + timedelta(seconds=2)
     await session.commit()
 
-    first_response = await client.get(f"/v1/workspaces/{workspace.id}/operations?limit=1")
+    first_response = await authed_client.get(f"/v1/workspaces/{workspace.id}/operations?limit=1")
     assert first_response.status_code == 200
     first_body = first_response.json()
     assert [item["id"] for item in first_body["items"]] == [newest.id]
@@ -347,7 +348,7 @@ async def test_list_workspace_operations_cursor_is_stable_when_newer_operations_
     inserted.created_at = base + timedelta(seconds=3)
     await session.commit()
 
-    second_response = await client.get(
+    second_response = await authed_client.get(
         f"/v1/workspaces/{workspace.id}/operations",
         params={"limit": 1, "cursor": first_body["next_cursor"]},
     )
@@ -359,9 +360,9 @@ async def test_list_workspace_operations_cursor_is_stable_when_newer_operations_
 
 @pytest.mark.unit
 async def test_list_operations_invalid_cursor_returns_structured_400(
-    client: AsyncClient,
+    authed_client: AsyncClient,
 ) -> None:
-    response = await client.get("/v1/operations?cursor=not-a-cursor")
+    response = await authed_client.get("/v1/operations?cursor=not-a-cursor")
 
     assert response.status_code == 400
     assert response.json()["detail"] == {
@@ -372,12 +373,12 @@ async def test_list_operations_invalid_cursor_returns_structured_400(
 
 @pytest.mark.unit
 async def test_list_workspace_operations_invalid_cursor_returns_structured_400(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     sample_data,
 ) -> None:
     ws1, _ws2 = sample_data
 
-    response = await client.get(f"/v1/workspaces/{ws1.id}/operations?cursor=not-a-cursor")
+    response = await authed_client.get(f"/v1/workspaces/{ws1.id}/operations?cursor=not-a-cursor")
 
     assert response.status_code == 400
     assert response.json()["detail"] == {
@@ -388,7 +389,7 @@ async def test_list_workspace_operations_invalid_cursor_returns_structured_400(
 
 @pytest.mark.unit
 async def test_list_operations_uses_prevalidated_service_responses(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     operation = _operation_response()
@@ -412,18 +413,18 @@ async def test_list_operations_uses_prevalidated_service_responses(
     )
     monkeypatch.setattr(OperationResponse, "model_validate", classmethod(fail_model_validate))
 
-    response = await client.get("/v1/operations")
+    response = await authed_client.get("/v1/operations")
 
     assert response.status_code == 200
     assert response.json()["items"][0]["id"] == operation.id
 
 
 @pytest.mark.unit
-async def test_list_workspace_operations_filters(client: AsyncClient, sample_data):
+async def test_list_workspace_operations_filters(authed_client: AsyncClient, sample_data):
     ws1, ws2 = sample_data
 
     # Test workspace-scoped list with status filter
-    response = await client.get(f"/v1/workspaces/{ws1.id}/operations?status=succeeded")
+    response = await authed_client.get(f"/v1/workspaces/{ws1.id}/operations?status=succeeded")
     assert response.status_code == 200
     body = response.json()
     assert len(body["items"]) == 1
@@ -434,22 +435,22 @@ async def test_list_workspace_operations_filters(client: AsyncClient, sample_dat
     assert body["cursor"] is None
 
     # Test workspace-scoped list with type filter
-    response = await client.get(f"/v1/workspaces/{ws1.id}/operations?type=validate")
+    response = await authed_client.get(f"/v1/workspaces/{ws1.id}/operations?type=validate")
     assert response.status_code == 200
     assert len(response.json()["items"]) == 1
     assert response.json()["items"][0]["status"] == "running"
 
 
 @pytest.mark.unit
-async def test_list_workspace_operations_not_found(client: AsyncClient):
-    response = await client.get("/v1/workspaces/ws_missing/operations")
+async def test_list_workspace_operations_not_found(authed_client: AsyncClient):
+    response = await authed_client.get("/v1/workspaces/ws_missing/operations")
     assert response.status_code == 404
     assert response.json()["detail"]["error_code"] == "NOT_FOUND"
 
 
 @pytest.mark.unit
-async def test_get_operation_not_found(client: AsyncClient):
-    response = await client.get("/v1/operations/op_missing")
+async def test_get_operation_not_found(authed_client: AsyncClient):
+    response = await authed_client.get("/v1/operations/op_missing")
 
     assert response.status_code == 404
     assert response.json()["detail"] == {
@@ -460,7 +461,7 @@ async def test_get_operation_not_found(client: AsyncClient):
 
 @pytest.mark.unit
 async def test_operation_response_serializes_stable_audit_fields(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     session: AsyncSession,
 ) -> None:
     ws_repo = WorkspaceRepository(session)
@@ -500,8 +501,8 @@ async def test_operation_response_serializes_stable_audit_fields(
     )
     await session.commit()
 
-    detail_response = await client.get(f"/v1/operations/{operation.id}")
-    list_response = await client.get(f"/v1/operations?workspace_id={ws.id}")
+    detail_response = await authed_client.get(f"/v1/operations/{operation.id}")
+    list_response = await authed_client.get(f"/v1/operations?workspace_id={ws.id}")
 
     assert detail_response.status_code == 200
     assert list_response.status_code == 200
@@ -532,7 +533,7 @@ async def test_operation_response_serializes_stable_audit_fields(
 
 @pytest.mark.unit
 async def test_operation_response_derives_pr_monitor_recovery_fields(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     session: AsyncSession,
 ) -> None:
     ws_repo = WorkspaceRepository(session)
@@ -565,8 +566,8 @@ async def test_operation_response_derives_pr_monitor_recovery_fields(
     )
     await session.commit()
 
-    detail_response = await client.get(f"/v1/operations/{operation.id}")
-    list_response = await client.get(f"/v1/workspaces/{ws.id}/operations")
+    detail_response = await authed_client.get(f"/v1/operations/{operation.id}")
+    list_response = await authed_client.get(f"/v1/workspaces/{ws.id}/operations")
 
     assert detail_response.status_code == 200
     assert list_response.status_code == 200
@@ -584,7 +585,7 @@ async def test_operation_response_derives_pr_monitor_recovery_fields(
 
 @pytest.mark.unit
 async def test_monitor_state_operations_list_and_filter_through_existing_endpoints(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     session: AsyncSession,
 ) -> None:
     ws_repo = WorkspaceRepository(session)
@@ -616,10 +617,10 @@ async def test_monitor_state_operations_list_and_filter_through_existing_endpoin
     )
     await session.commit()
 
-    global_response = await client.get(f"/v1/operations?workspace_id={ws.id}")
-    global_filter_response = await client.get("/v1/operations?type=monitor_state")
-    workspace_response = await client.get(f"/v1/workspaces/{ws.id}/operations")
-    workspace_filter_response = await client.get(
+    global_response = await authed_client.get(f"/v1/operations?workspace_id={ws.id}")
+    global_filter_response = await authed_client.get("/v1/operations?type=monitor_state")
+    workspace_response = await authed_client.get(f"/v1/workspaces/{ws.id}/operations")
+    workspace_filter_response = await authed_client.get(
         f"/v1/workspaces/{ws.id}/operations?type=monitor_state"
     )
 
@@ -640,7 +641,7 @@ async def test_monitor_state_operations_list_and_filter_through_existing_endpoin
 
 @pytest.mark.unit
 async def test_legacy_operation_without_payload_or_result_serializes_audit_fields(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     session: AsyncSession,
 ) -> None:
     ws_repo = WorkspaceRepository(session)
@@ -661,7 +662,7 @@ async def test_legacy_operation_without_payload_or_result_serializes_audit_field
     )
     await session.commit()
 
-    response = await client.get(f"/v1/operations/{operation.id}")
+    response = await authed_client.get(f"/v1/operations/{operation.id}")
 
     assert response.status_code == 200
     item = response.json()
@@ -680,7 +681,7 @@ async def test_legacy_operation_without_payload_or_result_serializes_audit_field
 
 @pytest.mark.unit
 async def test_operation_response_derives_failure_fields_from_error_columns(
-    client: AsyncClient,
+    authed_client: AsyncClient,
     session: AsyncSession,
 ) -> None:
     ws_repo = WorkspaceRepository(session)
@@ -707,7 +708,7 @@ async def test_operation_response_derives_failure_fields_from_error_columns(
     )
     await session.commit()
 
-    response = await client.get(f"/v1/operations/{operation.id}")
+    response = await authed_client.get(f"/v1/operations/{operation.id}")
 
     assert response.status_code == 200
     body = response.json()
@@ -879,16 +880,16 @@ def test_operation_response_deduplicates_colliding_log_stream_ref_lists() -> Non
 
 
 @pytest.mark.unit
-async def test_list_operations_limit_validation(client: AsyncClient):
-    response = await client.get("/v1/operations?limit=0")
+async def test_list_operations_limit_validation(authed_client: AsyncClient):
+    response = await authed_client.get("/v1/operations?limit=0")
     assert response.status_code == 422
 
-    response = await client.get("/v1/operations?limit=501")
+    response = await authed_client.get("/v1/operations?limit=501")
     assert response.status_code == 422
 
 
 @pytest.mark.unit
-async def test_list_operations_ordering(client: AsyncClient, session: AsyncSession):
+async def test_list_operations_ordering(authed_client: AsyncClient, session: AsyncSession):
     ws_repo = WorkspaceRepository(session)
     op_repo = OperationRepository(session)
 
@@ -911,7 +912,7 @@ async def test_list_operations_ordering(client: AsyncClient, session: AsyncSessi
 
     await session.commit()
 
-    response = await client.get(f"/v1/operations?workspace_id={ws.id}")
+    response = await authed_client.get(f"/v1/operations?workspace_id={ws.id}")
     assert response.status_code == 200
     items = response.json()["items"]
     assert len(items) == 3
@@ -922,7 +923,7 @@ async def test_list_operations_ordering(client: AsyncClient, session: AsyncSessi
 
 
 @pytest.mark.unit
-async def test_list_operations_empty(client: AsyncClient, session: AsyncSession):
+async def test_list_operations_empty(authed_client: AsyncClient, session: AsyncSession):
     ws_repo = WorkspaceRepository(session)
     ws = await ws_repo.create(
         repo_url="https://github.com/org/repo_empty",
@@ -935,11 +936,72 @@ async def test_list_operations_empty(client: AsyncClient, session: AsyncSession)
     await session.commit()
 
     # Empty global list scoped to this workspace
-    response = await client.get(f"/v1/operations?workspace_id={ws.id}&type=validate")
+    response = await authed_client.get(f"/v1/operations?workspace_id={ws.id}&type=validate")
     assert response.status_code == 200
     assert response.json()["items"] == []
 
     # Empty workspace list
-    response = await client.get(f"/v1/workspaces/{ws.id}/operations")
+    response = await authed_client.get(f"/v1/workspaces/{ws.id}/operations")
     assert response.status_code == 200
     assert response.json()["items"] == []
+
+
+@pytest.fixture
+def authed_client(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> Iterator[AsyncClient]:
+    get_settings.cache_clear()
+    monkeypatch.setenv("AWF_API_TOKEN", "test-token")
+    original_auth = client.headers.get("Authorization")
+    client.headers["Authorization"] = "Bearer test-token"
+    try:
+        yield client
+    finally:
+        if original_auth is None:
+            client.headers.pop("Authorization", None)
+        else:
+            client.headers["Authorization"] = original_auth
+        get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_unauthenticated_operation_reads_rejected(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, sample_data
+) -> None:
+    ws1, _ = sample_data
+
+    try:
+        get_settings.cache_clear()
+        monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+        for path in [
+            "/v1/operations",
+            "/v1/operations/op_missing",
+            f"/v1/workspaces/{ws1.id}/operations",
+        ]:
+            response = await client.get(path)
+            assert response.status_code == 503
+
+        get_settings.cache_clear()
+        monkeypatch.setenv("AWF_API_TOKEN", "test-token")
+        for path in [
+            "/v1/operations",
+            "/v1/operations/op_missing",
+            f"/v1/workspaces/{ws1.id}/operations",
+        ]:
+            response = await client.get(path)
+            assert response.status_code == 401
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_authenticated_operation_reads_accepted(
+    authed_client: AsyncClient, sample_data
+) -> None:
+    ws1, _ = sample_data
+
+    for path in [
+        "/v1/operations",
+        "/v1/operations/op_missing",
+        f"/v1/workspaces/{ws1.id}/operations",
+    ]:
+        response = await authed_client.get(path)
+        assert response.status_code in (200, 404)

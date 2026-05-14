@@ -64,6 +64,7 @@ PROTECTED_CLI_CAPABILITY_NAMES = tuple(
 _CLI_ARGUMENT_VALUES = {
     "workspace_id": "ws_auth_contract",
     "stream_id": "agent.stdout",
+    "operation_id": "op_auth_contract",
 }
 
 _CLI_OPTION_VALUES_BY_CAPABILITY = {
@@ -320,6 +321,7 @@ def _protected_rest_path(capability_name: str) -> str:
     return capability.rest_path.format(
         workspace_id="ws_auth_contract",
         stream_id="agent.stdout",
+        operation_id="op_auth_contract",
     )
 
 
