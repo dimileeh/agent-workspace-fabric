@@ -175,6 +175,78 @@ class TestWorkspaceCreate:
         assert kwargs["json"]["resources"]["memory"] == "4GB"
 
     @pytest.mark.unit
+    def test_emits_json_policy_flags_to_post(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_policy"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Policy create",
+                    "--prompt",
+                    "Verify policy flags.",
+                    "--out-of-scope-changes-json",
+                    '{"mode":"block","allowlist_patterns":["docs/**"]}',
+                    "--provider-recovery-json",
+                    '{"max_fallback_attempts":1,"fallbacks":[{"agent":"codex","provider":"openai","model":"gpt-5.5"}]}',
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["task"]["out_of_scope_changes"] == {
+            "mode": "block",
+            "allowlist_patterns": ["docs/**"],
+        }
+        assert body["task"]["provider_recovery"] == {
+            "max_fallback_attempts": 1,
+            "fallbacks": [
+                {"agent": "codex", "provider": "openai", "model": "gpt-5.5"},
+            ],
+        }
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "flag, value",
+        (
+            ("--out-of-scope-changes-json", "{mode:block}"),
+            ("--out-of-scope-changes-json", "[1,2,3]"),
+            ("--provider-recovery-json", "{fallbacks:[{agent:codex}]}"),
+            ("--provider-recovery-json", "null"),
+        ),
+    )
+    def test_invalid_json_policy_flag_values_do_not_request(
+        self,
+        flag: str,
+        value: str,
+    ) -> None:
+        with patch("awf.cli.main.httpx.request") as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Policy create",
+                    "--prompt",
+                    "Verify policy validation.",
+                    flag,
+                    value,
+                ],
+            )
+
+        assert result.exit_code == 2
+        assert flag in result.stderr
+        assert "json" in result.stderr.lower()
+        assert not mock.called
+
+    @pytest.mark.unit
     def test_idempotency_key_forwarded_as_header(self) -> None:
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_idem"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
