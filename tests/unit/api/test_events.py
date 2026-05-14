@@ -163,6 +163,7 @@ class TestListEvents:
 
         assert response.status_code == 200
         body = response.json()
+        assert len(body["items"]) >= 1
         for item in body["items"]:
             assert item["event_type"] == "workspace.phase_started"
 
