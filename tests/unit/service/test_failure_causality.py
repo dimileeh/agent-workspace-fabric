@@ -74,6 +74,32 @@ def test_restore_primary_failure_row_fields_preserves_bounded_primary_message() 
 
 
 @pytest.mark.unit
+def test_restore_primary_failure_row_fields_clears_missing_failure_reason() -> None:
+    workspace = Workspace(
+        id="ws_restore_primary_missing_reason",
+        status=WorkspaceStatus.failed.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="main",
+        task_title="Restore primary failure",
+        task_prompt="Preserve primary failure row fields.",
+        agent="codex",
+    )
+    workspace.failure_reason = FailureReason.infrastructure_failure.value
+    workspace.failure_message = "secondary failure"
+
+    restore_primary_failure_row_fields(
+        workspace,
+        {
+            "message": "primary failed before secondary failure",
+            "reason_code": "PRIMARY_FAILED",
+        },
+    )
+
+    assert workspace.failure_reason is None
+    assert workspace.failure_message == "primary failed before secondary failure"
+
+
+@pytest.mark.unit
 def test_preserved_failure_payload_accumulates_prior_secondary_failures() -> None:
     prior_secondary = {
         "failure_reason": "cleanup_failure",

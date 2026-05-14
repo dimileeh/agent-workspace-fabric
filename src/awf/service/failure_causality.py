@@ -223,8 +223,7 @@ def restore_primary_failure_row_fields(
     """Restore live workspace row fields from preserved primary failure evidence."""
 
     failure_reason = _string(primary_failure.get("failure_reason"))
-    if failure_reason:
-        workspace.failure_reason = failure_reason
+    workspace.failure_reason = failure_reason
     failure_message = _string(primary_failure.get("message"))
     if failure_message:
         workspace.failure_message = failure_message[:_PRIMARY_FAILURE_MESSAGE_MAX_LENGTH]
