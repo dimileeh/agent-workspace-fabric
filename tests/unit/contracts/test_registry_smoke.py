@@ -97,6 +97,12 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
     "Artifact content/download": (
         "tests/unit/mcp/test_mcp_server.py::TestReadWorkspaceArtifact::test_reads_safe_small_file_and_returns_base64_content",
     ),
+    "Workspace operations": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_operations_tool_matches_rest_filters_and_detail",
+    ),
+    "Global operations": (
+        "tests/unit/mcp/test_mcp_operator_surfaces.py::TestMcpOperatorSurfaceParity::test_operations_tool_matches_rest_filters_and_detail",
+    ),
     "Cancel workspace": (
         "tests/unit/contracts/test_request_payload_alignment.py::test_mcp_cancel_invokes_service_with_canonical_kwargs",
     ),

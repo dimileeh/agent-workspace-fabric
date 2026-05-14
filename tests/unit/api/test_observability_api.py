@@ -1265,12 +1265,12 @@ class TestOperationsAndControls:
         assert body["status"] == "cancelled"
         assert stopped == ["awf_ws_observe"]
 
-        operation = await client.get(f"/v1/operations/{body['operation_id']}")
+        operation = await client.get(f"/v1/operations/{body['operation_id']}", headers=headers)
         assert operation.status_code == 200
         assert operation.json()["type"] == "stop"
         assert operation.json()["status"] == "succeeded"
 
-        operations = await client.get(f"/v1/workspaces/{workspace_id}/operations")
+        operations = await client.get(f"/v1/workspaces/{workspace_id}/operations", headers=headers)
         assert operations.status_code == 200
         assert [item["type"] for item in operations.json()["items"]] == ["stop", "validate"]
 
