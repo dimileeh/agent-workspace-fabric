@@ -50,7 +50,7 @@ uv run --python 3.12 --extra dev awf service logs --follow --service api --servi
 ```
 
 `awf service logs` is a read-only wrapper around
-`docker compose -f docker/compose/local-service.yml logs`. By default it tails
+`docker compose -f docker/compose/local-service.yml logs` (run from an AWF source checkout). By default it tails
 the `api` and `worker` services. Repeat `--service` to select `api`, `worker`,
 `migrate`, or `postgres`.
 
