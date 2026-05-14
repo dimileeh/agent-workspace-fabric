@@ -2654,6 +2654,7 @@ class WorkspaceRepository:
                 old_state=None,
                 new_state=WorkspaceStatus.requested.value,
                 reason_code="CREATED",
+                event_order=workspace.version,
             )
         )
         self._session.add(workspace)
@@ -3168,6 +3169,7 @@ class WorkspaceRepository:
                 new_state=to.value,
                 reason_code=reason_code,
                 payload=payload,
+                event_order=workspace.version,
             )
         )
         return workspace
@@ -3228,6 +3230,7 @@ class WorkspaceRepository:
                 old_state=from_status.value,
                 new_state=to.value,
                 reason_code=reason_code,
+                event_order=workspace.version,
             )
         )
         await self._session.flush()

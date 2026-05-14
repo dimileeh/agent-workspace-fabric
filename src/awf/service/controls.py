@@ -580,6 +580,7 @@ class WorkspaceControlService:
                     new_state=str(state_reset["to"]),
                     reason_code=_OPERATOR_REMONITOR_REASON_CODE,
                     payload=event_payload,
+                    event_order=workspace.version,
                 )
             )
             await self._session.flush()

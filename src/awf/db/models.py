@@ -851,6 +851,12 @@ class WorkspaceEvent(Base):
     __table_args__ = (
         Index("ix_workspace_events_workspace", "workspace_id"),
         Index("ix_workspace_events_occurred_at", "occurred_at"),
+        Index(
+            "ix_workspace_events_workspace_occurred_order",
+            "workspace_id",
+            "occurred_at",
+            "event_order",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -862,6 +868,7 @@ class WorkspaceEvent(Base):
     new_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    event_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

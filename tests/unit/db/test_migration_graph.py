@@ -24,7 +24,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["d6e7f8a9b0c1"]
+    assert script.get_heads() == ["e8f9a0b1c2d3"]
 
 
 @pytest.mark.unit
@@ -114,6 +114,22 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
                         lambda sync_conn: [
                             column["name"]
                             for column in inspect(sync_conn).get_columns("workspaces")
+                        ]
+                    )
+                )
+                workspace_event_columns = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("workspace_events")
+                        ]
+                    )
+                )
+                workspace_event_indexes = set(
+                    await conn.run_sync(
+                        lambda sync_conn: [
+                            index["name"]
+                            for index in inspect(sync_conn).get_indexes("workspace_events")
                         ]
                     )
                 )
@@ -219,6 +235,8 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "environment_identity_inputs",
         "coverage",
     } <= validation_run_columns
+    assert "event_order" in workspace_event_columns
+    assert "ix_workspace_events_workspace_occurred_order" in workspace_event_indexes
     assert "workspace_secret_leases" in tables
     assert {
         "id",

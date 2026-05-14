@@ -252,7 +252,10 @@ async def _latest_failed_state_event(
     )
     if require_primary_failure:
         stmt = stmt.where(func.json_typeof(WorkspaceEvent.payload[PRIMARY_FAILURE_KEY]) == "object")
-    stmt = stmt.order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc()).limit(1)
+    stmt = stmt.order_by(
+        WorkspaceEvent.occurred_at.desc(),
+        WorkspaceEvent.event_order.desc().nullslast(),
+    ).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -283,7 +286,10 @@ async def _latest_failure_epoch_reset_before(
             *_failure_epoch_reset_conditions(workspace_id),
             _event_occurs_before_or_at_same_tick(event),
         )
-        .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc())
+        .order_by(
+            WorkspaceEvent.occurred_at.desc(),
+            WorkspaceEvent.event_order.desc().nullslast(),
+        )
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
@@ -333,13 +339,43 @@ def _failure_epoch_reset_conditions(workspace_id: str) -> tuple[ColumnElement[bo
 
 
 def _event_occurs_after_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[bool]:
-    # Event IDs are uuid4-derived, so equal timestamps cannot be ordered by ID.
-    return WorkspaceEvent.occurred_at >= event.occurred_at
+    # Event IDs are uuid4-derived, so equal timestamps must use the persisted
+    # workspace-local event order. Legacy rows without that order keep the
+    # conservative same-tick boundary behavior.
+    event_order = _event_order(event)
+    if event_order is None:
+        return WorkspaceEvent.occurred_at >= event.occurred_at
+    return or_(
+        WorkspaceEvent.occurred_at > event.occurred_at,
+        and_(
+            WorkspaceEvent.occurred_at == event.occurred_at,
+            or_(
+                WorkspaceEvent.event_order.is_(None),
+                WorkspaceEvent.event_order >= event_order,
+            ),
+        ),
+    )
 
 
 def _event_occurs_before_or_at_same_tick(event: WorkspaceEvent) -> ColumnElement[bool]:
-    # Same-timestamp resets still separate failure epochs without a sequence key.
-    return WorkspaceEvent.occurred_at <= event.occurred_at
+    event_order = _event_order(event)
+    if event_order is None:
+        return WorkspaceEvent.occurred_at <= event.occurred_at
+    return or_(
+        WorkspaceEvent.occurred_at < event.occurred_at,
+        and_(
+            WorkspaceEvent.occurred_at == event.occurred_at,
+            or_(
+                WorkspaceEvent.event_order.is_(None),
+                WorkspaceEvent.event_order <= event_order,
+            ),
+        ),
+    )
+
+
+def _event_order(event: WorkspaceEvent) -> int | None:
+    event_order = event.event_order
+    return event_order if isinstance(event_order, int) else None
 
 
 def _validation_run_snapshot(run: ValidationRun) -> dict[str, Any]:

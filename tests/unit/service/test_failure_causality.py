@@ -959,6 +959,117 @@ async def test_failure_causality_snapshot_loads_current_epoch_secondary_history(
     assert payload["secondary_failures"] == [cleanup_secondary, stale_secondary]
 
 
+@pytest.mark.unit
+async def test_failure_causality_snapshot_orders_same_timestamp_failures_by_event_order(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    same_tick = datetime(2100, 1, 1, 12, 0, tzinfo=UTC)
+    old_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "OLD_CLEANUP_FAILED",
+    }
+    current_secondary = {
+        "failure_reason": "cleanup_failure",
+        "reason_code": "CURRENT_CLEANUP_FAILED",
+    }
+    old_primary = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "message": "old validation failed before cleanup",
+        "reason_code": "OLD_VALIDATION_FAILURE",
+        "validation_run": {
+            "id": "vr_old_same_tick",
+            "status": "failed",
+            "reason_code": "OLD_VALIDATION_FAILURE",
+        },
+    }
+    current_primary = {
+        "failure_reason": FailureReason.validation_failure.value,
+        "message": "current validation failed before cleanup",
+        "reason_code": "CURRENT_VALIDATION_FAILURE",
+        "validation_run": {
+            "id": "vr_current_same_tick",
+            "status": "failed",
+            "reason_code": "CURRENT_VALIDATION_FAILURE",
+        },
+    }
+
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Failure causality event-order regression",
+            task_prompt="Do not order same-timestamp failure events by random IDs.",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
+        workspace.failure_reason = FailureReason.infrastructure_failure.value
+        workspace.failure_message = "old cleanup failed after validation"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="OLD_CLEANUP_FAILED",
+            payload=build_preserved_failure_payload(
+                old_primary,
+                secondary_failure=old_secondary,
+            ),
+        )
+        old_failed_event = next(
+            event
+            for event in workspace.events
+            if event.new_state == WorkspaceStatus.failed.value
+            and event.reason_code == "OLD_CLEANUP_FAILED"
+        )
+
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.destroying,
+            reason_code="DESTROY_REQUESTED",
+        )
+        workspace.failure_reason = FailureReason.infrastructure_failure.value
+        workspace.failure_message = "current cleanup failed after validation"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="CURRENT_CLEANUP_FAILED",
+            payload=build_preserved_failure_payload(
+                current_primary,
+                secondary_failure=current_secondary,
+            ),
+        )
+        current_failed_event = next(
+            event
+            for event in workspace.events
+            if event.new_state == WorkspaceStatus.failed.value
+            and event.reason_code == "CURRENT_CLEANUP_FAILED"
+        )
+
+        old_failed_event.id = "evt_zzzzzzzzzzzzzzzzzzzzzzzz"
+        current_failed_event.id = "evt_aaaaaaaaaaaaaaaaaaaaaaaa"
+        old_failed_event.occurred_at = same_tick
+        current_failed_event.occurred_at = same_tick
+        assert current_failed_event.id < old_failed_event.id
+        assert old_failed_event.event_order is not None
+        assert current_failed_event.event_order is not None
+        assert current_failed_event.event_order > old_failed_event.event_order
+        workspace_id = workspace.id
+        await session.commit()
+
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+        snapshot = await load_failure_causality_snapshot(session, workspace)
+
+    assert snapshot is not None
+    assert snapshot.primary_failure["reason_code"] == "CURRENT_VALIDATION_FAILURE"
+    assert snapshot.primary_failure["validation_run"]["id"] == "vr_current_same_tick"
+    assert snapshot.secondary_failures == (current_secondary,)
+
+
 async def _seed_failed_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     *,
