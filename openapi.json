@@ -11708,6 +11708,9 @@
             "schema": {
               "anyOf": [
                 {
+                  "$ref": "#/components/schemas/WorkspaceStatus"
+                },
+                {
                   "items": {
                     "$ref": "#/components/schemas/WorkspaceStatus"
                   },
