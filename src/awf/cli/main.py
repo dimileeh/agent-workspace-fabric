@@ -402,7 +402,8 @@ def _emit_smoke_pretty(payload: dict[str, Any]) -> None:
             name = _text_value(phase.get("name"), "unknown")
             message = _text_value(phase.get("message"), "")
             reason = _text_value(phase.get("reason_code"), "")
-            typer.echo(f"  [{phase_status}] {name}: {message}")
+            header = f"  [{phase_status}] {name}"
+            typer.echo(f"{header}: {message}" if message else header)
             if reason:
                 typer.echo(f"        reason: {reason}")
             action = _text_value(phase.get("action"), "")

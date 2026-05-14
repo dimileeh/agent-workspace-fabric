@@ -114,6 +114,7 @@ class TestSmokeRunCommand:
         result = _runner.invoke(app, ["smoke", "run", "--format", "pretty"])
 
         assert result.exit_code == 0
+        assert "  [ok] service_readiness\n" in result.stdout
         assert "  [ok] service_readiness: SMOKE_SERVICE_READY" not in result.stdout
         assert "        reason: SMOKE_SERVICE_READY" in result.stdout
         assert result.stdout.count("SMOKE_SERVICE_READY") == 1
