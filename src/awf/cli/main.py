@@ -1246,7 +1246,7 @@ def workspace_create(
     out_of_scope_changes_json: str | None = typer.Option(
         None,
         "--out-of-scope-changes-json",
-        help="JSON payload for task out-of-scope-changes policy.",
+        help="JSON payload for task out_of_scope_changes policy.",
     ),
     provider_recovery_json: str | None = typer.Option(
         None,
