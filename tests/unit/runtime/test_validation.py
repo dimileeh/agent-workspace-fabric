@@ -356,6 +356,21 @@ def test_setup_dependency_network_classifier_skips_chained_bootstrap_dns_failure
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_multiline_bootstrap_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="python -m pip install -r requirements.txt\n./bootstrap",
+        returncode=1,
+        stdout="Requirement already satisfied: pytest\n",
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_skips_chained_bootstrap_fetch_failure() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="python -m pip install -r requirements.txt && ./bootstrap",

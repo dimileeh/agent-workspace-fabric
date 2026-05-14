@@ -787,6 +787,8 @@ def _is_setup_dependency_index_host(host: str | None) -> bool:
 
 
 def _has_shell_compound_control_operator(command: str) -> bool:
+    if _has_unquoted_shell_newline(command):
+        return True
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
@@ -794,6 +796,32 @@ def _has_shell_compound_control_operator(command: str) -> bool:
     except ValueError:
         return False
     return any(token in _SHELL_COMPOUND_CONTROL_TOKENS for token in tokens)
+
+
+def _has_unquoted_shell_newline(command: str) -> bool:
+    quote: str | None = None
+    escaped = False
+    for char in command:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "\n":
+            return True
+    return False
 
 
 def _non_uv_dependency_setup_command_match(tokens: list[str]) -> bool | None:
