@@ -27,6 +27,10 @@ def upgrade() -> None:
     op.execute(
         sa.text("ALTER TABLE workspace_events ADD COLUMN IF NOT EXISTS event_order INTEGER")
     )
+    # Keep the short lock wait on deploy-facing DDL only. The backfill may need
+    # to wait behind ordinary row writers, while statement_timeout still bounds
+    # total runtime.
+    op.execute(sa.text("SET LOCAL lock_timeout = '0'"))
     # Event IDs are uuid4-derived, so they cannot recover chronology when old
     # rows share an occurred_at tick. workspace_events is append-only; ctid is
     # the best stored hint of heap insertion order for this one-time backfill.

@@ -294,9 +294,13 @@ def test_workspace_event_order_migration_has_timeout_guardrails() -> None:
         repo_root / "migrations/versions/e8f9a0b1c2d3_workspace_event_order.py"
     ).read_text()
 
-    assert "SET LOCAL lock_timeout" in migration
+    ddl_timeout_index = migration.index("SET LOCAL lock_timeout = '5s'")
+    add_column_index = migration.index("ADD COLUMN IF NOT EXISTS event_order")
+    backfill_timeout_index = migration.index("SET LOCAL lock_timeout = '0'")
+    backfill_index = migration.index("UPDATE workspace_events")
+
+    assert ddl_timeout_index < add_column_index < backfill_timeout_index < backfill_index
     assert "SET LOCAL statement_timeout" in migration
-    assert "ADD COLUMN IF NOT EXISTS event_order" in migration
     assert "workspace_events.event_order IS NULL" in migration
     assert "autocommit_block()" in migration
     assert "if_not_exists=True" in migration
