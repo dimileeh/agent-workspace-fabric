@@ -566,7 +566,12 @@ _SETUP_DETERMINISTIC_FAILURE_RE = re.compile(
     r"(?i)("
     r"\bauth(?:entication)? (?:failed|required)\b|"
     r"\bcommand not found\b|"
-    r"\bforbidden\b|"
+    r"\b(?:"
+    r"http(?:s)?(?:/\d+(?:\.\d+)?)? +403|"
+    r"http(?:s)? status(?: code)?[:= ]+403|"
+    r"status(?: code)?[:= ]+403|"
+    r"403"
+    r")\b[^\n]{0,80}\bforbidden\b|"
     r"\binvalid credentials\b|"
     r"\blockfile\b.*\b(out of date|conflict|mismatch)\b|"
     r"\bmissing local\b|"
@@ -884,7 +889,19 @@ def _extract_setup_dependency_host(text: str) -> str | None:
             return host
     for match in _SETUP_HOST_FALLBACK_RE.finditer(text):
         candidate = match.group(1).strip(".")
-        if candidate.endswith((".py", ".toml", ".lock")):
+        if candidate.lower().endswith(
+            (
+                ".cfg",
+                ".gz",
+                ".json",
+                ".lock",
+                ".py",
+                ".toml",
+                ".whl",
+                ".yml",
+                ".yaml",
+            )
+        ):
             continue
         if re.fullmatch(r"[\d.]+", candidate):
             continue

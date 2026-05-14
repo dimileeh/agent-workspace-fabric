@@ -262,6 +262,37 @@ def test_setup_dependency_network_classifier_ignores_version_like_fallback_host(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "artifact_name",
+    [
+        "docker-7.1.0.tar.gz",
+        "package.whl",
+        "setup.cfg",
+        "pyproject.yml",
+        "pyproject.yaml",
+        "metadata.json",
+    ],
+)
+def test_setup_dependency_network_classifier_ignores_artifact_like_fallback_hosts(
+    artifact_name: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            f"Failed to download {artifact_name} after request retries: "
+            "dns error: failed to lookup address information"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.package == "docker==7.1.0"
+    assert classification.host is None
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_skips_uv_run_script_dns_failure() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="uv run python scripts/bootstrap.py",
@@ -346,6 +377,41 @@ def test_setup_dependency_network_classifier_ignores_unrelated_5xx_numbers() -> 
         returncode=137,
         stdout="installing docker==7.1.0 from local cache\n",
         stderr="dependency setup worker exited with code 512 after OOM kill\n",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_retries_503_temporarily_forbidden_body() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Package index https://files.pythonhosted.org/simple returned HTTP status code 503: "
+            "access temporarily forbidden by rate limit while fetching docker==7.1.0"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == "http_5xx"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_keeps_403_forbidden_deterministic() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Package index https://files.pythonhosted.org/simple returned HTTP status code 403 "
+            "Forbidden while fetching docker==7.1.0: temporary failure in name resolution"
+        ),
     )
 
     assert classification is None
