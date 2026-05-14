@@ -1230,9 +1230,9 @@ def workspace_create(
     agent: str = typer.Option("codex", "--agent"),
     model: str | None = typer.Option(None, "--model"),
     task_class: TaskClass | None = typer.Option(None, "--task-class"),
-    priority: int = typer.Option(0, "--priority"),
-    human_boost: int = typer.Option(0, "--human-boost"),
-    owned_paths: list[str] = typer.Option([], "--owned-path", help="Repeatable."),
+    priority: int | None = typer.Option(None, "--priority"),
+    human_boost: int | None = typer.Option(None, "--human-boost"),
+    owned_paths: list[str] | None = typer.Option(None, "--owned-path", help="Repeatable."),
     external_id: str | None = typer.Option(None, "--external-id"),
     cpu: float | None = typer.Option(None, "--cpu"),
     memory: str | None = typer.Option(None, "--memory"),
@@ -1284,9 +1284,6 @@ def workspace_create(
             "kind": "feature_branch_pr",
             "auto_merge": auto_merge,
             "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
-            "priority": priority,
-            "human_boost": human_boost,
-            "owned_paths": owned_paths,
         },
         "workspace": {"profile_ref": "aira" if requires_database else profile_ref, "profile": None},
         "validation": {"commands": test_commands, "requested_tier": 1},
@@ -1303,6 +1300,12 @@ def workspace_create(
         body["task"]["task_class"] = task_class.value
     if external_id is not None:
         body["task"]["external_id"] = external_id
+    if priority is not None:
+        body["task"]["priority"] = priority
+    if human_boost is not None:
+        body["task"]["human_boost"] = human_boost
+    if owned_paths is not None:
+        body["task"]["owned_paths"] = owned_paths
 
     if cpu is not None:
         body["resources"]["cpu"] = cpu
