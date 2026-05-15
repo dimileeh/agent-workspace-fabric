@@ -312,6 +312,7 @@ async def _workspace_admission_disk_check(request: Request, settings: Settings) 
 def _workspace_create_rate_limited_response(
     decision: RequestAdmissionDecision,
 ) -> JSONResponse:
+    retry_after = decision.metadata.get("retry_after_seconds", 1)
     return JSONResponse(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content=ErrorResponse(
@@ -319,6 +320,7 @@ def _workspace_create_rate_limited_response(
             message="Workspace creation request rate limit exceeded.",
             detail=dict(decision.metadata),
         ).model_dump(),
+        headers={"Retry-After": str(retry_after)},
     )
 
 

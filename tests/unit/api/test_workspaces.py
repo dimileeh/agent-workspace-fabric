@@ -507,6 +507,7 @@ def _assert_workspace_rate_limited(response: Any) -> None:
     assert detail["limit"] == 1
     assert detail["window_seconds"] == 60
     assert detail["retry_after_seconds"] > 0
+    assert response.headers["Retry-After"] == str(detail["retry_after_seconds"])
     assert _WORKSPACE_API_TOKEN not in json.dumps(body)
     assert _WORKSPACE_AUTH_HEADER not in json.dumps(body)
 
