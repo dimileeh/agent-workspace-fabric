@@ -1016,23 +1016,23 @@ def _is_python_command_token(token: str) -> bool:
 
 
 def _looks_like_uv_dependency_setup_command(tokens: list[str]) -> bool:
+    start = _first_non_assignment_token_index(tokens)
+    if start >= len(tokens):
+        return False
     token_names = [_command_token_name(token) for token in tokens]
-    for index, token_name in enumerate(token_names):
-        if token_name != "uv":
-            continue
-        subcommand_index = _next_uv_subcommand_index(tokens, start=index + 1)
-        if subcommand_index is None:
-            continue
-        subcommand = token_names[subcommand_index]
-        if subcommand in _UV_SETUP_DEPENDENCY_SUBCOMMAND_TOKENS:
-            return True
-        nested_subcommands = _UV_SETUP_DEPENDENCY_NESTED_SUBCOMMAND_TOKENS.get(subcommand)
-        if nested_subcommands is None:
-            continue
-        nested_index = _next_uv_subcommand_index(tokens, start=subcommand_index + 1)
-        if nested_index is not None and token_names[nested_index] in nested_subcommands:
-            return True
-    return False
+    if token_names[start] != "uv":
+        return False
+    subcommand_index = _next_uv_subcommand_index(tokens, start=start + 1)
+    if subcommand_index is None:
+        return False
+    subcommand = token_names[subcommand_index]
+    if subcommand in _UV_SETUP_DEPENDENCY_SUBCOMMAND_TOKENS:
+        return True
+    nested_subcommands = _UV_SETUP_DEPENDENCY_NESTED_SUBCOMMAND_TOKENS.get(subcommand)
+    if nested_subcommands is None:
+        return False
+    nested_index = _next_uv_subcommand_index(tokens, start=subcommand_index + 1)
+    return nested_index is not None and token_names[nested_index] in nested_subcommands
 
 
 def _next_uv_subcommand_index(tokens: list[str], *, start: int) -> int | None:

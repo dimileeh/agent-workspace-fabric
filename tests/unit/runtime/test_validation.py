@@ -341,6 +341,21 @@ def test_setup_dependency_network_classifier_skips_uv_run_script_dns_failure() -
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_wrapper_uv_argument_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./bootstrap.sh uv sync",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_skips_chained_bootstrap_dns_failure() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="python -m pip install -r requirements.txt && ./bootstrap",
