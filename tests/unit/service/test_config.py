@@ -191,6 +191,8 @@ def test_production_guardrails_reject_callback_posture_without_api_token() -> No
     error = exc_info.value
     assert "production_callbacks_disabled_until_auth" in _diagnostic_codes(error)
     assert "AWF_CALLBACKS_ENABLED" in _diagnostic_fields(error)
+    assert "production_api_token_missing" in _diagnostic_codes(error)
+    assert "AWF_API_TOKEN" in _diagnostic_fields(error)
 
 
 @pytest.mark.unit
