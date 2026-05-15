@@ -329,7 +329,10 @@ class TestLogs:
         workspace_id = await _create_workspace(client)
         _auth(monkeypatch)
 
-        response = await client.get(f"/v1/workspaces/{workspace_id}/logs")
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/logs",
+            headers={"Authorization": "Bearer wrong"},
+        )
 
         assert response.status_code == 401
         assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"

@@ -80,7 +80,10 @@ class TestWorkspaceArtifacts:
         workspace_id = await _create_workspace(client)
         _configure_artifact_api(monkeypatch, tmp_path)
 
-        response = await client.get(f"/v1/workspaces/{workspace_id}/artifacts")
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            headers={"Authorization": "Bearer wrong"},
+        )
 
         assert response.status_code == 401
         assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
@@ -98,6 +101,7 @@ class TestWorkspaceArtifacts:
         response = await client.get(
             f"/v1/workspaces/{workspace_id}/artifacts/download",
             params={"path": "logs/stdout.txt"},
+            headers={"Authorization": "Bearer wrong"},
         )
 
         assert response.status_code == 401

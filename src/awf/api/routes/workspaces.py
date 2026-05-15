@@ -21,6 +21,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.deps import get_db_session, get_db_session_factory, require_api_token
+from awf.api.responses import (
+    API_TOKEN_AUTH_ERROR_RESPONSES,
+    API_TOKEN_UNAUTHORIZED_RESPONSE,
+    PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
+)
 from awf.api.schemas import (
     EgressAuditRecordResponse,
     ErrorResponse,
@@ -87,8 +92,18 @@ from awf.service.workspaces import (
     workspace_retry_response,
 )
 
-router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
-router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
+router = APIRouter(
+    prefix="/v1/workspaces",
+    tags=["workspaces"],
+    dependencies=[Depends(require_api_token)],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
+)
+router_v2 = APIRouter(
+    prefix="/v2/workspaces",
+    tags=["workspaces-v2"],
+    dependencies=[Depends(require_api_token)],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
+)
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 _logger = logging.getLogger(__name__)
 
@@ -160,7 +175,7 @@ async def create_workspace(
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         409: {"model": ErrorResponse},
-        503: {"model": ErrorResponse},
+        503: PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
     },
 )
 async def create_workspace_v2(
@@ -402,13 +417,12 @@ async def list_workspace_stale_reasons(
     response_model=PullRequestMonitorAdoptionResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
-        401: {"model": ErrorResponse},
+        401: API_TOKEN_UNAUTHORIZED_RESPONSE,
         404: {"model": ErrorResponse},
         409: {"model": ErrorResponse},
         422: {"model": ErrorResponse},
         502: {"model": ErrorResponse},
     },
-    dependencies=[Depends(require_api_token)],
 )
 async def adopt_pull_request_monitor(
     payload: PullRequestMonitorAdoptionRequest,
@@ -439,12 +453,11 @@ async def adopt_pull_request_monitor(
     response_model=WorkspaceRetryResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
-        401: {"model": ErrorResponse},
+        401: API_TOKEN_UNAUTHORIZED_RESPONSE,
         404: {"model": ErrorResponse},
         409: {"model": ErrorResponse},
-        503: {"model": ErrorResponse},
+        503: PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
     },
-    dependencies=[Depends(require_api_token)],
 )
 async def retry_workspace(
     workspace_id: str,

@@ -10,7 +10,7 @@ from typing import Any, cast
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import require_api_token
+from awf.api.deps import require_websocket_api_token
 from awf.api.schemas import WorkspaceEventResponse
 from awf.db.repositories import (
     WorkspaceEventRepository,
@@ -26,7 +26,7 @@ router = APIRouter(tags=["workspace-streams"])
 
 @router.websocket(
     "/v1/workspaces/{workspace_id}/ws",
-    dependencies=[Depends(require_api_token)],
+    dependencies=[Depends(require_websocket_api_token)],
 )
 async def workspace_socket(
     websocket: WebSocket,

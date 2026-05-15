@@ -6,10 +6,16 @@ from types import SimpleNamespace
 
 import pytest
 import structlog
-from fastapi import HTTPException
+from fastapi import HTTPException, WebSocketException, status
+from fastapi.security import HTTPAuthorizationCredentials
+from starlette.datastructures import Headers
 
 import awf.api.deps as deps
 from awf.common.config import Settings
+
+
+def _bearer_credentials(token: str, *, scheme: str = "Bearer") -> HTTPAuthorizationCredentials:
+    return HTTPAuthorizationCredentials(scheme=scheme, credentials=token)
 
 
 @pytest.mark.unit
@@ -22,12 +28,123 @@ def test_require_api_token_reports_missing_and_invalid_tokens() -> None:
 
     configured_settings = Settings(_env_file=None, api_token="secret")
     with pytest.raises(HTTPException) as unauthorized:
-        deps.require_api_token("Bearer wrong", settings=configured_settings)
+        deps.require_api_token(_bearer_credentials("wrong"), settings=configured_settings)
     assert unauthorized.value.status_code == 401
     assert unauthorized.value.detail["error_code"] == "UNAUTHORIZED"
     assert unauthorized.value.headers == {"WWW-Authenticate": "Bearer"}
 
-    deps.require_api_token("Bearer secret", settings=configured_settings)
+    deps.require_api_token(_bearer_credentials("secret"), settings=configured_settings)
+
+
+@pytest.mark.unit
+def test_require_api_token_accepts_http_bearer_credentials_case_insensitively() -> None:
+    settings = Settings(_env_file=None, api_token="secret")
+    credentials = _bearer_credentials("secret", scheme="bearer")
+
+    deps.require_api_token(credentials, settings=settings)
+
+
+@pytest.mark.unit
+async def test_require_websocket_api_token_reads_handshake_authorization_header() -> None:
+    settings = Settings(_env_file=None, api_token="secret")
+    websocket = SimpleNamespace(
+        headers=Headers({"authorization": "bearer secret"}),
+        scope={"extensions": {}},
+    )
+
+    await deps.require_websocket_api_token(websocket, settings=settings)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("authorization", "settings", "expected_code", "expected_reason"),
+    [
+        (
+            None,
+            Settings(_env_file=None, api_token="secret"),
+            status.WS_1008_POLICY_VIOLATION,
+            "UNAUTHORIZED",
+        ),
+        (
+            "Bearer wrong",
+            Settings(_env_file=None, api_token="secret"),
+            status.WS_1008_POLICY_VIOLATION,
+            "UNAUTHORIZED",
+        ),
+        (
+            "Bearer secret",
+            Settings(_env_file=None, api_token=None),
+            status.WS_1011_INTERNAL_ERROR,
+            "API_TOKEN_NOT_CONFIGURED",
+        ),
+    ],
+)
+async def test_require_websocket_api_token_uses_websocket_exception_without_denial_extension(
+    authorization: str | None,
+    settings: Settings,
+    expected_code: int,
+    expected_reason: str,
+) -> None:
+    headers = Headers({"authorization": authorization}) if authorization is not None else Headers()
+    websocket = SimpleNamespace(headers=headers, scope={"extensions": {}})
+
+    with pytest.raises(WebSocketException) as exc_info:
+        await deps.require_websocket_api_token(websocket, settings=settings)  # type: ignore[arg-type]
+
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.reason == expected_reason
+
+
+@pytest.mark.unit
+async def test_require_websocket_api_token_uses_denial_exception_with_denial_extension() -> None:
+    settings = Settings(_env_file=None, api_token="secret")
+    websocket = SimpleNamespace(
+        headers=Headers(),
+        scope={"extensions": {"websocket.http.response": {}}},
+    )
+
+    with pytest.raises(deps.WebSocketAuthorizationDenialError) as exc_info:
+        await deps.require_websocket_api_token(websocket, settings=settings)  # type: ignore[arg-type]
+
+    assert exc_info.value.failure.status_code == 401
+    assert exc_info.value.failure.detail["error_code"] == "UNAUTHORIZED"
+    assert exc_info.value.failure.headers == {"WWW-Authenticate": "Bearer"}
+
+
+@pytest.mark.unit
+def test_require_api_token_rejects_non_ascii_bearer_as_unauthorized() -> None:
+    settings = Settings(_env_file=None, api_token="secret")
+
+    with pytest.raises(HTTPException) as unauthorized:
+        deps.require_api_token(_bearer_credentials("caf\u00e9"), settings=settings)
+
+    assert unauthorized.value.status_code == 401
+    assert unauthorized.value.detail["error_code"] == "UNAUTHORIZED"
+    assert unauthorized.value.headers == {"WWW-Authenticate": "Bearer"}
+
+
+@pytest.mark.unit
+def test_require_api_token_compares_tokens_with_constant_time_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(_env_file=None, api_token="secret-token")
+    observed: list[tuple[object, object]] = []
+
+    def _compare(left: object, right: object) -> bool:
+        observed.append((left, right))
+        return left == right
+
+    monkeypatch.setattr(deps.hmac, "compare_digest", _compare)
+
+    with pytest.raises(HTTPException):
+        deps.require_api_token(_bearer_credentials("wrong"), settings=settings)
+    with pytest.raises(HTTPException):
+        deps.require_api_token(None, settings=settings)
+    deps.require_api_token(_bearer_credentials("secret-token"), settings=settings)
+
+    assert (b"Bearer wrong", b"Bearer secret-token") in observed
+    assert (b"", b"Bearer secret-token") in observed
+    assert (b"Bearer secret-token", b"Bearer secret-token") in observed
 
 
 @pytest.mark.unit

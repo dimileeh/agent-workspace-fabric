@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.app import configure_database, create_app
+from awf.common.config import get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -17,6 +18,9 @@ from awf.service.workspace_runtime_health import (
     ACTIVE_EXECUTION_PRESERVED_EVENT_TYPE,
     ACTIVE_EXECUTION_PRESERVED_REASON_CODE,
 )
+
+_RUNTIME_API_TOKEN = "unit-test-runtime-api-token"
+_RUNTIME_AUTH_HEADER = f"Bearer {_RUNTIME_API_TOKEN}"
 
 
 class _RuntimeInspector:
@@ -30,11 +34,20 @@ class _RuntimeInspector:
 
 
 @pytest.fixture
-async def runtime_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[object, AsyncClient]]:
+async def runtime_app_and_client(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[tuple[object, AsyncClient]]:
+    monkeypatch.setenv("AWF_API_TOKEN", _RUNTIME_API_TOKEN)
+    get_settings.cache_clear()
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        yield app, client
+        client.headers["Authorization"] = _RUNTIME_AUTH_HEADER
+        try:
+            yield app, client
+        finally:
+            get_settings.cache_clear()
 
 
 def _runtime_endpoint_profile() -> dict[str, object]:

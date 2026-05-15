@@ -20,6 +20,10 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf import __version__
+from awf.api.deps import (
+    WebSocketAuthorizationDenialError,
+    websocket_authorization_denial_handler,
+)
 from awf.api.routes import (
     artifacts,
     callbacks,
@@ -98,6 +102,10 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
         lifespan=_lifespan if use_lifespan else None,
     )
     health.reset_egress_audit_summary_counts_task(app.state)
+    app.add_exception_handler(
+        WebSocketAuthorizationDenialError,
+        websocket_authorization_denial_handler,
+    )
 
     app.include_router(health.router)
     app.include_router(callbacks.router)

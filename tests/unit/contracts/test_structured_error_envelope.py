@@ -169,7 +169,7 @@ async def test_rest_idempotency_conflict_envelope_for_create_v1(
         "agent": "codex",
         "test_commands": ["pytest -q"],
     }
-    headers = {"Idempotency-Key": "create-v1-key"}
+    headers = {**contract_stack.auth_headers, "Idempotency-Key": "create-v1-key"}
     accepted = await contract_stack.client.post("/v1/workspaces", json=body, headers=headers)
     assert accepted.status_code == 202
 

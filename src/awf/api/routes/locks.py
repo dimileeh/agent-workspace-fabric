@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as fastapi_status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session_factory
+from awf.api.deps import get_db_session_factory, require_api_token
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import (
     WorkspaceLockListResponse,
     WorkspaceLockResponse,
@@ -18,7 +19,12 @@ from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
 
-router = APIRouter(prefix="/v1/locks", tags=["locks"])
+router = APIRouter(
+    prefix="/v1/locks",
+    tags=["locks"],
+    dependencies=[Depends(require_api_token)],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
+)
 
 
 @router.get("/overlap-graph", response_model=WorkspaceOverlapGraphResponse)
