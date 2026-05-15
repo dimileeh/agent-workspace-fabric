@@ -26,6 +26,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.callback_targets import (
     is_public_callback_target_host,
     is_public_callback_target_ip,
+    validate_callback_target_url_port,
 )
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
@@ -881,6 +882,10 @@ def _validate_callback_target_static_policy(
         raise CallbackTargetPolicyError("target_url must use http or https")
     if not parsed.hostname:
         raise CallbackTargetPolicyError("target_url must include a host")
+    try:
+        validate_callback_target_url_port(parsed)
+    except ValueError as exc:
+        raise CallbackTargetPolicyError(str(exc)) from exc
     if parsed.username is not None or parsed.password is not None:
         raise CallbackTargetPolicyError("target_url must not include userinfo credentials")
     if parsed.fragment:

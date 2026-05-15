@@ -142,6 +142,8 @@ async def test_register_callback_persists_safe_public_contract(
         {**_VALID_BODY, "target_url": "https://user:pass@operator.example.com/events"},
         {**_VALID_BODY, "target_url": "https://operator.example.com/events#frag"},
         {**_VALID_BODY, "target_url": "https:///missing-host"},
+        {**_VALID_BODY, "target_url": "https://operator.example.com:abc/events"},
+        {**_VALID_BODY, "target_url": "https://operator.example.com:99999/events"},
         {**_VALID_BODY, "event_types": []},
         {**_VALID_BODY, "event_types": [""]},
         {**_VALID_BODY, "event_types": ["system.secret"]},

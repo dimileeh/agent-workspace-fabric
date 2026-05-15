@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+from urllib.parse import SplitResult
 
 _NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 _NAT64_LOCAL_USE_PREFIX = ipaddress.IPv6Network("64:ff9b:1::/48")
@@ -56,6 +57,14 @@ def is_public_callback_target_host(hostname: str) -> bool:
 def is_public_callback_target_ip(address: str) -> bool:
     """Return whether a resolved callback target IP is publicly routable."""
     return _is_public_callback_target_address(ipaddress.ip_address(address))
+
+
+def validate_callback_target_url_port(parsed: SplitResult) -> None:
+    """Raise when a parsed callback target URL has a malformed or invalid port."""
+    try:
+        _port = parsed.port
+    except ValueError as exc:
+        raise ValueError("target_url must include a valid port") from exc
 
 
 def _is_public_callback_target_address(

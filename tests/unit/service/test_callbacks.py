@@ -635,6 +635,8 @@ async def test_drain_due_records_budget_exceeded_when_validation_consumes_timeou
             "target_url must not include userinfo credentials",
         ),
         ("https://operator.example.com/events#secret", "target_url must not include a fragment"),
+        ("https://operator.example.com:abc/events", "target_url must include a valid port"),
+        ("https://operator.example.com:99999/events", "target_url must include a valid port"),
         ("https://localhost/events", "target_url must use a public host"),
     ],
 )

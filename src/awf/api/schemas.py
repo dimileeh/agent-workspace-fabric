@@ -14,7 +14,10 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from awf.common.callback_events import is_valid_callback_subscription_event_type
-from awf.common.callback_targets import is_public_callback_target_host
+from awf.common.callback_targets import (
+    is_public_callback_target_host,
+    validate_callback_target_url_port,
+)
 from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStatus
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
@@ -1393,6 +1396,7 @@ class CallbackSubscriptionCreateRequest(BaseModel):
             raise ValueError("target_url must use http or https")
         if not parsed.hostname:
             raise ValueError("target_url must include a host")
+        validate_callback_target_url_port(parsed)
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("target_url must not include userinfo credentials")
         if parsed.fragment:
