@@ -1638,9 +1638,9 @@ def _task_external_id_conflict_result(exc: TaskExternalIdConflictError) -> CallT
     error = ErrorResponse(
         error_code="TASK_EXTERNAL_ID_CONFLICT",
         message=(
-            "Task external_id is already associated with a different "
-            "repo/base/task-class/owned-path scope; use a unique "
-            "external_id for this backlog slice or retry the original scope."
+            "External task ID is already associated with a different "
+            "repo/base/task-class/owned-path scope; use a unique external "
+            "task ID for this backlog slice or retry the original scope."
         ),
         detail={"external_id": exc.external_id},
     )

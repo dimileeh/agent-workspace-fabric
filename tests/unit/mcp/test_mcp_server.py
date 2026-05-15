@@ -10,6 +10,7 @@ harness) against a throwaway PostgreSQL. This validates:
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1626,12 +1627,13 @@ class TestCreateWorkspaceV2:
         assert conflict.structuredContent == {
             "error_code": "TASK_EXTERNAL_ID_CONFLICT",
             "message": (
-                "Task external_id is already associated with a different "
-                "repo/base/task-class/owned-path scope; use a unique "
-                "external_id for this backlog slice or retry the original scope."
+                "External task ID is already associated with a different "
+                "repo/base/task-class/owned-path scope; use a unique external "
+                "task ID for this backlog slice or retry the original scope."
             ),
             "detail": {"external_id": external_id},
         }
+        assert "task_external_id" not in json.dumps(conflict.structuredContent, sort_keys=True)
 
     @pytest.mark.unit
     async def test_retry_workspace_provider_preflight_error_and_override(

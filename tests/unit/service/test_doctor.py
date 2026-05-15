@@ -21,6 +21,7 @@ def _settings(
     database_url: str = "postgresql+asyncpg://awf:pw@localhost:5433/awf",
     host_home: str | None = None,
     work_dir: str | None = None,
+    api_token: str | None = None,
     github_token: str | None = None,
 ) -> ServiceSettings:
     home = tmp_path / "home"
@@ -35,7 +36,7 @@ def _settings(
         docker_host=f"unix://{tmp_path / 'docker.sock'}",
         agent_runtime_image="awf-agent-runtime:latest",
         work_dir=str(work if work_dir is None else work_dir),
-        api_token=None,
+        api_token=api_token,
         github_token=github_token,
         worker_poll_interval_seconds=0.1,
         worker_max_concurrent_provisions=1,
@@ -633,6 +634,7 @@ def test_doctor_reports_local_config_issues(tmp_path: Path) -> None:
 def test_doctor_output_redacts_secrets_from_pretty_and_json(tmp_path: Path) -> None:
     from awf.service.doctor import collect_doctor_report, render_doctor_pretty
 
+    api_secret = "awf-api-doctor-secret"
     openai_secret = "sk-proj-doctorsecret123456"
     github_secret = "ghp_doctorsecret123456"
     anthropic_secret = "sk-ant-doctorsecret123456"
@@ -644,7 +646,10 @@ def test_doctor_output_redacts_secrets_from_pretty_and_json(tmp_path: Path) -> N
         "ok": False,
         "status": "fail",
         "reason": "API_UNREACHABLE",
-        "detail": f"token={openai_secret} db=postgresql://awf:{db_secret}@localhost/awf",
+        "detail": (
+            f"api_token={api_secret} token={openai_secret} "
+            f"db=postgresql://awf:{db_secret}@localhost/awf"
+        ),
     }
     readiness = status["agent_readiness"]
     assert isinstance(readiness, dict)
@@ -664,6 +669,7 @@ def test_doctor_output_redacts_secrets_from_pretty_and_json(tmp_path: Path) -> N
     settings = _settings(
         tmp_path,
         database_url=f"postgresql+asyncpg://awf:{db_secret}@localhost:5433/awf",
+        api_token=api_secret,
         github_token=github_secret,
     )
     report = asyncio.run(
@@ -683,7 +689,7 @@ def test_doctor_output_redacts_secrets_from_pretty_and_json(tmp_path: Path) -> N
     pretty = render_doctor_pretty(report)
     serialized = json.dumps(report.to_dict(), sort_keys=True)
 
-    for secret in (openai_secret, github_secret, anthropic_secret, db_secret):
+    for secret in (api_secret, openai_secret, github_secret, anthropic_secret, db_secret):
         assert secret not in pretty
         assert secret not in serialized
     assert "<redacted>" in serialized

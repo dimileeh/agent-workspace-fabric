@@ -94,6 +94,12 @@ _WORKSPACE_API_TOKEN = "unit-test-workspace-api-token"
 _WORKSPACE_AUTH_HEADER = f"Bearer {_WORKSPACE_API_TOKEN}"
 
 
+def _assert_no_internal_error_fields(payload: object) -> None:
+    serialized = json.dumps(payload, sort_keys=True)
+
+    assert "task_external_id" not in serialized
+
+
 @pytest.fixture(autouse=True)
 def _provider_auth_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("CODEX_AUTH_TOKEN", "unit-test-provider-token")
@@ -987,7 +993,9 @@ class TestCreateWorkspaceV2MonitorPolicy:
 
         assert first.status_code == 202
         assert replay.status_code == 409
-        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+        body = replay.json()
+        assert body["error_code"] == "IDEMPOTENCY_CONFLICT"
+        _assert_no_internal_error_fields(body)
 
 
 class TestCreateWorkspaceV2ResourceIdempotency:
@@ -1441,15 +1449,17 @@ class TestWorkspaceCreateProviderReadinessPreflight:
 
         assert first.status_code == 202
         assert second.status_code == 409
-        assert second.json() == {
+        body = second.json()
+        assert body == {
             "error_code": "TASK_EXTERNAL_ID_CONFLICT",
             "message": (
-                "Task external_id is already associated with a different "
-                "repo/base/task-class/owned-path scope; use a unique "
-                "external_id for this backlog slice or retry the original scope."
+                "External task ID is already associated with a different "
+                "repo/base/task-class/owned-path scope; use a unique external "
+                "task ID for this backlog slice or retry the original scope."
             ),
             "detail": {"external_id": "WAVE-1"},
         }
+        _assert_no_internal_error_fields(body)
 
     @pytest.mark.unit
     async def test_v2_rejects_external_id_reuse_for_different_title(
@@ -2162,7 +2172,9 @@ class TestCreateWorkspaceV2PolicyMetadata:
 
         assert first.status_code == 202
         assert replay.status_code == 409
-        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+        body = replay.json()
+        assert body["error_code"] == "IDEMPOTENCY_CONFLICT"
+        _assert_no_internal_error_fields(body)
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

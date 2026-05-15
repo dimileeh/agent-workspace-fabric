@@ -271,7 +271,13 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
     assert response.status_code == 409
     body = json.loads(response.body)
     assert body["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"
+    assert body["message"] == (
+        "External task ID is already associated with a different "
+        "repo/base/task-class/owned-path scope; use a unique external "
+        "task ID for this backlog slice or retry the original scope."
+    )
     assert body["detail"] == {"external_id": "task-123"}
+    assert "task_external_id" not in json.dumps(body, sort_keys=True)
 
 
 @pytest.mark.unit

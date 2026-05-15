@@ -22,6 +22,7 @@ from typing import Any, Final, Protocol, cast
 from sqlalchemy import (
     DateTime,
     Integer,
+    Interval,
     Numeric,
     and_,
     case,
@@ -4244,12 +4245,20 @@ def _postgresql_scheduler_age_boost_expr(
         *(
             (
                 workspace_entity.created_at
-                <= scoring_time - text(f"INTERVAL '{boost * AGE_BOOST_INTERVAL_SECONDS} seconds'"),
+                <= scoring_time
+                - _postgresql_interval_seconds_expr(boost * AGE_BOOST_INTERVAL_SECONDS),
                 boost,
             )
             for boost in range(AGE_BOOST_MAX, 0, -1)
         ),
         else_=0,
+    )
+
+
+def _postgresql_interval_seconds_expr(seconds: int) -> ColumnElement[Any]:
+    return cast(
+        "ColumnElement[Any]",
+        func.make_interval(0, 0, 0, 0, 0, 0, literal(seconds), type_=Interval()),
     )
 
 

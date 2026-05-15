@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 import sys
@@ -1845,7 +1846,16 @@ class TestOwnedPathOverlapLookup:
             )
         )
         assert "EXTRACT(epoch" not in sql
-        assert "INTERVAL '900 seconds'" in sql
+        assert "INTERVAL '" not in sql
+        assert "make_interval(0, 0, 0, 0, 0, 0, 900)" in sql
+
+    @pytest.mark.unit
+    def test_postgres_scheduler_age_boost_does_not_use_raw_interval_text(self) -> None:
+        source = inspect.getsource(repositories._postgresql_scheduler_age_boost_expr)
+        forbidden_text_call = "text(" + 'f"INTERVAL'
+
+        assert forbidden_text_call not in source
+        assert "INTERVAL '" not in source
 
     @pytest.mark.unit
     async def test_postgres_scheduler_cursor_reuses_cursor_scoring_timestamp(
