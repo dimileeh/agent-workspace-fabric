@@ -453,18 +453,9 @@ async def _workspace_create_v1_durable_replay_after_rejection(
     *,
     idempotency_key: str,
 ) -> WorkspaceAcceptedResponse | JSONResponse | None:
-    if not replay_key_cache.durable_warmed:
-        replay_key_cache.warm_durable(await repo.list_idempotency_replay_keys())
-    try:
-        known_replay_key = replay_key_cache.matches(
-            payload,
-            idempotency_key=idempotency_key,
-            api_version=_WORKSPACE_CREATE_V1_API_VERSION,
-        )
-    except _WorkspaceCreateIdempotencyConflictError:
-        return _workspace_create_idempotency_conflict_response()
-    if not known_replay_key:
+    if not await repo.has_idempotency_key(idempotency_key):
         return None
+    replay_key_cache.remember_hash(idempotency_key=idempotency_key, request_hash=None)
     replay = await _workspace_create_v1_replay_response(
         repo,
         payload,
@@ -512,18 +503,9 @@ async def _workspace_create_v2_durable_replay_after_rejection(
     idempotency_key: str,
     settings: Settings | None = None,
 ) -> WorkspaceAcceptedResponse | JSONResponse | None:
-    if not replay_key_cache.durable_warmed:
-        replay_key_cache.warm_durable(await repo.list_idempotency_replay_keys())
-    try:
-        known_replay_key = replay_key_cache.matches(
-            payload,
-            idempotency_key=idempotency_key,
-            api_version=_WORKSPACE_CREATE_V2_API_VERSION,
-        )
-    except _WorkspaceCreateIdempotencyConflictError:
-        return _workspace_create_idempotency_conflict_response()
-    if not known_replay_key:
+    if not await repo.has_idempotency_key(idempotency_key):
         return None
+    replay_key_cache.remember_hash(idempotency_key=idempotency_key, request_hash=None)
     replay = await _workspace_create_v2_replay_response(
         repo,
         payload,

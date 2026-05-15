@@ -819,7 +819,7 @@ class TestCreateWorkspace:
             ),
         ],
     )
-    async def test_rate_limit_rejects_fresh_idempotency_key_before_db_replay_miss(
+    async def test_rate_limit_rejects_fresh_idempotency_key_with_exact_replay_probe(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
         monkeypatch: pytest.MonkeyPatch,
@@ -835,8 +835,11 @@ class TestCreateWorkspace:
         )
         lock_keys: list[str] = []
         lookup_keys: list[str] = []
+        probe_keys: list[str] = []
+        list_calls = 0
         original_lock = WorkspaceRepository.acquire_idempotency_key_lock
         original_lookup = WorkspaceRepository.get_by_idempotency_key
+        original_probe = WorkspaceRepository.has_idempotency_key
 
         async def tracked_lock(self: WorkspaceRepository, key: str) -> None:
             lock_keys.append(key)
@@ -845,6 +848,15 @@ class TestCreateWorkspace:
         async def tracked_lookup(self: WorkspaceRepository, key: str) -> Any:
             lookup_keys.append(key)
             return await original_lookup(self, key)
+
+        async def tracked_probe(self: WorkspaceRepository, key: str) -> bool:
+            probe_keys.append(key)
+            return await original_probe(self, key)
+
+        async def fail_list_replay_keys(_self: WorkspaceRepository) -> list[str]:
+            nonlocal list_calls
+            list_calls += 1
+            raise AssertionError("fresh rejected keys must not trigger full-table replay warmup")
 
         monkeypatch.setattr(
             WorkspaceRepository,
@@ -855,6 +867,16 @@ class TestCreateWorkspace:
             WorkspaceRepository,
             "get_by_idempotency_key",
             tracked_lookup,
+        )
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "has_idempotency_key",
+            tracked_probe,
+        )
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_idempotency_replay_keys",
+            fail_list_replay_keys,
         )
 
         first = await client.post(
@@ -872,6 +894,8 @@ class TestCreateWorkspace:
         _assert_workspace_rate_limited(rejected)
         assert lock_keys == [first_key]
         assert lookup_keys == [first_key]
+        assert probe_keys == [second_key]
+        assert list_calls == 0
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

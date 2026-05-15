@@ -2734,6 +2734,10 @@ class WorkspaceRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def has_idempotency_key(self, key: str) -> bool:
+        stmt = select(Workspace.id).where(Workspace.idempotency_key == key).limit(1)
+        return (await self._session.execute(stmt)).scalar_one_or_none() is not None
+
     async def list_idempotency_replay_keys(self) -> builtins.list[str]:
         stmt = (
             select(Workspace.idempotency_key)
