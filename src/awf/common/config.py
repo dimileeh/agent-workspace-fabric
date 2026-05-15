@@ -270,7 +270,7 @@ class Settings(BaseSettings):
 
     # Database (control-plane)
     database_url: str = Field(
-        default="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
+        default=DEFAULT_LOCAL_DATABASE_URL,
         description=(
             "Control-plane PostgreSQL database URL. AWF requires postgresql+asyncpg://..."
         ),
