@@ -199,10 +199,28 @@ def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
     any_of = schema.get("anyOf")
     assert isinstance(any_of, list)
     string_schema = next(
-        item for item in any_of if isinstance(item, dict) and item.get("type") == "string"
+        (item for item in any_of if isinstance(item, dict) and item.get("type") == "string"),
+        None,
     )
+    assert string_schema is not None, f"Could not find string schema in anyOf: {any_of}"
     assert isinstance(string_schema, dict)
     return string_schema
+
+
+def _optional_object_schema(schema: dict[str, object]) -> dict[str, object]:
+    any_of = schema.get("anyOf")
+    if any_of is None:
+        assert schema.get("type") == "object"
+        return schema
+
+    assert isinstance(any_of, list)
+    object_schema = next(
+        (item for item in any_of if isinstance(item, dict) and item.get("type") == "object"),
+        None,
+    )
+    assert object_schema is not None, f"Could not find object schema in anyOf: {any_of}"
+    assert isinstance(object_schema, dict)
+    return object_schema
 
 
 def _assert_idempotency_key_schema(schema: dict[str, object]) -> None:
@@ -349,6 +367,8 @@ class TestToolRegistration:
         tools = await mcp.list_tools()
         create_v2 = next(tool for tool in tools if tool.name == "awf_create_workspace_v2")
         owned_paths = create_v2.inputSchema["properties"]["owned_paths"]
+        out_of_scope_changes = create_v2.inputSchema["properties"]["out_of_scope_changes"]
+        provider_recovery = create_v2.inputSchema["properties"]["provider_recovery"]
 
         assert owned_paths["maxItems"] == 128
         assert owned_paths["items"] == {
@@ -356,6 +376,8 @@ class TestToolRegistration:
             "minLength": 1,
             "type": "string",
         }
+        assert _optional_object_schema(out_of_scope_changes)["type"] == "object"
+        assert _optional_object_schema(provider_recovery)["type"] == "object"
         assert (
             create_v2.inputSchema["properties"]["provider_readiness_override"]["default"] is False
         )
@@ -1271,6 +1293,16 @@ class TestCreateWorkspaceV2:
                 "requested_tier": 2,
                 "auto_merge": False,
                 "initial_review_grace_period_seconds": 12.5,
+                "out_of_scope_changes": {
+                    "mode": "block",
+                    "allowlist_patterns": ["src/**", "docs/**"],
+                },
+                "provider_recovery": {
+                    "max_fallback_attempts": 1,
+                    "fallbacks": [
+                        {"agent": "codex", "provider": "openai", "model": "gpt-5.5"},
+                    ],
+                },
                 "provider_readiness_override": True,
                 "provider_readiness_override_reason": "mcp test override",
             },
@@ -1307,6 +1339,16 @@ class TestCreateWorkspaceV2:
         assert ws.test_commands == ["uv run pytest tests/unit -q"]
         assert ws.auto_merge is False
         assert ws.initial_review_grace_period_seconds == 12.5
+        assert ws.task_policy["out_of_scope_changes"] == {
+            "mode": "block",
+            "allowlist_patterns": ["src/**", "docs/**"],
+        }
+        assert ws.task_policy["provider_recovery"] == {
+            "max_fallback_attempts": 1,
+            "fallbacks": [
+                {"agent": "codex", "provider": "openai", "model": "gpt-5.5"},
+            ],
+        }
 
     @pytest.mark.unit
     async def test_policy_metadata_round_trips_through_create_get_and_list(

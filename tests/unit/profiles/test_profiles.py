@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -768,7 +769,7 @@ def test_validation_strategy_defaults_preserve_legacy_behavior() -> None:
 
 
 @pytest.mark.unit
-def test_awf_self_profile_uses_targeted_edit_validation_without_local_coverage_gate() -> None:
+def test_awf_self_profile_keeps_final_coverage_non_blocking_locally() -> None:
     profile_path = Path(__file__).resolve().parents[3] / ".awf" / "workspace.yml"
     profile = WorkspaceProfile.model_validate(
         yaml.safe_load(profile_path.read_text(encoding="utf-8"))["awf"]
@@ -779,8 +780,21 @@ def test_awf_self_profile_uses_targeted_edit_validation_without_local_coverage_g
     assert profile.validation.strategy.final_gate == "none"
     assert profile.validation.strategy.reuse_evidence is False
     assert profile.validation.strategy.full_gate_concurrency == 0
-    assert profile.validation.coverage.minimum_percent == 0
-    assert profile.validation.coverage.command is None
+    assert profile.validation.coverage.minimum_percent == 99
+    assert profile.validation.coverage.provider == "python"
+    assert profile.validation.coverage.parallel_workers == 3
+    assert profile.validation.coverage.command is not None
+    tokens = shlex.split(profile.validation.coverage.command.command)
+    assert not any(
+        token == "-n"
+        or (token.startswith("-n") and len(token) > 2)
+        or token == "--numprocesses"
+        or token.startswith("--numprocesses=")
+        or token == "--dist"
+        or token.startswith("--dist=")
+        for token in tokens
+    )
+    assert "--cov-fail-under=99" in tokens
 
 
 @pytest.mark.unit

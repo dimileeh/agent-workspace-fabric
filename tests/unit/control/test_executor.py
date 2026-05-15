@@ -3601,11 +3601,12 @@ class TestFailurePaths:
                 "name": "coverage-executor",
                 "phases": {"validate": ["pytest -q"]},
                 "validation": {
+                    "strategy": {"final_gate": "coverage"},
                     "coverage": {
                         "minimum_percent": 99,
                         "enforce": True,
                         "command": "pytest --cov=awf --cov-report=term",
-                    }
+                    },
                 },
             },
         )

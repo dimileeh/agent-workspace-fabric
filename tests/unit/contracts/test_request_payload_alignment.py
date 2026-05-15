@@ -388,6 +388,16 @@ async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
             "task_class": "docs_task",
             "priority": 10,
             "human_boost": 2,
+            "out_of_scope_changes": {
+                "mode": "block",
+                "allowlist_patterns": ["src/awf/**", "docs/**"],
+            },
+            "provider_recovery": {
+                "max_fallback_attempts": 2,
+                "fallbacks": [
+                    {"agent": "codex", "provider": "openai", "model": "gpt-5"},
+                ],
+            },
             "owned_paths": ["src/awf/**"],
             "auto_merge": True,
             "initial_review_grace_period_seconds": None,
@@ -427,6 +437,16 @@ async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
             "task_class": "docs_task",
             "priority": 10,
             "human_boost": 2,
+            "out_of_scope_changes": {
+                "mode": "block",
+                "allowlist_patterns": ["src/awf/**", "docs/**"],
+            },
+            "provider_recovery": {
+                "max_fallback_attempts": 2,
+                "fallbacks": [
+                    {"agent": "codex", "provider": "openai", "model": "gpt-5"},
+                ],
+            },
             "owned_paths": ["src/awf/**"],
             "profile_ref": "auto",
             "profile": None,
@@ -449,6 +469,59 @@ async def test_mcp_create_v2_hydrates_canonical_request_model() -> None:
     assert len(recorder.create_v2_calls) == 1
     mcp_request = recorder.create_v2_calls[0]
     assert rest_request.model_dump(mode="json") == mcp_request.model_dump(mode="json")
+
+
+@pytest.mark.unit
+async def test_mcp_create_v2_omits_unspecified_optional_task_fields() -> None:
+    rest_payload = {
+        "repo": {"url": "git@github.com:example/y.git", "base_branch": "main"},
+        "task": {
+            "title": "Contract defaults",
+            "prompt": "Validate omitted optional task fields.",
+            "kind": "feature_branch_pr",
+            "agent": "codex",
+            "owned_paths": [],
+            "auto_merge": True,
+            "initial_review_grace_period_seconds": None,
+        },
+        "workspace": {"profile_ref": "auto", "profile": None},
+        "validation": {"commands": [], "requested_tier": 1},
+        "resources": {
+            "cpu": None,
+            "memory": None,
+        },
+        "preflight": {
+            "provider_readiness_override": False,
+            "provider_readiness_override_reason": None,
+        },
+    }
+    rest_request = WorkspaceCreateV2Request.model_validate(rest_payload)
+
+    recorder = _RequestRecordingService()
+    mcp = build_mcp_server(service=cast(WorkspaceService, recorder))
+
+    result = await mcp.call_tool(
+        "awf_create_workspace_v2",
+        {
+            "repo_url": "git@github.com:example/y.git",
+            "base_branch": "main",
+            "task_title": "Contract defaults",
+            "task_prompt": "Validate omitted optional task fields.",
+        },
+    )
+    assert getattr(result, "isError", False) is False
+    assert len(recorder.create_v2_calls) == 1
+    mcp_request = recorder.create_v2_calls[0]
+    assert rest_request.model_dump(mode="json", exclude_none=True) == (
+        mcp_request.model_dump(mode="json", exclude_none=True)
+    )
+    assert "model" not in mcp_request.task.model_fields_set
+    assert "external_id" not in mcp_request.task.model_fields_set
+    assert "task_class" not in mcp_request.task.model_fields_set
+    assert "priority" not in mcp_request.task.model_fields_set
+    assert "human_boost" not in mcp_request.task.model_fields_set
+    assert "out_of_scope_changes" not in mcp_request.task.model_fields_set
+    assert "provider_recovery" not in mcp_request.task.model_fields_set
 
 
 @pytest.mark.unit
