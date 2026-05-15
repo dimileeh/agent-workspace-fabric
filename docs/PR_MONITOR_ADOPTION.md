@@ -141,10 +141,11 @@ The same raw policy rule applies to agent selection and agent overrides, but
 `agent` has a default rather than null/no-override semantics. For retries,
 omitting `agent` requests the default `codex` agent policy; it is not a no-op
 for conflict detection, and conflicts with an existing live adoption for another
-agent. For overrides, omitting `model` or `effort` requests the
-default/no-override policy, so a replay that omits those fields conflicts with
-an existing live adoption pinned to explicit `agent_model` or `agent_effort`
-values.
+agent. For overrides, request `model` and `effort` inputs persist as
+`agent_model` and `agent_effort` in `task_policy`. Omitting `model` or `effort`
+requests the default/no-override policy, so a replay that omits those fields
+conflicts with an existing live adoption pinned to explicit `agent_model` or
+`agent_effort` values from prior `model` or `effort` inputs.
 
 Terminal adoption retries: destroyed, destroying, cancelled, failed, completed,
 and superseded adoption rows are not reused as live monitor attachments. AWF

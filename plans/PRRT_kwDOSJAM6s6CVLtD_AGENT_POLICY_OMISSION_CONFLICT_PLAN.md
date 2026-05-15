@@ -39,10 +39,10 @@ regression coverage, and public adoption-policy wording.
 ## Verification Commands And Pass Criteria
 
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_pr_monitor_adoption.py::TestPullRequestMonitorAdoptionService::test_replay_omitting_agent_policy_conflicts_with_policy_bearing_adoption -q`
-  fails before implementation and passes after implementation.
+  must fail before implementation and pass after implementation.
 - `uv run --python 3.12 --extra dev pytest tests/unit/service/test_pr_monitor_adoption.py -q`
-  passes.
+  should pass for the full PR monitor adoption service surface.
 - `uv run --python 3.12 --extra dev ruff check src/awf/service/pr_monitor_adoption.py tests/unit/service/test_pr_monitor_adoption.py`
-  passes.
+  should report no lint violations in the touched Python files.
 - `uv run --python 3.12 --extra dev mypy src/awf/service/pr_monitor_adoption.py`
-  passes or any limitation is documented in validation.
+  should pass, or any limitation must be documented in validation.
