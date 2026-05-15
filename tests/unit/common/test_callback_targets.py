@@ -54,6 +54,12 @@ def test_callback_target_ip_publicness_policy(address: str, expected: bool) -> N
 
 
 @pytest.mark.unit
+def test_locally_assigned_nat64_callback_targets_unmask_embedded_ipv4() -> None:
+    assert callback_targets.is_public_callback_target_ip("64:ff9b:1::0808:0808") is True
+    assert callback_targets.is_public_callback_target_ip("64:ff9b:1::c0a8:0101") is False
+
+
+@pytest.mark.unit
 def test_legacy_ipv4_literal_detector_rejects_malformed_legacy_hosts() -> None:
     assert (
         callback_targets.looks_like_legacy_ipv4_literal(  # type: ignore[arg-type]

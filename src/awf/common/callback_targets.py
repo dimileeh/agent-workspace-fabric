@@ -5,6 +5,8 @@ from __future__ import annotations
 import ipaddress
 
 _NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
+_NAT64_LOCAL_USE_PREFIX = ipaddress.IPv6Network("64:ff9b:1::/48")
+_NAT64_TRANSLATION_PREFIXES = (_NAT64_WELL_KNOWN_PREFIX, _NAT64_LOCAL_USE_PREFIX)
 _SIX_TO_FOUR_PREFIX = ipaddress.IPv6Network("2002::/16")
 
 
@@ -69,7 +71,9 @@ def _callback_target_public_address(
     ipv4_mapped = getattr(address, "ipv4_mapped", None)
     if isinstance(ipv4_mapped, ipaddress.IPv4Address):
         return ipv4_mapped
-    if isinstance(address, ipaddress.IPv6Address) and address in _NAT64_WELL_KNOWN_PREFIX:
+    if isinstance(address, ipaddress.IPv6Address) and any(
+        address in prefix for prefix in _NAT64_TRANSLATION_PREFIXES
+    ):
         return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
     return address
 
