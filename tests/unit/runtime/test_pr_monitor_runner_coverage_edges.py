@@ -4217,10 +4217,19 @@ async def test_protected_scope_commit_repair_policy_block_uses_specific_reason(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("head_shas", "expected_history_rewritten"),
+    [
+        (["before-repair-sha", "after-repair-sha"], True),
+        (["same-repair-sha", "same-repair-sha"], False),
+    ],
+)
 async def test_protected_scope_commit_repair_logs_when_dirty_commit_not_created(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    head_shas: list[str],
+    expected_history_rewritten: bool,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     adapter = FakeAdapter()
@@ -4242,7 +4251,11 @@ async def test_protected_scope_commit_repair_logs_when_dirty_commit_not_created(
     async def _pushed_after_clean_recheck(**_kwargs: object) -> _GitPushResult:
         return _GitPushResult(pushed=True, failed=False, returncode=0)
 
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return head_shas.pop(0)
+
     monkeypatch.setattr(runner, "_commit_dirty_worktree", _no_commit_created)
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
     monkeypatch.setattr(runner, "_protected_scope_push_block", _clean_after_recheck)
     monkeypatch.setattr(runner, "_git_push_result", _pushed_after_clean_recheck)
 
@@ -4276,6 +4289,7 @@ async def test_protected_scope_commit_repair_logs_when_dirty_commit_not_created(
     ]
     assert commit_not_created_events
     assert "reason_code" not in commit_not_created_events[0]
+    assert commit_not_created_events[0]["history_rewritten"] is expected_history_rewritten
 
 
 @pytest.mark.unit

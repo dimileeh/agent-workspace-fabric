@@ -4573,6 +4573,8 @@ class PullRequestMonitorRunner:
         if await self._provider_recovery_suppresses_cli(workspace_id):
             raise ProviderRecoveryRetryError()
 
+        worktree_path = self._worktrees_root / workspace_id
+        head_before_repair = await self._rev_parse_head(worktree_path)
         command_evidence: list[str] = []
         agent_run_err = None
         try:
@@ -4595,7 +4597,10 @@ class PullRequestMonitorRunner:
         if agent_run_err is not None:
             await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
 
-        worktree_path = self._worktrees_root / workspace_id
+        head_after_repair = await self._rev_parse_head(worktree_path)
+        history_rewritten = bool(
+            head_before_repair and head_after_repair and head_before_repair != head_after_repair
+        )
         try:
             committed_dirty_changes = await self._commit_dirty_worktree(
                 workspace_id=workspace_id,
@@ -4633,6 +4638,7 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     paths=paths,
                     remote_branch=remote_branch,
+                    history_rewritten=history_rewritten,
                 )
         except ProtectedScopeDiffError as exc:
             return await self._protected_scope_diff_unavailable_push_result(
