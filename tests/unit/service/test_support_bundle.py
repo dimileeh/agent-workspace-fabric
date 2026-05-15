@@ -20,16 +20,21 @@ from awf.service.support_bundle import (
 )
 
 
-def _settings(tmp_path: Path) -> ServiceSettings:
+def _settings(
+    tmp_path: Path,
+    *,
+    database_url: str = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
+    api_token: str | None = None,
+) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
         env="local",
         api_base_url="http://localhost:8000",
-        database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
+        database_url=database_url,
         docker_host=f"unix://{tmp_path / 'docker.sock'}",
         agent_runtime_image="awf-agent-runtime:latest",
         work_dir=str(tmp_path / "work"),
-        api_token=None,
+        api_token=api_token,
         github_token=None,
         worker_poll_interval_seconds=0.1,
         worker_max_concurrent_provisions=1,
@@ -201,10 +206,15 @@ def test_support_bundle_collects_required_sections(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
+    api_secret = "awf-api-bundle-secret"
     github_secret = "ghp_bundlesecret123456"
     db_secret = "bundle-db-secret"
     openai_secret = "sk-bundlesecret123456"
+    settings = _settings(
+        tmp_path,
+        api_token=api_secret,
+        database_url=f"postgresql+asyncpg://awf:{db_secret}@localhost:5433/awf",
+    )
 
     status = _green_status()
     checks = status["checks"]
@@ -213,7 +223,10 @@ def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
         "ok": False,
         "status": "fail",
         "reason": "API_UNREACHABLE",
-        "detail": f"token={openai_secret} db=postgresql://awf:{db_secret}@localhost/awf",
+        "detail": (
+            f"api_token={api_secret} token={openai_secret} "
+            f"db=postgresql://awf:{db_secret}@localhost/awf"
+        ),
         openai_secret: "value under secret key",
     }
     readiness = status["agent_readiness"]
@@ -224,17 +237,26 @@ def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
         "ok": False,
         "status": "fail",
         "reason": "GITHUB_AUTH_UNUSABLE",
-        "message": f"bad token {github_secret}",
+        "message": f"bad token {github_secret} api={api_secret}",
     }
 
     async def _status_collector(_: ServiceSettings, **_kw: object) -> dict[str, object]:
         return status
 
     async def _doctor_collector(_: ServiceSettings, **_kw: object) -> DoctorReportProxy:
-        return _green_doctor()
+        report = _green_doctor()
+        report.diagnostics[0]["metadata"] = {
+            "api_token": api_secret,
+            "database_url": f"postgresql://awf:{db_secret}@localhost/awf",
+        }
+        return report
 
     async def _failure_collector(**_: object) -> dict[str, object]:
-        return _mock_failure_summary()
+        summary = _mock_failure_summary()
+        summary["opaque_detail"] = (
+            f"failure api_token={api_secret} db=postgresql://awf:{db_secret}@localhost/awf"
+        )
+        return summary
 
     bundle = asyncio.run(
         collect_support_bundle(
@@ -252,9 +274,13 @@ def test_support_bundle_redacts_secrets(tmp_path: Path) -> None:
     )
 
     serialized = json.dumps(bundle, sort_keys=True)
-    for secret in (github_secret, db_secret, openai_secret):
+    bundle_path = write_support_bundle(bundle, directory=tmp_path / "bundles")
+    written = bundle_path.read_text()
+    for secret in (api_secret, github_secret, db_secret, openai_secret):
         assert secret not in serialized
+        assert secret not in written
     assert "<redacted>" in serialized
+    assert "<redacted>" in written
 
 
 @pytest.mark.unit
