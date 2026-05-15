@@ -215,6 +215,7 @@ async def test_callbacks_endpoints_return_unavailable_when_disabled(
         "http://[::1]/events",
         "http://[::ffff:127.0.0.1]/events",
         "http://[::ffff:169.254.169.254]/latest/meta-data",
+        "http://[2002:c0a8:0101::1]/events",
         "http://[fe80::1]/events",
     ],
 )

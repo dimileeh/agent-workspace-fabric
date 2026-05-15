@@ -19,7 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import CallbackSubscriptionCreateRequest
 from awf.common.audit import redact_audit_text
-from awf.common.callback_targets import is_public_callback_target_host
+from awf.common.callback_targets import (
+    is_public_callback_target_host,
+    is_public_callback_target_ip,
+)
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.db.enums import CallbackEventKind
@@ -38,7 +41,6 @@ from awf.db.repositories import (
 
 CALLBACK_USER_AGENT = "AWF-Callback-Delivery/1.0"
 _CALLBACK_EXCEPTION_TRACEBACK_LIMIT = 4000
-_NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 _log = get_logger(__name__)
 
 
@@ -527,7 +529,7 @@ async def _validate_callback_target_with_timeout(
     timeout: float,
 ) -> ValidatedCallbackTarget:
     if timeout <= 0:
-        raise TimeoutError("Callback target validation timed out before it started.")
+        raise ValueError("Callback target validation timed out before it started.")
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(
@@ -538,7 +540,7 @@ async def _validate_callback_target_with_timeout(
             timeout=timeout,
         )
     except TimeoutError as exc:
-        raise TimeoutError(f"Callback target validation timed out after {timeout:g}s.") from exc
+        raise ValueError(f"Callback target validation timed out after {timeout:g}s.") from exc
 
 
 def _validate_callback_target_dns(*, hostname: str) -> tuple[str, ...]:
@@ -605,14 +607,7 @@ def _default_callback_port(scheme: str) -> int | None:
 
 
 def _is_public_ip(address: str) -> bool:
-    value = ipaddress.ip_address(address)
-    public_address = value
-    ipv4_mapped = getattr(value, "ipv4_mapped", None)
-    if isinstance(ipv4_mapped, ipaddress.IPv4Address):
-        public_address = ipv4_mapped
-    elif isinstance(value, ipaddress.IPv6Address) and value in _NAT64_WELL_KNOWN_PREFIX:
-        public_address = ipaddress.IPv4Address(int(value) & 0xFFFFFFFF)
-    return public_address.is_global and not public_address.is_multicast
+    return is_public_callback_target_ip(address)
 
 
 def _callback_address_family_sort_key(address: str) -> int:

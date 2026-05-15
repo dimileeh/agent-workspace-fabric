@@ -933,7 +933,7 @@ async def test_drain_due_offloads_callback_target_validation(
 
 
 @pytest.mark.unit
-async def test_drain_due_marks_callback_target_validation_timeout_as_request_failure(
+async def test_drain_due_marks_callback_target_validation_timeout_as_target_invalid(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -954,13 +954,18 @@ async def test_drain_due_marks_callback_target_validation_timeout_as_request_fai
 
     monkeypatch.setattr("asyncio.wait_for", fake_wait_for)
 
-    await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+    with structlog.testing.capture_logs() as captured:
+        await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
 
     assert wait_for_timeouts == [10.0]
     assert poster.calls == []
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_target_invalid"
+    )
+    assert log_entry["error_code"] == "CALLBACK_TARGET_INVALID"
     stored = await _get_delivery(factory, delivery.id)
     assert stored.status == CallbackDeliveryStatus.pending.value
-    assert stored.error_code == "CALLBACK_REQUEST_FAILED"
+    assert stored.error_code == "CALLBACK_TARGET_INVALID"
     assert "validation timed out" in (stored.error_message or "")
 
 
@@ -1332,6 +1337,41 @@ async def test_drain_due_rejects_nat64_delivery_target_that_embeds_private_ipv4(
     assert stored.attempt_count == 1
     assert stored.envelope["delivery"]["attempt_count"] == 1
     assert f"target_url resolved host is not public: {translated_metadata_ip}" in (
+        stored.error_message or ""
+    )
+
+
+@pytest.mark.unit
+async def test_drain_due_rejects_6to4_delivery_target(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(session, event_types=["workspace.*"])
+        _workspace_id, event_id = await _seed_workspace_event(session)
+        await session.commit()
+
+    deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
+    assert len(deliveries) == 1
+
+    six_to_four_ip = "2002:c0a8:0101::1"
+    monkeypatch.setattr(
+        callback_service_module,
+        "_resolve_callback_target_ip_addresses",
+        lambda _hostname: (six_to_four_ip,),
+    )
+    poster = _RecordingPoster()
+
+    await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
+
+    assert poster.calls == []
+    stored = await _get_delivery(factory, deliveries[0].id)
+    assert stored.status == CallbackDeliveryStatus.pending.value
+    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert stored.response_status_code is None
+    assert stored.attempt_count == 1
+    assert stored.envelope["delivery"]["attempt_count"] == 1
+    assert f"target_url resolved host is not public: {six_to_four_ip}" in (
         stored.error_message or ""
     )
 

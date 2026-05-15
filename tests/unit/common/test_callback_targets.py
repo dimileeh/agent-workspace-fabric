@@ -27,6 +27,7 @@ class _NoLegacyIPv4Labels:
         ("169.254.169.254", False),
         ("::ffff:127.0.0.1", False),
         ("::ffff:169.254.169.254", False),
+        ("2002:c0a8:0101::1", False),
         ("0300.0250.0001.0001", False),
         ("0xc0.0xa8.0x01.0x01", False),
         ("224.0.0.1", False),
@@ -34,6 +35,22 @@ class _NoLegacyIPv4Labels:
 )
 def test_callback_target_host_publicness_policy(hostname: str, expected: bool) -> None:
     assert callback_targets.is_public_callback_target_host(hostname) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("1.1.1.1", True),
+        ("2606:4700:4700::1111", True),
+        ("127.0.0.1", False),
+        ("::ffff:127.0.0.1", False),
+        ("64:ff9b::a9fe:a9fe", False),
+        ("2002:c0a8:0101::1", False),
+    ],
+)
+def test_callback_target_ip_publicness_policy(address: str, expected: bool) -> None:
+    assert callback_targets.is_public_callback_target_ip(address) is expected
 
 
 @pytest.mark.unit
