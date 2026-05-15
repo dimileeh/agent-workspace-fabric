@@ -2778,6 +2778,21 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
+    def test_pytest_failure_parser_captures_file_level_error_node_ids(self, tmp_path: Path) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "ERROR tests/unit/test_imports.py - ImportError: missing dependency\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == ["tests/unit/test_imports.py"]
+        assert evidence.evidence == [
+            "ERROR tests/unit/test_imports.py - ImportError: missing dependency"
+        ]
+
+    @pytest.mark.unit
     def test_pytest_failure_parser_skips_missing_and_blank_lines(self, tmp_path: Path) -> None:
         missing = tmp_path / "missing.txt"
         output = tmp_path / "pytest.txt"

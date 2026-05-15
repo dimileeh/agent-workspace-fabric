@@ -71,7 +71,7 @@ _COVERAGE_HEADER_RE = re.compile(r"(?i)Name\s+Stmts\s+Miss\s+Cover")
 _PYTEST_FAILURE_SUMMARY_RE = re.compile(r"^(?P<kind>FAILED|ERROR)\s+(?P<rest>.+)$")
 _PYTEST_PROGRESS_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s+)+(?=(?:FAILED|ERROR)\s+)")
 _PYTEST_NODE_COMPONENT = r"(?:[^\s:\[]+|\[[^\]]*\])+"
-_PYTEST_NODE_ID_RE = re.compile(rf"^(?P<node>[^\s:]+\.py(?:::{_PYTEST_NODE_COMPONENT})+)")
+_PYTEST_NODE_ID_RE = re.compile(rf"^(?P<node>[^\s:]+\.py(?:::{_PYTEST_NODE_COMPONENT})*)")
 _PYTEST_EVIDENCE_LIMIT = 20
 _PYTEST_NODE_ID_LIMIT = 20
 _PYTEST_EVIDENCE_MAX_CHARS = 500
@@ -1764,7 +1764,10 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
                         limit=_PYTEST_EVIDENCE_LIMIT,
                     )
                     rest = summary_match.group("rest")
-                    node_id = _pytest_node_id_from_text(rest)
+                    node_id = _pytest_node_id_from_text(
+                        rest,
+                        allow_file_level=summary_match.group("kind") == "ERROR",
+                    )
                     if node_id is not None:
                         _append_unique_capped(
                             node_ids,
@@ -1789,19 +1792,26 @@ def _normalize_pytest_summary_line(line: str) -> str:
 
 
 def _looks_like_pytest_node_id(value: str) -> bool:
-    return _pytest_node_id_from_text(value) is not None
+    return _pytest_node_id_from_text(value, allow_file_level=True) is not None
 
 
-def _pytest_node_id_from_text(value: str) -> str | None:
-    match = _PYTEST_NODE_ID_RE.match(value.lstrip())
+def _pytest_node_id_from_text(value: str, *, allow_file_level: bool = False) -> str | None:
+    text = value.lstrip()
+    match = _PYTEST_NODE_ID_RE.match(text)
     if match is None:
         return None
-    return _strip_pytest_node_id_suffix(match.group("node"))
+    node_id = _strip_pytest_node_id_suffix(match.group("node"))
+    if "::" not in node_id:
+        if text[match.end() :].startswith("::"):
+            return None
+        if not allow_file_level:
+            return None
+    return node_id
 
 
 def _strip_pytest_node_id_suffix(node_id: str) -> str:
     stripped = node_id.rstrip(".,;")
-    # _PYTEST_NODE_ID_RE requires a component after each "::", so only a single
+    # A matched "::" segment always requires a component, so only a single
     # trailing ":" can be a pytest/xdist message separator.
     if stripped.endswith(":") and not stripped.endswith("::"):
         stripped = stripped[:-1]
