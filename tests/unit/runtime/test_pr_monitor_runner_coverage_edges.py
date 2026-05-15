@@ -12,11 +12,13 @@ import structlog
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentRunError
+from awf.adapters.provider_failures import AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.control.quality_gates import QualityGateViolation
-from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace
 from awf.db.repositories import (
     OperationRepository,
@@ -4293,6 +4295,98 @@ async def test_protected_scope_commit_repair_logs_when_dirty_commit_not_created(
     assert commit_not_created_events
     assert "reason_code" not in commit_not_created_events[0]
     assert commit_not_created_events[0]["history_rewritten"] is expected_history_rewritten
+
+
+@pytest.mark.unit
+async def test_protected_scope_commit_repair_terminal_provider_error_skips_dirty_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.agent = AgentRuntime.codex.value
+        workspace.owned_paths = ["src/**"]
+        workspace.task_policy = {"provider_recovery": {"max_same_provider_retries": 0}}
+        await session.commit()
+
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="MODEL_CAPACITY_EXHAUSTED Please try again later.",
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex"},
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return "before-repair-sha"
+
+    async def _unexpected_commit_dirty_worktree(**_kwargs: object) -> bool:
+        pytest.fail("terminal provider recovery must skip dirty commit handling")
+
+    async def _unexpected_protected_scope_push_block(**_kwargs: object) -> None:
+        pytest.fail("terminal provider recovery must skip committed-diff recheck")
+
+    async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("terminal provider recovery must not push")
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _unexpected_commit_dirty_worktree)
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_push_block",
+        _unexpected_protected_scope_push_block,
+    )
+    monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
+
+    push_result = await runner._repair_protected_scope_commits_before_push(
+        workspace_id=workspace_id,
+        pr_number=42,
+        protected_scope_block=_ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            violations=(
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                ),
+            ),
+        ),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        terminal_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.provider_recovery_terminal",
+            limit=10,
+        )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert len(terminal_events) == 1
+    assert terminal_events[0].reason_code == "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+    assert workspace.task_policy["provider_recovery_state"]["action"] == "terminal"
 
 
 @pytest.mark.unit

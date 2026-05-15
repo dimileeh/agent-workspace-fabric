@@ -887,7 +887,7 @@ class PullRequestMonitorRunner:
         self,
         workspace_id: str,
         exc: AgentRunError,
-    ) -> Literal["fallback", "retry", "auth_failed", "deterministic"]:
+    ) -> Literal["fallback", "retry", "auth_failed", "terminal", "deterministic"]:
         message = exc.result.stderr.strip() or exc.result.stdout.strip()
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
@@ -917,7 +917,9 @@ class PullRequestMonitorRunner:
             await s.commit()
             if provider_auth_failed:
                 return "auth_failed"
-            if result == "terminal" or result == "stale":
+            if result == "terminal":
+                return "terminal"
+            if result == "stale":
                 return "deterministic"
             if result is not None and result.action == "fallback" and not result.in_place:
                 return "fallback"
@@ -929,7 +931,7 @@ class PullRequestMonitorRunner:
         exc: AgentRunError,
         *,
         state: MonitorState | None = None,
-    ) -> None:
+    ) -> Literal["fallback", "retry", "auth_failed", "terminal", "deterministic"]:
         if state is not None:
             await self._persist_state(workspace_id, state)
         action = await self._record_provider_agent_run_error(workspace_id, exc)
@@ -939,6 +941,7 @@ class PullRequestMonitorRunner:
             raise ProviderRecoveryRetryError()
         if action == "auth_failed":
             raise ProviderRecoveryAuthError() from exc
+        return action
 
     async def _record_pr_monitor_audit_event(
         self,
@@ -4603,7 +4606,24 @@ class PullRequestMonitorRunner:
             )
 
         if agent_run_err is not None:
-            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+            provider_error_action = await self._handle_provider_agent_run_error(
+                workspace_id,
+                agent_run_err,
+                state=state,
+            )
+            if provider_error_action == "terminal":
+                _log.warning(
+                    "monitor.protected_scope_committed_repair_cli_failed",
+                    workspace_id=workspace_id,
+                    stderr=agent_run_err.result.stderr[:400],
+                )
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=protected_scope_block.message,
+                    reason_code=protected_scope_block.reason_code,
+                )
 
         head_after_repair = await self._rev_parse_head(worktree_path)
         history_rewritten = bool(
