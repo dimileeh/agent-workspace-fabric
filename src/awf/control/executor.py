@@ -6453,7 +6453,10 @@ class WorkspaceExecutor:
                     defaults = self._defaults_for(AgentRuntime(workspace.agent))
                 except ValueError:
                     defaults = None
-                effective_default_model = defaults.model if defaults is not None else None
+                workspace_defaults = _agent_defaults_for_workspace(workspace, defaults)
+                effective_default_model = (
+                    workspace_defaults.model if workspace_defaults is not None else None
+                )
             result = await create_provider_recovery_attempt_row(
                 session,
                 workspace_id,

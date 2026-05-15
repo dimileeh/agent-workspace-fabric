@@ -957,6 +957,98 @@ class TestUnexpectedErrorDuringAgentRun:
         assert "not_before" in recovery_payload
 
     @pytest.mark.unit
+    async def test_provider_recovery_uses_workspace_model_override_as_effective_default(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.adapters import base as adapter_base
+
+        class _StderrClassifyingCodexAdapter(adapter_base.AgentAdapter):
+            runtime = AgentRuntime.codex
+
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.codex
+
+            def get_provider(self, model: str | None) -> str:
+                return "openai"
+
+            def _cli_args(self, *, model: str | None) -> list[str]:
+                del model
+                return ["codex", "exec"]
+
+        monkeypatch.setitem(
+            adapter_base._REGISTRY,
+            AgentRuntime.codex,
+            _StderrClassifyingCodexAdapter,
+        )
+        override_model = "gpt-5.3-codex-spark"
+        ws_id = await _seed_ready(
+            factory,
+            agent="codex",
+            task_policy={
+                "agent_model": override_model,
+                "provider_recovery": {
+                    "fallbacks": [],
+                    "max_same_provider_retries": 1,
+                    "cooldown_seconds": 30,
+                    "backoff_seconds": 30,
+                    "retry_after_cap_seconds": 300,
+                },
+            },
+            create_task_attempt=True,
+        )
+
+        fake.queue_result(
+            returncode=1,
+            stderr="MODEL_CAPACITY_EXHAUSTED Please try again later.",
+        )
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(returncode=0, stdout="0\n")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            retry_workspace = (
+                await session.execute(select(Workspace).where(Workspace.id != ws_id))
+            ).scalar_one()
+            event = (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == ws_id,
+                        WorkspaceEvent.event_type == "workspace.provider_recovery_requested",
+                    )
+                )
+            ).scalar_one()
+
+        state = retry_workspace.task_policy["provider_recovery_state"]
+        assert retry_workspace.status == WorkspaceStatus.requested.value
+        assert retry_workspace.agent == "codex"
+        assert retry_workspace.task_policy["agent_model"] == override_model
+        assert state["action"] == "retry"
+        assert state["target_provider"] == "openai"
+        assert state["target_model"] == override_model
+        assert state["retry_attempt_number"] == 1
+        assert state["fallback_attempt_number"] == 0
+        assert "not_before" in state
+
+        recovery_payload = event.payload["provider_recovery"]
+        assert recovery_payload["action"] == "retry"
+        assert recovery_payload["decision_reason_code"] == "PROVIDER_RETRY_DELAYED"
+        assert recovery_payload["target_model"] == override_model
+
+    @pytest.mark.unit
     async def test_generic_no_work_agent_failure_does_not_create_provider_recovery_attempt(
         self,
         fake: FakeCommandRunner,
