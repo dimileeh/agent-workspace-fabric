@@ -15,6 +15,7 @@ from awf.api.request_admission import (
     CALLBACK_REGISTER_ENDPOINT_FAMILY,
     RequestAdmissionDecision,
     admit_request,
+    request_app_state,
 )
 from awf.api.responses import RATE_LIMITED_ERROR_RESPONSE
 from awf.api.schemas import (
@@ -107,6 +108,16 @@ async def register_callback(
     if cached is not None:
         return cached
 
+    service = CallbackService(session_factory)
+    try:
+        durable_replay = await service.replay_existing(payload, idempotency_key=key)
+    except CallbackIdempotencyConflictError as exc:
+        raise _idempotency_conflict() from exc
+    if durable_replay is not None:
+        response = CallbackSubscriptionResponse.model_validate(durable_replay)
+        replay_cache.remember(payload, idempotency_key=key, response=response)
+        return response
+
     admission = admit_request(
         request,
         endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
@@ -117,7 +128,6 @@ async def register_callback(
     if not admission.allowed:
         return _callback_register_rate_limited_response(admission)
 
-    service = CallbackService(session_factory)
     try:
         subscription = await service.register(
             payload,
@@ -191,7 +201,7 @@ def _callback_register_rate_limited_response(
 def _callback_idempotency_replay_cache(
     request: Request | object | None,
 ) -> _CallbackIdempotencyReplayCache:
-    state = _request_app_state(request)
+    state = request_app_state(request)
     if state is None:
         return _STATELESS_CALLBACK_REPLAY_CACHE
 
@@ -202,16 +212,6 @@ def _callback_idempotency_replay_cache(
     cache = _CallbackIdempotencyReplayCache()
     setattr(state, _CALLBACK_REPLAY_CACHE_STATE_KEY, cache)
     return cache
-
-
-def _request_app_state(request: Request | object | None) -> object | None:
-    if request is None:
-        return None
-    try:
-        app = getattr(request, "app", None)
-    except (KeyError, RuntimeError):
-        return None
-    return getattr(app, "state", None)
 
 
 def _require_idempotency_key(idempotency_key: str | None) -> str:

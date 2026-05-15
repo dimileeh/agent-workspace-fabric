@@ -181,7 +181,7 @@ def admit_request(
 
 
 def request_admission_limiter(request: Request | object | None) -> RequestAdmissionLimiter:
-    state = _request_app_state(request)
+    state = request_app_state(request)
     if state is None:
         return _STATELESS_REQUEST_LIMITER
 
@@ -269,7 +269,7 @@ def _client_host(request: Request | object | None) -> str:
     return _UNKNOWN_CLIENT_HOST
 
 
-def _request_app_state(request: Request | object | None) -> object | None:
+def request_app_state(request: Request | object | None) -> object | None:
     if request is None:
         return None
     try:
@@ -291,5 +291,6 @@ __all__ = [
     "RequestAdmissionLimiter",
     "admit_request",
     "extract_request_identity",
+    "request_app_state",
     "request_admission_limiter",
 ]

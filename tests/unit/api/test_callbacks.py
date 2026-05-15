@@ -194,7 +194,7 @@ async def test_register_callback_rejects_burst_after_configured_limit(
 
 
 @pytest.mark.unit
-async def test_register_callback_rate_limit_rejects_fresh_key_before_replay_read(
+async def test_register_callback_rate_limit_rejects_fresh_key_after_db_replay_miss(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -239,7 +239,10 @@ async def test_register_callback_rate_limit_rejects_fresh_key_before_replay_read
 
     assert first.status_code == 201
     _assert_callback_rate_limited(rejected, identity_type="client_host")
-    assert "callback-replay-read-second" not in replay_keys
+    assert replay_keys == [
+        "callback-replay-read-first",
+        "callback-replay-read-second",
+    ]
 
 
 @pytest.mark.unit
@@ -268,6 +271,39 @@ async def test_register_callback_idempotency_replay_bypasses_limit_but_fresh_key
             "target_url": "https://operator.example.com/awf/fresh",
         },
         headers={"Idempotency-Key": "callback-rate-fresh"},
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    _assert_callback_rate_limited(fresh, identity_type="client_host")
+    assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_db_replay_bypasses_limit_when_replay_cache_is_cold(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+    headers = {"Idempotency-Key": "callback-db-rate-replay"}
+
+    first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayCache(),  # noqa: SLF001
+    )
+    replay = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-db-rate-fresh",
+            "target_url": "https://operator.example.com/awf/db-fresh",
+        },
+        headers={"Idempotency-Key": "callback-db-rate-fresh"},
     )
 
     assert first.status_code == 201
