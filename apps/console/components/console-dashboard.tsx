@@ -1762,13 +1762,13 @@ function TaskDetailsModal({
   const titleId = `task-details-title-${workspace.workspace_id}`;
 
   useEffect(() => {
+    const scrollY = window.scrollY;
     const previousBodyOverflow = document.body.style.overflow;
-    const previousHtmlOverflow = document.documentElement.style.overflow;
     document.body.style.overflow = "hidden";
-    document.documentElement.style.overflow = "hidden";
+    window.scrollTo(0, scrollY);
     return () => {
       document.body.style.overflow = previousBodyOverflow;
-      document.documentElement.style.overflow = previousHtmlOverflow;
+      window.scrollTo(0, scrollY);
     };
   }, []);
 

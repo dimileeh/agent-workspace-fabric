@@ -71,10 +71,18 @@ test("task details modal scrolls long prompts without moving the dashboard", asy
   await page.setViewportSize({ width: 947, height: 982 });
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  const detailsButton = page.getByRole("button", { name: "Details" }).first();
+  await expect(detailsButton).toBeVisible();
+  const scrollTarget = await detailsButton.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return Math.max(1, window.scrollY + rect.top - window.innerHeight / 3);
+  });
+  await page.evaluate((top) => window.scrollTo(0, top), scrollTarget);
+  await expect(detailsButton).toBeInViewport();
   const backgroundScrollBefore = await page.evaluate(() => window.scrollY);
+  expect(backgroundScrollBefore).toBeGreaterThan(0);
 
-  await page.getByRole("button", { name: "Details" }).first().click();
+  await detailsButton.click();
   await expect(page.getByRole("dialog", { name: /Task details/i })).toBeVisible();
   const detailsScroll = page.getByTestId("task-details-scroll");
   await expect(detailsScroll).toBeVisible();
@@ -124,7 +132,7 @@ test("mobile theme screenshots cover dashboard, workspace, and logs views", asyn
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("mobile-dashboard.png"), fullPage: true });
 
-  await page.getByRole("button", { name: /Dark theme verification workspace/i }).click();
+  await page.getByRole("button", { name: /policy parity title should wrap fully inside the list row/i }).click();
   await expect(page.getByRole("heading", { name: "Workspace", exact: true })).toBeVisible();
   await expectNoViewportOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("mobile-workspace.png"), fullPage: true });
