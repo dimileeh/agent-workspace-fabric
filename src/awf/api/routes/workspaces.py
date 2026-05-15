@@ -31,7 +31,7 @@ from awf.api.deps import (
 from awf.api.request_admission import (
     WORKSPACE_CREATE_ENDPOINT_FAMILY,
     RequestAdmissionDecision,
-    admit_request,
+    admit_request_async,
     request_app_state,
 )
 from awf.api.responses import (
@@ -196,6 +196,14 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
             self._entries.popitem(last=False)
 
 
+def _new_workspace_create_idempotency_replay_key_cache() -> (
+    _WorkspaceCreateIdempotencyReplayKeyCache
+):
+    return _WorkspaceCreateIdempotencyReplayKeyCache(
+        max_entries=_WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES
+    )
+
+
 def _current_request(request: Request) -> Request:
     return request
 
@@ -235,7 +243,7 @@ async def create_workspace(
                 return replay
             return _workspace_create_idempotency_replay_unavailable_response()
 
-    admission = admit_request(
+    admission = await admit_request_async(
         request,
         endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
         limit=settings.workspace_create_rate_limit_count,
@@ -331,7 +339,7 @@ async def create_workspace_v2(
                 return replay
             return _workspace_create_idempotency_replay_unavailable_response()
 
-    admission = admit_request(
+    admission = await admit_request_async(
         request,
         endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
         limit=settings.workspace_create_rate_limit_count,
@@ -981,7 +989,7 @@ def _workspace_create_idempotency_replay_key_cache(
     if isinstance(existing, _WorkspaceCreateIdempotencyReplayKeyCache):
         return existing
 
-    cache = _WorkspaceCreateIdempotencyReplayKeyCache()
+    cache = _new_workspace_create_idempotency_replay_key_cache()
     setattr(state, _WORKSPACE_CREATE_REPLAY_KEY_CACHE_STATE_KEY, cache)
     return cache
 
@@ -990,13 +998,13 @@ def _direct_workspace_create_idempotency_replay_key_cache(
     request: Request | object | None,
 ) -> _WorkspaceCreateIdempotencyReplayKeyCache:
     if request is None:
-        return _WorkspaceCreateIdempotencyReplayKeyCache()
+        return _new_workspace_create_idempotency_replay_key_cache()
 
     existing = getattr(request, _WORKSPACE_CREATE_REPLAY_KEY_CACHE_STATE_KEY, None)
     if isinstance(existing, _WorkspaceCreateIdempotencyReplayKeyCache):
         return existing
 
-    cache = _WorkspaceCreateIdempotencyReplayKeyCache()
+    cache = _new_workspace_create_idempotency_replay_key_cache()
     try:
         setattr(request, _WORKSPACE_CREATE_REPLAY_KEY_CACHE_STATE_KEY, cache)
     except (AttributeError, TypeError):

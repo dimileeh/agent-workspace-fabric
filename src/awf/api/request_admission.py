@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import threading
@@ -196,8 +197,38 @@ def admit_request(
     window_seconds: int,
     reason_code: str,
 ) -> RequestAdmissionDecision:
+    _warn_no_request_limiter_bypass(
+        request,
+        endpoint_family=endpoint_family,
+        reason_code=reason_code,
+    )
     identity = extract_request_identity(request, endpoint_family=endpoint_family)
     return request_admission_limiter(request).admit(
+        endpoint_family=endpoint_family,
+        identity=identity,
+        limit=limit,
+        window_seconds=window_seconds,
+        reason_code=reason_code,
+    )
+
+
+async def admit_request_async(
+    request: Request | object | None,
+    *,
+    endpoint_family: str,
+    limit: int,
+    window_seconds: int,
+    reason_code: str,
+) -> RequestAdmissionDecision:
+    _warn_no_request_limiter_bypass(
+        request,
+        endpoint_family=endpoint_family,
+        reason_code=reason_code,
+    )
+    identity = extract_request_identity(request, endpoint_family=endpoint_family)
+    limiter = request_admission_limiter(request)
+    return await asyncio.to_thread(
+        limiter.admit,
         endpoint_family=endpoint_family,
         identity=identity,
         limit=limit,
@@ -241,6 +272,21 @@ def _direct_request_admission_limiter(
     except (AttributeError, TypeError):
         return limiter
     return limiter
+
+
+def _warn_no_request_limiter_bypass(
+    request: Request | object | None,
+    *,
+    endpoint_family: str,
+    reason_code: str,
+) -> None:
+    if request is not None:
+        return
+    _log.warning(
+        "request_admission.no_request_bypassing_limiter",
+        endpoint_family=endpoint_family,
+        reason_code=reason_code,
+    )
 
 
 def _metadata(
@@ -339,6 +385,7 @@ __all__ = [
     "RequestAdmissionIdentity",
     "RequestAdmissionLimiter",
     "admit_request",
+    "admit_request_async",
     "extract_request_identity",
     "request_app_state",
     "request_admission_limiter",

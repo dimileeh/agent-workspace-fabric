@@ -14,7 +14,7 @@ from awf.api.deps import get_db_session_factory, require_api_token, resolve_sett
 from awf.api.request_admission import (
     CALLBACK_REGISTER_ENDPOINT_FAMILY,
     RequestAdmissionDecision,
-    admit_request,
+    admit_request_async,
     request_app_state,
 )
 from awf.api.responses import RATE_LIMITED_ERROR_RESPONSE
@@ -205,7 +205,7 @@ async def register_callback(
             return response
         raise _idempotency_replay_unavailable()
 
-    admission = admit_request(
+    admission = await admit_request_async(
         request,
         endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
         limit=route_settings.callback_register_rate_limit_count,

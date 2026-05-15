@@ -541,7 +541,7 @@ def _clear_workspace_create_replay_key_cache(app: Any) -> None:
     setattr(
         app.state,
         workspaces_route._WORKSPACE_CREATE_REPLAY_KEY_CACHE_STATE_KEY,  # noqa: SLF001
-        workspaces_route._WorkspaceCreateIdempotencyReplayKeyCache(),  # noqa: SLF001
+        workspaces_route._new_workspace_create_idempotency_replay_key_cache(),  # noqa: SLF001
     )
 
 
@@ -1129,6 +1129,42 @@ class TestCreateWorkspace:
             workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
                 request
             )
+
+    @pytest.mark.unit
+    def test_workspace_replay_key_cache_app_state_is_bounded(self) -> None:
+        request = _request_with_disk_check()
+        cache = workspaces_route._workspace_create_idempotency_replay_key_cache(  # noqa: SLF001
+            request
+        )
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "task_title": "bounded workspace replay key"}
+        )
+        max_entries = workspaces_route._WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES  # noqa: SLF001
+
+        for index in range(max_entries + 1):
+            cache.remember(
+                payload,
+                idempotency_key=f"workspace-app-state-key-{index}",
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+
+        newest_key = f"workspace-app-state-key-{max_entries}"
+        assert (
+            cache.matches(
+                payload,
+                idempotency_key="workspace-app-state-key-0",
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+            is False
+        )
+        assert (
+            cache.matches(
+                payload,
+                idempotency_key=newest_key,
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+            is True
+        )
 
     @pytest.mark.unit
     def test_workspace_replay_key_cache_default_retains_keys_past_response_cache_limit(

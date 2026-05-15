@@ -15,6 +15,7 @@ from starlette.datastructures import Headers
 from starlette.requests import Request
 
 import awf.api.deps as deps
+import awf.api.request_admission as request_admission
 from awf.api.auth_context import VERIFIED_BEARER_AUTH_SCOPE_KEY
 from awf.api.request_admission import (
     CALLBACK_REGISTER_ENDPOINT_FAMILY,
@@ -318,6 +319,44 @@ def test_request_admission_limiter_serializes_concurrent_admissions() -> None:
 
 
 @pytest.mark.unit
+async def test_admit_request_async_uses_worker_thread_for_limiter_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_to_thread(
+        func: object,
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        calls.append((func, args, kwargs))
+        assert callable(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(request_admission.asyncio, "to_thread", fake_to_thread)
+    request = SimpleNamespace(
+        headers=Headers({}),
+        client=SimpleNamespace(host="203.0.113.41"),
+    )
+
+    decision = await request_admission.admit_request_async(
+        request,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    )
+
+    assert decision.allowed is True
+    assert len(calls) == 1
+    func, _args, kwargs = calls[0]
+    assert getattr(func, "__name__", "") == "admit"
+    assert kwargs["endpoint_family"] == WORKSPACE_CREATE_ENDPOINT_FAMILY
+    assert kwargs["reason_code"] == "WORKSPACE_CREATE_RATE_LIMITED"
+
+
+@pytest.mark.unit
 def test_request_admission_limiter_prunes_once_per_window() -> None:
     now = 60.0
 
@@ -574,6 +613,27 @@ def test_request_admission_none_request_uses_fresh_direct_limiter() -> None:
 
     assert first.allowed is True
     assert second.allowed is True
+
+
+@pytest.mark.unit
+def test_request_admission_none_request_logs_limiter_bypass() -> None:
+    with structlog.testing.capture_logs() as captured:
+        decision = admit_request(
+            None,
+            endpoint_family="none_request_warning_test",
+            limit=1,
+            window_seconds=60,
+            reason_code="NONE_REQUEST_RATE_LIMITED",
+        )
+
+    assert decision.allowed is True
+    assert any(
+        entry.get("event") == "request_admission.no_request_bypassing_limiter"
+        and entry.get("log_level") == "warning"
+        and entry.get("endpoint_family") == "none_request_warning_test"
+        and entry.get("reason_code") == "NONE_REQUEST_RATE_LIMITED"
+        for entry in captured
+    )
 
 
 @pytest.mark.unit
