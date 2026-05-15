@@ -15,7 +15,7 @@ import hashlib
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated, Any, cast
 
@@ -153,11 +153,6 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
             raise ValueError("max_entries must be greater than 0")
         self._max_entries = max_entries
         self._entries: OrderedDict[str, str | None] = OrderedDict()
-        self._durable_warmed = False
-
-    @property
-    def durable_warmed(self) -> bool:
-        return self._durable_warmed
 
     def matches(
         self,
@@ -193,12 +188,6 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
         self._entries[idempotency_key] = request_hash
         self._entries.move_to_end(idempotency_key)
         self._trim()
-
-    def warm_durable(self, idempotency_keys: Iterable[str]) -> None:
-        for idempotency_key in idempotency_keys:
-            if idempotency_key not in self._entries:
-                self.remember_hash(idempotency_key=idempotency_key, request_hash=None)
-        self._durable_warmed = True
 
     def _trim(self) -> None:
         if self._max_entries is None:

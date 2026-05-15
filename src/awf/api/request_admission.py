@@ -140,15 +140,6 @@ class RequestAdmissionLimiter:
                 ),
             )
 
-    def _prune(self, *, window_seconds: int, current_window: int) -> None:
-        """Prune stale buckets. Callers must not already hold ``self._lock``."""
-        with self._lock:
-            self._prune_locked(
-                window_seconds=window_seconds,
-                current_window=current_window,
-                now=float(current_window * window_seconds),
-            )
-
     def _prune_locked(self, *, window_seconds: int, current_window: int, now: float) -> None:
         last_pruned_window = self._last_pruned_windows.get(window_seconds)
         if last_pruned_window is not None and current_window <= last_pruned_window:
