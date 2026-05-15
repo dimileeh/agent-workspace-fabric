@@ -23,11 +23,10 @@ from sqlalchemy import (
     DateTime,
     Float,
     Integer,
-    Interval,
     Numeric,
     and_,
+    bindparam,
     case,
-    column,
     func,
     literal,
     or_,
@@ -4260,9 +4259,8 @@ def _postgresql_scheduler_age_boost_expr(
 def _postgresql_interval_seconds_expr(seconds: int) -> ColumnElement[Any]:
     return cast(
         "ColumnElement[Any]",
-        func.make_interval(
-            column("secs").op("=>")(sql_cast(literal(float(seconds)), Float)),
-            type_=Interval(),
+        text("make_interval(secs => :seconds)").bindparams(
+            bindparam("seconds", float(seconds), type_=Float, unique=True),
         ),
     )
 
