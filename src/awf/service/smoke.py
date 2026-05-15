@@ -12,6 +12,8 @@ ServiceCollector = Callable[[ServiceSettings], Awaitable[dict[str, Any]]]
 AuthCollector = Callable[..., dict[str, Any]]
 ProfilePreview = Callable[..., Any]
 ConfigResolver = Callable[[ServiceSettings], dict[str, Any]]
+ConsoleChecker = Callable[[str], Awaitable[bool]]
+DEFAULT_LOCAL_CONSOLE_URL = "http://localhost:3000"
 
 _PROFILE_MARKER_PATHS = (
     ".awf/workspace.yml",
@@ -35,6 +37,7 @@ async def collect_smoke_report(
     auth_collector: AuthCollector | None = None,
     profile_preview: ProfilePreview | None = None,
     config_resolver: ConfigResolver | None = None,
+    console_checker: ConsoleChecker | None = None,
 ) -> dict[str, Any]:
     mode = "mocked_local" if mocked_local else "live"
     phases: list[dict[str, Any]] = []
@@ -81,7 +84,10 @@ async def collect_smoke_report(
         phases.append(_phase_pr_monitor(mocked_local, settings))
         overall.append(phases[-1]["status"])
         resolved_config = _resolve_config(settings, config_resolver)
-        console_phase, console_links = _phase_console_links(resolved_config)
+        console_phase, console_links = await _phase_console_links(
+            resolved_config,
+            console_checker=console_checker,
+        )
         phases.append(console_phase)
         overall.append(console_phase["status"])
         status = _compute_overall_status(overall)
@@ -112,7 +118,10 @@ async def collect_smoke_report(
     overall.append(phases[-1]["status"])
 
     resolved_config = _resolve_config(settings, config_resolver)
-    console_phase, console_links = _phase_console_links(resolved_config)
+    console_phase, console_links = await _phase_console_links(
+        resolved_config,
+        console_checker=console_checker,
+    )
     phases.append(console_phase)
     overall.append(console_phase["status"])
 
@@ -402,8 +411,10 @@ def _resolve_config(
     return resolver(settings)
 
 
-def _phase_console_links(
+async def _phase_console_links(
     resolved_config: dict[str, Any],
+    *,
+    console_checker: ConsoleChecker | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     api_base = resolved_config.get("api_base_url", "http://localhost:8000")
     console_url = resolved_config.get("console_url")
@@ -412,24 +423,72 @@ def _phase_console_links(
     }
 
     if console_url:
-        links["ui"] = str(console_url)
+        configured_console_url = str(console_url)
+        links["ui"] = configured_console_url
+        checker = console_checker or _default_console_checker
+        if not await checker(configured_console_url):
+            return {
+                "name": "console_links",
+                "status": "warn",
+                "reason_code": "SMOKE_CONSOLE_UNAVAILABLE",
+                "message": "Configured console URL was not reachable.",
+                "evidence": {
+                    "ui": configured_console_url,
+                    "api_docs": f"{api_base.rstrip('/')}/docs",
+                    "source": "configured",
+                },
+                "action": ("Start the console or set AWF_CONSOLE_URL to a reachable console URL."),
+            }, links
         return {
             "name": "console_links",
             "status": "ok",
             "reason_code": "SMOKE_CONSOLE_READY",
-            "message": f"Console links resolved: UI={console_url}, API docs={api_base}/docs",
-            "evidence": {"ui": console_url, "api_docs": f"{api_base.rstrip('/')}/docs"},
+            "message": (
+                "Configured console is reachable: "
+                f"UI={configured_console_url}, API docs={api_base}/docs"
+            ),
+            "evidence": {
+                "ui": configured_console_url,
+                "api_docs": f"{api_base.rstrip('/')}/docs",
+                "source": "configured",
+            },
             "action": "No action required.",
         }, links
 
-    links["ui"] = "unavailable"
+    inferred_console_url = DEFAULT_LOCAL_CONSOLE_URL
+    links["ui"] = inferred_console_url
+    checker = console_checker or _default_console_checker
+    if await checker(inferred_console_url):
+        return {
+            "name": "console_links",
+            "status": "ok",
+            "reason_code": "SMOKE_CONSOLE_READY",
+            "message": (
+                "Default local console is reachable: "
+                f"UI={inferred_console_url}, API docs={api_base}/docs"
+            ),
+            "evidence": {
+                "ui": inferred_console_url,
+                "api_docs": f"{api_base.rstrip('/')}/docs",
+                "source": "default_local_probe",
+            },
+            "action": "No action required.",
+        }, links
+
     return {
         "name": "console_links",
         "status": "warn",
         "reason_code": "SMOKE_CONSOLE_UNAVAILABLE",
-        "message": "Console UI URL could not be resolved.",
-        "evidence": {},
-        "action": "Set AWF_CONSOLE_URL or verify the console service is running.",
+        "message": "Default local console was not reachable.",
+        "evidence": {
+            "ui": inferred_console_url,
+            "api_docs": f"{api_base.rstrip('/')}/docs",
+            "source": "default_local_probe",
+        },
+        "action": (
+            "Start the console with `npm --prefix apps/console run dev` or set "
+            "AWF_CONSOLE_URL to a reachable console URL."
+        ),
     }, links
 
 
@@ -460,6 +519,17 @@ async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any
         if response.status_code == 200:
             return {"status": "ok"}
         return {"status": "unreachable"}
+
+
+async def _default_console_checker(url: str) -> bool:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            response = await client.get(url)
+    except (httpx.HTTPError, httpx.InvalidURL):
+        return False
+    return 200 <= response.status_code < 400
 
 
 def _default_auth_collector(settings: ServiceSettings) -> dict[str, Any]:

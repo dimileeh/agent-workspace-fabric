@@ -233,6 +233,96 @@ def test_service_readiness_exits_nonzero_when_scorecard_fails(
 
 
 @pytest.mark.unit
+def test_service_readiness_pretty_labels_release_gate_and_summarizes_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import awf.service.config as config_module
+    import awf.service.readiness as readiness_module
+
+    async def _collect(**_kwargs: object) -> CoreReadinessReport:
+        return CoreReadinessReport(
+            status="fail",
+            checks=(
+                CoreReadinessCheck(
+                    name="service_status",
+                    status="ok",
+                    reason_code="SERVICE_STATUS_OK",
+                    message="service dependencies are ready",
+                    evidence={"checks": {"database": {"ok": True}}},
+                ),
+                CoreReadinessCheck(
+                    name="prd_slo_thresholds",
+                    status="fail",
+                    reason_code="PRD_SLO_THRESHOLDS_FAILED",
+                    message="rolling PRD SLO thresholds are below Core release criteria",
+                    evidence={
+                        "since_hours": 168,
+                        "breaches": {
+                            "workspace_creation_success_rate": {
+                                "actual": 0.9,
+                                "threshold": {"operator": ">=", "value": 0.98},
+                            }
+                        },
+                    },
+                ),
+            ),
+            next_actions=("Collect more successful workspace evidence.",),
+        )
+
+    monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(
+        config_module,
+        "resolve_service_settings",
+        lambda: SimpleNamespace(service_name="awf-local"),
+    )
+    monkeypatch.setattr(config_module, "local_service_environ", lambda: os.environ)
+
+    result = _runner.invoke(app, ["service", "readiness", "--format", "pretty"])
+
+    assert result.exit_code == 1, result.output
+    assert "AWF Core release readiness: fail" in result.stdout
+    assert "local service health" in result.stdout
+    assert "[fail] prd_slo_thresholds" in result.stdout
+    assert "workspace_creation_success_rate: 90.0% >= 98.0%" in result.stdout
+    assert "checks[0]." not in result.stdout
+
+
+@pytest.mark.unit
+def test_service_release_readiness_alias_matches_readiness_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import awf.service.config as config_module
+    import awf.service.readiness as readiness_module
+
+    async def _collect(**_kwargs: object) -> CoreReadinessReport:
+        return CoreReadinessReport(
+            status="ok",
+            checks=(
+                CoreReadinessCheck(
+                    name="service_status",
+                    status="ok",
+                    reason_code="SERVICE_STATUS_OK",
+                    message="service dependencies are ready",
+                    evidence={"status": "ok"},
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(
+        config_module,
+        "resolve_service_settings",
+        lambda: SimpleNamespace(service_name="awf-local"),
+    )
+    monkeypatch.setattr(config_module, "local_service_environ", lambda: os.environ)
+
+    result = _runner.invoke(app, ["service", "release-readiness", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["checks"][0]["reason_code"] == "SERVICE_STATUS_OK"
+
+
+@pytest.mark.unit
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 def test_service_logs_defaults_to_tail_api_and_worker_logs(
     monkeypatch: pytest.MonkeyPatch,

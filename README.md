@@ -1,6 +1,6 @@
 # Aira Agent Workspace Fabric (AWF)
 
-*New to AWF? See the [Start Here Quickstart](docs/START_HERE.md) to bootstrap a local evaluation workspace in under 5 minutes.*
+*New to AWF? See the [Quickstart](docs/QUICKSTART.md) to bootstrap a local evaluation workspace in a few commands.*
 
 **AWF is an industrial workspace fabric for AI coding agents.**
 
@@ -118,11 +118,14 @@ See:
 
 ## Documentation
 
-- [Getting Started](docs/GETTING_STARTED.md) / [Start Here Quickstart](docs/QUICKSTART.md)
+- [Documentation Index](docs/README.md)
+- [Quickstart](docs/QUICKSTART.md)
+- [Getting Started](docs/GETTING_STARTED.md)
 - [Project Onboarding](docs/PROJECT_ONBOARDING.md)
 - [Concepts & Architecture](docs/CONCEPTS.md)
 - [CLI Reference](docs/CLI_REFERENCE.md)
 - [DX Smoke Command](docs/SMOKE_COMMAND.md)
+- [Upgrade Guide](docs/UPGRADE.md)
 - [REST API Reference](docs/REST_API_REFERENCE.md)
 - [MCP Reference](docs/MCP_REFERENCE.md)
 - [MCP Client Parity Matrix](docs/MCP_CLIENT_PARITY.md)
@@ -132,6 +135,7 @@ See:
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Trust Model](docs/AWF_CORE_TRUST_MODEL.md)
 - [Test Quality Guardrails](docs/test-quality-guardrails.md)
+- [Changelog](CHANGELOG.md)
 - [Contributor Guide](CONTRIBUTING.md)
 
 ## Supported Client Surfaces (v0.1)
