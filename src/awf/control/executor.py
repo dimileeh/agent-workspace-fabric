@@ -132,6 +132,10 @@ from awf.runtime.validation import (
     DB_GENERATED_SETUP_PHASE,
     PROFILE_VALIDATION_TOOL_UNAVAILABLE,
     PYTEST_TEST_FAILURE,
+    SETUP_DEPENDENCY_NETWORK_FAILURE,
+    SETUP_DEPENDENCY_NETWORK_METADATA_KEY,
+    SETUP_DEPENDENCY_NETWORK_RETRY,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
@@ -207,6 +211,10 @@ POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE = "POST_AGENT_COMMIT_FORMAT_
 POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE = "POST_AGENT_FORMAT_REPAIR_FAILED"
 POST_AGENT_COMMIT_REPAIR_EVENT_TYPE = "workspace.post_agent_commit_repair"
 POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE = POST_AGENT_COMMIT_REPAIR_EVENT_TYPE
+SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE = "workspace.setup_dependency_network_retry"
+SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE = (
+    "workspace.setup_dependency_network_retry_exhausted"
+)
 _PR_MONITOR_ADOPTED_EVENT = "workspace.pr_monitor_adopted"
 _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
@@ -974,6 +982,38 @@ def _metadata_int(metadata: Mapping[str, object], key: str) -> int | None:
     return value if isinstance(value, int) else None
 
 
+def _setup_dependency_network_details(first_fail: object | None) -> dict[str, Any] | None:
+    metadata = getattr(first_fail, "metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    details = metadata.get(SETUP_DEPENDENCY_NETWORK_METADATA_KEY)
+    if not isinstance(details, Mapping):
+        return None
+    return cast(dict[str, Any], redact_audit_value(dict(details)))
+
+
+def _setup_dependency_network_failure_details(
+    first_fail: object | None,
+) -> dict[str, Any] | None:
+    if getattr(first_fail, "reason_code", None) != SETUP_DEPENDENCY_NETWORK_FAILURE:
+        return None
+    return _setup_dependency_network_details(first_fail)
+
+
+def _setup_dependency_network_event_payload(
+    details: Mapping[str, Any],
+    *,
+    reason_code: str,
+) -> dict[str, Any]:
+    payload = dict(details)
+    payload["reason_code"] = reason_code
+    # This identifies the transient setup-dependency classifier that caused the
+    # retry event. When retry_exhausted=false and recovered=false, the command
+    # can still terminate on a later deterministic setup failure.
+    payload["failure_reason_code"] = SETUP_DEPENDENCY_NETWORK_FAILURE
+    return payload
+
+
 def _metadata_number(metadata: Mapping[str, object], key: str) -> int | float | None:
     value = metadata.get(key)
     return value if isinstance(value, int | float) else None
@@ -1299,6 +1339,62 @@ class WorkspaceExecutor:
                 reason_code=reason_code,
                 payload=payload,
             )
+            await session.commit()
+
+    async def _record_setup_dependency_network_events(
+        self,
+        *,
+        workspace_id: str,
+        result: ValidationResult,
+    ) -> None:
+        event_specs: list[tuple[str, str, dict[str, Any]]] = []
+        commands = getattr(result, "commands", None)
+        if not commands:
+            return
+        for command in commands:
+            details = _setup_dependency_network_details(command)
+            if details is None:
+                continue
+            retry_count = _metadata_int(details, "retry_count") or 0
+            if retry_count > 0:
+                # Exhausted attempts intentionally emit both the retry event and
+                # the exhausted event from the same redacted retry metadata.
+                event_specs.append(
+                    (
+                        SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
+                        SETUP_DEPENDENCY_NETWORK_RETRY,
+                        _setup_dependency_network_event_payload(
+                            details,
+                            reason_code=SETUP_DEPENDENCY_NETWORK_RETRY,
+                        ),
+                    )
+                )
+            if details.get("retry_exhausted") is True:
+                event_specs.append(
+                    (
+                        SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
+                        SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
+                        _setup_dependency_network_event_payload(
+                            details,
+                            reason_code=SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
+                        ),
+                    )
+                )
+        if not event_specs:
+            return
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:  # pragma: no cover - destroyed mid-flight
+                return
+            for event_type, reason_code, payload in event_specs:
+                await repo.add_event(
+                    workspace,
+                    event_type=event_type,
+                    reason_code=reason_code,
+                    payload=payload,
+                )
             await session.commit()
 
     def _materialize_salvage_patch_for_agent(
@@ -1643,13 +1739,33 @@ class WorkspaceExecutor:
                 phase_names=("setup", "pre_agent"),
                 worktree_path=worktree_path,
             )
+            try:
+                await self._record_setup_dependency_network_events(
+                    workspace_id=workspace_id,
+                    result=setup_result,
+                )
+            except Exception:
+                _log.exception(
+                    "executor.setup_dependency_network_event_record_failed",
+                    workspace_id=workspace_id,
+                    setup_all_passed=setup_result.all_passed,
+                )
             if not setup_result.all_passed:
                 first_fail = setup_result.first_failure
+                setup_dependency_details = _setup_dependency_network_failure_details(first_fail)
+                setup_failure_reason_code = (
+                    SETUP_DEPENDENCY_NETWORK_FAILURE
+                    if setup_dependency_details is not None
+                    else None
+                )
                 if recovery is not None:
+                    recovery_setup_failure_reason_code = (
+                        setup_failure_reason_code or "MONITOR_RECOVERY_SETUP_FAILED"
+                    )
                     await self._finish_active_recovery_operations(
                         workspace_id=workspace_id,
                         status=OperationStatus.failed,
-                        reason_code="MONITOR_RECOVERY_SETUP_FAILED",
+                        reason_code=recovery_setup_failure_reason_code,
                         error_message=(
                             f"profile setup failed: {first_fail.command}"
                             if first_fail is not None
@@ -1665,6 +1781,8 @@ class WorkspaceExecutor:
                         if first_fail is not None
                         else "profile setup failed"
                     )[:2000],
+                    reason_code=setup_failure_reason_code,
+                    details=setup_dependency_details,
                 )
                 return
             profile_preflight = getattr(self._validation, "run_profile_tool_preflight", None)
@@ -7530,7 +7648,7 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
 def _validation_command_count(ws: Workspace) -> int:
     if ws.resolved_profile:
         profile = WorkspaceProfile.model_validate(ws.resolved_profile)
-        coverage_count = 1 if profile.validation.coverage.command is not None else 0
+        coverage_count = 1 if _should_run_local_coverage(profile) else 0
         return (
             len(profile.phases.post_agent)
             + len(profile.database.pre_validation_refresh)
@@ -7600,10 +7718,15 @@ def _validation_run_command_records(
         ordered.append(record)
     if pending_healthchecks:
         ordered.extend(_healthcheck_command_records(pending_healthchecks))
-    if "validate" in phase_names and profile.validation.coverage.command is not None:
+    if "validate" in phase_names and _should_run_local_coverage(profile):
+        coverage_command = profile.validation.coverage.command
+        if coverage_command is None:
+            raise RuntimeError(
+                "_should_run_local_coverage returned True but coverage.command is None"
+            )
         coverage_record = {
             "phase": "coverage",
-            "command": profile.validation.coverage.command.command,
+            "command": coverage_command.command,
         }
         if coverage_evidence_status is not None:
             coverage_record["evidence_status"] = coverage_evidence_status
@@ -7656,11 +7779,52 @@ def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfi
         TaskClass.build_config_task.value,
     }:
         task_class_tier = 2
-    return max(profile_tier, task_class_tier)
+    operation_tier = _successful_validate_operation_tier(workspace) or 1
+    return max(profile_tier, task_class_tier, operation_tier)
+
+
+def _successful_validate_operation_tier(workspace: Workspace) -> int | None:
+    tiers: list[int] = []
+    operations = getattr(workspace, "operations", None) or []
+    for operation in operations:
+        if getattr(operation, "type", None) != OperationType.validate.value:
+            continue
+        if getattr(operation, "status", None) != OperationStatus.succeeded.value:
+            continue
+        operation_tiers = [
+            tier
+            for tier in (
+                _requested_tier_from_metadata(getattr(operation, "result", None)),
+                _requested_tier_from_metadata(getattr(operation, "payload", None)),
+            )
+            if tier is not None
+        ]
+        operation_max = max(operation_tiers, default=None)
+        if operation_max is not None:
+            tiers.append(operation_max)
+    return max(tiers, default=None)
+
+
+def _requested_tier_from_metadata(metadata: object) -> int | None:
+    if not isinstance(metadata, Mapping):
+        return None
+    requested_tier = metadata.get("requested_tier")
+    if type(requested_tier) is int and requested_tier > 0:
+        return requested_tier
+    validation = metadata.get("validation")
+    if not isinstance(validation, Mapping):
+        return None
+    requested_tier = validation.get("requested_tier")
+    if type(requested_tier) is int and requested_tier > 0:
+        return requested_tier
+    return None
 
 
 def _should_run_local_coverage(profile: WorkspaceProfile) -> bool:
-    return profile.validation.coverage.command is not None
+    return (
+        profile.validation.strategy.final_gate == "coverage"
+        and profile.validation.coverage.command is not None
+    )
 
 
 def _validation_run_log_stream_refs(
