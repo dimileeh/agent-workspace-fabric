@@ -4258,7 +4258,7 @@ def _postgresql_scheduler_age_boost_expr(
 def _postgresql_interval_seconds_expr(seconds: int) -> ColumnElement[Any]:
     return cast(
         "ColumnElement[Any]",
-        func.make_interval(0, 0, 0, 0, 0, 0, literal(seconds), type_=Interval()),
+        func.make_interval(0, 0, 0, 0, 0, 0, literal(float(seconds)), type_=Interval()),
     )
 
 
