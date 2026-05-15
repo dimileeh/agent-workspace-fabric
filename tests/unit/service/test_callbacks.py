@@ -180,6 +180,7 @@ class _FakeHttpxPost:
     headers: dict[str, str]
     timeout: float
     extensions: dict[str, Any] | None = None
+    extensions_supplied: bool = False
 
 
 @dataclass
@@ -213,7 +214,7 @@ class _FakeAsyncClient:
         json: dict[str, Any],
         headers: dict[str, str],
         timeout: float,
-        extensions: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> _FakeHttpxResponse:
         self.posts.append(
             _FakeHttpxPost(
@@ -221,7 +222,8 @@ class _FakeAsyncClient:
                 json=json,
                 headers=headers,
                 timeout=timeout,
-                extensions=extensions,
+                extensions=kwargs.get("extensions"),
+                extensions_supplied="extensions" in kwargs,
             )
         )
         return _FakeHttpxResponse(status_code=207)
@@ -532,6 +534,7 @@ async def test_default_httpx_poster_pins_connection_to_validated_callback_addres
             },
             timeout=3.5,
             extensions={"sni_hostname": "operator.example.com"},
+            extensions_supplied=True,
         )
     ]
 
@@ -1105,7 +1108,32 @@ async def test_validated_address_post_attempt_uses_remaining_wall_clock_timeout(
             connect_ip_addresses=("1.1.1.1",),
         )
 
-    assert wait_for_timeouts == [10.0]
+    assert wait_for_timeouts == [11.0]
+
+
+@pytest.mark.unit
+def test_callback_target_validation_executor_shutdown_closes_and_resets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeExecutor:
+        def __init__(self) -> None:
+            self.shutdown_calls: list[tuple[bool, bool]] = []
+
+        def shutdown(self, *, wait: bool = True, cancel_futures: bool = False) -> None:
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    executor = _FakeExecutor()
+    monkeypatch.setattr(
+        callback_service_module,
+        "_CALLBACK_TARGET_VALIDATION_EXECUTOR",
+        executor,
+        raising=False,
+    )
+
+    callback_service_module.shutdown_callback_target_validation_executor()
+
+    assert executor.shutdown_calls == [(False, True)]
+    assert callback_service_module._CALLBACK_TARGET_VALIDATION_EXECUTOR is None
 
 
 @pytest.mark.unit

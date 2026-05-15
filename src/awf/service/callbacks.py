@@ -9,6 +9,7 @@ import hashlib
 import ipaddress
 import json as json_module
 import socket
+import threading
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,15 +45,22 @@ from awf.db.repositories import (
 CALLBACK_USER_AGENT = "AWF-Callback-Delivery/1.0"
 _CALLBACK_EXCEPTION_TRACEBACK_LIMIT = 4000
 _CALLBACK_TARGET_VALIDATION_WORKERS = 4
-# `getaddrinfo` cannot be interrupted portably once running. Keep callback DNS
-# work out of asyncio's shared default executor so timed-out resolutions can
-# only occupy this callback-specific pool.
-_CALLBACK_TARGET_VALIDATION_EXECUTOR: concurrent.futures.Executor = (
-    concurrent.futures.ThreadPoolExecutor(
+
+
+def _new_callback_target_validation_executor() -> concurrent.futures.Executor:
+    return concurrent.futures.ThreadPoolExecutor(
         max_workers=_CALLBACK_TARGET_VALIDATION_WORKERS,
         thread_name_prefix="awf-callback-dns",
     )
+
+
+# `getaddrinfo` cannot be interrupted portably once running. Keep callback DNS
+# work out of asyncio's shared default executor so timed-out resolutions can
+# only occupy this callback-specific pool.
+_CALLBACK_TARGET_VALIDATION_EXECUTOR: concurrent.futures.Executor | None = (
+    _new_callback_target_validation_executor()
 )
+_CALLBACK_TARGET_VALIDATION_EXECUTOR_LOCK = threading.Lock()
 _log = get_logger(__name__)
 
 
@@ -95,6 +103,24 @@ class CallbackHttpPoster(Protocol):
 
 
 Clock = Callable[[], datetime]
+
+
+def _callback_target_validation_executor() -> concurrent.futures.Executor:
+    global _CALLBACK_TARGET_VALIDATION_EXECUTOR  # noqa: PLW0603
+    with _CALLBACK_TARGET_VALIDATION_EXECUTOR_LOCK:
+        if _CALLBACK_TARGET_VALIDATION_EXECUTOR is None:
+            _CALLBACK_TARGET_VALIDATION_EXECUTOR = _new_callback_target_validation_executor()
+        return _CALLBACK_TARGET_VALIDATION_EXECUTOR
+
+
+def shutdown_callback_target_validation_executor(*, wait: bool = False) -> None:
+    """Release callback DNS validation workers during application shutdown."""
+    global _CALLBACK_TARGET_VALIDATION_EXECUTOR  # noqa: PLW0603
+    with _CALLBACK_TARGET_VALIDATION_EXECUTOR_LOCK:
+        executor = _CALLBACK_TARGET_VALIDATION_EXECUTOR
+        _CALLBACK_TARGET_VALIDATION_EXECUTOR = None
+    if executor is not None:
+        executor.shutdown(wait=wait, cancel_futures=True)
 
 
 class CallbackService:
@@ -509,13 +535,14 @@ async def _httpx_post_json(
         extensions = {"sni_hostname": parsed.hostname} if parsed.scheme == "https" else None
 
     async with httpx.AsyncClient() as client:
-        response = await client.post(
-            request_url,
-            json=json,
-            headers=request_headers,
-            timeout=timeout,
-            extensions=extensions,
-        )
+        kwargs: dict[str, Any] = {
+            "json": json,
+            "headers": request_headers,
+            "timeout": timeout,
+        }
+        if extensions is not None:
+            kwargs["extensions"] = extensions
+        response = await client.post(request_url, **kwargs)
     return CallbackPostResult(status_code=response.status_code)
 
 
@@ -547,7 +574,7 @@ async def _post_to_validated_callback_addresses(
                     timeout=remaining_timeout,
                     connect_ip_address=connect_ip_address,
                 ),
-                timeout=remaining_timeout,
+                timeout=remaining_timeout + 1,
             )
         except Exception as exc:  # noqa: BLE001 - later validated addresses may still work.
             exc.add_note(f"callback connect_ip_address={connect_ip_address}")
@@ -748,7 +775,7 @@ async def _run_callback_target_validation(
         settings=settings,
     )
     return await loop.run_in_executor(
-        _CALLBACK_TARGET_VALIDATION_EXECUTOR,
+        _callback_target_validation_executor(),
         validate_target,
     )
 
