@@ -11,9 +11,11 @@ from httpx import ASGITransport, AsyncClient, Response
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
+from starlette.requests import Request
 
 from awf.api import schemas as api_schemas
 from awf.api.app import configure_database, create_app
+from awf.api.routes import callbacks as callbacks_route
 from awf.common.config import Settings, get_settings
 from awf.db.session import make_session_factory
 
@@ -50,6 +52,19 @@ def _callback_request_admission_settings(*, limit: int = 1) -> Settings:
     )
 
 
+def _direct_callback_request() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/callbacks",
+            "headers": [],
+            "client": ("198.51.100.42", 42100),
+            "app": FastAPI(),
+        }
+    )
+
+
 def _assert_callback_rate_limited(response: Response, *, identity_type: str) -> None:
     assert response.status_code == 429
     body = response.json()
@@ -63,6 +78,22 @@ def _assert_callback_rate_limited(response: Response, *, identity_type: str) -> 
     assert detail["limit"] == 1
     assert detail["window_seconds"] == 60
     assert detail["retry_after_seconds"] > 0
+
+
+@pytest.mark.unit
+async def test_register_callback_direct_call_uses_default_settings_dependency(
+    engine: AsyncEngine,
+) -> None:
+    response = await callbacks_route.register_callback(
+        api_schemas.CallbackSubscriptionCreateRequest.model_validate(_VALID_BODY),
+        _direct_callback_request(),
+        idempotency_key="callback-direct-default-settings",
+        session_factory=make_session_factory(engine),
+    )
+
+    assert isinstance(response, api_schemas.CallbackSubscriptionResponse)
+    assert response.id.startswith("cb_")
+    assert await _subscription_count(engine) == 1
 
 
 @pytest.fixture

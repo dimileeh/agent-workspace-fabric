@@ -20,7 +20,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session, get_db_session_factory, require_api_token
+from awf.api.deps import (
+    get_db_session,
+    get_db_session_factory,
+    require_api_token,
+    resolve_settings_dependency,
+)
 from awf.api.request_admission import (
     WORKSPACE_CREATE_ENDPOINT_FAMILY,
     RequestAdmissionDecision,
@@ -143,7 +148,7 @@ async def create_workspace(
     settings: object = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
-    route_settings = _resolve_settings(settings)
+    route_settings = resolve_settings_dependency(settings)
     repo = WorkspaceRepository(session)
 
     if idempotency_key is not None:
@@ -206,7 +211,7 @@ async def create_workspace_v2(
     settings: object = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
-    route_settings = _resolve_settings(settings)
+    route_settings = resolve_settings_dependency(settings)
     repo = WorkspaceRepository(session)
 
     if idempotency_key is not None:
@@ -302,12 +307,6 @@ async def _workspace_admission_disk_check(request: Request, settings: Settings) 
         settings.work_dir,
         min_free_bytes=settings.min_free_disk_bytes,
     )
-
-
-def _resolve_settings(settings: object) -> Settings:
-    if isinstance(settings, Settings):
-        return settings
-    return get_settings()
 
 
 def _workspace_create_rate_limited_response(

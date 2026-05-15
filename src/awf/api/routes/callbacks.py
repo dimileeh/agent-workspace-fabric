@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session_factory
+from awf.api.deps import get_db_session_factory, resolve_settings_dependency
 from awf.api.request_admission import (
     CALLBACK_REGISTER_ENDPOINT_FAMILY,
     RequestAdmissionDecision,
@@ -39,9 +39,10 @@ async def register_callback(
     request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
-    settings: Settings = Depends(get_settings),
+    settings: object = Depends(get_settings),
 ) -> CallbackSubscriptionResponse | JSONResponse:
-    _ensure_callbacks_enabled(settings)
+    route_settings = resolve_settings_dependency(settings)
+    _ensure_callbacks_enabled(route_settings)
     key = _require_idempotency_key(idempotency_key)
     service = CallbackService(session_factory)
     try:
@@ -54,8 +55,8 @@ async def register_callback(
     admission = admit_request(
         request,
         endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
-        limit=settings.callback_register_rate_limit_count,
-        window_seconds=settings.request_admission_window_seconds,
+        limit=route_settings.callback_register_rate_limit_count,
+        window_seconds=route_settings.request_admission_window_seconds,
         reason_code=_CALLBACK_REGISTER_RATE_LIMITED,
     )
     if not admission.allowed:
@@ -76,9 +77,10 @@ async def list_callbacks(
     enabled: Annotated[bool | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
-    settings: Settings = Depends(get_settings),
+    settings: object = Depends(get_settings),
 ) -> CallbackSubscriptionListResponse:
-    _ensure_callbacks_enabled(settings)
+    route_settings = resolve_settings_dependency(settings)
+    _ensure_callbacks_enabled(route_settings)
     rows = await CallbackService(session_factory).list(enabled=enabled, limit=limit)
     return CallbackSubscriptionListResponse(
         items=[CallbackSubscriptionResponse.model_validate(row) for row in rows],

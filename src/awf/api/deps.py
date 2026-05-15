@@ -98,6 +98,13 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
             )
 
 
+def resolve_settings_dependency(settings: object) -> Settings:
+    """Resolve explicit settings or FastAPI's direct-call dependency sentinel."""
+    if isinstance(settings, Settings):
+        return settings
+    return get_settings()
+
+
 def require_api_token(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
