@@ -40,6 +40,15 @@ awf:
     strategy:
       baseline_coverage: skip
       edit_gate: targeted
+      final_gate: none
+    coverage:
+      minimum_percent: 99
+      enforce: true
+      provider: python
+      command:
+        command: uv run --python 3.12 --extra dev pytest --timeout=300 --cov=awf --cov-report=term-missing --cov-fail-under=99
+        timeout_seconds: 3600
+      parallel_workers: 3
   phases:
     setup:
       - command: uv sync --extra dev

@@ -3400,6 +3400,80 @@ class TestCoverageEnforcement:
         assert result.command_result.reason_code == "PYTEST_TEST_FAILURE"
 
     @pytest.mark.unit
+    async def test_run_profile_coverage_classifies_xdist_errors_when_percent_passes(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=1,
+            stdout=(
+                "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+                "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]\n"
+                "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+                "TestFinalGate::test_parallel_fixture_failure[workspace:local] "
+                "- AssertionError: boom\n"
+                "Name                                      Stmts   Miss  Cover\n"
+                "-------------------------------------------------------------\n"
+                "TOTAL                                     28144    167    99.02%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "final-coverage-xdist-pytest-failure",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term-missing",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_coverage(
+            workspace_id="ws_final_coverage_xdist_pytest_failure",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase="final_coverage",
+        )
+
+        assert result is not None
+        assert result.percent == 99.02
+        assert result.status == "passed"
+        assert result.reason_code == "COVERAGE_OK"
+        assert result.failing_test_node_ids == [
+            "tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]",
+            "tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_parallel_fixture_failure[workspace:local]",
+        ]
+        assert result.failing_test_evidence == [
+            "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]",
+            "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_parallel_fixture_failure[workspace:local] "
+            "- AssertionError: boom",
+        ]
+        assert not result.ok
+        assert result.command_result is not None
+        assert result.command_result.reason_code == "PYTEST_TEST_FAILURE"
+        assert result.command_result.metadata["coverage_reason_code"] == "COVERAGE_OK"
+        assert result.command_result.metadata["failing_test_node_ids"] == [
+            "tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]",
+            "tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_parallel_fixture_failure[workspace:local]",
+        ]
+        assert result.command_result.metadata["failing_test_evidence"] == [
+            "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]",
+            "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_parallel_fixture_failure[workspace:local] "
+            "- AssertionError: boom",
+        ]
+
+    @pytest.mark.unit
     async def test_run_profile_coverage_rejects_provider_fail_under_even_when_rounded_percent_passes(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:
@@ -3918,6 +3992,21 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
+    def test_pytest_failure_parser_captures_file_level_error_node_ids(self, tmp_path: Path) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "ERROR tests/unit/test_imports.py - ImportError: missing dependency\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == ["tests/unit/test_imports.py"]
+        assert evidence.evidence == [
+            "ERROR tests/unit/test_imports.py - ImportError: missing dependency"
+        ]
+
+    @pytest.mark.unit
     def test_pytest_failure_parser_skips_missing_and_blank_lines(self, tmp_path: Path) -> None:
         missing = tmp_path / "missing.txt"
         output = tmp_path / "pytest.txt"
@@ -3947,6 +4036,75 @@ class TestCoverageEnforcement:
         assert evidence.node_ids == ["tests/unit/test_widget.py::test_handles_edges"]
         assert evidence.evidence == [
             "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
+        ]
+
+    @pytest.mark.unit
+    def test_pytest_failure_parser_preserves_class_style_xdist_node_ids(
+        self, tmp_path: Path
+    ) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_fixture_timeout[param:slow]: setup failed\n"
+            "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_case[workspace:local] - AssertionError: boom\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == [
+            "tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_fixture_timeout[param:slow]",
+            "tests/unit/control/test_executor.py::TestFinalGate::test_case[workspace:local]",
+        ]
+        assert evidence.evidence == [
+            "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_fixture_timeout[param:slow]: setup failed",
+            "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_case[workspace:local] - AssertionError: boom",
+        ]
+
+    @pytest.mark.unit
+    def test_pytest_failure_parser_preserves_param_ids_with_spaces(self, tmp_path: Path) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "FAILED tests/unit/test_widget.py::test_handles[bad value] "
+            "- AssertionError: boom\n"
+            "FAILED tests/unit/test_widget.py::test_handles[a - b] "
+            "- AssertionError: boom\n"
+            "ERROR tests/unit/test_widget.py::test_setup[param: slow]: setup failed\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == [
+            "tests/unit/test_widget.py::test_handles[bad value]",
+            "tests/unit/test_widget.py::test_handles[a - b]",
+            "tests/unit/test_widget.py::test_setup[param: slow]",
+        ]
+        assert evidence.evidence == [
+            "FAILED tests/unit/test_widget.py::test_handles[bad value] - AssertionError: boom",
+            "FAILED tests/unit/test_widget.py::test_handles[a - b] - AssertionError: boom",
+            "ERROR tests/unit/test_widget.py::test_setup[param: slow]: setup failed",
+        ]
+
+    @pytest.mark.unit
+    def test_pytest_failure_parser_does_not_scan_error_details_for_node_ids(
+        self, tmp_path: Path
+    ) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "FAILED tests/unit/test_foo.py - Cannot import tests/unit/test_bar.py::SomeClass\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == []
+        assert evidence.evidence == [
+            "FAILED tests/unit/test_foo.py - Cannot import tests/unit/test_bar.py::SomeClass"
         ]
 
     @pytest.mark.unit
