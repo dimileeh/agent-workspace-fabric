@@ -4807,14 +4807,9 @@ class PullRequestMonitorRunner:
     ) -> list[QualityGateViolation]:
         """Filter out protected dirty paths that restore the remote PR branch tree."""
 
+        if not violations:
+            return []
         untracked_paths = set(_untracked_paths_from_porcelain(status_stdout))
-        remaining = [violation for violation in violations if violation.path in untracked_paths]
-        tracked_violations = [
-            violation for violation in violations if violation.path not in untracked_paths
-        ]
-        if not tracked_violations:
-            return remaining
-
         worktree_path = self._worktrees_root / workspace_id
         remote = remote_push_url or "origin"
         fetch_result = await self._deps.runner.run(
@@ -4841,8 +4836,55 @@ class PullRequestMonitorRunner:
             )
             raise ProtectedScopeDiffError(message)
 
+        remaining: list[QualityGateViolation] = []
         restored_paths: list[str] = []
-        for violation in tracked_violations:
+        for violation in violations:
+            if violation.path in untracked_paths:
+                remote_blob_result = await self._deps.runner.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_path),
+                        "rev-parse",
+                        "--verify",
+                        f"FETCH_HEAD:{violation.path}^{{blob}}",
+                    ]
+                )
+                if not remote_blob_result.ok:
+                    remaining.append(violation)
+                    continue
+                worktree_blob_result = await self._deps.runner.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_path),
+                        "hash-object",
+                        "--path",
+                        violation.path,
+                        "--",
+                        violation.path,
+                    ]
+                )
+                if not worktree_blob_result.ok:
+                    message = (
+                        "Could not verify protected-scope restore against the remote PR branch: "
+                        f"hash-object --path {violation.path} exit={worktree_blob_result.returncode} "
+                        f"stdout={worktree_blob_result.stdout.strip() or '<empty>'} "
+                        f"stderr={worktree_blob_result.stderr.strip() or '<empty>'}"
+                    )
+                    _log.warning(
+                        "monitor.protected_scope_revert_diff_failed",
+                        workspace_id=workspace_id,
+                        path=violation.path,
+                        stderr=worktree_blob_result.stderr[:400],
+                    )
+                    raise ProtectedScopeDiffError(message)
+                if remote_blob_result.stdout.strip() == worktree_blob_result.stdout.strip():
+                    restored_paths.append(violation.path)
+                    continue
+                remaining.append(violation)
+                continue
+
             diff_result = await self._deps.runner.run(
                 [
                     "git",
