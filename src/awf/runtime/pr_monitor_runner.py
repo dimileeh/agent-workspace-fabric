@@ -413,6 +413,7 @@ class _GitPushResult:
 class _ProtectedScopePushBlock:
     message: str
     reason_code: str
+    violations: tuple[QualityGateViolation, ...] = ()
 
 
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
@@ -1840,6 +1841,12 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     remote_branch=remote_branch,
                     remote_push_url=remote_push_url,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    operation_id=operation.operation_id if operation is not None else None,
+                    operation_type=OperationType.ci_repair.value,
+                    monitor_log=monitor_log,
                 )
             except ProviderRecoveryRetryError:
                 await self._finish_monitor_operation(
@@ -4298,6 +4305,12 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         remote_branch: str,
         remote_push_url: str | None = None,
+        status: PRStatus | None = None,
+        state: MonitorState | None = None,
+        base_branch: str = "",
+        operation_id: str | None = None,
+        operation_type: str | None = None,
+        monitor_log: WorkspaceLogSink | None = None,
     ) -> _GitPushResult:
         prompt = fix_ci_prompt(
             pr_number=pr_number,
@@ -4358,12 +4371,20 @@ class PullRequestMonitorRunner:
             remote_push_url=remote_push_url,
         )
         if protected_scope_block is not None:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=protected_scope_block.message,
-                reason_code=protected_scope_block.reason_code,
+            return await self._repair_protected_scope_commits_before_push(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                protected_scope_block=protected_scope_block,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                remote_branch=remote_branch,
+                remote_push_url=remote_push_url,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
             )
         return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
@@ -4455,6 +4476,138 @@ class PullRequestMonitorRunner:
             return False
         _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
         return True
+
+    async def _repair_protected_scope_commits_before_push(
+        self,
+        *,
+        workspace_id: str,
+        pr_number: int,
+        protected_scope_block: _ProtectedScopePushBlock,
+        compose_project: str,
+        compose_file: Path,
+        remote_branch: str,
+        remote_push_url: str | None = None,
+        status: PRStatus | None = None,
+        state: MonitorState | None = None,
+        base_branch: str = "",
+        operation_id: str | None = None,
+        operation_type: str | None = None,
+        monitor_log: WorkspaceLogSink | None = None,
+    ) -> _GitPushResult:
+        """Ask the monitor agent to remove committed protected-scope edits once."""
+
+        if (
+            protected_scope_block.reason_code != _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
+            or not protected_scope_block.violations
+        ):
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=protected_scope_block.message,
+                reason_code=protected_scope_block.reason_code,
+            )
+
+        violations = list(protected_scope_block.violations)
+        paths = [violation.path for violation in violations]
+        prompt = await self._protected_scope_repair_prompt(
+            workspace_id=workspace_id,
+            violations=violations,
+        )
+        await self._record_pr_monitor_audit_event(
+            workspace_id=workspace_id,
+            event_type=_AUDIT_GIT_PUSH_EVENT,
+            action="protected_scope_repair",
+            outcome="requested",
+            reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+            pr_number=pr_number,
+            status=status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+            evidence={
+                "phase": "pre_push_committed_diff",
+                "paths": paths,
+                "protected_patterns": [violation.protected_pattern for violation in violations],
+                "message": protected_scope_block.message,
+            },
+        )
+        _log.warning(
+            "monitor.protected_scope_committed_repair_requested",
+            workspace_id=workspace_id,
+            paths=paths,
+        )
+        if await self._provider_recovery_suppresses_cli(workspace_id):
+            raise ProviderRecoveryRetryError()
+
+        command_evidence: list[str] = []
+        agent_run_err = None
+        try:
+            result = await self._deps.adapter.run(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
+                workspace_id=workspace_id,
+                log_source="recovery",
+            )
+            append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        except AgentRunError as exc:
+            agent_run_err = exc
+            append_command_evidence(
+                command_evidence,
+                stdout=exc.result.stdout,
+                stderr=exc.result.stderr,
+            )
+
+        if agent_run_err is not None:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+
+        try:
+            await self._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message=f"fix: remove protected-scope edits for PR #{pr_number}",
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                command_evidence=command_evidence,
+            )
+        except _MonitorPolicyBlockedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+            )
+
+        if agent_run_err is not None:
+            _log.warning(
+                "monitor.protected_scope_committed_repair_cli_failed",
+                workspace_id=workspace_id,
+                stderr=agent_run_err.result.stderr[:400],
+            )
+
+        worktree_path = self._worktrees_root / workspace_id
+        remaining_block = await self._protected_scope_push_block(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+        if remaining_block is not None:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=remaining_block.message,
+                reason_code=remaining_block.reason_code,
+            )
+        return await self._git_push_result(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_url=remote_push_url,
+        )
 
     async def _repair_protected_scope_changes_before_commit(
         self,
@@ -4807,6 +4960,7 @@ class PullRequestMonitorRunner:
         return _ProtectedScopePushBlock(
             message=message,
             reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+            violations=tuple(violations),
         )
 
     async def _protected_scope_repair_prompt(

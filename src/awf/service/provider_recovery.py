@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.provider_failures import (
     AGENT_AUTH_FAILED,
     AGENT_PROVIDER_CAPACITY_EXHAUSTED,
@@ -18,7 +19,7 @@ from awf.adapters.provider_failures import (
 )
 from awf.common.redaction import redact_secrets
 from awf.control.state_machine import WorkspaceStateMachine
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     OperationRepository,
@@ -179,6 +180,27 @@ def decide_provider_recovery(
     if fingerprint is not None and fingerprint in state.failure_fingerprints:
         return _terminal_decision(PROVIDER_RECOVERY_NO_LOOP_REASON, state=state)
 
+    default_fallback_target = _default_capacity_fallback_target(
+        metadata,
+        policy=policy,
+        state=state,
+        current_agent=current_agent,
+        current_model=model,
+    )
+    if default_fallback_target is not None:
+        return ProviderRecoveryDecision(
+            action="fallback",
+            retryable=True,
+            not_before=None,
+            target_agent=default_fallback_target.agent,
+            target_provider=default_fallback_target.provider,
+            target_model=default_fallback_target.model,
+            reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
+            terminal_reason=None,
+            fallback_attempt_number=state.fallback_attempt_number + 1,
+            retry_attempt_number=0,
+        )
+
     if state.retry_attempt_number < policy.max_same_provider_retries:
         delay = _retry_delay_seconds(metadata, policy, state)
         return ProviderRecoveryDecision(
@@ -217,6 +239,43 @@ def _is_auth_failure_metadata(metadata: Mapping[str, Any]) -> bool:
         _metadata_str(metadata, "failure_type") == "auth"
         or _metadata_str(metadata, "reason_code") == AGENT_AUTH_FAILED
     )
+
+
+def _default_capacity_fallback_target(
+    metadata: Mapping[str, Any],
+    *,
+    policy: ProviderRecoveryPolicy,
+    state: ProviderRecoveryState,
+    current_agent: str,
+    current_model: str | None,
+) -> FallbackTarget | None:
+    if policy.fallbacks:
+        return None
+    if state.fallback_attempt_number > 0:
+        return None
+    if current_agent != AgentRuntime.codex.value:
+        return None
+    if not _is_capacity_failure_metadata(metadata):
+        return None
+    defaults = DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex]
+    default_model = defaults.model
+    if default_model is None or current_model == default_model:
+        return None
+    return FallbackTarget(
+        agent=AgentRuntime.codex.value,
+        provider=provider_for_agent_model(AgentRuntime.codex.value, default_model),
+        model=default_model,
+    )
+
+
+def _is_capacity_failure_metadata(metadata: Mapping[str, Any]) -> bool:
+    return _metadata_str(
+        metadata, "reason_code"
+    ) == AGENT_PROVIDER_CAPACITY_EXHAUSTED or _metadata_str(metadata, "failure_type") in {
+        "capacity",
+        "quota",
+        "usage_limit",
+    }
 
 
 async def create_provider_recovery_attempt_row(

@@ -3858,7 +3858,7 @@ async def test_git_push_result_blocks_existing_supply_chain_finding_before_git_p
 
 
 @pytest.mark.unit
-async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
+async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -3874,8 +3874,13 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout="")  # repair agent committed locally itself
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
+    adapter.queue(stdout="Still committed protected workflow edit.")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -3900,6 +3905,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
     assert push_result.pushed is False
     assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert ".github/workflows/ci.yml" in push_result.stderr
+    assert len(adapter.calls) == 2
     call_args = [call.args for call in cmd.calls]
     assert any(
         args[:1] == ["git"] and "status" in args and args[-1:] == ["--porcelain"]
@@ -3919,14 +3925,14 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_before_push(
             event_type="workspace.monitor_protected_scope_push_blocked",
             limit=10,
         )
-    assert len(events) == 1
+    assert len(events) == 2
     assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
 
 
 @pytest.mark.unit
-async def test_execute_ci_fix_protected_scope_block_is_terminal(
+async def test_execute_ci_fix_retries_when_local_commit_touches_protected_scope(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -3942,8 +3948,17 @@ async def test_execute_ci_fix_protected_scope_block_is_terminal(
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # post-repair dirty worktree
+    cmd.queue_result(returncode=0)  # git add -A
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=0)  # git commit
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stderr="pushed")  # git push
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
+    adapter.queue(stdout="Removed protected workflow edit and fixed source.")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -3972,9 +3987,14 @@ async def test_execute_ci_fix_protected_scope_block_is_terminal(
         monitor_log=None,
     )
 
-    assert terminal is True
-    assert state.iter_count == 0
-    assert not any(call.args[:1] == ["git"] and "push" in call.args for call in cmd.calls)
+    assert terminal is False
+    assert state.iter_count == 1
+    assert len(adapter.calls) == 2
+    assert "protected file(s)" in adapter.calls[1]
+    push_calls = [
+        call.args for call in cmd.calls if call.args[:1] == ["git"] and "push" in call.args
+    ]
+    assert len(push_calls) == 1
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
@@ -3985,15 +4005,21 @@ async def test_execute_ci_fix_protected_scope_block_is_terminal(
         )
 
     assert workspace is not None
-    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
     ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
-    assert ci_operation.status == OperationStatus.failed.value
-    assert ci_operation.error_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
-    assert len(push_events) == 1
-    assert push_events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
-    assert push_events[0].payload is not None
-    assert push_events[0].payload["action"] == "ci_repair_push"
-    assert push_events[0].payload["outcome"] == "failed"
+    assert ci_operation.status == OperationStatus.succeeded.value
+    assert ci_operation.result["outcome"] == "ci_repair_pushed"
+    assert len(push_events) == 2
+    requested_event = next(
+        event for event in push_events if event.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    )
+    succeeded_event = next(event for event in push_events if event.reason_code == "CI_REPAIR")
+    assert requested_event.payload is not None
+    assert requested_event.payload["action"] == "protected_scope_repair"
+    assert requested_event.payload["outcome"] == "requested"
+    assert succeeded_event.payload is not None
+    assert succeeded_event.payload["action"] == "ci_repair_push"
+    assert succeeded_event.payload["outcome"] == "succeeded"
 
 
 @pytest.mark.unit
