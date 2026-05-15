@@ -27,6 +27,7 @@ from sqlalchemy import (
     Numeric,
     and_,
     case,
+    column,
     func,
     literal,
     or_,
@@ -4260,13 +4261,7 @@ def _postgresql_interval_seconds_expr(seconds: int) -> ColumnElement[Any]:
     return cast(
         "ColumnElement[Any]",
         func.make_interval(
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            sql_cast(literal(float(seconds)), Float),
+            column("secs").op("=>")(sql_cast(literal(float(seconds)), Float)),
             type_=Interval(),
         ),
     )

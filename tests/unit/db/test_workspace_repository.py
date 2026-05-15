@@ -1847,7 +1847,7 @@ class TestOwnedPathOverlapLookup:
         )
         assert "EXTRACT(epoch" not in sql
         assert "INTERVAL '" not in sql
-        assert "make_interval(0, 0, 0, 0, 0, 0, CAST(900.0 AS FLOAT))" in sql
+        assert "make_interval(secs => CAST(900.0 AS FLOAT))" in sql
 
     @pytest.mark.unit
     def test_postgres_scheduler_age_boost_does_not_use_raw_interval_text(self) -> None:
