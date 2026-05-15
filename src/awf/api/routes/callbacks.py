@@ -118,6 +118,7 @@ def _idempotency_conflict() -> HTTPException:
 def _callback_register_rate_limited_response(
     decision: RequestAdmissionDecision,
 ) -> JSONResponse:
+    retry_after = decision.metadata.get("retry_after_seconds", 1)
     return JSONResponse(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content=ErrorResponse(
@@ -125,6 +126,7 @@ def _callback_register_rate_limited_response(
             message="Callback registration request rate limit exceeded.",
             detail=dict(decision.metadata),
         ).model_dump(),
+        headers={"Retry-After": str(retry_after)},
     )
 
 

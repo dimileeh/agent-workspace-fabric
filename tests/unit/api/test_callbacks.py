@@ -78,6 +78,7 @@ def _assert_callback_rate_limited(response: Response, *, identity_type: str) -> 
     assert detail["limit"] == 1
     assert detail["window_seconds"] == 60
     assert detail["retry_after_seconds"] > 0
+    assert response.headers["Retry-After"] == str(detail["retry_after_seconds"])
 
 
 @pytest.mark.unit
