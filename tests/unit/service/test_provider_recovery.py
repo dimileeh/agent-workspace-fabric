@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.provider_failures import (
     AGENT_AUTH_FAILED,
     AGENT_IDLE_TIMEOUT,
@@ -16,7 +17,7 @@ from awf.adapters.provider_failures import (
     classify_provider_failure,
 )
 from awf.api.schemas import WorkspaceCreateV2Request
-from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -390,6 +391,7 @@ def test_codex_non_default_capacity_falls_back_to_default_model() -> None:
         task_policy={},
     )
     assert metadata is not None
+    expected_default = DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model
 
     decision = decide_provider_recovery(
         metadata,
@@ -405,7 +407,7 @@ def test_codex_non_default_capacity_falls_back_to_default_model() -> None:
         not_before=None,
         target_agent="codex",
         target_provider="openai",
-        target_model="gpt-5.5",
+        target_model=expected_default,
         reason_code="PROVIDER_FALLBACK_SELECTED",
         terminal_reason=None,
         fallback_attempt_number=1,
