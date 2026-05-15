@@ -1851,7 +1851,13 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     def test_postgres_scheduler_age_boost_does_not_use_raw_interval_text(self) -> None:
-        source = inspect.getsource(repositories._postgresql_scheduler_age_boost_expr)
+        source = "\n".join(
+            inspect.getsource(function)
+            for function in (
+                repositories._postgresql_scheduler_age_boost_expr,
+                repositories._postgresql_interval_seconds_expr,
+            )
+        )
         forbidden_text_call = "text(" + 'f"INTERVAL'
 
         assert forbidden_text_call not in source
