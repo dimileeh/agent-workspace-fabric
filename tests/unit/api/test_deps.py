@@ -9,13 +9,159 @@ import structlog
 from fastapi import HTTPException, WebSocketException, status
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.datastructures import Headers
+from starlette.requests import Request
 
 import awf.api.deps as deps
+from awf.api.request_admission import (
+    CALLBACK_REGISTER_ENDPOINT_FAMILY,
+    WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    RequestAdmissionLimiter,
+    extract_request_identity,
+)
 from awf.common.config import Settings
 
 
 def _bearer_credentials(token: str, *, scheme: str = "Bearer") -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme=scheme, credentials=token)
+
+
+def _request(
+    *,
+    authorization: str | None = None,
+    client_host: str = "198.51.100.10",
+) -> Request:
+    headers: list[tuple[bytes, bytes]] = []
+    if authorization is not None:
+        headers.append((b"authorization", authorization.encode("latin-1")))
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": headers,
+            "client": (client_host, 43210),
+        }
+    )
+
+
+@pytest.mark.unit
+def test_request_admission_bearer_identity_is_digest_only() -> None:
+    raw_token = "secret-token-value"
+    identity = extract_request_identity(
+        _request(authorization=f"Bearer {raw_token}"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert identity.identity_type == "bearer_token"
+    assert identity.identity_digest
+    assert raw_token not in identity.identity_digest
+    assert raw_token not in str(identity.redacted_metadata())
+
+
+@pytest.mark.unit
+def test_request_admission_invalid_bearer_falls_back_to_client_host() -> None:
+    identity = extract_request_identity(
+        _request(authorization="Bearer    ", client_host="203.0.113.11"),
+        endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
+    )
+
+    assert identity.identity_type == "client_host"
+    assert identity.identity_digest
+
+
+@pytest.mark.unit
+def test_request_admission_limiter_separates_bearer_tokens() -> None:
+    limiter = RequestAdmissionLimiter(clock=lambda: 10.0)
+    first = extract_request_identity(
+        _request(authorization="Bearer token-a"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+    second = extract_request_identity(
+        _request(authorization="Bearer token-b"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=first,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=second,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+    rejected = limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=first,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    )
+
+    assert rejected.allowed is False
+    assert rejected.metadata["reason_code"] == "WORKSPACE_CREATE_RATE_LIMITED"
+    assert "token-a" not in str(rejected.metadata)
+
+
+@pytest.mark.unit
+def test_request_admission_limiter_separates_fallback_and_bearer_identity() -> None:
+    limiter = RequestAdmissionLimiter(clock=lambda: 10.0)
+    fallback = extract_request_identity(
+        _request(client_host="203.0.113.12"),
+        endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
+    )
+    bearer = extract_request_identity(
+        _request(authorization="Bearer token-for-same-host", client_host="203.0.113.12"),
+        endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
+    )
+
+    assert limiter.admit(
+        endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
+        identity=fallback,
+        limit=1,
+        window_seconds=60,
+        reason_code="CALLBACK_REGISTER_RATE_LIMITED",
+    ).allowed
+    assert limiter.admit(
+        endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
+        identity=bearer,
+        limit=1,
+        window_seconds=60,
+        reason_code="CALLBACK_REGISTER_RATE_LIMITED",
+    ).allowed
+
+
+@pytest.mark.unit
+def test_request_admission_limiter_separates_endpoint_families() -> None:
+    limiter = RequestAdmissionLimiter(clock=lambda: 10.0)
+    workspace_identity = extract_request_identity(
+        _request(authorization="Bearer shared-token"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+    callback_identity = extract_request_identity(
+        _request(authorization="Bearer shared-token"),
+        endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
+    )
+
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=workspace_identity,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+    assert limiter.admit(
+        endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
+        identity=callback_identity,
+        limit=1,
+        window_seconds=60,
+        reason_code="CALLBACK_REGISTER_RATE_LIMITED",
+    ).allowed
 
 
 @pytest.mark.unit

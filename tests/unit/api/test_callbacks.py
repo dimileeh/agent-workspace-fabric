@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 
 import pytest
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -37,6 +38,31 @@ async def _subscription_count(engine: AsyncEngine) -> int:
         return int(
             await session.scalar(select(func.count()).select_from(CallbackSubscription)) or 0
         )
+
+
+def _callback_request_admission_settings(*, limit: int = 1) -> Settings:
+    return Settings(
+        _env_file=None,
+        callbacks_enabled=True,
+        request_admission_window_seconds=60,
+        workspace_create_rate_limit_count=20,
+        callback_register_rate_limit_count=limit,
+    )
+
+
+def _assert_callback_rate_limited(response: Response, *, identity_type: str) -> None:
+    assert response.status_code == 429
+    body = response.json()
+    assert body["error_code"] == "CALLBACK_REGISTER_RATE_LIMITED"
+    assert body["message"] == "Callback registration request rate limit exceeded."
+    detail = body["detail"]
+    assert detail["reason_code"] == "CALLBACK_REGISTER_RATE_LIMITED"
+    assert detail["endpoint_family"] == "callback_register"
+    assert detail["identity_type"] == identity_type
+    assert detail["identity_digest"]
+    assert detail["limit"] == 1
+    assert detail["window_seconds"] == 60
+    assert detail["retry_after_seconds"] > 0
 
 
 @pytest.fixture
@@ -105,6 +131,148 @@ async def test_register_callback_persists_safe_public_contract(
     assert "secret" not in body
     assert "headers" not in body
     assert "authorization" not in body
+
+
+@pytest.mark.unit
+async def test_register_callback_rejects_burst_after_configured_limit(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+
+    first = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "name": "callback-rate-first"},
+        headers={"Idempotency-Key": "callback-rate-first"},
+    )
+    rejected = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-rate-second",
+            "target_url": "https://operator.example.com/awf/events-2",
+        },
+        headers={"Idempotency-Key": "callback-rate-second"},
+    )
+
+    assert first.status_code == 201
+    _assert_callback_rate_limited(rejected, identity_type="client_host")
+    assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_idempotency_replay_bypasses_limit_but_fresh_keys_are_bounded(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+
+    first = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers={"Idempotency-Key": "callback-rate-replay"},
+    )
+    replay = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers={"Idempotency-Key": "callback-rate-replay"},
+    )
+    fresh = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "callback-rate-fresh",
+            "target_url": "https://operator.example.com/awf/fresh",
+        },
+        headers={"Idempotency-Key": "callback-rate-fresh"},
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    _assert_callback_rate_limited(fresh, identity_type="client_host")
+    assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_separates_fallback_and_bearer_identity(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+
+    fallback = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "name": "fallback-identity"},
+        headers={"Idempotency-Key": "callback-fallback-identity"},
+    )
+    bearer = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "bearer-identity",
+            "target_url": "https://operator.example.com/awf/bearer",
+        },
+        headers={
+            "Authorization": "Bearer callback-token",
+            "Idempotency-Key": "callback-bearer-identity",
+        },
+    )
+
+    assert fallback.status_code == 201
+    assert bearer.status_code == 201
+    assert await _subscription_count(engine) == 2
+
+
+@pytest.mark.unit
+async def test_register_callback_separates_tokens_and_redacts_rejection_metadata(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+    secret_token = "callback-secret-token"
+
+    first = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "name": "token-a-first"},
+        headers={
+            "Authorization": f"Bearer {secret_token}",
+            "Idempotency-Key": "callback-token-a-first",
+        },
+    )
+    second_token = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "token-b-first",
+            "target_url": "https://operator.example.com/awf/token-b",
+        },
+        headers={
+            "Authorization": "Bearer callback-other-token",
+            "Idempotency-Key": "callback-token-b-first",
+        },
+    )
+    rejected = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "name": "token-a-second",
+            "target_url": "https://operator.example.com/awf/token-a-second",
+        },
+        headers={
+            "Authorization": f"Bearer {secret_token}",
+            "Idempotency-Key": "callback-token-a-second",
+        },
+    )
+
+    assert first.status_code == 201
+    assert second_token.status_code == 201
+    _assert_callback_rate_limited(rejected, identity_type="bearer_token")
+    assert secret_token not in json.dumps(rejected.json())
+    assert f"Bearer {secret_token}" not in json.dumps(rejected.json())
 
 
 @pytest.mark.unit

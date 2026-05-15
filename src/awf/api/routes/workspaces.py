@@ -14,13 +14,18 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Final, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.deps import get_db_session, get_db_session_factory, require_api_token
+from awf.api.request_admission import (
+    WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    RequestAdmissionDecision,
+    admit_request,
+)
 from awf.api.responses import (
     API_TOKEN_AUTH_ERROR_RESPONSES,
     API_TOKEN_UNAUTHORIZED_RESPONSE,
@@ -106,6 +111,8 @@ router_v2 = APIRouter(
 )
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 _logger = logging.getLogger(__name__)
+_DIRECT_REQUEST_DEFAULT: Final[Request] = cast(Request, None)
+_WORKSPACE_CREATE_RATE_LIMITED = "WORKSPACE_CREATE_RATE_LIMITED"
 
 __all__ = [
     "InvalidWorkspaceOverviewCursorError",
@@ -127,13 +134,16 @@ __all__ = [
     "",
     response_model=WorkspaceAcceptedResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    responses={409: {"model": ErrorResponse}},
+    responses={409: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
 )
 async def create_workspace(
     payload: WorkspaceCreateRequest,
+    request: Request = _DIRECT_REQUEST_DEFAULT,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    settings: object = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
+    route_settings = _resolve_settings(settings)
     repo = WorkspaceRepository(session)
 
     if idempotency_key is not None:
@@ -152,6 +162,16 @@ async def create_workspace(
                     ).model_dump(),
                 )
             return _accepted(existing.id, existing.status, existing.version, existing.created_at)
+
+    admission = admit_request(
+        request,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        limit=route_settings.workspace_create_rate_limit_count,
+        window_seconds=route_settings.request_admission_window_seconds,
+        reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
+    )
+    if not admission.allowed:
+        return _workspace_create_rate_limited_response(admission)
 
     ws = await repo.create(
         repo_url=payload.repo_url,
@@ -175,6 +195,7 @@ async def create_workspace(
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         409: {"model": ErrorResponse},
+        429: {"model": ErrorResponse},
         503: PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
     },
 )
@@ -182,16 +203,17 @@ async def create_workspace_v2(
     payload: WorkspaceCreateV2Request,
     request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    settings: Settings = Depends(get_settings),
+    settings: object = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
+    route_settings = _resolve_settings(settings)
     repo = WorkspaceRepository(session)
 
     if idempotency_key is not None:
         await repo.acquire_idempotency_key_lock(idempotency_key)
         existing = await repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
-            if not _payloads_match_v2(existing, payload, settings=settings):
+            if not _payloads_match_v2(existing, payload, settings=route_settings):
                 return JSONResponse(
                     status_code=status.HTTP_409_CONFLICT,
                     content=ErrorResponse(
@@ -211,7 +233,17 @@ async def create_workspace_v2(
                 provider_readiness_preflight=workspace_provider_readiness_preflight(existing),
             )
 
-    disk_check = await _workspace_admission_disk_check(request, settings)
+    admission = admit_request(
+        request,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        limit=route_settings.workspace_create_rate_limit_count,
+        window_seconds=route_settings.request_admission_window_seconds,
+        reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
+    )
+    if not admission.allowed:
+        return _workspace_create_rate_limited_response(admission)
+
+    disk_check = await _workspace_admission_disk_check(request, route_settings)
     if not disk_check.ok:
         return _insufficient_disk_response(disk_check)
 
@@ -220,7 +252,7 @@ async def create_workspace_v2(
             session,
             payload,
             idempotency_key=idempotency_key,
-            settings=settings,
+            settings=route_settings,
             disk_check=disk_check,
         )
     except ProfileResolutionError as exc:
@@ -269,6 +301,25 @@ async def _workspace_admission_disk_check(request: Request, settings: Settings) 
         check_disk_space,
         settings.work_dir,
         min_free_bytes=settings.min_free_disk_bytes,
+    )
+
+
+def _resolve_settings(settings: object) -> Settings:
+    if isinstance(settings, Settings):
+        return settings
+    return get_settings()
+
+
+def _workspace_create_rate_limited_response(
+    decision: RequestAdmissionDecision,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content=ErrorResponse(
+            error_code=_WORKSPACE_CREATE_RATE_LIMITED,
+            message="Workspace creation request rate limit exceeded.",
+            detail=dict(decision.metadata),
+        ).model_dump(),
     )
 
 

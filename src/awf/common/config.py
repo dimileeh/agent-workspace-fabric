@@ -69,6 +69,28 @@ class Settings(BaseSettings):
     callback_delivery_timeout_seconds: int = Field(default=10, ge=1, le=120)
     callback_delivery_max_attempts: int = Field(default=3, ge=1, le=20)
     callback_delivery_initial_backoff_seconds: int = Field(default=5, ge=1, le=3600)
+    request_admission_window_seconds: int = Field(
+        default=60,
+        ge=1,
+        le=3600,
+        description="Fixed-window size for request-level admission limits.",
+    )
+    workspace_create_rate_limit_count: int = Field(
+        default=120,
+        ge=1,
+        description=(
+            "Maximum fresh workspace creation requests admitted per request identity "
+            "within one request_admission_window_seconds window."
+        ),
+    )
+    callback_register_rate_limit_count: int = Field(
+        default=240,
+        ge=1,
+        description=(
+            "Maximum fresh callback registration requests admitted per request identity "
+            "within one request_admission_window_seconds window."
+        ),
+    )
 
     # Database (control-plane)
     database_url: str = Field(

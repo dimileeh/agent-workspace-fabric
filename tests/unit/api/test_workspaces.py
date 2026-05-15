@@ -484,6 +484,33 @@ def _provider_preflight_settings(tmp_path: Any) -> Settings:
     )
 
 
+def _workspace_request_admission_settings(*, limit: int = 1) -> Settings:
+    return Settings(
+        _env_file=None,
+        api_token=_WORKSPACE_API_TOKEN,
+        request_admission_window_seconds=60,
+        workspace_create_rate_limit_count=limit,
+        callback_register_rate_limit_count=20,
+    )
+
+
+def _assert_workspace_rate_limited(response: Any) -> None:
+    assert response.status_code == 429
+    body = response.json()
+    assert body["error_code"] == "WORKSPACE_CREATE_RATE_LIMITED"
+    assert body["message"] == "Workspace creation request rate limit exceeded."
+    detail = body["detail"]
+    assert detail["reason_code"] == "WORKSPACE_CREATE_RATE_LIMITED"
+    assert detail["endpoint_family"] == "workspace_create"
+    assert detail["identity_type"] == "bearer_token"
+    assert detail["identity_digest"]
+    assert detail["limit"] == 1
+    assert detail["window_seconds"] == 60
+    assert detail["retry_after_seconds"] > 0
+    assert _WORKSPACE_API_TOKEN not in json.dumps(body)
+    assert _WORKSPACE_AUTH_HEADER not in json.dumps(body)
+
+
 def _assert_effective_identity(
     row: dict[str, Any],
     *,
@@ -737,6 +764,28 @@ async def _insert_validation_run(
 
 class TestCreateWorkspace:
     @pytest.mark.unit
+    async def test_rejects_v1_create_burst_after_configured_limit(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+
+        first = await client.post(
+            "/v1/workspaces",
+            json={**_MINIMAL_BODY, "task_title": "rate limit first v1"},
+        )
+        rejected = await client.post(
+            "/v1/workspaces",
+            json={**_MINIMAL_BODY, "task_title": "rate limit second v1"},
+        )
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+
+    @pytest.mark.unit
     async def test_returns_202_with_workspace_id(self, client: AsyncClient) -> None:
         response = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
         assert response.status_code == 202
@@ -800,6 +849,88 @@ class TestCreateWorkspace:
 
 
 class TestCreateWorkspaceV2DiskPressure:
+    @pytest.mark.unit
+    async def test_rejects_v2_create_burst_after_configured_limit(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+
+        first = await client.post("/v2/workspaces", json=_v2_body(title="rate limit first v2"))
+        rejected = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(title="rate limit second v2"),
+        )
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+
+    @pytest.mark.unit
+    async def test_v2_create_rate_limit_rejects_before_disk_admission(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        disk_checks = 0
+
+        def admission_check(settings: Settings) -> DiskCheck:
+            nonlocal disk_checks
+            disk_checks += 1
+            return _disk_check(
+                free_bytes=settings.min_free_disk_bytes + 1,
+                threshold_bytes=settings.min_free_disk_bytes,
+                ok=True,
+            )
+
+        app.state.workspace_admission_disk_check = admission_check
+
+        first = await client.post("/v2/workspaces", json=_v2_body(title="disk first"))
+        rejected = await client.post("/v2/workspaces", json=_v2_body(title="disk second"))
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+        assert disk_checks == 1
+
+    @pytest.mark.unit
+    async def test_v2_idempotency_replay_bypasses_limit_but_fresh_keys_are_bounded(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+        payload = _v2_body(title="idempotent rate limit replay")
+
+        first = await client.post(
+            "/v2/workspaces",
+            json=payload,
+            headers={"Idempotency-Key": "rate-limit-v2-replay"},
+        )
+        replay = await client.post(
+            "/v2/workspaces",
+            json=payload,
+            headers={"Idempotency-Key": "rate-limit-v2-replay"},
+        )
+        fresh = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(title="fresh key bounded"),
+            headers={"Idempotency-Key": "rate-limit-v2-fresh"},
+        )
+        listed = await client.get("/v1/workspaces")
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        _assert_workspace_rate_limited(fresh)
+        assert len(listed.json()) == 1
+
     @pytest.mark.unit
     async def test_default_disk_admission_checks_configured_work_dir(
         self,

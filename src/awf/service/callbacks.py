@@ -79,6 +79,25 @@ class CallbackService:
             await session.commit()
             return subscription
 
+    async def replay_existing(
+        self,
+        payload: CallbackSubscriptionCreateRequest,
+        *,
+        idempotency_key: str,
+    ) -> CallbackSubscription | None:
+        request_hash = callback_request_hash(payload)
+        async with self._factory() as session:
+            existing = await CallbackSubscriptionRepository(session).get_by_idempotency_key(
+                idempotency_key
+            )
+            if existing is None:
+                return None
+            if existing.request_hash != request_hash:
+                raise CallbackIdempotencyConflictError(
+                    "Idempotency-Key previously used with a different callback request."
+                )
+            return existing
+
     async def list(
         self,
         *,
