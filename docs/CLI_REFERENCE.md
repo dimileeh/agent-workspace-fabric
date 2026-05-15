@@ -41,6 +41,18 @@ structured counts, examples, reason codes, and suggested follow-up actions.
 The check returns structured `unavailable`/`unknown` warnings (rather than
 raising) when Docker or the database is offline.
 
+Run the AWF Core release-readiness gate:
+
+```bash
+uv run --python 3.12 --extra dev awf service readiness --format pretty
+uv run --python 3.12 --extra dev awf service release-readiness --format pretty
+```
+
+This is separate from local health. It includes historical PRD SLO metrics,
+failure taxonomy, demo-project evidence, doctor diagnostics, provider
+readiness, and cleanup posture. A healthy local stack can still fail this gate
+when the 168-hour SLO window lacks enough passing evidence.
+
 Inspect the local service Compose logs without writing Docker commands:
 
 ```bash
@@ -64,7 +76,9 @@ uv run --python 3.12 --extra dev awf smoke run --mocked-local --format pretty
 `awf smoke run` validates service readiness, auth/provider readiness, profile
 preview, validation commands, workspace request shape, PR/monitor path (mocked
 in `--mocked-local` mode), and console links. It is safe to run repeatedly and
-produces structured reason codes with next actions on failure. See
+produces structured reason codes with next actions on failure. Without
+`AWF_CONSOLE_URL`, it probes `http://localhost:3000` as the default local
+console. See
 [SMOKE_COMMAND.md](SMOKE_COMMAND.md) for the full phase reference.
 
 Run one target-branch reconciliation pass:

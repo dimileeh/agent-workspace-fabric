@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import WorkspaceGCComposeTeardownResult, WorkspaceGCWorktreeRemoveResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
+from awf.service.smoke import _PROFILE_MARKER_PATHS as _PROJECT_PROFILE_MARKER_PATHS
 
 _DX_FIRST_PATH_HELP = """
 For first-time users: the recommended first path is to run `awf init`
@@ -310,6 +311,205 @@ def _emit_pretty_dict(d: dict[str, Any], *, prefix: str = "") -> None:
         typer.echo(f"  {pretty_key}: {value}")
 
 
+def _emit_profile_preview_pretty(payload: dict[str, Any]) -> None:
+    profile = _mapping_value(payload.get("profile"))
+    profile_name = _text_value(profile.get("name"), "unknown")
+    confidence = _text_value(profile.get("confidence"), "unknown")
+    source = _text_value(profile.get("source"), "unknown")
+    typer.echo(f"Profile: {profile_name}")
+    typer.echo(f"Source: {source} ({confidence} confidence)")
+
+    runtime = _profile_runtime_summary(profile)
+    if runtime:
+        typer.echo(f"Runtime: {runtime}")
+
+    services = _profile_services_summary(profile)
+    typer.echo(f"Services: {services or 'none declared'}")
+
+    setup = _profile_phase_commands(profile, "setup")
+    if setup:
+        typer.echo(f"Setup: {'; '.join(setup)}")
+
+    validation = _profile_phase_commands(profile, "validate")
+    typer.echo(f"Validation: {'; '.join(validation) if validation else 'none declared'}")
+
+    coverage = _mapping_value(_mapping_value(profile.get("validation")).get("coverage"))
+    coverage_target = _profile_coverage_target(coverage)
+    if coverage_target is not None:
+        target, fractional = coverage_target
+        typer.echo(f"Coverage target: {_format_coverage_target(target, fractional=fractional)}")
+
+    network_posture_value = payload.get("network_posture")
+    if isinstance(network_posture_value, Mapping):
+        network_posture = _mapping_value(network_posture_value)
+        status = _text_value(network_posture.get("status"), "unknown")
+        reason = _text_value(network_posture.get("reason"), "")
+        typer.echo(f"Network posture: {status}{f' ({reason})' if reason else ''}")
+    else:
+        network_posture_status = _text_value(network_posture_value, "")
+        if network_posture_status:
+            typer.echo(f"Network posture: {network_posture_status}")
+
+    findings = _list_value(payload.get("lint_findings"))
+    if findings:
+        typer.echo(f"Profile lint: {len(findings)} finding(s)")
+        for finding in findings[:3]:
+            if not isinstance(finding, Mapping):
+                continue
+            severity = _text_value(finding.get("severity"), "info")
+            message = _text_value(finding.get("message"), str(finding))
+            typer.echo(f"  - [{severity}] {message}")
+        if len(findings) > 3:
+            typer.echo(f"  - ... {len(findings) - 3} more")
+    else:
+        typer.echo("Profile lint: clean")
+
+    reason = _text_value(payload.get("reason"), "")
+    if reason:
+        typer.echo(f"Reason: {reason}")
+
+    typer.echo(
+        "Next: awf init <path> --include-smoke-request; "
+        "awf smoke run --mocked-local --format pretty"
+    )
+
+
+def _emit_smoke_pretty(payload: dict[str, Any]) -> None:
+    status = _text_value(payload.get("status"), "unknown")
+    mode = _text_value(payload.get("mode"), "unknown")
+    project = _text_value(payload.get("project"), "unknown")
+    typer.echo(f"AWF smoke: {status}")
+    typer.echo(f"Project: {project}")
+    typer.echo(f"Mode: {mode}")
+
+    console_links = _mapping_value(payload.get("console_links"))
+    if console_links:
+        ui = _text_value(console_links.get("ui"), "")
+        api_docs = _text_value(console_links.get("api_docs"), "")
+        if ui:
+            typer.echo(f"Console: {ui}")
+        if api_docs:
+            typer.echo(f"API docs: {api_docs}")
+
+    phases = _list_value(payload.get("phases"))
+    if phases:
+        typer.echo("")
+        typer.echo("Phases:")
+        for phase in phases:
+            if not isinstance(phase, Mapping):
+                continue
+            phase_status = _text_value(phase.get("status"), "unknown")
+            name = _text_value(phase.get("name"), "unknown")
+            message = _text_value(phase.get("message"), "")
+            reason = _text_value(phase.get("reason_code"), "")
+            header = f"  [{phase_status}] {name}"
+            typer.echo(f"{header}: {message}" if message else header)
+            if reason:
+                typer.echo(f"        reason: {reason}")
+            action = _text_value(phase.get("action"), "")
+            if action and action not in {"No action required.", "none"}:
+                typer.echo(f"        action: {action}")
+
+    next_actions = [
+        str(action)
+        for action in _list_value(payload.get("next_actions"))
+        if str(action) and str(action) != "No action required."
+    ]
+    if next_actions:
+        typer.echo("")
+        typer.echo("Next actions:")
+        for action in next_actions:
+            typer.echo(f"  - {action}")
+
+
+def _profile_runtime_summary(profile: Mapping[str, object]) -> str:
+    runtime = _mapping_value(profile.get("runtime"))
+    if not runtime:
+        return ""
+    parts: list[str] = []
+    for key in ("image", "dockerfile", "base_image"):
+        value = runtime.get(key)
+        if value:
+            parts.append(f"{key}={value}")
+    if parts:
+        return " ".join(parts)
+    for key, value in sorted(runtime.items()):
+        if value in (None, "", (), [], {}):
+            continue
+        if isinstance(value, Mapping):
+            parts.append(f"{key}={len(value)} value(s)")
+        elif isinstance(value, list | tuple):
+            parts.append(f"{key}={len(value)} item(s)")
+        else:
+            parts.append(f"{key}={value}")
+    return " ".join(parts) if parts else "default"
+
+
+def _profile_services_summary(profile: Mapping[str, object]) -> str:
+    services = _list_value(profile.get("services"))
+    names: list[str] = []
+    for service in services:
+        if isinstance(service, Mapping):
+            names.append(_text_value(service.get("name"), "unnamed"))
+        else:
+            names.append(str(service))
+    return ", ".join(names)
+
+
+def _profile_phase_commands(profile: Mapping[str, object], phase_name: str) -> list[str]:
+    phases = _mapping_value(profile.get("phases"))
+    commands = _list_value(phases.get(phase_name))
+    rendered: list[str] = []
+    for command in commands:
+        if isinstance(command, Mapping):
+            value = command.get("command")
+            if isinstance(value, str) and value:
+                rendered.append(value)
+        elif isinstance(command, str) and command:
+            rendered.append(command)
+    return rendered
+
+
+def _mapping_value(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _list_value(value: object) -> list[object]:
+    return list(value) if isinstance(value, list | tuple) else []
+
+
+def _text_value(value: object, default: str) -> str:
+    return value if isinstance(value, str) and value else default
+
+
+def _profile_coverage_target(coverage: Mapping[str, object]) -> tuple[object, bool] | None:
+    minimum_percent = coverage.get("minimum_percent")
+    if minimum_percent is not None:
+        return (minimum_percent, False) if _has_positive_coverage_target(minimum_percent) else None
+
+    legacy_target = coverage.get("target")
+    if legacy_target is None or not _has_positive_coverage_target(legacy_target):
+        return None
+    return legacy_target, True
+
+
+def _has_positive_coverage_target(value: object) -> bool:
+    if isinstance(value, int | float):
+        return value > 0
+    if isinstance(value, str):
+        return bool(value.strip())
+    return value is not None
+
+
+def _format_coverage_target(value: object, *, fractional: bool = False) -> str:
+    if isinstance(value, int | float):
+        percent = float(value)
+        if fractional and 0 <= percent <= 1:
+            percent *= 100
+        return f"{percent:.1f}%"
+    return str(value)
+
+
 def _parse_json_option(flag: str, value: str) -> dict[str, Any]:
     """Parse a command-line JSON object option.
 
@@ -504,6 +704,8 @@ def _run_init_project_onboarding(
         typer.echo(f"error: project path is not a directory: {repository}", err=True)
         raise typer.Exit(code=2)
 
+    existing_profile_path = _existing_project_profile_path(repository)
+
     try:
         settings = resolve_service_settings()
         service_env = local_service_environ()
@@ -595,10 +797,19 @@ def _run_init_project_onboarding(
 
     typer.echo("")
     typer.echo("Suggested next steps:")
-    typer.echo("  - Run `awf profile init <path> --write` to create `.awf/workspace.yml`.")
-    typer.echo(
-        "  - Run `awf profile preview <path> --profile <name>` to inspect profile resolution."
-    )
+    if existing_profile_path is not None:
+        typer.echo(f"  - AWF profile already exists: {existing_profile_path}")
+        typer.echo(
+            "  - Run `awf profile preview <path> --profile auto --format pretty` "
+            "to inspect profile resolution."
+        )
+        typer.echo("  - Run `awf smoke run --mocked-local --format pretty` for a local DX proof.")
+    else:
+        typer.echo("  - Run `awf profile init <path> --write` to create `.awf/workspace.yml`.")
+        typer.echo(
+            "  - Run `awf profile preview <path> --profile <name> --format pretty` "
+            "to inspect profile resolution."
+        )
     typer.echo(
         "  - Optional: generate a smoke workspace request locally with "
         "`awf init <path> --include-smoke-request`; this prints the payload inline and does "
@@ -611,6 +822,14 @@ def _run_init_project_onboarding(
             "creating or retrying workspaces."
         )
         raise typer.Exit(code=1)
+
+
+def _existing_project_profile_path(repository: Path) -> Path | None:
+    for relative_path in _PROJECT_PROFILE_MARKER_PATHS:
+        candidate = repository / relative_path
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _resolve_state_directory(env: Mapping[str, str]) -> Path:
@@ -773,6 +992,9 @@ def _run_init_service_bootstrap(
         typer.echo("Next steps:")
         typer.echo('  - export AWF_GITHUB_TOKEN="$(gh auth token)" so the worker can create PRs.')
         typer.echo("  - Run `awf service status --format pretty` to verify readiness.")
+        typer.echo(
+            "  - Optional console: `npm --prefix apps/console run dev`, then open http://localhost:3000."
+        )
         typer.echo("  - Run `awf init <path>` to onboard a project repository.")
     else:
         payload = result.to_dict()
@@ -917,6 +1139,7 @@ def service_doctor(
         raise typer.Exit(code=1)
 
 
+@service_app.command("release-readiness")
 @service_app.command("readiness")
 def service_readiness(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
@@ -964,7 +1187,11 @@ def service_readiness(
     """Run the executable local AWF Core release-readiness gate."""
     from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
-    from awf.service.readiness import DEFAULT_DEMO_PATH, collect_core_readiness_report
+    from awf.service.readiness import (
+        DEFAULT_DEMO_PATH,
+        collect_core_readiness_report,
+        render_core_readiness_pretty,
+    )
 
     try:
         strict_providers = validate_provider_names(provider)
@@ -986,7 +1213,10 @@ def service_readiness(
             allow_slo_breach=allow_slo_breach,
         )
     )
-    _emit(report.to_dict(), fmt)
+    if fmt == OutputFormat.pretty:
+        typer.echo(render_core_readiness_pretty(report), nl=False)
+    else:
+        _emit(report.to_dict(), fmt)
     if report.status == "fail":
         raise typer.Exit(code=1)
 
@@ -1965,7 +2195,11 @@ def profile_preview(
         profile_ref=profile_ref,
         validation_commands=validation_command,
     )
-    _emit(resolution.model_dump(mode="json", by_alias=True), fmt)
+    payload = resolution.model_dump(mode="json", by_alias=True)
+    if fmt == OutputFormat.pretty:
+        _emit_profile_preview_pretty(payload)
+    else:
+        _emit(payload, fmt)
 
 
 @profile_app.command("init")
@@ -2042,7 +2276,10 @@ def smoke_run(
             demo_path=resolved_demo,
         )
     )
-    _emit(report, fmt)
+    if fmt == OutputFormat.pretty:
+        _emit_smoke_pretty(report)
+    else:
+        _emit(report, fmt)
     if report["status"] == "fail":
         raise typer.Exit(code=1)
 
