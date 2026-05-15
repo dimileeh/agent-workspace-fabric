@@ -218,21 +218,9 @@ def _is_default_local_database_url_or_credentials(database_url: str) -> bool:
     if normalized == DEFAULT_LOCAL_DATABASE_URL:
         return True
     parsed = urlsplit(normalized)
-    port = parsed.port
     username = unquote(parsed.username or "")
     password = unquote(parsed.password or "")
-    hostname = parsed.hostname or ""
-    database = parsed.path.lstrip("/")
-    uses_default_local_url = (
-        parsed.scheme == "postgresql+asyncpg"
-        and username == "awf"
-        and password == "awf_dev"
-        and hostname in {"localhost", "127.0.0.1"}
-        and port == 5433
-        and database == "awf"
-    )
-    uses_default_local_credentials = username == "awf" and password == "awf_dev"
-    return uses_default_local_url or uses_default_local_credentials
+    return username == "awf" and password == "awf_dev"
 
 
 class Settings(BaseSettings):

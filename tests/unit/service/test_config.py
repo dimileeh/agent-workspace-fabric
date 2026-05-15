@@ -121,7 +121,20 @@ def test_production_guardrails_reject_empty_database_url(database_url: str) -> N
 
 
 @pytest.mark.unit
-def test_production_guardrails_let_malformed_database_url_port_bubble() -> None:
+def test_production_guardrails_allow_non_default_credentials_with_malformed_port() -> None:
+    settings = Settings(
+        _env_file=None,
+        env="prod",
+        database_url="postgresql+asyncpg://awf:prod-pass@db.internal:not-a-port/awf",
+        api_token=_STRONG_PRODUCTION_API_TOKEN,
+        callbacks_enabled=False,
+    )
+
+    validate_production_settings(settings)
+
+
+@pytest.mark.unit
+def test_production_guardrails_reject_default_credentials_with_malformed_port() -> None:
     settings = Settings(
         _env_file=None,
         env="prod",
@@ -130,8 +143,12 @@ def test_production_guardrails_let_malformed_database_url_port_bubble() -> None:
         callbacks_enabled=False,
     )
 
-    with pytest.raises(ValueError, match="Port could not be cast"):
+    with pytest.raises(ProductionSettingsError) as exc_info:
         validate_production_settings(settings)
+
+    error = exc_info.value
+    assert "production_default_database_url" in _diagnostic_codes(error)
+    assert "AWF_DATABASE_URL" in _diagnostic_fields(error)
 
 
 @pytest.mark.unit
