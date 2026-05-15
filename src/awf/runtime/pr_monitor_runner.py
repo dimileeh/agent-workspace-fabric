@@ -4633,7 +4633,6 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     paths=paths,
                     remote_branch=remote_branch,
-                    reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
                 )
         except ProtectedScopeDiffError as exc:
             return await self._protected_scope_diff_unavailable_push_result(

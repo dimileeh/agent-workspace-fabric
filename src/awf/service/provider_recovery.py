@@ -282,6 +282,9 @@ def _capacity_default_model(
         stripped = effective_default_model.strip()
         if stripped:
             return stripped
+    # Without an effective default from the adapter, policy_model is only a
+    # sentinel that the task explicitly selected a model; the fallback target is
+    # still the runtime's system default below.
     if policy_model is None:
         return None
     defaults = DEFAULT_AGENT_DEFAULTS.get(AgentRuntime.codex)

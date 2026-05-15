@@ -4266,13 +4266,16 @@ async def test_protected_scope_commit_repair_logs_when_dirty_commit_not_created(
         )
 
     assert push_result.pushed is True
-    assert any(
-        event.get("event") == "monitor.protected_scope_committed_repair_commit_not_created"
+    commit_not_created_events = [
+        event
+        for event in captured
+        if event.get("event") == "monitor.protected_scope_committed_repair_commit_not_created"
         and event.get("log_level") == "warning"
         and event.get("workspace_id") == workspace_id
         and event.get("paths") == [".github/workflows/ci.yml"]
-        for event in captured
-    )
+    ]
+    assert commit_not_created_events
+    assert "reason_code" not in commit_not_created_events[0]
 
 
 @pytest.mark.unit
