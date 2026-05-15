@@ -1040,9 +1040,8 @@ def _raise_if_agent_policy_conflicts(
 ) -> None:
     existing_policy = _workspace_agent_policy(workspace)
     requested_policy = _requested_agent_policy(request)
-    for key in ("agent_model", "agent_effort"):
+    for key, requested_value in requested_policy.items():
         existing_value = existing_policy.get(key)
-        requested_value = requested_policy.get(key)
         if existing_value == requested_value:
             continue
         raise PRMonitorAdoptionError(

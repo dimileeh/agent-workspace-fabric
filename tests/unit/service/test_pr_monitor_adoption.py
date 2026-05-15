@@ -453,6 +453,34 @@ class TestPullRequestMonitorAdoptionService:
         assert fetcher.calls == [("dimileeh/aira-web", 277)]
 
     @pytest.mark.unit
+    async def test_replay_omitting_agent_policy_attaches_to_policy_bearing_adoption(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        metadata = _metadata()
+        fetcher = _MetadataFetcher(metadata)
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    model="gpt-5.3-codex",
+                )
+            )
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    pr_url="https://github.com/dimileeh/aira-web/pull/277"
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is True
+        assert second.workspace_id == first.workspace_id
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+    @pytest.mark.unit
     async def test_replay_with_different_model_policy_conflicts(
         self,
         factory: async_sessionmaker[AsyncSession],
