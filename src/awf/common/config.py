@@ -90,7 +90,7 @@ class ProductionSettingsError(RuntimeError):
 
 def settings_guardrails(
     *,
-    env: str,
+    env: RuntimeEnv,
     database_url: str,
     api_token: str | None,
     callbacks_enabled: bool,
