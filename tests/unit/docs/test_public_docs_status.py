@@ -95,6 +95,28 @@ def test_copy_paste_marked_snippets_are_syntactically_valid() -> None:
     assert checked, "Expected at least one copy-paste-marked snippet to validate."
 
 
+def test_quickstart_is_canonical_and_not_a_stub() -> None:
+    readme_text = README_PATH.read_text(encoding="utf-8")
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    start_here_text = (REPO_ROOT / "docs" / "START_HERE.md").read_text(encoding="utf-8")
+
+    assert "docs/QUICKSTART.md" in readme_text
+    assert "docs/START_HERE.md" not in readme_text
+    assert "currently a stub" not in quickstart_text.lower()
+    assert "awf init" in quickstart_text
+    assert "awf smoke run --mocked-local --format pretty" in quickstart_text
+    assert "[Quickstart](QUICKSTART.md)" in start_here_text
+
+
+def test_changelog_and_upgrade_guide_are_discoverable() -> None:
+    readme_text = README_PATH.read_text(encoding="utf-8")
+
+    assert (REPO_ROOT / "CHANGELOG.md").exists()
+    assert (REPO_ROOT / "docs" / "UPGRADE.md").exists()
+    assert "[Changelog](CHANGELOG.md)" in readme_text
+    assert "[Upgrade Guide](docs/UPGRADE.md)" in readme_text
+
+
 def test_shell_snippet_validation_fails_cleanly_when_bash_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
