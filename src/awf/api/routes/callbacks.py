@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -100,11 +99,6 @@ class _CallbackIdempotencyReplayKeyCache:
             raise ValueError("max_entries must be greater than 0")
         self._max_entries = max_entries
         self._entries: OrderedDict[str, str] = OrderedDict()
-        self._durable_warmed = False
-
-    @property
-    def durable_warmed(self) -> bool:
-        return self._durable_warmed
 
     def matches(
         self,
@@ -137,14 +131,6 @@ class _CallbackIdempotencyReplayKeyCache:
         self._entries[idempotency_key] = request_hash
         self._entries.move_to_end(idempotency_key)
         self._trim()
-
-    def warm_durable(self, entries: Iterable[tuple[str, str]]) -> None:
-        for idempotency_key, request_hash in entries:
-            self.remember_hash(
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-            )
-        self._durable_warmed = True
 
     def _trim(self) -> None:
         if self._max_entries is None:
@@ -361,8 +347,13 @@ async def _callback_durable_replay_after_rejection(
     *,
     idempotency_key: str,
 ) -> CallbackSubscriptionResponse | None:
-    if not replay_key_cache.durable_warmed:
-        replay_key_cache.warm_durable(await service.list_idempotency_replay_keys())
+    durable_request_hash = await service.get_idempotency_request_hash(idempotency_key)
+    if durable_request_hash is None:
+        return None
+    replay_key_cache.remember_hash(
+        idempotency_key=idempotency_key,
+        request_hash=durable_request_hash,
+    )
     try:
         known_replay_key = replay_key_cache.matches(payload, idempotency_key=idempotency_key)
     except CallbackIdempotencyConflictError as exc:

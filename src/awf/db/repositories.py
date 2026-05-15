@@ -4626,6 +4626,12 @@ class CallbackSubscriptionRepository:
         stmt = select(CallbackSubscription).where(CallbackSubscription.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def get_idempotency_request_hash(self, key: str) -> str | None:
+        stmt = select(CallbackSubscription.request_hash).where(
+            CallbackSubscription.idempotency_key == key
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def list_idempotency_replay_keys(self) -> builtins.list[tuple[str, str]]:
         stmt = select(
             CallbackSubscription.idempotency_key, CallbackSubscription.request_hash

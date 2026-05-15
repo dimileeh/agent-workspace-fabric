@@ -271,6 +271,11 @@ async def test_register_callback_rate_limit_rejects_fresh_key_before_db_replay_m
     replay_keys: list[str] = []
     original_replay_existing = callbacks_route.CallbackService.replay_existing
 
+    async def fail_list_idempotency_replay_keys(
+        _self: callbacks_route.CallbackService,
+    ) -> list[tuple[str, str]]:
+        raise AssertionError("fresh over-limit callbacks must not scan all replay keys")
+
     async def tracked_replay_existing(
         self: callbacks_route.CallbackService,
         payload: api_schemas.CallbackSubscriptionCreateRequest,
@@ -288,6 +293,11 @@ async def test_register_callback_rate_limit_rejects_fresh_key_before_db_replay_m
         callbacks_route.CallbackService,
         "replay_existing",
         tracked_replay_existing,
+    )
+    monkeypatch.setattr(
+        callbacks_route.CallbackService,
+        "list_idempotency_replay_keys",
+        fail_list_idempotency_replay_keys,
     )
 
     first = await client.post(

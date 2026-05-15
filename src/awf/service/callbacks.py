@@ -298,6 +298,12 @@ class CallbackService:
                 )
             return existing
 
+    async def get_idempotency_request_hash(self, idempotency_key: str) -> str | None:
+        async with self._factory() as session:
+            return await CallbackSubscriptionRepository(session).get_idempotency_request_hash(
+                idempotency_key
+            )
+
     async def list_idempotency_replay_keys(self) -> list[tuple[str, str]]:
         async with self._factory() as session:
             return await CallbackSubscriptionRepository(session).list_idempotency_replay_keys()

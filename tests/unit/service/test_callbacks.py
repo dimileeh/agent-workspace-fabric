@@ -418,6 +418,27 @@ async def _merge_candidate_snapshot(
 
 
 @pytest.mark.unit
+async def test_callback_service_gets_idempotency_request_hash_by_key(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _register_subscription(
+            session,
+            event_types=["workspace.*"],
+            idempotency_key="callback-service-replay-hash",
+        )
+        await session.commit()
+
+    service = CallbackService(factory)
+
+    assert (
+        await service.get_idempotency_request_hash("callback-service-replay-hash")
+        == "callback-service-replay-hash"
+    )
+    assert await service.get_idempotency_request_hash("missing-service-replay-hash") is None
+
+
+@pytest.mark.unit
 async def test_callback_service_registers_and_lists_subscriptions(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

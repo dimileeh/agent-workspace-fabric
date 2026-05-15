@@ -162,6 +162,21 @@ async def test_subscription_repository_lists_idempotency_replay_keys(
 
 
 @pytest.mark.unit
+async def test_subscription_repository_gets_idempotency_request_hash_by_key(
+    session: AsyncSession,
+) -> None:
+    await _subscription(
+        session,
+        idempotency_key="idem-replay-hash",
+        request_hash="hash-replay-single-key",
+    )
+    repo = CallbackSubscriptionRepository(session)
+
+    assert await repo.get_idempotency_request_hash("idem-replay-hash") == "hash-replay-single-key"
+    assert await repo.get_idempotency_request_hash("missing-replay-hash") is None
+
+
+@pytest.mark.unit
 async def test_subscription_create_idempotent_falls_back_without_insert_guard(
     session: AsyncSession,
 ) -> None:
