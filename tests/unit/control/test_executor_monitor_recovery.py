@@ -216,6 +216,22 @@ def _setup_dependency_exhausted_result(tmp_path: Path) -> ValidationCommandResul
     )
 
 
+def _generic_setup_failure_result(tmp_path: Path) -> ValidationCommandResult:
+    stdout_path = tmp_path / "generic-setup.stdout"
+    stderr_path = tmp_path / "generic-setup.stderr"
+    stdout_path.write_text("setup stdout\n", encoding="utf-8")
+    stderr_path.write_text("missing local configuration\n", encoding="utf-8")
+    return ValidationCommandResult(
+        command="./scripts/setup-local.sh",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        phase="setup",
+        reason_code="COMMAND_FAILED",
+    )
+
+
 def _setup_dependency_retry_success_result(tmp_path: Path) -> ValidationCommandResult:
     stdout_path = tmp_path / "setup-success.stdout"
     stderr_path = tmp_path / "setup-success.stderr"
@@ -1056,7 +1072,7 @@ async def test_open_pr_guard_uses_fresh_recovery_operation_after_claim(
 
 
 @pytest.mark.unit
-async def test_setup_dependency_exhaustion_during_recovery_preserves_monitor_reason(
+async def test_setup_dependency_exhaustion_during_recovery_preserves_precise_monitor_reason(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1100,8 +1116,8 @@ async def test_setup_dependency_exhaustion_during_recovery_preserves_monitor_rea
     assert len(recovery_ops) == 1
     recovery_op = recovery_ops[0]
     assert recovery_op.status == OperationStatus.failed.value
-    assert recovery_op.error_code == "MONITOR_RECOVERY_SETUP_FAILED"
-    assert recovery_op.result == {"reason_code": "MONITOR_RECOVERY_SETUP_FAILED"}
+    assert recovery_op.error_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert recovery_op.result == {"reason_code": SETUP_DEPENDENCY_NETWORK_FAILURE}
 
     failed_events = [
         event
@@ -1115,6 +1131,54 @@ async def test_setup_dependency_exhaustion_during_recovery_preserves_monitor_rea
     assert terminal_event.payload is not None
     assert terminal_event.payload["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
     assert terminal_event.payload["details"]["package"] == "docker==7.1.0"
+
+
+@pytest.mark.unit
+async def test_generic_setup_failure_during_recovery_preserves_monitor_setup_reason(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    validation = _SetupFailureValidation(
+        ValidationResult(commands=[_generic_setup_failure_result(tmp_path)])
+    )
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        validation=validation,
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        resolved_profile={
+            "name": "setup-failure",
+            "phases": {"setup": ["./scripts/setup-local.sh"]},
+        },
+    )
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+
+    assert validation.calls == [("setup", "pre_agent")]
+    assert fake.calls == []
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    assert ws.failure_reason == "service_startup_failure"
+    assert ws.failure_message == "profile setup failed: ./scripts/setup-local.sh"
+
+    recovery_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(recovery_ops) == 1
+    recovery_op = recovery_ops[0]
+    assert recovery_op.status == OperationStatus.failed.value
+    assert recovery_op.error_code == "MONITOR_RECOVERY_SETUP_FAILED"
+    assert recovery_op.result == {"reason_code": "MONITOR_RECOVERY_SETUP_FAILED"}
 
 
 @pytest.mark.unit

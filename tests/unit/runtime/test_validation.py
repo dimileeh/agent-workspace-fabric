@@ -761,6 +761,18 @@ def test_setup_dependency_network_classifier_ignores_unrelated_5xx_numbers() -> 
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_non_http_status_code_5xx() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="installing docker==7.1.0 from local cache\n",
+        stderr="dependency setup worker reported status code 512 after local process crash\n",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_ignores_bare_5xx_phrase_without_http_context() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="uv sync --extra dev",
