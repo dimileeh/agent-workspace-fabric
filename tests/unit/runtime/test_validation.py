@@ -477,6 +477,24 @@ def test_setup_dependency_network_classifier_accepts_chained_dependency_output()
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_metadata_allows_host_without_package() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install -r requirements.txt",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Package index https://files.pythonhosted.org/simple returned HTTP status code 503"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.package is None
+    assert classification.host == "files.pythonhosted.org"
+    assert "package" not in classification.metadata
+    assert classification.metadata["host"] == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
 def test_setup_dependency_network_classifier_accepts_chained_multiline_dependency_output() -> None:
     classification = _classify_setup_dependency_network_failure(
         command="uv sync --extra dev && ./bootstrap",
@@ -858,6 +876,261 @@ def test_setup_dependency_network_classifier_retries_503_temporarily_forbidden_b
     assert classification.transient_category == "http_5xx"
     assert classification.package == "docker==7.1.0"
     assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_success_and_missing_tool() -> None:
+    transient_output = "failed to download docker==7.1.0: connection timed out"
+
+    assert (
+        _classify_setup_dependency_network_failure(
+            command="pip install docker==7.1.0",
+            returncode=0,
+            stdout="",
+            stderr=transient_output,
+        )
+        is None
+    )
+    assert (
+        _classify_setup_dependency_network_failure(
+            command="pip install docker==7.1.0",
+            returncode=127,
+            stdout="",
+            stderr=transient_output,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_setup_dependency_context_helpers_accept_index_evidence() -> None:
+    assert validation_module._setup_dependency_output_has_specific_context(  # noqa: SLF001
+        "Package index /simple returned HTTP status code 503"
+    )
+    assert validation_module._setup_dependency_output_has_specific_context(  # noqa: SLF001
+        "failed to fetch https://files.pythonhosted.org/packages/cu121/torch.whl"
+    )
+    assert validation_module._setup_dependency_output_has_specific_context(  # noqa: SLF001
+        "failed fetching files.pythonhosted.org after retries"
+    )
+    assert validation_module._setup_dependency_output_has_specific_transient_context(  # noqa: SLF001
+        "\n".join(
+            [
+                "Collecting docker==7.1.0",
+                "noise",
+                "failed to fetch dependency from registry.npmjs.org: connection timed out",
+            ]
+        )
+    )
+    assert validation_module._is_setup_dependency_index_host(None) is False  # noqa: SLF001
+    assert validation_module._is_setup_dependency_index_host("mirror.pypi.org")  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_setup_dependency_shell_compound_detection_handles_quotes_and_parse_errors() -> None:
+    assert validation_module._has_unquoted_shell_newline("pip install a\npytest")  # noqa: SLF001
+    assert not validation_module._has_unquoted_shell_newline("echo 'a\nb'")  # noqa: SLF001
+    assert not validation_module._has_unquoted_shell_newline('echo "a\nb"')  # noqa: SLF001
+    assert not validation_module._has_unquoted_shell_newline("echo \\\ncontinued")  # noqa: SLF001
+    assert not validation_module._has_shell_compound_control_operator("'unterminated")  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_setup_dependency_command_match_defensive_edges() -> None:
+    assert validation_module._direct_dependency_setup_command_match([], start=0) is None  # noqa: SLF001
+    assert (  # noqa: SLF001
+        validation_module._direct_dependency_setup_command_match(["custom"], start=0) is None
+    )
+    assert validation_module._direct_dependency_setup_command_match(["pip"], start=0) is True  # noqa: SLF001
+    assert (  # noqa: SLF001
+        validation_module._direct_dependency_setup_command_match(["go", "mod"], start=0) is False
+    )
+    assert (  # noqa: SLF001
+        validation_module._direct_dependency_setup_command_match(
+            ["go", "mod", "download"],
+            start=0,
+        )
+        is True
+    )
+    assert (
+        validation_module._option_only_dependency_install_command_match(  # noqa: SLF001
+            ["yarn", "--cwd"],
+            command="yarn",
+            start=1,
+        )
+        is False
+    )
+    assert (
+        validation_module._option_only_dependency_install_command_match(  # noqa: SLF001
+            ["yarn", "--"],
+            command="yarn",
+            start=1,
+        )
+        is False
+    )
+    assert (
+        validation_module._option_only_dependency_install_command_match(  # noqa: SLF001
+            ["pip", "--immutable"],
+            command="pip",
+            start=1,
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+def test_setup_dependency_python_and_uv_command_match_defensive_edges() -> None:
+    assert (  # noqa: SLF001
+        validation_module._python_module_pip_dependency_setup_command_match(
+            ["not-python", "-m", "pip"],
+            start=0,
+        )
+        is None
+    )
+    assert (  # noqa: SLF001
+        validation_module._python_module_pip_dependency_setup_command_match(
+            ["python", "-m"], start=0
+        )
+        is False
+    )
+    assert (  # noqa: SLF001
+        validation_module._python_module_pip_dependency_setup_command_match(
+            ["python", "-m", "venv"],
+            start=0,
+        )
+        is None
+    )
+    assert (  # noqa: SLF001
+        validation_module._python_module_pip_dependency_setup_command_match(
+            ["python", "script.py"],
+            start=0,
+        )
+        is None
+    )
+    assert not validation_module._looks_like_uv_dependency_setup_command([])  # noqa: SLF001
+    assert not validation_module._looks_like_uv_dependency_setup_command(["uv"])  # noqa: SLF001
+    assert not validation_module._looks_like_uv_dependency_setup_command(["uv", "pip"])  # noqa: SLF001
+    assert validation_module._looks_like_uv_dependency_setup_command(  # noqa: SLF001
+        ["uv", "tool", "install", "ruff"]
+    )
+    assert (
+        validation_module._next_dependency_tool_subcommand_index(  # noqa: SLF001
+            ["pip", "--", "install"],
+            start=1,
+        )
+        == 2
+    )
+    assert (
+        validation_module._next_dependency_tool_subcommand_index(  # noqa: SLF001
+            ["pip", "--"],
+            start=1,
+        )
+        is None
+    )
+    assert validation_module._next_uv_subcommand_index(["uv", "--"], start=1) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_setup_dependency_python_and_uv_option_value_edges() -> None:
+    assert (  # noqa: SLF001
+        validation_module._python_module_pip_dependency_setup_command_match(
+            ["python", "--", "-m", "pip"],
+            start=0,
+        )
+        is None
+    )
+    assert (  # noqa: SLF001
+        validation_module._python_module_pip_dependency_setup_command_match(
+            ["python", "-X", "dev", "-m", "pip", "install"],
+            start=0,
+        )
+        is True
+    )
+    assert (
+        validation_module._next_uv_subcommand_index(  # noqa: SLF001
+            ["uv", "--extra", "dev", "sync"],
+            start=1,
+        )
+        == 3
+    )
+
+
+@pytest.mark.unit
+def test_setup_dependency_url_userinfo_stripping_handles_ipv6_and_bad_ports() -> None:
+    ipv6_match = validation_module._SETUP_URL_RE.search(  # noqa: SLF001
+        "https://user:pass@[2001:db8::1]:8443/simple/docker-7.1.0.whl"
+    )
+    assert ipv6_match is not None
+    assert (
+        validation_module._strip_setup_dependency_url_userinfo(ipv6_match)  # noqa: SLF001
+        == "https://[2001:db8::1]:8443/simple/docker-7.1.0.whl"
+    )
+
+    bad_port_match = validation_module._SETUP_URL_RE.search(  # noqa: SLF001
+        "https://user:pass@example.com:bad/simple/docker-7.1.0.whl"
+    )
+    assert bad_port_match is not None
+    assert (
+        validation_module._strip_setup_dependency_url_userinfo(bad_port_match)  # noqa: SLF001
+        == "https://example.com/simple/docker-7.1.0.whl"
+    )
+
+
+@pytest.mark.unit
+def test_setup_dependency_retry_prefix_and_file_read_edges(tmp_path: Path) -> None:
+    runner = ValidationRunner(
+        runner=FakeCommandRunner(),
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_backoff_seconds=(),
+    )
+
+    assert runner._setup_dependency_retry_delay(1) == 0.0  # noqa: SLF001
+    assert (
+        validation_module._setup_dependency_retry_output_prefix(retry_number=2)  # noqa: SLF001
+        == "\n[setup dependency network retry 2]\n"
+    )
+
+    class _UnreadablePath:
+        def is_file(self) -> bool:
+            return True
+
+        def read_text(self, *, encoding: str, errors: str) -> str:
+            assert encoding == "utf-8"
+            assert errors == "replace"
+            raise OSError("permission denied")
+
+    assert validation_module._read_text_if_present(_UnreadablePath()) is None  # type: ignore[arg-type]  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_pytest_failure_text_helpers_cover_file_level_and_truncation() -> None:
+    assert (
+        validation_module._pytest_node_id_from_text(  # noqa: SLF001
+            "tests/unit/test_app.py::",
+            allow_file_level=True,
+        )
+        is None
+    )
+    assert (
+        validation_module._pytest_node_id_from_text("tests/unit/test_app.py failed")  # noqa: SLF001
+        is None
+    )
+    assert (
+        validation_module._pytest_node_id_from_text(  # noqa: SLF001
+            "tests/unit/test_app.py failed",
+            allow_file_level=True,
+        )
+        == "tests/unit/test_app.py"
+    )
+    assert (
+        validation_module._strip_pytest_node_id_suffix(  # noqa: SLF001
+            "tests/unit/test_app.py::test_case:"
+        )
+        == "tests/unit/test_app.py::test_case"
+    )
+    assert validation_module._truncate_pytest_evidence_line("short") == "short"  # noqa: SLF001
+    long_line = "x" * (validation_module._PYTEST_EVIDENCE_MAX_CHARS + 10)  # noqa: SLF001
+    assert validation_module._truncate_pytest_evidence_line(long_line).endswith("...")  # noqa: SLF001
 
 
 @pytest.mark.unit

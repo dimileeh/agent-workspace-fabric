@@ -18,7 +18,11 @@ import pytest
 from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import OperationResponse, WorkspaceControlResponse
+from awf.api.schemas import (
+    OperationResponse,
+    PullRequestMonitorAdoptionResponse,
+    WorkspaceControlResponse,
+)
 from awf.common.config import Settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
@@ -425,6 +429,7 @@ class TestToolRegistration:
                 "repo_slug": "dimileeh/aira-web",
                 "pr_number": 277,
                 "auto_merge": False,
+                "model": "gpt-5.3-codex",
             },
         )
 
@@ -434,6 +439,56 @@ class TestToolRegistration:
         assert payload["pr_number"] == 277
         assert payload["head_ref"] == "feature/ready"
         assert payload["auto_merge"] is False
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(str(payload["workspace_id"]))
+        assert workspace is not None
+        assert workspace.task_policy["agent_model"] == "gpt-5.3-codex"
+        assert workspace.task_policy["agent_effort"] == "xhigh"
+
+    @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_forwards_model_and_effort(self) -> None:
+        class _CaptureService:
+            def __init__(self) -> None:
+                self.request = None
+
+            async def adopt_pull_request_monitor(self, request):  # type: ignore[no-untyped-def]
+                self.request = request
+                return PullRequestMonitorAdoptionResponse(
+                    workspace_id="ws_adopt",
+                    status=WorkspaceStatus.requested,
+                    version=1,
+                    repo_slug="dimileeh/aira-web",
+                    repo_url="git@github.com:dimileeh/aira-web.git",
+                    pr_number=277,
+                    pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                    head_ref="feature/ready",
+                    base_ref="development",
+                    auto_merge=True,
+                    attached_existing=False,
+                    status_url="/v1/workspaces/ws_adopt",
+                    events_url="/v1/workspaces/ws_adopt/events",
+                    logs_url="/v1/workspaces/ws_adopt/logs",
+                )
+
+        service = _CaptureService()
+        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
+
+        payload = await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "model": "gpt-5.3-codex",
+                "effort": "high",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        assert payload["workspace_id"] == "ws_adopt"
+        assert service.request is not None
+        assert service.request.model == "gpt-5.3-codex"
+        assert service.request.effort == "high"
 
     @pytest.mark.unit
     async def test_adopt_pull_request_monitor_tool_ignores_destroyed_prior_adoption(
@@ -609,6 +664,14 @@ class TestToolRegistration:
         repo_url_schema = _optional_string_schema(list_workspaces_props["repo_url"])
         assert repo_url_schema["maxLength"] == 512
         assert repo_url_schema["minLength"] == 1
+
+        adopt_props = tools["awf_adopt_pull_request_monitor"].inputSchema["properties"]
+        model_schema = _optional_string_schema(adopt_props["model"])
+        effort_schema = _optional_string_schema(adopt_props["effort"])
+        assert model_schema["maxLength"] == 128
+        assert model_schema["minLength"] == 1
+        assert effort_schema["maxLength"] == 64
+        assert effort_schema["minLength"] == 1
 
         merge_props = tools["awf_list_merge_queue"].inputSchema["properties"]
         repo_url_schema = _optional_string_schema(merge_props["repo_url"])
@@ -3248,6 +3311,45 @@ class TestReadWorkspaceArtifact:
             mcp,
             "awf_read_workspace_artifact",
             {"workspace_id": workspace.id, "relative_path": "secret.bin", "limit_bytes": 1024},
+        )
+        assert isinstance(result, dict)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"
+
+    @pytest.mark.unit
+    async def test_binary_artifact_containing_provider_env_secret_is_blocked(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        secret = "env-secret-token-abc"
+        monkeypatch.setenv("OPENAI_API_KEY", secret)
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact binary env secret blocked",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = b"\x00" + f"prefix {secret} suffix".encode() + b"\x00\xff"
+        (artifact_dir / "secret-env.bin").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "secret-env.bin",
+                "limit_bytes": 1024,
+            },
         )
         assert isinstance(result, dict)
         assert result["error_code"] == "ARTIFACT_BLOCKED"
