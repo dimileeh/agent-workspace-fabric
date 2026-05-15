@@ -1036,6 +1036,33 @@ class TestCreateWorkspace:
             )
 
     @pytest.mark.unit
+    def test_workspace_replay_key_cache_default_retains_keys_past_response_cache_limit(
+        self,
+    ) -> None:
+        cache = workspaces_route._WorkspaceCreateIdempotencyReplayKeyCache()  # noqa: SLF001
+        payload = WorkspaceCreateRequest.model_validate(
+            {**_MINIMAL_BODY, "task_title": "default retain workspace replay key"}
+        )
+
+        for index in range(
+            workspaces_route._WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES + 1  # noqa: SLF001
+        ):
+            cache.remember(
+                payload,
+                idempotency_key=f"workspace-default-key-{index}",
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+
+        assert (
+            cache.matches(
+                payload,
+                idempotency_key="workspace-default-key-0",
+                api_version=workspaces_route._WORKSPACE_CREATE_V1_API_VERSION,  # noqa: SLF001
+            )
+            is True
+        )
+
+    @pytest.mark.unit
     async def test_rejects_empty_task_prompt(self, client: AsyncClient) -> None:
         bad = {**_MINIMAL_BODY, "task_prompt": ""}
         response = await client.post("/v1/workspaces", json=bad)

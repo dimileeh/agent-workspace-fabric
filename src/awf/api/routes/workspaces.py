@@ -15,7 +15,7 @@ import hashlib
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Annotated, Any, cast
 
@@ -147,9 +147,16 @@ class _WorkspaceCreateIdempotencyConflictError(Exception):
 
 
 class _WorkspaceCreateIdempotencyReplayKeyCache:
-    def __init__(self, *, max_entries: int = _WORKSPACE_CREATE_REPLAY_KEY_CACHE_MAX_ENTRIES):
+    def __init__(self, *, max_entries: int | None = None):
+        if max_entries is not None and max_entries < 1:
+            raise ValueError("max_entries must be greater than 0")
         self._max_entries = max_entries
-        self._entries: OrderedDict[str, str] = OrderedDict()
+        self._entries: OrderedDict[str, str | None] = OrderedDict()
+        self._durable_warmed = False
+
+    @property
+    def durable_warmed(self) -> bool:
+        return self._durable_warmed
 
     def matches(
         self,
@@ -158,10 +165,13 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
         idempotency_key: str,
         api_version: str,
     ) -> bool:
-        request_hash = self._entries.get(idempotency_key)
-        if request_hash is None:
+        if idempotency_key not in self._entries:
             return False
-        if request_hash != _workspace_create_request_hash(payload, api_version=api_version):
+        request_hash = self._entries[idempotency_key]
+        if request_hash is not None and request_hash != _workspace_create_request_hash(
+            payload,
+            api_version=api_version,
+        ):
             raise _WorkspaceCreateIdempotencyConflictError
         self._entries.move_to_end(idempotency_key)
         return True
@@ -173,11 +183,25 @@ class _WorkspaceCreateIdempotencyReplayKeyCache:
         idempotency_key: str,
         api_version: str,
     ) -> None:
-        self._entries[idempotency_key] = _workspace_create_request_hash(
-            payload,
-            api_version=api_version,
+        self.remember_hash(
+            idempotency_key=idempotency_key,
+            request_hash=_workspace_create_request_hash(payload, api_version=api_version),
         )
+
+    def remember_hash(self, *, idempotency_key: str, request_hash: str | None) -> None:
+        self._entries[idempotency_key] = request_hash
         self._entries.move_to_end(idempotency_key)
+        self._trim()
+
+    def warm_durable(self, idempotency_keys: Iterable[str]) -> None:
+        for idempotency_key in idempotency_keys:
+            if idempotency_key not in self._entries:
+                self.remember_hash(idempotency_key=idempotency_key, request_hash=None)
+        self._durable_warmed = True
+
+    def _trim(self) -> None:
+        if self._max_entries is None:
+            return
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
 
@@ -228,6 +252,15 @@ async def create_workspace(
         reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
     )
     if not admission.allowed:
+        if idempotency_key is not None:
+            replay = await _workspace_create_v1_durable_replay_after_rejection(
+                repo,
+                replay_key_cache,
+                payload,
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                return replay
         return _workspace_create_rate_limited_response(admission)
 
     if idempotency_key is not None:
@@ -314,6 +347,16 @@ async def create_workspace_v2(
         reason_code=_WORKSPACE_CREATE_RATE_LIMITED,
     )
     if not admission.allowed:
+        if idempotency_key is not None:
+            replay = await _workspace_create_v2_durable_replay_after_rejection(
+                repo,
+                replay_key_cache,
+                payload,
+                idempotency_key=idempotency_key,
+                settings=settings,
+            )
+            if replay is not None:
+                return replay
         return _workspace_create_rate_limited_response(admission)
 
     if idempotency_key is not None:
@@ -400,6 +443,39 @@ async def _workspace_create_v1_replay_response(
     return _accepted(existing.id, existing.status, existing.version, existing.created_at)
 
 
+async def _workspace_create_v1_durable_replay_after_rejection(
+    repo: WorkspaceRepository,
+    replay_key_cache: _WorkspaceCreateIdempotencyReplayKeyCache,
+    payload: WorkspaceCreateRequest,
+    *,
+    idempotency_key: str,
+) -> WorkspaceAcceptedResponse | JSONResponse | None:
+    if not replay_key_cache.durable_warmed:
+        replay_key_cache.warm_durable(await repo.list_idempotency_replay_keys())
+    try:
+        known_replay_key = replay_key_cache.matches(
+            payload,
+            idempotency_key=idempotency_key,
+            api_version=_WORKSPACE_CREATE_V1_API_VERSION,
+        )
+    except _WorkspaceCreateIdempotencyConflictError:
+        return _workspace_create_idempotency_conflict_response()
+    if not known_replay_key:
+        return None
+    replay = await _workspace_create_v1_replay_response(
+        repo,
+        payload,
+        idempotency_key=idempotency_key,
+    )
+    if replay is not None and not isinstance(replay, JSONResponse):
+        replay_key_cache.remember(
+            payload,
+            idempotency_key=idempotency_key,
+            api_version=_WORKSPACE_CREATE_V1_API_VERSION,
+        )
+    return replay
+
+
 async def _workspace_create_v2_replay_response(
     repo: WorkspaceRepository,
     payload: WorkspaceCreateV2Request,
@@ -421,6 +497,41 @@ async def _workspace_create_v2_replay_response(
         warnings=owned_path_overlap_warnings(existing),
         provider_readiness_preflight=workspace_provider_readiness_preflight(existing),
     )
+
+
+async def _workspace_create_v2_durable_replay_after_rejection(
+    repo: WorkspaceRepository,
+    replay_key_cache: _WorkspaceCreateIdempotencyReplayKeyCache,
+    payload: WorkspaceCreateV2Request,
+    *,
+    idempotency_key: str,
+    settings: Settings | None = None,
+) -> WorkspaceAcceptedResponse | JSONResponse | None:
+    if not replay_key_cache.durable_warmed:
+        replay_key_cache.warm_durable(await repo.list_idempotency_replay_keys())
+    try:
+        known_replay_key = replay_key_cache.matches(
+            payload,
+            idempotency_key=idempotency_key,
+            api_version=_WORKSPACE_CREATE_V2_API_VERSION,
+        )
+    except _WorkspaceCreateIdempotencyConflictError:
+        return _workspace_create_idempotency_conflict_response()
+    if not known_replay_key:
+        return None
+    replay = await _workspace_create_v2_replay_response(
+        repo,
+        payload,
+        idempotency_key=idempotency_key,
+        settings=settings,
+    )
+    if replay is not None and not isinstance(replay, JSONResponse):
+        replay_key_cache.remember(
+            payload,
+            idempotency_key=idempotency_key,
+            api_version=_WORKSPACE_CREATE_V2_API_VERSION,
+        )
+    return replay
 
 
 async def _workspace_admission_disk_check(request: Request, settings: Settings) -> DiskCheck:

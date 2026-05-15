@@ -2732,6 +2732,14 @@ class WorkspaceRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_idempotency_replay_keys(self) -> builtins.list[str]:
+        stmt = (
+            select(Workspace.idempotency_key)
+            .where(Workspace.idempotency_key.is_not(None))
+            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+        )
+        return [key for key in (await self._session.execute(stmt)).scalars().all() if key]
+
     async def list_idempotency_key_family(self, logical_key: str) -> builtins.list[str]:
         generation_pattern = f"{_escape_like_pattern(logical_key)}:g%"
         stmt = (
