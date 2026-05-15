@@ -453,6 +453,40 @@ class TestPullRequestMonitorAdoptionService:
         assert fetcher.calls == [("dimileeh/aira-web", 277)]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("legacy_task_policy", [None, "legacy"])
+    async def test_replay_treats_legacy_non_object_task_policy_as_empty_agent_policy(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        legacy_task_policy: object,
+    ) -> None:
+        metadata = _metadata()
+        fetcher = _MetadataFetcher(metadata)
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            workspace = await WorkspaceRepository(session).get(first.workspace_id)
+            assert workspace is not None
+            workspace.task_policy = legacy_task_policy  # type: ignore[assignment]
+
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is True
+        assert second.workspace_id == first.workspace_id
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("initial_kwargs", "expected_detail"),
         [

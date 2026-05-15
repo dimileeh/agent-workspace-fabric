@@ -1057,7 +1057,9 @@ def _raise_if_agent_policy_conflicts(
 
 
 def _workspace_agent_policy(workspace: Workspace) -> dict[str, str]:
-    policy = workspace.task_policy
+    policy: object = workspace.task_policy
+    if not isinstance(policy, Mapping):
+        return {}
     agent_policy: dict[str, str] = {}
     model = _optional_str(policy.get("agent_model"))
     effort = _optional_str(policy.get("agent_effort"))
