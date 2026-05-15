@@ -80,6 +80,10 @@ class CallbackTargetValidationTimeoutError(ValueError):
 class CallbackDeliveryBudgetExceededError(ValueError):
     """Raised when target validation leaves no remaining callback delivery budget."""
 
+    def __init__(self, message: str, *, prior_failure_summary: str | None = None) -> None:
+        super().__init__(message)
+        self.prior_failure_summary = prior_failure_summary
+
 
 class CallbackTargetPolicyError(ValueError):
     """Raised when a callback target violates static registration/delivery policy."""
@@ -454,18 +458,26 @@ async def _record_callback_delivery_budget_exceeded(
     *,
     now: Clock,
 ) -> None:
+    log_fields: dict[str, Any] = {
+        "delivery_id": delivery.id,
+        "subscription_id": subscription.id,
+        "event_kind": delivery.event_kind,
+        "event_type": delivery.event_type,
+        "source_id": delivery.source_id,
+        "workspace_id": delivery.workspace_id,
+        "operation_id": delivery.operation_id,
+        "merge_candidate_id": delivery.merge_candidate_id,
+        "error_code": "CALLBACK_DELIVERY_BUDGET_EXCEEDED",
+        "error_message": redact_audit_text(str(exc), limit=256),
+    }
+    if exc.prior_failure_summary is not None:
+        log_fields["prior_failure_summary"] = redact_audit_text(
+            exc.prior_failure_summary,
+            limit=256,
+        )
     _log.warning(
         "callback.delivery_budget_exceeded",
-        delivery_id=delivery.id,
-        subscription_id=subscription.id,
-        event_kind=delivery.event_kind,
-        event_type=delivery.event_type,
-        source_id=delivery.source_id,
-        workspace_id=delivery.workspace_id,
-        operation_id=delivery.operation_id,
-        merge_candidate_id=delivery.merge_candidate_id,
-        error_code="CALLBACK_DELIVERY_BUDGET_EXCEEDED",
-        error_message=redact_audit_text(str(exc), limit=256),
+        **log_fields,
     )
     await repo.mark_failed_or_retry(
         delivery,
@@ -606,7 +618,8 @@ async def _post_to_validated_callback_addresses(
             )
             raise CallbackDeliveryBudgetExceededError(
                 "Callback delivery timeout expired before remaining validated target "
-                "addresses could be attempted"
+                "addresses could be attempted",
+                prior_failure_summary=failure_summary,
             ) from ExceptionGroup(
                 f"callback request had prior validated target address failures: {failure_summary}",
                 failures,

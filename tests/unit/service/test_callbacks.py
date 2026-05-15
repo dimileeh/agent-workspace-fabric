@@ -1249,6 +1249,81 @@ async def test_validated_address_timeout_after_failure_raises_timeout_with_prior
 
 
 @pytest.mark.unit
+async def test_delivery_budget_log_includes_prior_validated_address_failure_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    @dataclass
+    class _FakeDelivery:
+        id: str = "delivery-prior-failure"
+        event_kind: str = "workspace"
+        event_type: str = "workspace.state_changed"
+        source_id: str = "event-prior-failure"
+        workspace_id: str = "workspace-prior-failure"
+        operation_id: str | None = None
+        merge_candidate_id: str | None = None
+
+    @dataclass
+    class _FakeSubscription:
+        id: str = "subscription-prior-failure"
+        initial_backoff_seconds: int = 1
+
+    class _FakeRepo:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def mark_failed_or_retry(self, *args: Any, **kwargs: Any) -> None:
+            self.calls.append({"args": args, "kwargs": kwargs})
+
+    loop = _FakeLoop()
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def poster(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        del url, json, headers, timeout, connect_ip_address
+        loop.now += 10.0
+        raise ConnectionRefusedError("first address refused")
+
+    with pytest.raises(callback_service_module.CallbackDeliveryBudgetExceededError) as exc_info:
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=10.0,
+            connect_ip_addresses=("1.1.1.1", "2.2.2.2"),
+        )
+
+    repo = _FakeRepo()
+    with structlog.testing.capture_logs() as captured:
+        await callback_service_module._record_callback_delivery_budget_exceeded(
+            repo,
+            _FakeDelivery(),  # type: ignore[arg-type]
+            _FakeSubscription(),  # type: ignore[arg-type]
+            exc_info.value,
+            now=lambda: datetime(2026, 5, 15, tzinfo=UTC),
+        )
+
+    log_entry = next(
+        event for event in captured if event.get("event") == "callback.delivery_budget_exceeded"
+    )
+    assert log_entry["prior_failure_summary"] == "1.1.1.1 (ConnectionRefusedError)"
+    assert repo.calls
+
+
+@pytest.mark.unit
 async def test_validated_address_fallback_stops_when_timeout_budget_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
