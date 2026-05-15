@@ -608,6 +608,45 @@ def test_core_readiness_jsonable_handles_nested_dataclass_values(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_core_readiness_pretty_omits_ok_reason_and_keeps_failure_reason() -> None:
+    report = readiness.CoreReadinessReport(
+        status="fail",
+        checks=(
+            readiness.CoreReadinessCheck(
+                name="service_status",
+                status="ok",
+                reason_code="SERVICE_STATUS_OK",
+                message="service dependencies are ready",
+                evidence={"status": "ok"},
+            ),
+            readiness.CoreReadinessCheck(
+                name="prd_slo_thresholds",
+                status="fail",
+                reason_code="PRD_SLO_THRESHOLDS_FAILED",
+                message="rolling PRD SLO thresholds are below Core release criteria",
+                evidence={
+                    "since_hours": 168,
+                    "breaches": {
+                        "workspace_creation_success_rate": {
+                            "actual": 0.9,
+                            "threshold": {"operator": ">=", "value": 0.98},
+                        }
+                    },
+                },
+            ),
+        ),
+    )
+
+    pretty = readiness.render_core_readiness_pretty(report)
+
+    assert "[ok] service_status: service dependencies are ready" in pretty
+    assert "reason: SERVICE_STATUS_OK" not in pretty
+    assert "evidence status: ok" in pretty
+    assert "[fail] prd_slo_thresholds" in pretty
+    assert "reason: PRD_SLO_THRESHOLDS_FAILED" in pretty
+
+
+@pytest.mark.unit
 def test_core_demo_has_executable_offline_golden_path_smoke() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "examples" / "awf-core-demo" / "scripts" / "core_release_smoke.py"

@@ -1,6 +1,6 @@
 # Getting Started
 
-> **Note:** For a quick, step-by-step introduction, see the [Start Here Quickstart](QUICKSTART.md).
+> **Note:** For a quick, step-by-step introduction, see the [Quickstart](QUICKSTART.md).
 
 ### Prerequisites
 
