@@ -58,6 +58,12 @@ class RequestAdmissionLimiter:
     The limiter is intentionally process-local for this hardening slice. Callers
     pass the configured limit/window per request so tests and local app instances
     can override policy without global state.
+
+    Fixed-window counters reset at window boundaries, so a burst of ``limit``
+    requests at the end of one window followed by ``limit`` at the start of the
+    next can pass ``2 * limit`` requests in a short interval. This is acceptable
+    for the current permissive defaults; consider a sliding-window algorithm if
+    limits are tightened.
     """
 
     def __init__(self, *, clock: Clock | None = None) -> None:
@@ -131,6 +137,7 @@ class RequestAdmissionLimiter:
             )
 
     def _prune(self, *, window_seconds: int, current_window: int) -> None:
+        """Prune stale buckets. Callers must not already hold ``self._lock``."""
         with self._lock:
             self._prune_locked(window_seconds=window_seconds, current_window=current_window)
 

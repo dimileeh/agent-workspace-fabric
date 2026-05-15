@@ -328,6 +328,11 @@ def _callback_idempotency_replay_cache(
 ) -> _CallbackIdempotencyReplayCache:
     state = request_app_state(request)
     if state is None:
+        if isinstance(request, Request):
+            raise RuntimeError(
+                "callback idempotency replay cache requires request.app.state; "
+                "direct callers must pass None or a non-Starlette test object."
+            )
         return _direct_callback_idempotency_replay_cache(request)
 
     existing = getattr(state, _CALLBACK_REPLAY_CACHE_STATE_KEY, None)
@@ -344,6 +349,11 @@ def _callback_idempotency_replay_key_cache(
 ) -> _CallbackIdempotencyReplayKeyCache:
     state = request_app_state(request)
     if state is None:
+        if isinstance(request, Request):
+            raise RuntimeError(
+                "callback idempotency replay key cache requires request.app.state; "
+                "direct callers must pass None or a non-Starlette test object."
+            )
         return _direct_callback_idempotency_replay_key_cache(request)
 
     existing = getattr(state, _CALLBACK_REPLAY_KEY_CACHE_STATE_KEY, None)

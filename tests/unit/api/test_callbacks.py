@@ -70,6 +70,18 @@ def _direct_callback_request() -> Request:
     )
 
 
+def _callback_request_without_app_state() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/callbacks",
+            "headers": [],
+            "client": ("198.51.100.43", 42100),
+        }
+    )
+
+
 def _assert_callback_rate_limited(response: Response, *, identity_type: str) -> None:
     assert response.status_code == 429
     body = response.json()
@@ -773,6 +785,14 @@ def test_callback_replay_cache_without_app_state_is_request_local() -> None:
 
 
 @pytest.mark.unit
+def test_callback_replay_cache_real_request_without_app_state_fails_loudly() -> None:
+    request = _callback_request_without_app_state()
+
+    with pytest.raises(RuntimeError, match=r"request\.app\.state"):
+        callbacks_route._callback_idempotency_replay_cache(request)
+
+
+@pytest.mark.unit
 def test_callback_replay_key_cache_without_app_state_is_request_local() -> None:
     request = SimpleNamespace()
 
@@ -783,6 +803,14 @@ def test_callback_replay_key_cache_without_app_state_is_request_local() -> None:
     assert callbacks_route._callback_idempotency_replay_key_cache(None) is not (
         callbacks_route._callback_idempotency_replay_key_cache(None)
     )
+
+
+@pytest.mark.unit
+def test_callback_replay_key_cache_real_request_without_app_state_fails_loudly() -> None:
+    request = _callback_request_without_app_state()
+
+    with pytest.raises(RuntimeError, match=r"request\.app\.state"):
+        callbacks_route._callback_idempotency_replay_key_cache(request)
 
 
 @pytest.mark.unit
