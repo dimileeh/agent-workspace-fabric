@@ -525,6 +525,14 @@ def _assert_workspace_rate_limited(response: Any) -> None:
     assert _WORKSPACE_AUTH_HEADER not in json.dumps(body)
 
 
+def _clear_workspace_create_replay_key_cache(app: Any) -> None:
+    setattr(
+        app.state,
+        workspaces_route._WORKSPACE_CREATE_REPLAY_KEY_CACHE_STATE_KEY,  # noqa: SLF001
+        workspaces_route._WorkspaceCreateIdempotencyReplayKeyCache(),  # noqa: SLF001
+    )
+
+
 def _assert_effective_identity(
     row: dict[str, Any],
     *,
@@ -852,6 +860,52 @@ class TestCreateWorkspace:
         _assert_workspace_rate_limited(rejected)
         assert lock_keys == [first_key]
         assert lookup_keys == [first_key]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("path", "payload", "idempotency_key"),
+        [
+            pytest.param(
+                "/v1/workspaces",
+                {**_MINIMAL_BODY, "task_title": "cache loss replay v1"},
+                "workspace-cache-loss-replay-v1",
+                id="v1",
+            ),
+            pytest.param(
+                "/v2/workspaces",
+                _v2_body(title="cache loss replay v2"),
+                "workspace-cache-loss-replay-v2",
+                id="v2",
+            ),
+        ],
+    )
+    async def test_idempotency_replay_survives_cache_loss_when_rate_limited(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        path: str,
+        payload: dict[str, object],
+        idempotency_key: str,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+
+        first = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+        _clear_workspace_create_replay_key_cache(app)
+        replay = await client.post(
+            path,
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
 
     @pytest.mark.unit
     async def test_rejects_v1_create_burst_after_configured_limit(
