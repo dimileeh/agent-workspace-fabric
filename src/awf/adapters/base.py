@@ -140,6 +140,10 @@ class AgentAdapter(ABC):
     @abstractmethod
     def name(self) -> AgentRuntime: ...  # pragma: no cover
 
+    @property
+    def default_model(self) -> str | None:
+        return self._default_model
+
     @abstractmethod
     def get_provider(self, model: str | None) -> str: ...  # pragma: no cover
 

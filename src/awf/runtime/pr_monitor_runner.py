@@ -891,6 +891,11 @@ class PullRequestMonitorRunner:
             ws = await repo.get(workspace_id)
             if ws is None:
                 return "deterministic"
+            effective_default_model = (
+                self._deps.adapter.default_model
+                if agent_model_from_task_policy(ws.task_policy) is None
+                else None
+            )
             metadata = provider_recovery_metadata_from_failure(
                 reason_code=exc.reason_code,
                 message=message,
@@ -904,6 +909,7 @@ class PullRequestMonitorRunner:
                 s,
                 workspace_id,
                 metadata=metadata,
+                effective_default_model=effective_default_model,
             )
             await s.commit()
             if provider_auth_failed:

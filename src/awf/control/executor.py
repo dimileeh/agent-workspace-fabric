@@ -6446,7 +6446,19 @@ class WorkspaceExecutor:
 
     async def _prepare_provider_recovery(self, workspace_id: str) -> None:
         async with self._session_factory() as session:
-            result = await create_provider_recovery_attempt_row(session, workspace_id)
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            effective_default_model: str | None = None
+            if workspace is not None:
+                try:
+                    defaults = self._defaults_for(AgentRuntime(workspace.agent))
+                except ValueError:
+                    defaults = None
+                effective_default_model = defaults.model if defaults is not None else None
+            result = await create_provider_recovery_attempt_row(
+                session,
+                workspace_id,
+                effective_default_model=effective_default_model,
+            )
             if result is None or result == "terminal" or result == "stale":
                 await session.commit()
                 return

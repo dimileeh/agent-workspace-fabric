@@ -163,9 +163,11 @@ def decide_provider_recovery(
     current_agent: str,
     current_model: str | None,
     now: datetime,
+    effective_default_model: str | None = None,
 ) -> ProviderRecoveryDecision:
     policy = parse_provider_recovery_policy(task_policy)
     state = parse_provider_recovery_state(task_policy)
+    policy_model = _policy_model(task_policy)
     fingerprint = _metadata_str(metadata, "failure_fingerprint")
     provider = _metadata_str(metadata, "provider") or provider_for_agent_model(
         current_agent,
@@ -186,6 +188,10 @@ def decide_provider_recovery(
         state=state,
         current_agent=current_agent,
         current_model=model,
+        default_model=_capacity_default_model(
+            policy_model=policy_model,
+            effective_default_model=effective_default_model,
+        ),
     )
     if default_fallback_target is not None:
         return ProviderRecoveryDecision(
@@ -248,6 +254,7 @@ def _default_capacity_fallback_target(
     state: ProviderRecoveryState,
     current_agent: str,
     current_model: str | None,
+    default_model: str | None,
 ) -> FallbackTarget | None:
     if policy.fallbacks:
         return None
@@ -257,8 +264,6 @@ def _default_capacity_fallback_target(
         return None
     if not _is_capacity_failure_metadata(metadata):
         return None
-    defaults = DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex]
-    default_model = defaults.model
     if default_model is None or current_model is None or current_model == default_model:
         return None
     return FallbackTarget(
@@ -266,6 +271,21 @@ def _default_capacity_fallback_target(
         provider=provider_for_agent_model(AgentRuntime.codex.value, default_model),
         model=default_model,
     )
+
+
+def _capacity_default_model(
+    *,
+    policy_model: str | None,
+    effective_default_model: str | None,
+) -> str | None:
+    if effective_default_model is not None:
+        stripped = effective_default_model.strip()
+        if stripped:
+            return stripped
+    if policy_model is None:
+        return None
+    defaults = DEFAULT_AGENT_DEFAULTS.get(AgentRuntime.codex)
+    return defaults.model if defaults is not None else None
 
 
 def _is_capacity_failure_metadata(metadata: Mapping[str, Any]) -> bool:
@@ -284,6 +304,7 @@ async def create_provider_recovery_attempt_row(
     *,
     now: datetime | None = None,
     metadata: Mapping[str, Any] | None = None,
+    effective_default_model: str | None = None,
 ) -> ProviderRecoveryAttemptResult | Literal["terminal", "stale"] | None:
     """Create or attach a requested retry/fallback recovery for a retryable provider failure."""
 
@@ -318,6 +339,7 @@ async def create_provider_recovery_attempt_row(
         task_policy=source.task_policy,
         current_agent=source.agent,
         current_model=current_model,
+        effective_default_model=effective_default_model,
         now=recovery_now,
     )
     attempt_repo = TaskAttemptRepository(session)

@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
-from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
@@ -2625,6 +2625,66 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
     assert [operation for operation in operations if operation.type == "retry"] == []
     assert len(recovery_events) == 1
     assert recovery_events[0]["provider_recovery"]["failure_type"] == "usage_limit"
+
+
+@pytest.mark.unit
+async def test_monitor_provider_failure_on_configured_default_retries_without_builtin_fallback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.agent = "codex"
+        workspace.task_policy = {"pr_monitor": {"review_grace_seconds": 75}}
+        await session.commit()
+
+    adapter = FakeAdapter(default_model="gpt-5.3-codex-spark")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="Codex Spark MODEL_CAPACITY_EXHAUSTED",
+        ),
+        reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+    )
+
+    action = await runner._record_provider_agent_run_error(workspace_id, exc)
+
+    source_policy, recovery_events, operations, requested_ids = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    state = source_policy["provider_recovery_state"]
+    retry_operations = [operation for operation in operations if operation.type == "retry"]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+    assert action == "retry"
+    assert isinstance(state, dict)
+    assert state["action"] == "retry"
+    assert state["target_agent"] == "codex"
+    assert state["target_provider"] == "openai"
+    assert state["target_model"] == "gpt-5.3-codex-spark"
+    assert state["decision_reason_code"] == "PROVIDER_RETRY_DELAYED"
+    assert "agent_model" not in source_policy
+    assert workspace.agent == "codex"
+    assert retry_operations == []
+    assert requested_ids == []
+    assert len(recovery_events) == 1
+    assert recovery_events[0]["provider_recovery"]["action"] == "retry"
+    assert recovery_events[0]["provider_recovery"]["target_model"] == "gpt-5.3-codex-spark"
 
 
 @pytest.mark.unit

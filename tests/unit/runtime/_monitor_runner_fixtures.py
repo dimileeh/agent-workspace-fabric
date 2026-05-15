@@ -46,8 +46,8 @@ class FakeAdapter(AgentAdapter):
     calls: list[str] = field(default_factory=list)
     workspace_ids: list[str | None] = field(default_factory=list)
 
-    def __init__(self) -> None:  # type: ignore[override]
-        super().__init__(runner=None)  # type: ignore[arg-type]
+    def __init__(self, *, default_model: str | None = None) -> None:  # type: ignore[override]
+        super().__init__(runner=None, default_model=default_model)  # type: ignore[arg-type]
         self._queued = []
         self.calls = []
         self.workspace_ids = []
