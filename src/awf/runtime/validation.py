@@ -672,7 +672,7 @@ _SETUP_TRANSIENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"connection reset|connection refused|connection aborted|"
             r"connection closed|connection error|network is unreachable|"
             r"proxy error|temporary network failure|tunnel error|"
-            r"\bECONNRESET\b"
+            r"\bECONN(?:RESET|REFUSED)\b"
             r")"
         ),
     ),

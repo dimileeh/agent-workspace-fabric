@@ -704,6 +704,14 @@ def test_setup_dependency_network_classifier_skips_yarn_non_install_options(
             "lodash==4.17.21",
             "registry.yarnpkg.com",
         ),
+        (
+            "npm ci",
+            "npm ERR! request to https://registry.npmjs.org/react/-/react-18.2.0.tgz "
+            "failed, reason: connect ECONNREFUSED registry.npmjs.org:443",
+            "connection",
+            "react==18.2.0",
+            "registry.npmjs.org",
+        ),
     ],
 )
 def test_setup_dependency_network_classifier_accepts_node_transient_error_codes(
