@@ -3908,6 +3908,10 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert ".github/workflows/ci.yml" in push_result.stderr
     assert len(adapter.calls) == 2
+    committed_repair_prompt = adapter.calls[1]
+    assert "already committed locally" in committed_repair_prompt
+    assert "branch history relative to the PR head" in committed_repair_prompt
+    assert "reverting commit" in committed_repair_prompt
     call_args = [call.args for call in cmd.calls]
     assert any(
         args[:1] == ["git"] and "status" in args and args[-1:] == ["--porcelain"]
