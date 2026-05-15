@@ -18,6 +18,7 @@ from awf.db.repositories import TaskExternalIdConflictError
 from awf.service import workspaces as workspaces_service
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck
+from tests.unit.helpers import assert_no_internal_error_fields
 
 
 def _admission_ok_disk_check() -> DiskCheck:
@@ -271,7 +272,13 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
     assert response.status_code == 409
     body = json.loads(response.body)
     assert body["error_code"] == "TASK_EXTERNAL_ID_CONFLICT"
+    assert body["message"] == (
+        "External task ID is already associated with a different "
+        "repo/base/task-class/owned-path scope; use a unique external "
+        "task ID for this backlog slice or retry the original scope."
+    )
     assert body["detail"] == {"external_id": "task-123"}
+    assert_no_internal_error_fields(body)
 
 
 @pytest.mark.unit

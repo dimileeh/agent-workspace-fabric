@@ -36,6 +36,7 @@ from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
 from awf.service.workspaces import OperationRowsPage, WorkspaceRetryError
 from tests.postgres import postgres_test_engine
+from tests.unit.helpers import assert_no_internal_error_fields
 
 _PROVIDER_AUTH_ENV_KEYS = (
     "OPENAI_API_KEY",
@@ -1689,12 +1690,13 @@ class TestCreateWorkspaceV2:
         assert conflict.structuredContent == {
             "error_code": "TASK_EXTERNAL_ID_CONFLICT",
             "message": (
-                "Task external_id is already associated with a different "
-                "repo/base/task-class/owned-path scope; use a unique "
-                "external_id for this backlog slice or retry the original scope."
+                "External task ID is already associated with a different "
+                "repo/base/task-class/owned-path scope; use a unique external "
+                "task ID for this backlog slice or retry the original scope."
             ),
             "detail": {"external_id": external_id},
         }
+        assert_no_internal_error_fields(conflict.structuredContent)
 
     @pytest.mark.unit
     async def test_retry_workspace_provider_preflight_error_and_override(

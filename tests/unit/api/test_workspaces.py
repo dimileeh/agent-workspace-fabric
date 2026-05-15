@@ -47,6 +47,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.service import workspaces as workspaces_service
 from awf.service.disk import DiskCheck
+from tests.unit.helpers import assert_no_internal_error_fields as _assert_no_internal_error_fields
 
 pytestmark = pytest.mark.usefixtures("mock_docker_cli_probe")
 
@@ -92,6 +93,17 @@ _PROVIDER_AUTH_ENV_KEYS = (
 
 _WORKSPACE_API_TOKEN = "unit-test-workspace-api-token"
 _WORKSPACE_AUTH_HEADER = f"Bearer {_WORKSPACE_API_TOKEN}"
+
+
+@pytest.mark.unit
+def test_internal_error_field_assertion_allows_message_values() -> None:
+    _assert_no_internal_error_fields(
+        {
+            "error_code": "IDEMPOTENCY_CONFLICT",
+            "message": "Retry with the original idempotency_key.",
+            "detail": {"external_id": "WAVE-1"},
+        }
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -796,7 +808,9 @@ class TestCreateWorkspace:
         assert first.workspace_id == replay.workspace_id
         assert isinstance(conflict, JSONResponse)
         assert conflict.status_code == 409
-        assert json.loads(conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
+        body = json.loads(conflict.body)
+        assert body["error_code"] == "IDEMPOTENCY_CONFLICT"
+        _assert_no_internal_error_fields(body)
 
 
 class TestCreateWorkspaceV2DiskPressure:
@@ -987,7 +1001,9 @@ class TestCreateWorkspaceV2MonitorPolicy:
 
         assert first.status_code == 202
         assert replay.status_code == 409
-        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+        body = replay.json()
+        assert body["error_code"] == "IDEMPOTENCY_CONFLICT"
+        _assert_no_internal_error_fields(body)
 
 
 class TestCreateWorkspaceV2ResourceIdempotency:
@@ -1441,15 +1457,17 @@ class TestWorkspaceCreateProviderReadinessPreflight:
 
         assert first.status_code == 202
         assert second.status_code == 409
-        assert second.json() == {
+        body = second.json()
+        assert body == {
             "error_code": "TASK_EXTERNAL_ID_CONFLICT",
             "message": (
-                "Task external_id is already associated with a different "
-                "repo/base/task-class/owned-path scope; use a unique "
-                "external_id for this backlog slice or retry the original scope."
+                "External task ID is already associated with a different "
+                "repo/base/task-class/owned-path scope; use a unique external "
+                "task ID for this backlog slice or retry the original scope."
             ),
             "detail": {"external_id": "WAVE-1"},
         }
+        _assert_no_internal_error_fields(body)
 
     @pytest.mark.unit
     async def test_v2_rejects_external_id_reuse_for_different_title(
@@ -2162,7 +2180,9 @@ class TestCreateWorkspaceV2PolicyMetadata:
 
         assert first.status_code == 202
         assert replay.status_code == 409
-        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+        body = replay.json()
+        assert body["error_code"] == "IDEMPOTENCY_CONFLICT"
+        _assert_no_internal_error_fields(body)
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -2625,7 +2645,9 @@ class TestIdempotency:
         r2 = await client.post("/v1/workspaces", json=mutated, headers=headers)
 
         assert r2.status_code == 409
-        assert r2.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+        body = r2.json()
+        assert body["error_code"] == "IDEMPOTENCY_CONFLICT"
+        _assert_no_internal_error_fields(body)
 
 
 class TestGetWorkspace:
