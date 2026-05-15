@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 import yaml
 
 from awf.common.commands import CommandResult, FakeCommandRunner
@@ -20,10 +22,15 @@ from awf.runtime.validation import (
     HEALTHCHECK_HTTP_STATUS_MISMATCH,
     HEALTHCHECK_INVALID_CONFIGURATION,
     PROFILE_VALIDATION_TOOL_UNAVAILABLE,
+    SETUP_DEPENDENCY_NETWORK_FAILURE,
+    SETUP_DEPENDENCY_NETWORK_RETRY,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
     ValidationRunner,
+    _classify_setup_dependency_network_failure,
+    _classify_setup_dependency_network_result,
     _coverage_reason_code,
     _coverage_status,
     _healthcheck_attempt_timeout,
@@ -47,6 +54,16 @@ from awf.service.alembic_resolver import (
 
 _COMPOSE_PROJECT = "awf_ws_val"
 _COMPOSE_FILE = Path("/fake/compose.yml")
+
+
+def _uv_pypi_dns_failure(*, package: str = "docker==7.1.0") -> str:
+    return f"""
+  x Failed to download `{package}`
+  |- Failed to fetch: `https://files.pythonhosted.org/packages/aa/bb/docker-7.1.0.whl`
+  |- Request failed after 3 retries
+  |- error sending request for url (https://files.pythonhosted.org/packages/aa/bb/docker-7.1.0.whl)
+  `- client error (Connect): dns error: failed to lookup address information: No address associated with hostname
+""".strip()
 
 
 class _CountingLogStore(LogStore):
@@ -171,6 +188,1203 @@ def _identity_profile_with_endpoint(**endpoint_overrides: object) -> WorkspacePr
     }
     endpoint.update(endpoint_overrides)
     return _identity_profile(app_endpoints=[endpoint])
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_extracts_uv_pypi_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="",
+        stderr=_uv_pypi_dns_failure(),
+    )
+
+    assert classification is not None
+    assert classification.retryable is True
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+    assert classification.metadata["retryable"] is True
+    assert classification.metadata["diagnostic"]
+    assert len(str(classification.metadata["diagnostic"])) <= 1000 + len("...[truncated]")
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_result_reads_missing_captured_stream_from_artifact(
+    tmp_path: Path,
+) -> None:
+    stderr_path = tmp_path / "setup.stderr"
+    stderr_path.write_text(_uv_pypi_dns_failure(), encoding="utf-8")
+    result = ValidationCommandResult(
+        command="uv sync --extra dev",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=tmp_path / "setup.stdout",
+        stderr_path=stderr_path,
+        phase="setup",
+        captured_stdout="",
+        captured_stderr=None,
+    )
+
+    classification = _classify_setup_dependency_network_result(result)
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_index_url_credentials_for_package() -> None:
+    raw_secret = "ghp_1234567890abcdef"
+    classification = _classify_setup_dependency_network_failure(
+        command=(f"uv sync --index-url https://user:{raw_secret}@files.pythonhosted.org/simple"),
+        returncode=1,
+        stdout="",
+        stderr=_uv_pypi_dns_failure(package="docker==7.1.0"),
+    )
+
+    assert classification is not None
+    assert classification.package == "docker==7.1.0"
+    assert raw_secret not in str(classification.metadata)
+    assert "user:ghp_" not in str(classification.metadata)
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_does_not_extract_jwt_secret_as_host() -> None:
+    raw_secret = ".".join(
+        [
+            "eyJhbGciOiJIUzI1NiJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+            "signature123",
+        ]
+    )
+    classification = _classify_setup_dependency_network_failure(
+        command=f"TOKEN={raw_secret} uv sync --extra dev",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Failed to download docker==7.1.0 after request retries: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.host is None
+    assert raw_secret not in str(classification.metadata)
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_version_like_fallback_host() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Failed to download docker==7.1.0 after request retries: "
+            "dns error: failed to lookup address information"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.package == "docker==7.1.0"
+    assert classification.host is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "artifact_name",
+    [
+        "docker-7.1.0.tar.gz",
+        "package.whl",
+        "setup.cfg",
+        "pyproject.yml",
+        "pyproject.yaml",
+        "metadata.json",
+    ],
+)
+def test_setup_dependency_network_classifier_ignores_artifact_like_fallback_hosts(
+    artifact_name: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            f"Failed to download {artifact_name} after request retries: "
+            "dns error: failed to lookup address information"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.package == "docker==7.1.0"
+    assert classification.host is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_uv_run_script_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv run python scripts/bootstrap.py",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_wrapper_uv_argument_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./bootstrap.sh uv sync",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_chained_bootstrap_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="python -m pip install -r requirements.txt && ./bootstrap",
+        returncode=1,
+        stdout="Requirement already satisfied: pytest\n",
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_multiline_bootstrap_dns_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="python -m pip install -r requirements.txt\n./bootstrap",
+        returncode=1,
+        stdout="Requirement already satisfied: pytest\n",
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_chained_bootstrap_fetch_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="python -m pip install -r requirements.txt && ./bootstrap",
+        returncode=1,
+        stdout="Requirement already satisfied: pytest\n",
+        stderr="bootstrap failed to fetch config: connection timed out",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_chained_bootstrap_after_package_output() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="python -m pip install docker==7.1.0 && ./bootstrap",
+        returncode=1,
+        stdout="Collecting docker==7.1.0\nSuccessfully installed docker-7.1.0\n",
+        stderr="bootstrap failed while contacting api.internal.example: connection timed out",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_standalone_bootstrap_fetch_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./bootstrap",
+        returncode=1,
+        stdout="",
+        stderr="bootstrap failed to fetch config: connection timed out",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_unknown_wrapper_after_successful_package_output() -> (
+    None
+):
+    classification = _classify_setup_dependency_network_failure(
+        command="./setup.sh",
+        returncode=1,
+        stdout=(
+            "Collecting docker==7.1.0\n"
+            "Installing collected packages: docker\n"
+            "Successfully installed docker-7.1.0\n"
+        ),
+        stderr=(
+            "bootstrap failed while contacting api.internal.example: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_skips_assignment_like_fetch_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./bootstrap",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "bootstrap failed to fetch CONFIG_URL=https://api.internal.example/config: "
+            "connection timed out"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_accepts_chained_dependency_output() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="python -m pip install -r requirements.txt && ./bootstrap",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_accepts_chained_multiline_dependency_output() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev && ./bootstrap",
+        returncode=1,
+        stdout="",
+        stderr=_uv_pypi_dns_failure(),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npm run build",
+        "poetry run python scripts/bootstrap.py",
+        "bundle exec rake assets:precompile",
+        "go test ./...",
+    ],
+)
+def test_setup_dependency_network_classifier_skips_non_install_package_manager_verbs(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_does_not_use_command_for_context_fallback() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./sync-packages.sh",
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_plain_simple_context_fallback() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./build.sh",
+        returncode=1,
+        stdout="",
+        stderr="simple error: temporary failure in name resolution",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npm ci",
+        "poetry install",
+        "bundle install",
+        "go install example.com/acme/tool@latest",
+        "gradle --no-daemon dependencies",
+        "mvn -B -DskipTests dependency:go-offline",
+        "python -m pip install -r requirements.txt",
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_install_package_manager_verbs(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pip --cache-dir /tmp/pip install -r requirements.txt",
+        "pip --proxy http://proxy:8080 install -r requirements.txt",
+        "pip --log /tmp/pip.log install -r requirements.txt",
+        "pip --retries 2 install -r requirements.txt",
+        "pip --exists-action w install -r requirements.txt",
+        "pip --keyring-provider disabled install -r requirements.txt",
+        "pip --resume-retries 2 install -r requirements.txt",
+        "pip --use-feature fast-deps install -r requirements.txt",
+        "pip --cert /etc/ssl/corp.pem install -r requirements.txt",
+        "python -m pip --client-cert client.pem install -r requirements.txt",
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_pip_value_flags_before_subcommand(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npm --workspace apps/console ci",
+        "npm -w apps/console ci",
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_npm_workspace_flags_before_subcommand(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pnpm --filter apps/console install",
+        "pnpm -F apps/console install",
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_pnpm_filter_flags_before_subcommand(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_accepts_pnpm_dir_flag_before_subcommand() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pnpm --dir apps/console install",
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "yarn --immutable",
+        "yarn --immutable --immutable-cache",
+        "yarn --cwd apps/console --immutable",
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_yarn_option_only_installs(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "yarn --version",
+        "yarn --help",
+        "yarn --immutable --help",
+    ],
+)
+def test_setup_dependency_network_classifier_skips_yarn_non_install_options(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command", "stderr", "expected_category", "expected_package", "expected_host"),
+    [
+        (
+            "npm ci",
+            "npm ERR! request to "
+            "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz "
+            "failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org",
+            "dns",
+            "left-pad==1.3.0",
+            "registry.npmjs.org",
+        ),
+        (
+            "npm ci",
+            "npm ERR! request to https://registry.npmjs.org/react/-/react-18.2.0.tgz "
+            "failed, reason: getaddrinfo ENOTFOUND registry.npmjs.org",
+            "dns",
+            "react==18.2.0",
+            "registry.npmjs.org",
+        ),
+        (
+            "pnpm install --frozen-lockfile",
+            "ERR_PNPM_FETCH_ request to "
+            "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz "
+            "failed, reason: connect ETIMEDOUT 104.16.25.34:443",
+            "connect_timeout",
+            "is-odd==3.0.1",
+            "registry.npmjs.org",
+        ),
+        (
+            "yarn install --frozen-lockfile",
+            "error Error: https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz: "
+            "read ECONNRESET",
+            "connection",
+            "lodash==4.17.21",
+            "registry.yarnpkg.com",
+        ),
+        (
+            "npm ci",
+            "npm ERR! request to https://registry.npmjs.org/react/-/react-18.2.0.tgz "
+            "failed, reason: connect ECONNREFUSED registry.npmjs.org:443",
+            "connection",
+            "react==18.2.0",
+            "registry.npmjs.org",
+        ),
+        (
+            "pnpm install --frozen-lockfile",
+            "ERR_PNPM_PREPARE_PKG_FAILURE Command failed: git ls-remote --refs "
+            "https://github.com/acme/private-dep.git\n"
+            "fatal: unable to access 'https://github.com/acme/private-dep.git/': "
+            "Could not resolve host: github.com",
+            "dns",
+            None,
+            "github.com",
+        ),
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_node_transient_error_codes(
+    command: str,
+    stderr: str,
+    expected_category: str,
+    expected_package: str | None,
+    expected_host: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr=stderr,
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == expected_category
+    assert classification.package == expected_package
+    assert classification.host == expected_host
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_accepts_go_mod_download_proxy_failure() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="go mod download",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "go: golang.org/x/text@v0.3.7: Get "
+            '"https://proxy.golang.org/golang.org/x/text/@v/v0.3.7.mod": '
+            "dial tcp: lookup proxy.golang.org: temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == "dns"
+    assert classification.host == "proxy.golang.org"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_unrelated_5xx_numbers() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=137,
+        stdout="installing docker==7.1.0 from local cache\n",
+        stderr="dependency setup worker exited with code 512 after OOM kill\n",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_non_http_status_code_5xx() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="installing docker==7.1.0 from local cache\n",
+        stderr="dependency setup worker reported status code 512 after local process crash\n",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_ignores_bare_5xx_phrase_without_http_context() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="installing docker==7.1.0 from local cache\n",
+        stderr="dependency setup worker reported service unavailable after pool shutdown\n",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_retries_503_temporarily_forbidden_body() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Package index https://files.pythonhosted.org/simple returned HTTP status code 503: "
+            "access temporarily forbidden by rate limit while fetching docker==7.1.0"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == "http_5xx"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_retries_5xx_phrase_with_http_context() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Package index https://files.pythonhosted.org/simple returned 503 Service Unavailable "
+            "while fetching docker==7.1.0"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == "http_5xx"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_retries_dependency_simple_index_fallback() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="./bootstrap-deps.sh",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple/: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("port", ["401", "403"])
+def test_setup_dependency_network_classifier_does_not_treat_index_port_as_http_auth_status(
+    port: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=f"pip install docker==7.1.0 --index-url http://pypi.internal:{port}/simple/",
+        returncode=1,
+        stdout="",
+        stderr=(
+            f"Failed to download docker==7.1.0 from http://pypi.internal:{port}/simple/: "
+            "temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "pypi.internal"
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_classifier_keeps_403_forbidden_deterministic() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Package index https://files.pythonhosted.org/simple returned HTTP status code 403 "
+            "Forbidden while fetching docker==7.1.0: temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status_code", ["401", "403"])
+def test_setup_dependency_network_classifier_keeps_http_auth_status_deterministic(
+    status_code: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=(
+            f"Package index https://files.pythonhosted.org/simple returned HTTP status code "
+            f"{status_code} while fetching docker==7.1.0: temporary failure in name resolution"
+        ),
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stderr", "expected_category"),
+    [
+        (
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple "
+            "after connection reset by peer",
+            "connection",
+        ),
+        (
+            "Failed to fetch package docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "connection refused",
+            "connection",
+        ),
+        (
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "client error (Connect): tunnel error: unsuccessful",
+            "connection",
+        ),
+        (
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "connect timeout",
+            "connect_timeout",
+        ),
+        (
+            "Failed to fetch package docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "read timed out",
+            "read_timeout",
+        ),
+        (
+            "Failed to download docker==7.1.0 from https://files.pythonhosted.org/simple: "
+            "TLS handshake timeout",
+            "tls",
+        ),
+        (
+            "Package index https://files.pythonhosted.org/simple returned HTTP status code 503 "
+            "while fetching docker==7.1.0",
+            "http_5xx",
+        ),
+        (
+            "Package index https://files.pythonhosted.org/simple returned HTTP/1.1 503 "
+            "while fetching docker==7.1.0",
+            "http_5xx",
+        ),
+    ],
+)
+def test_setup_dependency_network_classifier_covers_transient_shapes(
+    stderr: str,
+    expected_category: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip install docker==7.1.0",
+        returncode=1,
+        stdout="",
+        stderr=stderr,
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.retryable is True
+    assert classification.transient_category == expected_category
+    assert classification.package == "docker==7.1.0"
+    assert classification.host == "files.pythonhosted.org"
+
+
+@pytest.mark.unit
+async def test_setup_dependency_network_failure_retries_and_succeeds_on_cache_hit(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+        }
+    )
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+    fake.queue_result(returncode=0, stdout="Using cached docker==7.1.0\n")
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert result.all_passed
+    assert len(fake.calls) == 2
+    command = result.commands[0]
+    assert command.retry_count == 1
+    retry_metadata = command.metadata["setup_dependency_network"]
+    assert retry_metadata["reason_code"] == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert retry_metadata["retry_count"] == 1
+    assert retry_metadata["retry_exhausted"] is False
+    assert retry_metadata["package"] == "docker==7.1.0"
+    assert retry_metadata["host"] == "files.pythonhosted.org"
+    stderr_text = command.stderr_path.read_text(encoding="utf-8")
+    stdout_text = command.stdout_path.read_text(encoding="utf-8")
+    retry_prefix_pattern = r"\[setup dependency network retry 1 at \d+(?:\.\d+)?s\]"
+    assert re.search(retry_prefix_pattern, stdout_text)
+    assert re.search(retry_prefix_pattern, stderr_text)
+    assert _uv_pypi_dns_failure() in stderr_text
+    assert "Using cached docker==7.1.0" in stdout_text
+
+
+@pytest.mark.unit
+async def test_setup_dependency_retry_does_not_consume_flaky_retry_budget(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=2,
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+            "validation": {"retry_budget": 1},
+        }
+    )
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+    fake.queue_result(returncode=124, stderr="command timed out")
+    fake.queue_result(returncode=0, stdout="Using cached docker==7.1.0\n")
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_then_flaky_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert result.all_passed
+    assert len(fake.calls) == 3
+    command = result.commands[0]
+    assert command.retry_count == 2
+    retry_metadata = command.metadata["setup_dependency_network"]
+    assert retry_metadata["retry_count"] == 1
+    assert retry_metadata["setup_retry_count"] == 1
+    assert retry_metadata["flaky_retry_count"] == 1
+    assert retry_metadata["total_retry_count"] == 2
+    assert retry_metadata["retry_budget"] == 2
+    assert retry_metadata["retry_exhausted"] is False
+    assert len(retry_metadata["attempts"]) == 1
+    assert retry_metadata["attempts"][0]["attempt"] == 1
+    assert retry_metadata["attempts"][0]["retry_number"] == 1
+
+
+@pytest.mark.unit
+async def test_setup_dependency_network_exhaustion_reports_setup_retry_budget_only(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=1,
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+            "validation": {"retry_budget": 3},
+        }
+    )
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert not result.all_passed
+    assert len(fake.calls) == 2
+    command = result.commands[0]
+    assert command.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert command.retry_count == 1
+    retry_metadata = command.metadata["setup_dependency_network"]
+    assert retry_metadata["retry_count"] == 1
+    assert retry_metadata["retry_budget"] == 1
+    assert retry_metadata["retry_exhausted"] is True
+
+
+@pytest.mark.unit
+async def test_setup_dependency_network_failure_exhaustion_has_precise_reason(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=2,
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+        }
+    )
+    for _ in range(3):
+        fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert not result.all_passed
+    assert len(fake.calls) == 3
+    command = result.commands[0]
+    assert command.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert command.retry_count == 2
+    retry_metadata = command.metadata["setup_dependency_network"]
+    assert retry_metadata["retry_count"] == 2
+    assert retry_metadata["retry_budget"] == 2
+    assert retry_metadata["retry_exhausted"] is True
+    assert len(str(retry_metadata["diagnostic"])) <= 1000 + len("...[truncated]")
+
+
+@pytest.mark.unit
+async def test_deterministic_setup_failure_is_not_retried(tmp_path: Path) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=2,
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+        }
+    )
+    fake.queue_result(
+        returncode=1,
+        stderr=(
+            "error: Failed to resolve dependencies\n"
+            "  Caused by: No solution found when resolving dependencies\n"
+            "  lockfile is out of date"
+        ),
+    )
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert not result.all_passed
+    assert len(fake.calls) == 1
+    assert result.commands[0].reason_code == "COMMAND_FAILED"
+    assert "setup_dependency_network" not in result.commands[0].metadata
+
+
+@pytest.mark.unit
+async def test_setup_dependency_retry_logs_redact_and_truncate_command_credentials(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=1,
+        setup_retry_backoff_seconds=(0,),
+    )
+    raw_secret = "ghp_1234567890abcdef"
+    long_secret_command = (
+        "uv sync --extra dev "
+        f"--index-url https://user:{raw_secret}@files.pythonhosted.org/simple "
+        + ("--config-setting xxxxxxxxxx " * 80)
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": [long_secret_command]},
+        }
+    )
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+
+    with structlog.testing.capture_logs() as captured:
+        result = await val.run_profile_phases(
+            workspace_id="ws_setup_retry_secret_command",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("setup",),
+        )
+
+    assert not result.all_passed
+    retry_log = next(
+        event for event in captured if event["event"] == "validation.setup_dependency_network_retry"
+    )
+    exhausted_log = next(
+        event
+        for event in captured
+        if event["event"] == "validation.setup_dependency_network_retry_exhausted"
+    )
+    assert retry_log["reason_code"] == SETUP_DEPENDENCY_NETWORK_RETRY
+    assert exhausted_log["reason_code"] == SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED
+    for log_entry in (retry_log, exhausted_log):
+        command = str(log_entry["command"])
+        assert raw_secret not in command
+        assert f"user:{raw_secret}" not in command
+        assert "https://[redacted]@files.pythonhosted.org/simple" in command
+        assert command.endswith("...[truncated]")
+        assert len(command) <= 500 + len("...[truncated]")
+
+
+@pytest.mark.unit
+async def test_setup_dependency_retry_preserves_metadata_when_later_failure_reclassifies(
+    tmp_path: Path,
+) -> None:
+    fake = FakeCommandRunner()
+    val = ValidationRunner(
+        runner=fake,
+        artifacts_dir=tmp_path / "artifacts",
+        setup_retry_budget=2,
+        setup_retry_backoff_seconds=(0,),
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "setup-retry",
+            "phases": {"setup": ["uv sync --extra dev"]},
+        }
+    )
+    fake.queue_result(returncode=1, stderr=_uv_pypi_dns_failure())
+    fake.queue_result(returncode=1, stderr="local post-install hook failed")
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_setup_retry",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("setup",),
+    )
+
+    assert not result.all_passed
+    assert len(fake.calls) == 2
+    assert result.commands[0].reason_code == "COMMAND_FAILED"
+    assert result.commands[0].retry_count == 1
+    retry_metadata = result.commands[0].metadata["setup_dependency_network"]
+    assert retry_metadata["retry_count"] == 1
+    assert retry_metadata["retry_budget"] == 2
+    assert retry_metadata["retry_exhausted"] is False
+    assert retry_metadata["recovered"] is False
+    assert retry_metadata["package"] == "docker==7.1.0"
+    assert retry_metadata["host"] == "files.pythonhosted.org"
+    assert retry_metadata["attempts"][0]["attempt"] == 1
+    assert retry_metadata["attempts"][0]["retry_number"] == 1
+
+
+@pytest.mark.unit
+def test_setup_dependency_network_diagnostic_normalization_uses_bounded_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized_lengths: list[int] = []
+    original_sub = validation_module.re.sub
+
+    def record_normalized_input(
+        pattern: str,
+        repl: str,
+        string: str,
+        count: int = 0,
+        flags: int = 0,
+    ) -> str:
+        normalized_lengths.append(len(string))
+        return original_sub(pattern, repl, string, count=count, flags=flags)
+
+    monkeypatch.setattr(validation_module.re, "sub", record_normalized_input)
+
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="progress line\n" * 1000,
+        stderr=_uv_pypi_dns_failure(),
+    )
+
+    assert classification is not None
+    assert normalized_lengths
+    assert max(normalized_lengths) <= (
+        4 * validation_module._SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT
+    )
+
+
+@pytest.mark.unit
+def test_setup_dependency_diagnostics_redact_and_truncate_secret_output() -> None:
+    raw_secret = "ghp_1234567890abcdef"
+    classification = _classify_setup_dependency_network_failure(
+        command="uv sync --extra dev",
+        returncode=1,
+        stdout="",
+        stderr=(
+            _uv_pypi_dns_failure()
+            + "\nhttps://user:pass@files.pythonhosted.org/simple/docker/"
+            + f"\nAuthorization: Bearer {raw_secret}"
+            + "\nPIP_INDEX_URL=https://token:secret@files.pythonhosted.org/simple"
+            + "\n"
+            + ("DNS timeout while downloading docker==7.1.0 " * 200)
+        ),
+    )
+
+    assert classification is not None
+    diagnostic = str(classification.metadata["diagnostic"])
+    assert raw_secret not in diagnostic
+    assert "user:pass" not in diagnostic
+    assert "token:secret" not in diagnostic
+    assert "[redacted]" in diagnostic
+    assert diagnostic.endswith("...[truncated]")
+    assert len(diagnostic) <= 1000 + len("...[truncated]")
 
 
 @pytest.mark.unit
