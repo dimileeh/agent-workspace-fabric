@@ -4140,6 +4140,43 @@ def test_call_pr_monitor_factory_uses_widest_supported_signature() -> None:
 
 
 @pytest.mark.unit
+def test_call_pr_monitor_factory_passes_provider_recovery_default_when_supported() -> None:
+    calls: list[tuple[object, object, object, str | None]] = []
+    adapter = object()
+    profile = WorkspaceProfile.model_validate({"name": "factory-profile"})
+    workspace = object()
+
+    def factory(
+        adapter_arg: object,
+        profile_arg: object,
+        workspace_arg: object,
+        *,
+        provider_recovery_default_model: str | None = None,
+    ) -> object:
+        calls.append(
+            (
+                adapter_arg,
+                profile_arg,
+                workspace_arg,
+                provider_recovery_default_model,
+            )
+        )
+        return "monitor"
+
+    assert (
+        _call_pr_monitor_factory(
+            factory,
+            adapter=adapter,  # type: ignore[arg-type]
+            profile=profile,
+            workspace=workspace,  # type: ignore[arg-type]
+            provider_recovery_default_model="gpt-5",
+        )
+        == "monitor"
+    )
+    assert calls == [(adapter, profile, workspace, "gpt-5")]
+
+
+@pytest.mark.unit
 def test_call_pr_monitor_factory_uses_two_argument_fallback_when_signature_is_opaque() -> None:
     class _OpaqueFactory:
         @property

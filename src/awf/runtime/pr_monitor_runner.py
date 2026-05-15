@@ -232,6 +232,7 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
+_MONITOR_POLICY_BLOCKED_REASON = "MONITOR_POLICY_BLOCKED"
 _GIT_FETCH_BASE_FAILED_REASON = "GIT_FETCH_BASE_FAILED"
 _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON = "GIT_BASE_FETCH_TRANSIENT_RETRY"
 _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON = "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
@@ -358,6 +359,7 @@ class _RunnerDeps:
     adapter: AgentAdapter
     gh: GitHubClient
     sleep: Callable[[float], Awaitable[None]]
+    provider_recovery_default_model: str | None = None
     log_store: LogStore | None = None
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None
 
@@ -413,6 +415,7 @@ class _GitPushResult:
 class _ProtectedScopePushBlock:
     message: str
     reason_code: str
+    violations: tuple[QualityGateViolation, ...] = ()
 
 
 def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
@@ -478,6 +481,7 @@ class PullRequestMonitorRunner:
         merge_coordinator: MergeCoordinator | None = None,
         post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
         workspace_runtime_context: str = "",
+        provider_recovery_default_model: str | None = None,
     ) -> None:
         self._deps = _RunnerDeps(
             session_factory=session_factory,
@@ -485,6 +489,7 @@ class PullRequestMonitorRunner:
             adapter=adapter,
             gh=gh,
             sleep=sleep,
+            provider_recovery_default_model=provider_recovery_default_model,
             log_store=log_store,
             post_merge_target_reconciler=post_merge_target_reconciler,
         )
@@ -882,13 +887,18 @@ class PullRequestMonitorRunner:
         self,
         workspace_id: str,
         exc: AgentRunError,
-    ) -> Literal["fallback", "retry", "auth_failed", "deterministic"]:
+    ) -> Literal["fallback", "retry", "auth_failed", "terminal", "deterministic"]:
         message = exc.result.stderr.strip() or exc.result.stdout.strip()
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
             if ws is None:
                 return "deterministic"
+            effective_default_model = (
+                self._deps.provider_recovery_default_model
+                if self._deps.provider_recovery_default_model is not None
+                else self._deps.adapter.default_model
+            )
             metadata = provider_recovery_metadata_from_failure(
                 reason_code=exc.reason_code,
                 message=message,
@@ -902,11 +912,14 @@ class PullRequestMonitorRunner:
                 s,
                 workspace_id,
                 metadata=metadata,
+                effective_default_model=effective_default_model,
             )
             await s.commit()
             if provider_auth_failed:
                 return "auth_failed"
-            if result == "terminal" or result == "stale":
+            if result == "terminal":
+                return "terminal"
+            if result == "stale":
                 return "deterministic"
             if result is not None and result.action == "fallback" and not result.in_place:
                 return "fallback"
@@ -918,7 +931,7 @@ class PullRequestMonitorRunner:
         exc: AgentRunError,
         *,
         state: MonitorState | None = None,
-    ) -> None:
+    ) -> Literal["fallback", "retry", "auth_failed", "terminal", "deterministic"]:
         if state is not None:
             await self._persist_state(workspace_id, state)
         action = await self._record_provider_agent_run_error(workspace_id, exc)
@@ -928,6 +941,7 @@ class PullRequestMonitorRunner:
             raise ProviderRecoveryRetryError()
         if action == "auth_failed":
             raise ProviderRecoveryAuthError() from exc
+        return action
 
     async def _record_pr_monitor_audit_event(
         self,
@@ -1588,6 +1602,7 @@ class PullRequestMonitorRunner:
                     state,
                     head_sha=status.head_sha,
                     failures=action.failures,
+                    legacy_failures=status.ci_failures,
                 )
                 + 1
             )
@@ -1644,6 +1659,7 @@ class PullRequestMonitorRunner:
                 state,
                 head_sha=status.head_sha,
                 failures=action.failures,
+                legacy_failures=status.ci_failures,
             )
             event_payload["attempt"] = recorded_attempt
             await self._persist_state(workspace_id, state)
@@ -1840,6 +1856,12 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     remote_branch=remote_branch,
                     remote_push_url=remote_push_url,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    operation_id=operation.operation_id if operation is not None else None,
+                    operation_type=OperationType.ci_repair.value,
+                    monitor_log=monitor_log,
                 )
             except ProviderRecoveryRetryError:
                 await self._finish_monitor_operation(
@@ -3755,6 +3777,14 @@ class PullRequestMonitorRunner:
                         compose_file=compose_file,
                         state=state,
                     )
+                except ProtectedScopeDiffError as exc:
+                    for item_id in publish_dependent_ids:
+                        _clear_addressed_state_by_id(state, item_id)
+                    return await self._protected_scope_diff_unavailable_push_result(
+                        workspace_id=workspace_id,
+                        remote_branch=remote_branch,
+                        exc=exc,
+                    )
                 except _MonitorPolicyBlockedError as exc:
                     return _GitPushResult(
                         pushed=False,
@@ -3776,6 +3806,14 @@ class PullRequestMonitorRunner:
                         compose_project=compose_project,
                         compose_file=compose_file,
                         state=state,
+                    )
+                except ProtectedScopeDiffError as exc:
+                    for item_id in publish_dependent_ids:
+                        _clear_addressed_state_by_id(state, item_id)
+                    return await self._protected_scope_diff_unavailable_push_result(
+                        workspace_id=workspace_id,
+                        remote_branch=remote_branch,
+                        exc=exc,
                     )
                 except _MonitorPolicyBlockedError as exc:
                     return _GitPushResult(
@@ -4298,6 +4336,12 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         remote_branch: str,
         remote_push_url: str | None = None,
+        status: PRStatus | None = None,
+        state: MonitorState | None = None,
+        base_branch: str = "",
+        operation_id: str | None = None,
+        operation_type: str | None = None,
+        monitor_log: WorkspaceLogSink | None = None,
     ) -> _GitPushResult:
         prompt = fix_ci_prompt(
             pr_number=pr_number,
@@ -4337,12 +4381,19 @@ class PullRequestMonitorRunner:
                 compose_file=compose_file,
                 command_evidence=command_evidence,
             )
+        except ProtectedScopeDiffError as exc:
+            return await self._protected_scope_diff_unavailable_push_result(
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                exc=exc,
+            )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(
                 pushed=False,
                 failed=True,
                 returncode=1,
                 stderr=str(exc),
+                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
             )
 
         if agent_run_err is not None:
@@ -4358,12 +4409,20 @@ class PullRequestMonitorRunner:
             remote_push_url=remote_push_url,
         )
         if protected_scope_block is not None:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=protected_scope_block.message,
-                reason_code=protected_scope_block.reason_code,
+            return await self._repair_protected_scope_commits_before_push(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                protected_scope_block=protected_scope_block,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                remote_branch=remote_branch,
+                remote_push_url=remote_push_url,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
             )
         return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
@@ -4382,6 +4441,8 @@ class PullRequestMonitorRunner:
         compose_file: Path | None = None,
         state: MonitorState | None = None,
         command_evidence: Sequence[str] = (),
+        protected_scope_revert_remote_branch: str | None = None,
+        remote_push_url: str | None = None,
     ) -> bool:
         """Commit dirty monitor-agent edits so PR feedback is not stranded.
 
@@ -4423,6 +4484,8 @@ class PullRequestMonitorRunner:
                 compose_project=compose_project,
                 compose_file=compose_file,
                 state=state,
+                protected_scope_revert_remote_branch=protected_scope_revert_remote_branch,
+                remote_push_url=remote_push_url,
             )
             if repaired_status is None:
                 return False
@@ -4456,6 +4519,197 @@ class PullRequestMonitorRunner:
         _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
         return True
 
+    async def _repair_protected_scope_commits_before_push(
+        self,
+        *,
+        workspace_id: str,
+        pr_number: int,
+        protected_scope_block: _ProtectedScopePushBlock,
+        compose_project: str,
+        compose_file: Path,
+        remote_branch: str,
+        remote_push_url: str | None = None,
+        status: PRStatus | None = None,
+        state: MonitorState | None = None,
+        base_branch: str = "",
+        operation_id: str | None = None,
+        operation_type: str | None = None,
+        monitor_log: WorkspaceLogSink | None = None,
+    ) -> _GitPushResult:
+        """Ask the monitor agent to remove committed protected-scope edits once."""
+
+        if (
+            protected_scope_block.reason_code != _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
+            or not protected_scope_block.violations
+        ):
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=protected_scope_block.message,
+                reason_code=protected_scope_block.reason_code,
+            )
+
+        violations = list(protected_scope_block.violations)
+        paths = [violation.path for violation in violations]
+        prompt = await self._protected_scope_committed_repair_prompt(
+            workspace_id=workspace_id,
+            violations=violations,
+        )
+        await self._record_pr_monitor_audit_event(
+            workspace_id=workspace_id,
+            event_type=_AUDIT_GIT_PUSH_EVENT,
+            action="protected_scope_repair",
+            outcome="requested",
+            reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+            pr_number=pr_number,
+            status=status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+            evidence={
+                "phase": "pre_push_committed_diff",
+                "paths": paths,
+                "protected_patterns": [violation.protected_pattern for violation in violations],
+                "message": protected_scope_block.message,
+            },
+        )
+        _log.warning(
+            "monitor.protected_scope_committed_repair_requested",
+            workspace_id=workspace_id,
+            paths=paths,
+        )
+        if await self._provider_recovery_suppresses_cli(workspace_id):
+            raise ProviderRecoveryRetryError()
+
+        worktree_path = self._worktrees_root / workspace_id
+        head_before_repair = await self._rev_parse_head(worktree_path)
+        command_evidence: list[str] = []
+        agent_run_err = None
+        try:
+            result = await self._deps.adapter.run(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
+                workspace_id=workspace_id,
+                log_source="recovery",
+            )
+            append_command_evidence(command_evidence, stdout=result.stdout, stderr=result.stderr)
+        except AgentRunError as exc:
+            agent_run_err = exc
+            append_command_evidence(
+                command_evidence,
+                stdout=exc.result.stdout,
+                stderr=exc.result.stderr,
+            )
+
+        if agent_run_err is not None:
+            provider_error_action = await self._handle_provider_agent_run_error(
+                workspace_id,
+                agent_run_err,
+                state=state,
+            )
+            if provider_error_action == "terminal":
+                _log.warning(
+                    "monitor.protected_scope_committed_repair_cli_failed",
+                    workspace_id=workspace_id,
+                    stderr=agent_run_err.result.stderr[:400],
+                )
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=protected_scope_block.message,
+                    reason_code=protected_scope_block.reason_code,
+                )
+
+        head_after_repair = await self._rev_parse_head(worktree_path)
+        history_rewritten = bool(
+            head_before_repair and head_after_repair and head_before_repair != head_after_repair
+        )
+        try:
+            committed_dirty_changes = await self._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message=f"fix: remove protected-scope edits for PR #{pr_number}",
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                command_evidence=command_evidence,
+                protected_scope_revert_remote_branch=remote_branch,
+                remote_push_url=remote_push_url,
+            )
+            if not committed_dirty_changes:
+                dirty_status = await self._deps.runner.run(
+                    ["git", "-C", str(worktree_path), "status", "--porcelain"]
+                )
+                if not dirty_status.ok or dirty_status.stdout.strip():
+                    _log.error(
+                        "monitor.protected_scope_committed_repair_dirty_after_commit_failed",
+                        workspace_id=workspace_id,
+                        paths=paths,
+                        remote_branch=remote_branch,
+                        returncode=dirty_status.returncode,
+                        stderr=dirty_status.stderr[:400],
+                        reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                    )
+                    return _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=dirty_status.returncode if not dirty_status.ok else 1,
+                        stderr="Protected-scope repair left uncommitted changes.",
+                        reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                    )
+                _log.warning(
+                    "monitor.protected_scope_committed_repair_commit_not_created",
+                    workspace_id=workspace_id,
+                    paths=paths,
+                    remote_branch=remote_branch,
+                    history_rewritten=history_rewritten,
+                )
+        except ProtectedScopeDiffError as exc:
+            return await self._protected_scope_diff_unavailable_push_result(
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                exc=exc,
+            )
+        except _MonitorPolicyBlockedError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+            )
+
+        if agent_run_err is not None:
+            _log.warning(
+                "monitor.protected_scope_committed_repair_cli_failed",
+                workspace_id=workspace_id,
+                stderr=agent_run_err.result.stderr[:400],
+            )
+
+        remaining_block = await self._protected_scope_push_block(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+        if remaining_block is not None:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=remaining_block.message,
+                reason_code=remaining_block.reason_code,
+            )
+        return await self._git_push_result(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_url=remote_push_url,
+        )
+
     async def _repair_protected_scope_changes_before_commit(
         self,
         *,
@@ -4464,6 +4718,8 @@ class PullRequestMonitorRunner:
         compose_project: str,
         compose_file: Path,
         state: MonitorState | None = None,
+        protected_scope_revert_remote_branch: str | None = None,
+        remote_push_url: str | None = None,
     ) -> CommandResult | None:
         """Give the agent one chance to remove protected out-of-scope edits.
 
@@ -4477,6 +4733,17 @@ class PullRequestMonitorRunner:
             workspace_id=workspace_id,
             status_stdout=status_stdout,
         )
+        if violations and protected_scope_revert_remote_branch is not None:
+            filtered_violations = (
+                await self._protected_scope_violations_not_restored_to_remote_branch(
+                    workspace_id=workspace_id,
+                    status_stdout=status_stdout,
+                    violations=violations,
+                    remote_branch=protected_scope_revert_remote_branch,
+                    remote_push_url=remote_push_url,
+                )
+            )
+            violations = filtered_violations
         if not violations:
             return CommandResult(returncode=0, stdout=status_stdout, stderr="")
 
@@ -4514,6 +4781,17 @@ class PullRequestMonitorRunner:
             workspace_id=workspace_id,
             status_stdout=repaired_status.stdout,
         )
+        if remaining and protected_scope_revert_remote_branch is not None:
+            filtered_remaining = (
+                await self._protected_scope_violations_not_restored_to_remote_branch(
+                    workspace_id=workspace_id,
+                    status_stdout=repaired_status.stdout,
+                    violations=remaining,
+                    remote_branch=protected_scope_revert_remote_branch,
+                    remote_push_url=remote_push_url,
+                )
+            )
+            remaining = filtered_remaining
         if remaining:
             _log.warning(
                 "monitor.protected_scope_repair_failed",
@@ -4544,6 +4822,135 @@ class PullRequestMonitorRunner:
             paths=[violation.path for violation in violations],
         )
         return repaired_status
+
+    async def _protected_scope_violations_not_restored_to_remote_branch(
+        self,
+        *,
+        workspace_id: str,
+        status_stdout: str,
+        violations: list[QualityGateViolation],
+        remote_branch: str,
+        remote_push_url: str | None = None,
+    ) -> list[QualityGateViolation]:
+        """Filter out protected dirty paths that restore the remote PR branch tree."""
+
+        if not violations:
+            return []
+        untracked_paths = set(_untracked_paths_from_porcelain(status_stdout))
+        worktree_path = self._worktrees_root / workspace_id
+        remote = remote_push_url or "origin"
+        fetch_result = await self._deps.runner.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "fetch",
+                remote,
+                f"refs/heads/{remote_branch}",
+            ]
+        )
+        if not fetch_result.ok:
+            message = (
+                "Could not verify protected-scope restore against the remote PR branch: "
+                f"fetch refs/heads/{remote_branch} exit={fetch_result.returncode} "
+                f"stdout={fetch_result.stdout.strip() or '<empty>'} "
+                f"stderr={fetch_result.stderr.strip() or '<empty>'}"
+            )
+            _log.warning(
+                "monitor.protected_scope_revert_baseline_fetch_failed",
+                workspace_id=workspace_id,
+                stderr=fetch_result.stderr[:400],
+            )
+            raise ProtectedScopeDiffError(message)
+
+        remaining: list[QualityGateViolation] = []
+        restored_paths: list[str] = []
+        for violation in violations:
+            if violation.path in untracked_paths:
+                remote_blob_result = await self._deps.runner.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_path),
+                        "rev-parse",
+                        "--verify",
+                        f"FETCH_HEAD:{violation.path}^{{blob}}",
+                    ]
+                )
+                if not remote_blob_result.ok:
+                    remaining.append(violation)
+                    continue
+                worktree_blob_result = await self._deps.runner.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_path),
+                        "hash-object",
+                        "--path",
+                        violation.path,
+                        "--",
+                        violation.path,
+                    ]
+                )
+                if not worktree_blob_result.ok:
+                    message = (
+                        "Could not verify protected-scope restore against the remote PR branch: "
+                        f"hash-object --path {violation.path} exit={worktree_blob_result.returncode} "
+                        f"stdout={worktree_blob_result.stdout.strip() or '<empty>'} "
+                        f"stderr={worktree_blob_result.stderr.strip() or '<empty>'}"
+                    )
+                    _log.warning(
+                        "monitor.protected_scope_revert_diff_failed",
+                        workspace_id=workspace_id,
+                        path=violation.path,
+                        stderr=worktree_blob_result.stderr[:400],
+                    )
+                    raise ProtectedScopeDiffError(message)
+                if remote_blob_result.stdout.strip() == worktree_blob_result.stdout.strip():
+                    restored_paths.append(violation.path)
+                    continue
+                remaining.append(violation)
+                continue
+
+            diff_result = await self._deps.runner.run(
+                [
+                    "git",
+                    "-C",
+                    str(worktree_path),
+                    "diff",
+                    "--quiet",
+                    "FETCH_HEAD",
+                    "--",
+                    violation.path,
+                ]
+            )
+            if diff_result.returncode == 0:
+                restored_paths.append(violation.path)
+                continue
+            if diff_result.returncode == 1:
+                remaining.append(violation)
+                continue
+            message = (
+                "Could not verify protected-scope restore against the remote PR branch: "
+                f"diff FETCH_HEAD -- {violation.path} exit={diff_result.returncode} "
+                f"stdout={diff_result.stdout.strip() or '<empty>'} "
+                f"stderr={diff_result.stderr.strip() or '<empty>'}"
+            )
+            _log.warning(
+                "monitor.protected_scope_revert_diff_failed",
+                workspace_id=workspace_id,
+                path=violation.path,
+                stderr=diff_result.stderr[:400],
+            )
+            raise ProtectedScopeDiffError(message)
+
+        if restored_paths:
+            _log.info(
+                "monitor.protected_scope_revert_verified",
+                workspace_id=workspace_id,
+                paths=restored_paths,
+            )
+        return remaining
 
     async def _protected_scope_violations_for_status(
         self,
@@ -4733,6 +5140,58 @@ class PullRequestMonitorRunner:
             owned_paths=owned_paths,
         )
 
+    async def _protected_scope_diff_unavailable_block(
+        self,
+        *,
+        workspace_id: str,
+        remote_branch: str,
+        exc: ProtectedScopeDiffError,
+    ) -> _ProtectedScopePushBlock:
+        redacted_error = redact_audit_text(str(exc), limit=1000)
+        message = (
+            "AWF could not verify protected-scope changes before push; "
+            "refusing to push this repair until the PR branch diff baseline "
+            f"is available. {redacted_error}"
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="workspace.monitor_protected_scope_push_blocked",
+                    reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                    payload={
+                        "reason": "diff_baseline_unavailable",
+                        "remote_branch": remote_branch,
+                        "error": redacted_error,
+                    },
+                )
+            ],
+        )
+        return _ProtectedScopePushBlock(
+            message=message,
+            reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+        )
+
+    async def _protected_scope_diff_unavailable_push_result(
+        self,
+        *,
+        workspace_id: str,
+        remote_branch: str,
+        exc: ProtectedScopeDiffError,
+    ) -> _GitPushResult:
+        block = await self._protected_scope_diff_unavailable_block(
+            workspace_id=workspace_id,
+            remote_branch=remote_branch,
+            exc=exc,
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=block.message,
+            reason_code=block.reason_code,
+        )
+
     async def _protected_scope_push_block(
         self,
         *,
@@ -4761,29 +5220,10 @@ class PullRequestMonitorRunner:
                     remote_push_url=remote_push_url,
                 )
         except ProtectedScopeDiffError as exc:
-            redacted_error = redact_audit_text(str(exc), limit=1000)
-            message = (
-                "AWF could not verify protected-scope changes before push; "
-                "refusing to push this repair until the PR branch diff baseline "
-                f"is available. {redacted_error}"
-            )
-            await self._append_workspace_events(
+            return await self._protected_scope_diff_unavailable_block(
                 workspace_id=workspace_id,
-                events=[
-                    WorkspaceEventCreate(
-                        event_type="workspace.monitor_protected_scope_push_blocked",
-                        reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
-                        payload={
-                            "reason": "diff_baseline_unavailable",
-                            "remote_branch": remote_branch,
-                            "error": redacted_error,
-                        },
-                    )
-                ],
-            )
-            return _ProtectedScopePushBlock(
-                message=message,
-                reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                remote_branch=remote_branch,
+                exc=exc,
             )
         if not violations:
             return None
@@ -4807,6 +5247,7 @@ class PullRequestMonitorRunner:
         return _ProtectedScopePushBlock(
             message=message,
             reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+            violations=tuple(violations),
         )
 
     async def _protected_scope_repair_prompt(
@@ -4815,14 +5256,10 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         violations: list[QualityGateViolation],
     ) -> str:
-        async with self._deps.session_factory() as session:
-            workspace = await WorkspaceRepository(session).get(workspace_id)
-            owned_paths = list(workspace.owned_paths) if workspace is not None else []
-        paths = "\n".join(
-            f"  - {violation.path} (protected by {violation.protected_pattern})"
-            for violation in violations
+        paths, owned = await self._protected_scope_prompt_sections(
+            workspace_id=workspace_id,
+            violations=violations,
         )
-        owned = "\n".join(f"  - {path}" for path in owned_paths) or "  - (none declared)"
         return (
             "Your previous PR-monitor repair changed protected file(s) outside "
             "this workspace's declared owned_paths.\n\n"
@@ -4838,6 +5275,49 @@ class PullRequestMonitorRunner:
             "Make the smallest corrective edit now. AWF will re-check the diff "
             "before it commits or pushes."
         )
+
+    async def _protected_scope_committed_repair_prompt(
+        self,
+        *,
+        workspace_id: str,
+        violations: list[QualityGateViolation],
+    ) -> str:
+        paths, owned = await self._protected_scope_prompt_sections(
+            workspace_id=workspace_id,
+            violations=violations,
+        )
+        return (
+            "Your previous PR-monitor repair committed protected file(s) outside "
+            "this workspace's declared owned_paths.\n\n"
+            f"Protected out-of-scope changes already committed locally:\n{paths}\n\n"
+            f"Declared owned_paths:\n{owned}\n\n"
+            "These protected edits are already committed locally in the branch diff "
+            "AWF is about to push. Remove the protected-file changes from branch "
+            "history relative to the PR head by making a reverting commit or "
+            "rewriting local commits, then keep the PR feedback resolution inside "
+            "the declared scope. Do not only clean the worktree; the committed diff "
+            "must no longer contain these protected paths. If the protected change "
+            "is truly required, remove it from the branch history and explain that "
+            "human/orchestrator approval is needed.\n\n"
+            "Make the smallest corrective edit now. AWF will re-check the committed "
+            "diff before it pushes."
+        )
+
+    async def _protected_scope_prompt_sections(
+        self,
+        *,
+        workspace_id: str,
+        violations: list[QualityGateViolation],
+    ) -> tuple[str, str]:
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            owned_paths = list(workspace.owned_paths) if workspace is not None else []
+        paths = "\n".join(
+            f"  - {violation.path} (protected by {violation.protected_pattern})"
+            for violation in violations
+        )
+        owned = "\n".join(f"  - {path}" for path in owned_paths) or "  - (none declared)"
+        return paths, owned
 
     def _record_sync_base_progress(
         self,
@@ -6294,15 +6774,20 @@ def _ci_transient_rerun_attempt(
     *,
     head_sha: str,
     failures: tuple[CheckFailure, ...],
+    legacy_failures: tuple[CheckFailure, ...] | None = None,
 ) -> int:
     key = _ci_transient_rerun_state_key(head_sha, failures)
-    raw_count = state.threads_addressed_ids.get(key, "0")
-    try:
-        current = int(raw_count)
-    except ValueError:
-        current = 0
+    current = _ci_transient_rerun_count(
+        state,
+        head_sha=head_sha,
+        failures=failures,
+        legacy_failures=legacy_failures,
+    )
     attempt = current + 1
     state.threads_addressed_ids[key] = str(attempt)
+    if legacy_failures is not None and legacy_failures != failures:
+        legacy_key = _ci_transient_rerun_state_key(head_sha, legacy_failures)
+        state.threads_addressed_ids.pop(legacy_key, None)
     return attempt
 
 
@@ -6917,6 +7402,16 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
             paths.extend([old_path, new_path])
         else:
             paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
+def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
+    """Extract untracked paths from ``git status --porcelain`` output."""
+    paths: list[str] = []
+    for line in status_stdout.splitlines():
+        if not line.startswith("?? "):
+            continue
+        paths.append(line[3:])
     return list(dict.fromkeys(paths))
 
 
