@@ -67,13 +67,15 @@ _CONTROL_IDEMPOTENCY_KEY_HELP = (
 _MIN_RICH_HELP_WIDTH = 80
 
 
-def _configure_rich_help_width() -> None:
-    configured_width = typer_rich_utils.MAX_WIDTH
-    terminal_width = shutil.get_terminal_size(fallback=(_MIN_RICH_HELP_WIDTH, 24)).columns
-    typer_rich_utils.MAX_WIDTH = max(configured_width or terminal_width, _MIN_RICH_HELP_WIDTH)
-
-
-_configure_rich_help_width()
+class _MinRichHelpWidthCommand(typer.core.TyperCommand):
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        configured_width = typer_rich_utils.MAX_WIDTH
+        terminal_width = shutil.get_terminal_size(fallback=(_MIN_RICH_HELP_WIDTH, 24)).columns
+        typer_rich_utils.MAX_WIDTH = max(configured_width or terminal_width, _MIN_RICH_HELP_WIDTH)
+        try:
+            super().format_help(ctx, formatter)
+        finally:
+            typer_rich_utils.MAX_WIDTH = configured_width
 
 
 app = typer.Typer(
@@ -1922,7 +1924,7 @@ def workspace_rebase(
     _handle_response(response, fmt)
 
 
-@workspace_app.command("adopt-pr")
+@workspace_app.command("adopt-pr", cls=_MinRichHelpWidthCommand)
 def workspace_adopt_pr(
     repo: str | None = typer.Option(
         None,

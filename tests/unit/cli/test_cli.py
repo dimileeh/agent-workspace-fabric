@@ -1218,16 +1218,14 @@ class TestWorkspaceAdoptPr:
     ) -> None:
         import typer.rich_utils as typer_rich_utils
 
-        from awf.cli.main import _configure_rich_help_width
-
         monkeypatch.setattr(typer_rich_utils, "MAX_WIDTH", 30)
-        _configure_rich_help_width()
 
         result = _runner.invoke(app, ["workspace", "adopt-pr", "--help"])
 
         assert result.exit_code == 0
         assert "--model" in result.stdout
         assert "--effort" in result.stdout
+        assert typer_rich_utils.MAX_WIDTH == 30
 
     @pytest.mark.unit
     def test_posts_pr_url_without_repo_fields(self) -> None:
