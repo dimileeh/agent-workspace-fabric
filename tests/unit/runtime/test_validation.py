@@ -644,6 +644,20 @@ def test_setup_dependency_network_classifier_accepts_pnpm_filter_flags_before_su
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_accepts_pnpm_dir_flag_before_subcommand() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pnpm --dir apps/console install",
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "command",
     [

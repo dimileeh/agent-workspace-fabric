@@ -536,6 +536,7 @@ _SETUP_DEPENDENCY_OPTION_VALUE_FLAGS = frozenset(
         "--client-cert",
         "--config",
         "--cwd",
+        "--dir",
         "--directory",
         "--exists-action",
         "--file",
