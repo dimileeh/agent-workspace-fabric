@@ -4599,6 +4599,7 @@ class PullRequestMonitorRunner:
         if agent_run_err is not None:
             await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
 
+        worktree_path = self._worktrees_root / workspace_id
         try:
             committed_dirty_changes = await self._commit_dirty_worktree(
                 workspace_id=workspace_id,
@@ -4611,6 +4612,26 @@ class PullRequestMonitorRunner:
                 remote_push_url=remote_push_url,
             )
             if not committed_dirty_changes:
+                dirty_status = await self._deps.runner.run(
+                    ["git", "-C", str(worktree_path), "status", "--porcelain"]
+                )
+                if not dirty_status.ok or dirty_status.stdout.strip():
+                    _log.error(
+                        "monitor.protected_scope_committed_repair_dirty_after_commit_failed",
+                        workspace_id=workspace_id,
+                        paths=paths,
+                        remote_branch=remote_branch,
+                        returncode=dirty_status.returncode,
+                        stderr=dirty_status.stderr[:400],
+                        reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                    )
+                    return _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=dirty_status.returncode if not dirty_status.ok else 1,
+                        stderr="Protected-scope repair left uncommitted changes.",
+                        reason_code=_PROTECTED_SCOPE_REPAIR_FAILED_REASON,
+                    )
                 _log.warning(
                     "monitor.protected_scope_committed_repair_commit_not_created",
                     workspace_id=workspace_id,
@@ -4640,7 +4661,6 @@ class PullRequestMonitorRunner:
                 stderr=agent_run_err.result.stderr[:400],
             )
 
-        worktree_path = self._worktrees_root / workspace_id
         remaining_block = await self._protected_scope_push_block(
             workspace_id=workspace_id,
             worktree_path=worktree_path,

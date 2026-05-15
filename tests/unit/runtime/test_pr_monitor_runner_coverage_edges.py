@@ -4018,6 +4018,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
     cmd.queue_result(returncode=0, stdout="")  # repair agent committed locally itself
+    cmd.queue_result(returncode=0, stdout="")  # no dirty repair edits after no-op commit
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
@@ -4272,6 +4273,72 @@ async def test_protected_scope_commit_repair_logs_when_dirty_commit_not_created(
         and event.get("paths") == [".github/workflows/ci.yml"]
         for event in captured
     )
+
+
+@pytest.mark.unit
+async def test_protected_scope_commit_repair_fails_when_commit_returns_false_with_dirty_worktree(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted protected-scope repair")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    remote_branch = f"awf/{workspace_id}"
+
+    async def _no_commit_created(**kwargs: object) -> bool:
+        assert kwargs["protected_scope_revert_remote_branch"] == remote_branch
+        return False
+
+    async def _unexpected_protected_scope_push_block(**_kwargs: object) -> None:
+        pytest.fail("dirty repair edits must abort before committed-diff push recheck")
+
+    async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("dirty repair edits must abort before git push")
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _no_commit_created)
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_push_block",
+        _unexpected_protected_scope_push_block,
+    )
+    monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
+
+    push_result = await runner._repair_protected_scope_commits_before_push(
+        workspace_id=workspace_id,
+        pr_number=42,
+        protected_scope_block=_ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            violations=(
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                ),
+            ),
+        ),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=remote_branch,
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.returncode == 1
+    assert push_result.reason_code == "PROTECTED_SCOPE_REPAIR_FAILED"
+    assert "uncommitted changes" in push_result.stderr
+    assert [call.args[-2:] for call in cmd.calls] == [["status", "--porcelain"]]
 
 
 @pytest.mark.unit
