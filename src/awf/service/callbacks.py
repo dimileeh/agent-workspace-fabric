@@ -277,28 +277,12 @@ class CallbackDeliveryService:
                             timeout=delivery_timeout,
                         )
                     except CallbackTargetValidationTimeoutError as exc:
-                        _log.warning(
-                            "callback.delivery_target_validation_timeout",
-                            delivery_id=delivery.id,
-                            subscription_id=subscription.id,
-                            event_kind=delivery.event_kind,
-                            event_type=delivery.event_type,
-                            source_id=delivery.source_id,
-                            workspace_id=delivery.workspace_id,
-                            operation_id=delivery.operation_id,
-                            merge_candidate_id=delivery.merge_candidate_id,
-                            error_code="CALLBACK_TARGET_VALIDATION_TIMEOUT",
-                            error_message=redact_audit_text(str(exc), limit=256),
-                        )
-                        await repo.mark_failed_or_retry(
+                        await _record_callback_target_validation_timeout(
+                            repo,
                             delivery,
-                            error_code="CALLBACK_TARGET_VALIDATION_TIMEOUT",
-                            error_message=_bounded_error_message(
-                                f"Callback target validation timed out: {exc}"
-                            ),
-                            response_status_code=None,
-                            backoff_seconds=subscription.initial_backoff_seconds,
-                            now=self._clock(),
+                            subscription,
+                            exc,
+                            now=self._clock,
                         )
                         continue
                     except ValueError as exc:
@@ -329,7 +313,7 @@ class CallbackDeliveryService:
 
                     remaining_timeout = delivery_deadline - monotonic_clock()
                     if remaining_timeout <= 0:
-                        raise TimeoutError(
+                        raise CallbackTargetValidationTimeoutError(
                             "Callback delivery timeout expired after target validation."
                         )
                     result = await _post_to_validated_callback_addresses(
@@ -340,6 +324,15 @@ class CallbackDeliveryService:
                         timeout=remaining_timeout,
                         connect_ip_addresses=validated_target.connect_ip_addresses,
                     )
+                except CallbackTargetValidationTimeoutError as exc:
+                    await _record_callback_target_validation_timeout(
+                        repo,
+                        delivery,
+                        subscription,
+                        exc,
+                        now=self._clock,
+                    )
+                    continue
                 except Exception as exc:  # noqa: BLE001 - delivery failures are isolated.
                     _log.error(
                         "callback.delivery_request_failed",
@@ -382,6 +375,37 @@ class CallbackDeliveryService:
                 )
             await session.commit()
             return deliveries
+
+
+async def _record_callback_target_validation_timeout(
+    repo: CallbackDeliveryRepository,
+    delivery: CallbackDelivery,
+    subscription: CallbackSubscription,
+    exc: CallbackTargetValidationTimeoutError,
+    *,
+    now: Clock,
+) -> None:
+    _log.warning(
+        "callback.delivery_target_validation_timeout",
+        delivery_id=delivery.id,
+        subscription_id=subscription.id,
+        event_kind=delivery.event_kind,
+        event_type=delivery.event_type,
+        source_id=delivery.source_id,
+        workspace_id=delivery.workspace_id,
+        operation_id=delivery.operation_id,
+        merge_candidate_id=delivery.merge_candidate_id,
+        error_code="CALLBACK_TARGET_VALIDATION_TIMEOUT",
+        error_message=redact_audit_text(str(exc), limit=256),
+    )
+    await repo.mark_failed_or_retry(
+        delivery,
+        error_code="CALLBACK_TARGET_VALIDATION_TIMEOUT",
+        error_message=_bounded_error_message(f"Callback target validation timed out: {exc}"),
+        response_status_code=None,
+        backoff_seconds=subscription.initial_backoff_seconds,
+        now=now(),
+    )
 
 
 def callback_request_hash(payload: CallbackSubscriptionCreateRequest) -> str:

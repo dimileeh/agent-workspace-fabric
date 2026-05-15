@@ -570,7 +570,7 @@ async def test_default_httpx_poster_uses_no_extensions_for_pinned_http_request(
 
 
 @pytest.mark.unit
-async def test_drain_due_records_request_failure_when_validation_consumes_timeout_budget(
+async def test_drain_due_records_validation_timeout_when_validation_consumes_timeout_budget(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -608,14 +608,16 @@ async def test_drain_due_records_request_failure_when_validation_consumes_timeou
 
     assert poster.calls == []
     log_entry = next(
-        event for event in captured if event.get("event") == "callback.delivery_request_failed"
+        event
+        for event in captured
+        if event.get("event") == "callback.delivery_target_validation_timeout"
     )
     assert log_entry["delivery_id"] == delivery.id
-    assert log_entry["error_code"] == "CALLBACK_REQUEST_FAILED"
-    assert "timeout expired after target validation" in log_entry["redacted_traceback"]
+    assert log_entry["error_code"] == "CALLBACK_TARGET_VALIDATION_TIMEOUT"
+    assert "timeout expired after target validation" in log_entry["error_message"]
     stored = await _get_delivery(factory, delivery.id)
     assert stored.status == CallbackDeliveryStatus.pending.value
-    assert stored.error_code == "CALLBACK_REQUEST_FAILED"
+    assert stored.error_code == "CALLBACK_TARGET_VALIDATION_TIMEOUT"
     assert "timeout expired after target validation" in (stored.error_message or "")
 
 
