@@ -13,13 +13,15 @@ from sqlalchemy.engine import make_url
 
 from awf.common.config import (
     DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS,
+    DEFAULT_LOCAL_DATABASE_URL,
     DEFAULT_MIN_FREE_DISK_BYTES,
     DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT,
     DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS,
     Settings,
+    validate_production_settings,
 )
 
-DEFAULT_LOCAL_SERVICE_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+DEFAULT_LOCAL_SERVICE_DATABASE_URL = DEFAULT_LOCAL_DATABASE_URL
 DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 _PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
@@ -86,6 +88,7 @@ def resolve_service_settings(
         database_url = DEFAULT_LOCAL_SERVICE_DATABASE_URL
 
     work_dir = _resolve_service_work_dir(settings, work_dir_env, host_environ=env)
+    validate_production_settings(settings, database_url=database_url)
 
     return ServiceSettings(
         service_name=settings.service_name,
@@ -157,11 +160,13 @@ def local_service_environ(
 
 
 def _has_env_key(environ: Mapping[str, str], key: str) -> bool:
+    """Return true when ``environ`` contains ``key`` using case-insensitive matching."""
     wanted = key.upper()
     return any(existing.upper() == wanted for existing in environ)
 
 
 def _env_value(environ: Mapping[str, str], key: str) -> str | None:
+    """Return an environment value using case-insensitive key matching."""
     wanted = key.upper()
     for existing, value in environ.items():
         if existing.upper() == wanted:
@@ -205,10 +210,12 @@ def _resolve_service_work_dir(
 
 
 def _is_project_default_work_dir(value: str) -> bool:
+    """Return true when ``value`` is the generic project-local AWF work directory."""
     return value.strip() == _PROJECT_DEFAULT_WORK_DIR
 
 
 def _empty_to_none(value: str | None) -> str | None:
+    """Normalize optional environment values by treating empty strings as unset."""
     return value or None
 
 
@@ -230,6 +237,7 @@ def _resolve_github_token(settings_value: str | None, environ: Mapping[str, str]
 
 
 def _redact_database_url(value: str) -> str:
+    """Return a database URL string with credentials hidden from operator payloads."""
     try:
         return make_url(value).render_as_string(hide_password=True)
     except Exception:
