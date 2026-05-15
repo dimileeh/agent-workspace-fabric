@@ -4075,6 +4075,60 @@ async def test_protected_scope_commit_repair_policy_block_uses_specific_reason(
 
 
 @pytest.mark.unit
+async def test_protected_scope_revert_verifies_tracked_restore_against_fetch_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch
+    cmd.queue_result(returncode=0)  # tracked path matches FETCH_HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    remaining = await runner._protected_scope_violations_not_restored_to_remote_branch(
+        workspace_id=workspace_id,
+        status_stdout=" M .github/workflows/ci.yml\n",
+        violations=[
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            )
+        ],
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert remaining == []
+    assert [call.args for call in cmd.calls] == [
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "fetch",
+            "origin",
+            f"refs/heads/awf/{workspace_id}",
+        ],
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "diff",
+            "--quiet",
+            "FETCH_HEAD",
+            "--",
+            ".github/workflows/ci.yml",
+        ],
+    ]
+
+
+@pytest.mark.unit
 async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -4096,7 +4150,6 @@ async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
         stdout=" M .github/workflows/ci.yml\n M src/fix.py\n",
     )
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for protected revert check
-    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=0)  # workflow file now matches the remote PR branch baseline
     cmd.queue_result(returncode=0)  # git add -A
     cmd.queue_result(returncode=1)  # git diff --cached --quiet
@@ -4138,7 +4191,7 @@ async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
         str(worktree),
         "diff",
         "--quiet",
-        "merge-base-sha",
+        "FETCH_HEAD",
         "--",
         ".github/workflows/ci.yml",
     ] in call_args
@@ -5939,7 +5992,6 @@ async def test_commit_dirty_worktree_fails_closed_when_protected_revert_check_er
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
     cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
     cmd.queue_result(returncode=128, stderr="bad revision")
     adapter = FakeAdapter()
     runner = make_runner(

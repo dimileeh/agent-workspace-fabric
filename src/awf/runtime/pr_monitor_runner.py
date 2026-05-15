@@ -4807,20 +4807,6 @@ class PullRequestMonitorRunner:
             )
             raise ProtectedScopeDiffError(message)
 
-        try:
-            local_base = await self._merge_base_with_head(
-                worktree_path=worktree_path,
-                ref="FETCH_HEAD",
-                error_context="against the remote PR branch",
-            )
-        except ProtectedScopeDiffError as exc:
-            _log.warning(
-                "monitor.protected_scope_revert_baseline_failed",
-                workspace_id=workspace_id,
-                error=str(exc)[:400],
-            )
-            raise
-
         restored_paths: list[str] = []
         for violation in tracked_violations:
             diff_result = await self._deps.runner.run(
@@ -4830,7 +4816,7 @@ class PullRequestMonitorRunner:
                     str(worktree_path),
                     "diff",
                     "--quiet",
-                    local_base,
+                    "FETCH_HEAD",
                     "--",
                     violation.path,
                 ]
@@ -4843,7 +4829,7 @@ class PullRequestMonitorRunner:
                 continue
             message = (
                 "Could not verify protected-scope restore against the remote PR branch: "
-                f"diff {local_base} -- {violation.path} exit={diff_result.returncode} "
+                f"diff FETCH_HEAD -- {violation.path} exit={diff_result.returncode} "
                 f"stdout={diff_result.stdout.strip() or '<empty>'} "
                 f"stderr={diff_result.stderr.strip() or '<empty>'}"
             )
