@@ -552,6 +552,20 @@ def test_setup_dependency_network_classifier_accepts_install_package_manager_ver
 
 
 @pytest.mark.unit
+def test_setup_dependency_network_classifier_accepts_pip_proxy_before_subcommand() -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command="pip --proxy http://proxy:8080 install -r requirements.txt",
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "command",
     [

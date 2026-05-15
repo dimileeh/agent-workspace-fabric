@@ -539,6 +539,7 @@ _SETUP_DEPENDENCY_OPTION_VALUE_FLAGS = frozenset(
         "--project-dir",
         "--project-directory",
         "--python",
+        "--proxy",
         "--registry",
         "--repository",
         "--root",
