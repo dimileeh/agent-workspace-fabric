@@ -3129,6 +3129,112 @@ class TestRunOnceMonitorRecovery:
         assert cooldown_events == []
 
     @pytest.mark.unit
+    async def test_stale_active_scan_preserves_monitor_provider_retry_cooldown(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-cooling-stale-monitor",
+            agent="codex",
+            task_policy={
+                "agent_model": "gpt-5.3-codex-spark",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                    "decision_reason_code": "PROVIDER_RETRY_DELAYED",
+                },
+            },
+        )
+        compose_project = f"awf_{monitor_id}"
+        inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
+        cleaner = _RecordingRuntimeCleaner()
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        await worker.wait_for_execution_tasks()
+
+        assert executor.resume_calls == []
+        assert inspector.calls == []
+        assert cleaner.calls == []
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
+
+        assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+
+    @pytest.mark.unit
+    async def test_stale_active_scan_preserves_due_monitor_provider_fallback_for_resume(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-fallback-stale-monitor",
+            agent="codex",
+            task_policy={
+                "agent_model": "gpt-5.5",
+                "provider_recovery_state": {
+                    "action": "fallback",
+                    "decision_reason_code": "PROVIDER_FALLBACK_SELECTED",
+                    "source_reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                    "target_agent": "codex",
+                    "target_provider": "openai",
+                    "target_model": "gpt-5.5",
+                },
+            },
+        )
+        compose_project = f"awf_{monitor_id}"
+        inspector = _RecordingRuntimeInspector({compose_project: _live_agent_snapshot()})
+        cleaner = _RecordingRuntimeCleaner()
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            runtime_cleaner=cleaner,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.resume_calls == [monitor_id]
+        assert inspector.calls == []
+        assert cleaner.calls == []
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            events = await WorkspaceEventRepository(session).list(workspace_id=monitor_id)
+
+        assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+
+    @pytest.mark.unit
     async def test_monitoring_pr_in_place_fallback_resumes_monitor_not_feature_execution(
         self,
         session_factory: async_sessionmaker[AsyncSession],

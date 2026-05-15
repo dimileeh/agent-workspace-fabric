@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -1417,6 +1418,15 @@ class ControlWorker:
         self,
         candidate: _ActiveExecutionCandidate,
     ) -> None:
+        if _monitor_provider_recovery_resume_pending(candidate):
+            _log.info(
+                "worker.monitor_provider_recovery_resume_pending",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                compose_project_name=candidate.compose_project_name,
+                reason_code="PROVIDER_RECOVERY_MONITOR_RESUME_PENDING",
+            )
+            return
         if await self._has_current_preserved_active_execution(candidate):
             return
         try:
@@ -2625,6 +2635,16 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
         Workspace.monitor_claim_expires_at.is_(None),
         Workspace.monitor_claim_expires_at <= claim_cutoff,
     )
+
+
+def _monitor_provider_recovery_resume_pending(candidate: _ActiveExecutionCandidate) -> bool:
+    if candidate.status != WorkspaceStatus.monitoring_pr:
+        return False
+    task_policy = candidate.task_policy if isinstance(candidate.task_policy, Mapping) else {}
+    raw_state = task_policy.get("provider_recovery_state")
+    if not isinstance(raw_state, Mapping):
+        return False
+    return raw_state.get("action") in {"retry", "fallback"}
 
 
 def _claim_recheck_conditions(

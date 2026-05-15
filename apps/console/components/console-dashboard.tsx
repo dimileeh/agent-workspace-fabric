@@ -41,6 +41,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1652,7 +1653,7 @@ function WorkspaceList({
             }`}
           >
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
-              <div className="flex min-w-0 items-start gap-2 overflow-hidden">
+              <div className="flex min-w-0 items-start gap-2">
                 <input
                   type="checkbox"
                   checked={selectedSet.has(item.workspace_id)}
@@ -1663,23 +1664,33 @@ function WorkspaceList({
                 <button
                   type="button"
                   onClick={() => onSelect(item.workspace_id)}
-                  className="grid min-w-0 flex-1 gap-2 overflow-hidden text-left"
+                  className="grid min-w-0 flex-1 gap-2 text-left"
                 >
-                  <span className="line-clamp-2 text-sm font-semibold text-slate-950">{item.title}</span>
-                  <div className="mono truncate text-[11px] text-[var(--muted)]">{item.workspace_id}</div>
-                  <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
-                    <span className="truncate">created {formatDateTime(item.created_at)}</span>
-                    <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
+                  <span
+                    className="whitespace-normal break-words text-sm font-semibold text-slate-950"
+                    data-testid={`workspace-title-${item.workspace_id}`}
+                  >
+                    {item.title}
+                  </span>
+                  <div className="mono break-all text-[11px] text-[var(--muted)]">{item.workspace_id}</div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
+                    <span>created {formatDateTime(item.created_at)}</span>
+                    <span>updated {formatDateTime(item.updated_at)}</span>
                   </div>
-                  <div className="flex items-center gap-2 text-xs text-slate-600">
-                    <Bot size={13} aria-hidden />
-                    <span className="truncate" title={formatAgentTitle(item)}>
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
+                    <Bot size={13} aria-hidden className="shrink-0" />
+                    <span className="break-words" title={formatAgentTitle(item)}>
                       {formatAgentLabel(item)}
                     </span>
                     <span className="text-slate-300">/</span>
-                    <span className="truncate">{item.base_branch}</span>
+                    <span className="min-w-0 break-words">{item.base_branch}</span>
                   </div>
-                  <div className="truncate text-xs text-[var(--muted)]">{item.repo_url}</div>
+                  <div
+                    className="break-words text-xs text-[var(--muted)]"
+                    data-testid={`workspace-repo-${item.workspace_id}`}
+                  >
+                    {item.repo_url}
+                  </div>
                 </button>
               </div>
               <div className="flex w-28 shrink-0 flex-col items-end gap-1 sm:w-32">
@@ -1750,14 +1761,26 @@ function TaskDetailsModal({
 }) {
   const labelId = `task-details-label-${workspace.workspace_id}`;
   const titleId = `task-details-title-${workspace.workspace_id}`;
+
+  useLayoutEffect(() => {
+    const scrollY = window.scrollY;
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.scrollTo(0, scrollY);
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      window.scrollTo(0, scrollY);
+    };
+  }, []);
+
   return (
     <div
-      className="fixed inset-0 z-50 grid bg-slate-950/45 p-3 sm:p-6"
+      className="fixed inset-0 z-50 grid overflow-hidden overscroll-contain bg-slate-950/45 p-3 sm:p-6"
       role="dialog"
       aria-modal="true"
       aria-labelledby={`${labelId} ${titleId}`}
     >
-      <div className="m-auto grid max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-md border border-slate-300 bg-white shadow-xl">
+      <div className="m-auto grid max-h-[calc(100dvh-1.5rem)] w-full max-w-5xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-md border border-slate-300 bg-white shadow-xl sm:max-h-[calc(100dvh-3rem)]">
         <header className="flex min-h-14 items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
           <div className="min-w-0">
             <div id={labelId} className="flex items-center gap-2 text-sm font-semibold text-slate-950">
@@ -1778,7 +1801,11 @@ function TaskDetailsModal({
             <X size={16} aria-hidden />
           </button>
         </header>
-        <div className="grid min-h-0 gap-3 overflow-y-auto p-4">
+        <div
+          className="grid min-h-0 gap-3 overflow-y-auto overscroll-contain p-4"
+          data-testid="task-details-scroll"
+          tabIndex={0}
+        >
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <Fact label="Agent" value={formatAgentLabel(workspace)} />
             <Fact label="Effort" value={formatAgentEffort(workspace)} />

@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.provider_failures import (
     AGENT_AUTH_FAILED,
     AGENT_IDLE_TIMEOUT,
@@ -16,7 +17,7 @@ from awf.adapters.provider_failures import (
     classify_provider_failure,
 )
 from awf.api.schemas import WorkspaceCreateV2Request
-from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -379,6 +380,143 @@ def test_retryable_failure_without_fallback_policy_delays_same_provider_retry() 
         fallback_attempt_number=0,
         retry_attempt_number=1,
     )
+
+
+def test_codex_non_default_capacity_falls_back_to_default_model() -> None:
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        message="MODEL_CAPACITY_EXHAUSTED Please try again later.",
+        details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        task_policy={},
+    )
+    assert metadata is not None
+    expected_default = DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy={"agent_model": "gpt-5.3-codex-spark"},
+        current_agent="codex",
+        current_model="gpt-5.3-codex-spark",
+        now=now,
+    )
+
+    assert decision == ProviderRecoveryDecision(
+        action="fallback",
+        retryable=True,
+        not_before=None,
+        target_agent="codex",
+        target_provider="openai",
+        target_model=expected_default,
+        reason_code="PROVIDER_FALLBACK_SELECTED",
+        terminal_reason=None,
+        fallback_attempt_number=1,
+        retry_attempt_number=0,
+    )
+
+
+def test_codex_default_capacity_does_not_fallback_to_itself() -> None:
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        message="MODEL_CAPACITY_EXHAUSTED Please try again later.",
+        details={"provider": "openai", "model": "gpt-5.5"},
+        task_policy={},
+    )
+    assert metadata is not None
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy={"agent_model": "gpt-5.5"},
+        current_agent="codex",
+        current_model="gpt-5.5",
+        now=now,
+    )
+
+    assert decision.action == "retry"
+    assert decision.target_agent == "codex"
+    assert decision.target_provider == "openai"
+    assert decision.target_model == "gpt-5.5"
+    assert decision.reason_code == "PROVIDER_RETRY_DELAYED"
+
+
+def test_codex_implicit_default_capacity_does_not_fallback_to_itself() -> None:
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    metadata = {
+        "retryable": True,
+        "reason_code": AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        "failure_type": "capacity",
+    }
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy={},
+        current_agent="codex",
+        current_model=None,
+        now=now,
+    )
+
+    assert decision.action == "retry"
+    assert decision.target_agent == "codex"
+    assert decision.target_provider == "openai"
+    assert decision.target_model is None
+    assert decision.reason_code == "PROVIDER_RETRY_DELAYED"
+
+
+def test_codex_configured_default_capacity_uses_retry_path() -> None:
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        message="MODEL_CAPACITY_EXHAUSTED Please try again later.",
+        details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        task_policy={},
+    )
+    assert metadata is not None
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy={},
+        current_agent="codex",
+        current_model="gpt-5.3-codex-spark",
+        effective_default_model="gpt-5.3-codex-spark",
+        now=now,
+    )
+
+    assert decision == ProviderRecoveryDecision(
+        action="retry",
+        retryable=True,
+        not_before=now + timedelta(seconds=300),
+        target_agent="codex",
+        target_provider="openai",
+        target_model="gpt-5.3-codex-spark",
+        reason_code="PROVIDER_RETRY_DELAYED",
+        terminal_reason=None,
+        fallback_attempt_number=0,
+        retry_attempt_number=1,
+    )
+
+
+def test_codex_capacity_without_effective_default_skips_implicit_fallback() -> None:
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    metadata = provider_recovery_metadata_from_failure(
+        reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        message="MODEL_CAPACITY_EXHAUSTED Please try again later.",
+        details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        task_policy={},
+    )
+    assert metadata is not None
+
+    decision = decide_provider_recovery(
+        metadata,
+        task_policy={},
+        current_agent="codex",
+        current_model="gpt-5.3-codex-spark",
+        now=now,
+    )
+
+    assert decision.action == "retry"
+    assert decision.target_model == "gpt-5.3-codex-spark"
+    assert decision.reason_code == "PROVIDER_RETRY_DELAYED"
 
 
 def test_non_retryable_provider_failure_is_terminal() -> None:

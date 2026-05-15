@@ -570,6 +570,18 @@ _CI_TRANSIENT_FAILURE_MARKERS = (
     "runner has received a shutdown signal",
     "lost communication with the server",
 )
+_CI_REQUIRED_ROLLUP_CHECK_NAMES = frozenset(
+    {
+        "ci-required",
+        "required-ci",
+        "required checks",
+        "required-checks",
+    }
+)
+_CI_REQUIRED_ROLLUP_FAILURE_MARKERS = (
+    "a required ci job did not pass",
+    "required ci job did not pass",
+)
 
 
 def _ci_transient_rerun_state_key(
@@ -602,11 +614,16 @@ def _ci_transient_rerun_count(
     *,
     head_sha: str,
     failures: tuple[CheckFailure, ...],
+    legacy_failures: tuple[CheckFailure, ...] | None = None,
 ) -> int:
-    raw_count = state.threads_addressed_ids.get(
-        _ci_transient_rerun_state_key(head_sha, failures),
-        "0",
-    )
+    keys = [_ci_transient_rerun_state_key(head_sha, failures)]
+    if legacy_failures is not None and legacy_failures != failures:
+        keys.append(_ci_transient_rerun_state_key(head_sha, legacy_failures))
+    return max(_ci_transient_rerun_count_for_key(state, key) for key in keys)
+
+
+def _ci_transient_rerun_count_for_key(state: MonitorState, key: str) -> int:
+    raw_count = state.threads_addressed_ids.get(key, "0")
     try:
         return int(raw_count)
     except ValueError:
@@ -622,6 +639,22 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     if _looks_like_code_failure_text(log_text):
         return False
     return any(marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
+
+
+def _looks_like_required_ci_rollup_failure(failure: CheckFailure) -> bool:
+    name = failure.name.strip().lower()
+    if name in _CI_REQUIRED_ROLLUP_CHECK_NAMES:
+        return True
+    log_text = failure.log_excerpt.lower()
+    return any(marker in log_text for marker in _CI_REQUIRED_ROLLUP_FAILURE_MARKERS)
+
+
+def _ci_transient_rerun_failures(status: PRStatus) -> tuple[CheckFailure, ...]:
+    return tuple(
+        failure
+        for failure in status.ci_failures
+        if not _looks_like_required_ci_rollup_failure(failure)
+    )
 
 
 def _has_structured_code_failure_evidence(failure: CheckFailure) -> bool:
@@ -649,17 +682,21 @@ def _should_rerun_transient_ci(
         return False
     if not status.ci_failures:
         return False
-    if any(not failure.run_id for failure in status.ci_failures):
+    rerun_failures = _ci_transient_rerun_failures(status)
+    if not rerun_failures:
         return False
-    if any(not _supports_failed_job_rerun(failure) for failure in status.ci_failures):
+    if any(not failure.run_id for failure in rerun_failures):
         return False
-    if not all(_looks_like_transient_ci_failure(failure) for failure in status.ci_failures):
+    if any(not _supports_failed_job_rerun(failure) for failure in rerun_failures):
+        return False
+    if not all(_looks_like_transient_ci_failure(failure) for failure in rerun_failures):
         return False
     return (
         _ci_transient_rerun_count(
             state,
             head_sha=status.head_sha,
-            failures=status.ci_failures,
+            failures=rerun_failures,
+            legacy_failures=status.ci_failures,
         )
         < config.ci_transient_rerun_max_attempts
     )
@@ -798,7 +835,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             # off a ReportCiFailure action.
             return ReportCiFailure(failures=())
         if _should_rerun_transient_ci(status, state, config):
-            return RerunTransientCI(failures=status.ci_failures)
+            return RerunTransientCI(failures=_ci_transient_rerun_failures(status))
         return ReportCiFailure(failures=status.ci_failures)
 
     # 5. CI still running, or GitHub is still computing state → passive wait.

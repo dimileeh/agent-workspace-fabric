@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
-from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
@@ -780,6 +780,37 @@ def test_ci_transient_rerun_attempt_treats_corrupt_count_as_zero() -> None:
 
     assert attempt == 1
     assert state.threads_addressed_ids[_ci_transient_rerun_state_key("head", (failure,))] == "1"
+
+
+@pytest.mark.unit
+def test_ci_transient_rerun_attempt_carries_legacy_rollup_count_forward() -> None:
+    failure = CheckFailure(
+        name="python-full-coverage",
+        conclusion="FAILURE",
+        log_excerpt="HTTP status server error (502 Bad Gateway)",
+        run_id="25655330295",
+    )
+    rollup_failure = CheckFailure(
+        name="ci-required",
+        conclusion="FAILURE",
+        log_excerpt="A required CI job did not pass.",
+        run_id="25655330295",
+    )
+    state = MonitorState()
+    legacy_key = _ci_transient_rerun_state_key("head", (failure, rollup_failure))
+    current_key = _ci_transient_rerun_state_key("head", (failure,))
+    state.threads_addressed_ids[legacy_key] = "1"
+
+    attempt = _ci_transient_rerun_attempt(
+        state,
+        head_sha="head",
+        failures=(failure,),
+        legacy_failures=(failure, rollup_failure),
+    )
+
+    assert attempt == 2
+    assert state.threads_addressed_ids[current_key] == "2"
+    assert legacy_key not in state.threads_addressed_ids
 
 
 def _provider_recovery_policy(
@@ -2595,6 +2626,128 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
     assert [operation for operation in operations if operation.type == "retry"] == []
     assert len(recovery_events) == 1
     assert recovery_events[0]["provider_recovery"]["failure_type"] == "usage_limit"
+
+
+@pytest.mark.unit
+async def test_monitor_provider_failure_on_configured_default_retries_without_builtin_fallback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.agent = "codex"
+        workspace.task_policy = {"pr_monitor": {"review_grace_seconds": 75}}
+        await session.commit()
+
+    adapter = FakeAdapter(default_model="gpt-5.3-codex-spark")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="Codex Spark MODEL_CAPACITY_EXHAUSTED",
+        ),
+        reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+    )
+
+    action = await runner._record_provider_agent_run_error(workspace_id, exc)
+
+    source_policy, recovery_events, operations, requested_ids = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    state = source_policy["provider_recovery_state"]
+    retry_operations = [operation for operation in operations if operation.type == "retry"]
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+
+    assert action == "retry"
+    assert isinstance(state, dict)
+    assert state["action"] == "retry"
+    assert state["target_agent"] == "codex"
+    assert state["target_provider"] == "openai"
+    assert state["target_model"] == "gpt-5.3-codex-spark"
+    assert state["decision_reason_code"] == "PROVIDER_RETRY_DELAYED"
+    assert "agent_model" not in source_policy
+    assert workspace.agent == "codex"
+    assert retry_operations == []
+    assert requested_ids == []
+    assert len(recovery_events) == 1
+    assert recovery_events[0]["provider_recovery"]["action"] == "retry"
+    assert recovery_events[0]["provider_recovery"]["target_model"] == "gpt-5.3-codex-spark"
+
+
+@pytest.mark.unit
+async def test_monitor_explicit_model_capacity_falls_back_to_configured_default(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    explicit_model = "gpt-5.3-codex-spark"
+    configured_default = "gpt-5.4-mini"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.agent = "codex"
+        workspace.task_policy = {
+            "agent_model": explicit_model,
+            "pr_monitor": {"review_grace_seconds": 75},
+        }
+        await session.commit()
+
+    # Production handoff binds explicit task policy into the adapter default.
+    adapter = FakeAdapter(default_model=explicit_model)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        provider_recovery_default_model=configured_default,
+    )
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="Codex Spark MODEL_CAPACITY_EXHAUSTED",
+        ),
+        reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        details={"provider": "openai", "model": explicit_model},
+    )
+
+    action = await runner._record_provider_agent_run_error(workspace_id, exc)
+
+    source_policy, recovery_events, operations, requested_ids = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    state = source_policy["provider_recovery_state"]
+    retry_operations = [operation for operation in operations if operation.type == "retry"]
+
+    assert action == "retry"
+    assert source_policy["agent_model"] == configured_default
+    assert isinstance(state, dict)
+    assert state["action"] == "fallback"
+    assert state["target_agent"] == "codex"
+    assert state["target_provider"] == "openai"
+    assert state["target_model"] == configured_default
+    assert retry_operations == []
+    assert requested_ids == []
+    assert len(recovery_events) == 1
+    assert recovery_events[0]["provider_recovery"]["action"] == "fallback"
+    assert recovery_events[0]["provider_recovery"]["target_model"] == configured_default
 
 
 @pytest.mark.unit
