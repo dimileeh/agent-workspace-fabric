@@ -10,7 +10,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from awf.common.config import DEFAULT_MIN_FREE_DISK_BYTES, Settings
+from awf.common.config import (
+    DEFAULT_MIN_FREE_DISK_BYTES,
+    ProductionSettingsError,
+    Settings,
+    settings_guardrails,
+    validate_production_settings,
+)
 from awf.service.config import (
     DEFAULT_LOCAL_SERVICE_WORK_DIR,
     _redact_database_url,
@@ -19,6 +25,161 @@ from awf.service.config import (
     resolve_service_settings,
     service_config_payload,
 )
+
+_DEFAULT_LOCAL_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+_NON_DEFAULT_DATABASE_URL = "postgresql+asyncpg://awf:prod-pass@db.internal:5432/awf"
+_STRONG_PRODUCTION_API_TOKEN = "prod-token-for-awf-operator-apis-32"
+
+
+def _diagnostic_codes(error: ProductionSettingsError) -> set[str]:
+    return {diagnostic.code for diagnostic in error.diagnostics}
+
+
+def _diagnostic_fields(error: ProductionSettingsError) -> set[str]:
+    return {diagnostic.field for diagnostic in error.diagnostics}
+
+
+def _diagnostic_text(error: ProductionSettingsError) -> str:
+    return " ".join(
+        " ".join(
+            (
+                diagnostic.code,
+                diagnostic.field,
+                diagnostic.message,
+                diagnostic.remediation,
+            )
+        )
+        for diagnostic in error.diagnostics
+    )
+
+
+@pytest.mark.unit
+def test_production_guardrails_allow_local_defaults() -> None:
+    settings = Settings(_env_file=None, env="local", api_token=None, callbacks_enabled=True)
+
+    diagnostics = settings_guardrails(
+        env=settings.env,
+        database_url=settings.database_url,
+        api_token=settings.api_token,
+        callbacks_enabled=settings.callbacks_enabled,
+    )
+
+    assert diagnostics == ()
+    validate_production_settings(settings)
+
+
+@pytest.mark.unit
+def test_production_guardrails_allow_ci_defaults() -> None:
+    settings = Settings(_env_file=None, env="ci", api_token=None, callbacks_enabled=True)
+
+    diagnostics = settings_guardrails(
+        env=settings.env,
+        database_url=settings.database_url,
+        api_token=settings.api_token,
+        callbacks_enabled=settings.callbacks_enabled,
+    )
+
+    assert diagnostics == ()
+    validate_production_settings(settings)
+
+
+@pytest.mark.unit
+def test_production_guardrails_reject_default_local_database_url() -> None:
+    settings = Settings(
+        _env_file=None,
+        env="prod",
+        database_url=_DEFAULT_LOCAL_DATABASE_URL,
+        api_token=_STRONG_PRODUCTION_API_TOKEN,
+        callbacks_enabled=False,
+    )
+
+    with pytest.raises(ProductionSettingsError) as exc_info:
+        validate_production_settings(settings)
+
+    error = exc_info.value
+    assert "production_default_database_url" in _diagnostic_codes(error)
+    assert "AWF_DATABASE_URL" in _diagnostic_fields(error)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "api_token",
+    [None, "", " ", "local-dev-token", "changeme", "default", "short"],
+)
+def test_production_guardrails_reject_missing_or_weak_api_token(
+    api_token: str | None,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        env="prod",
+        database_url=_NON_DEFAULT_DATABASE_URL,
+        api_token=api_token,
+        callbacks_enabled=False,
+    )
+
+    with pytest.raises(ProductionSettingsError) as exc_info:
+        validate_production_settings(settings)
+
+    error = exc_info.value
+    assert "production_api_token_weak" in _diagnostic_codes(error) or (
+        "production_api_token_missing" in _diagnostic_codes(error)
+    )
+    assert "AWF_API_TOKEN" in _diagnostic_fields(error)
+
+
+@pytest.mark.unit
+def test_production_guardrails_reject_callback_posture_without_api_token() -> None:
+    settings = Settings(
+        _env_file=None,
+        env="prod",
+        database_url=_NON_DEFAULT_DATABASE_URL,
+        api_token=None,
+        callbacks_enabled=True,
+    )
+
+    with pytest.raises(ProductionSettingsError) as exc_info:
+        validate_production_settings(settings)
+
+    error = exc_info.value
+    assert "production_callbacks_require_api_token" in _diagnostic_codes(error)
+    assert "AWF_CALLBACKS_ENABLED" in _diagnostic_fields(error)
+
+
+@pytest.mark.unit
+def test_production_guardrail_diagnostics_redact_sensitive_values() -> None:
+    settings = Settings(
+        _env_file=None,
+        env="prod",
+        database_url=_DEFAULT_LOCAL_DATABASE_URL,
+        api_token="local-dev-token",
+        callbacks_enabled=True,
+    )
+
+    with pytest.raises(ProductionSettingsError) as exc_info:
+        validate_production_settings(settings)
+
+    error = exc_info.value
+    rendered = f"{error} {_diagnostic_text(error)}"
+    assert _DEFAULT_LOCAL_DATABASE_URL not in rendered
+    assert "awf_dev" not in rendered
+    assert "local-dev-token" not in rendered
+
+
+@pytest.mark.unit
+def test_service_settings_resolution_runs_production_guardrails_after_db_resolution() -> None:
+    base = Settings(
+        _env_file=None,
+        env="prod",
+        api_token=_STRONG_PRODUCTION_API_TOKEN,
+        callbacks_enabled=False,
+    )
+
+    with pytest.raises(ProductionSettingsError) as exc_info:
+        resolve_service_settings(base, environ={})
+
+    error = exc_info.value
+    assert "production_default_database_url" in _diagnostic_codes(error)
+    assert "AWF_DATABASE_URL" in _diagnostic_fields(error)
 
 
 @pytest.mark.unit

@@ -41,7 +41,7 @@ from awf.api.routes import (
     workspaces,
     ws,
 )
-from awf.common.config import Settings, get_settings
+from awf.common.config import Settings, get_settings, validate_production_settings
 from awf.db.session import make_engine, make_session_factory
 
 
@@ -69,6 +69,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     health.reset_egress_audit_summary_counts_task(app.state)
     settings: Settings = get_settings()
+    validate_production_settings(settings)
     engine = make_engine(settings.database_url)
 
     factory = make_session_factory(engine)

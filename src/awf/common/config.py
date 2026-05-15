@@ -10,26 +10,197 @@ rather than mutating a global object.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from typing import Any, Literal
+from urllib.parse import unquote, urlsplit
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 RuntimeEnv = Literal["local", "ci", "staging", "prod"]
+DEFAULT_LOCAL_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 DEFAULT_MIN_FREE_DISK_BYTES = 10 * 1024 * 1024 * 1024
 DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS = 168
 DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS = 3600
 DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT = 50
+_MIN_PRODUCTION_API_TOKEN_LENGTH = 24
+_WEAK_API_TOKEN_VALUES = frozenset(
+    {
+        "change-me",
+        "changeme",
+        "default",
+        "dev",
+        "dev-token",
+        "example",
+        "local",
+        "local-dev-token",
+        "password",
+        "placeholder",
+        "replace-me",
+        "replace_me",
+        "test",
+        "token",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionSettingsDiagnostic:
+    """Structured production settings validation diagnostic."""
+
+    code: str
+    field: str
+    message: str
+    remediation: str
+
+
+class ProductionSettingsError(RuntimeError):
+    """Raised when production settings use unsafe local-development defaults."""
+
+    diagnostics: tuple[ProductionSettingsDiagnostic, ...]
+
+    def __init__(self, diagnostics: tuple[ProductionSettingsDiagnostic, ...]) -> None:
+        self.diagnostics = diagnostics
+        super().__init__(self._message())
+
+    def _message(self) -> str:
+        if not self.diagnostics:
+            return "Production settings validation failed."
+        rendered = "; ".join(
+            (
+                f"{diagnostic.code} ({diagnostic.field}): {diagnostic.message} "
+                f"Remediation: {diagnostic.remediation}"
+            )
+            for diagnostic in self.diagnostics
+        )
+        return f"Production settings validation failed: {rendered}"
+
+
+def settings_guardrails(
+    *,
+    env: str,
+    database_url: str,
+    api_token: str | None,
+    callbacks_enabled: bool,
+) -> tuple[ProductionSettingsDiagnostic, ...]:
+    """Return production-only settings diagnostics without side effects.
+
+    Local and CI defaults intentionally remain usable. This helper treats only
+    ``AWF_ENV=prod`` as production for the current local-first guardrail slice.
+    """
+
+    if env != "prod":
+        return ()
+
+    diagnostics: list[ProductionSettingsDiagnostic] = []
+    if _is_default_local_database_url_or_credentials(database_url):
+        diagnostics.append(
+            ProductionSettingsDiagnostic(
+                code="production_default_database_url",
+                field="AWF_DATABASE_URL",
+                message=(
+                    "Production must not use AWF's bundled local development "
+                    "database URL or credentials."
+                ),
+                remediation=(
+                    "Set AWF_DATABASE_URL to a production PostgreSQL database "
+                    "with deployment-specific credentials."
+                ),
+            )
+        )
+
+    token_diagnostic = _api_token_diagnostic(api_token)
+    if token_diagnostic is not None:
+        diagnostics.append(token_diagnostic)
+
+    if callbacks_enabled and not _is_strong_api_token(api_token):
+        diagnostics.append(
+            ProductionSettingsDiagnostic(
+                code="production_callbacks_require_api_token",
+                field="AWF_CALLBACKS_ENABLED",
+                message=(
+                    "Callback registration is enabled, so production requires "
+                    "a strong AWF API bearer token before exposing the API."
+                ),
+                remediation=(
+                    "Set a strong AWF_API_TOKEN or disable AWF_CALLBACKS_ENABLED "
+                    "until callback delivery policy hardening is configured."
+                ),
+            )
+        )
+
+    return tuple(diagnostics)
+
+
+def _api_token_diagnostic(api_token: str | None) -> ProductionSettingsDiagnostic | None:
+    normalized = _normalized_secret(api_token)
+    if normalized is None:
+        return ProductionSettingsDiagnostic(
+            code="production_api_token_missing",
+            field="AWF_API_TOKEN",
+            message="Production requires an AWF API bearer token for operator APIs.",
+            remediation="Set AWF_API_TOKEN to a deployment-specific high-entropy secret.",
+        )
+    if _is_weak_api_token(normalized):
+        return ProductionSettingsDiagnostic(
+            code="production_api_token_weak",
+            field="AWF_API_TOKEN",
+            message="Production AWF_API_TOKEN must not be a local placeholder or short value.",
+            remediation="Generate and set a deployment-specific high-entropy AWF_API_TOKEN.",
+        )
+    return None
+
+
+def _is_strong_api_token(api_token: str | None) -> bool:
+    return _api_token_diagnostic(api_token) is None
+
+
+def _is_weak_api_token(api_token: str) -> bool:
+    return (
+        len(api_token) < _MIN_PRODUCTION_API_TOKEN_LENGTH
+        or api_token.lower() in _WEAK_API_TOKEN_VALUES
+    )
+
+
+def _normalized_secret(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _is_default_local_database_url_or_credentials(database_url: str) -> bool:
+    if database_url.strip() == DEFAULT_LOCAL_DATABASE_URL:
+        return True
+    parsed = urlsplit(database_url)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    username = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    database = parsed.path.lstrip("/")
+    uses_default_local_url = (
+        parsed.scheme == "postgresql+asyncpg"
+        and username == "awf"
+        and password == "awf_dev"
+        and (parsed.hostname or "") in {"localhost", "127.0.0.1"}
+        and port == 5433
+        and database == "awf"
+    )
+    uses_default_local_credentials = username == "awf" and password == "awf_dev"
+    return uses_default_local_url or uses_default_local_credentials
 
 
 class Settings(BaseSettings):
     """Single source of truth for runtime configuration.
 
     All fields are either required or have defaults that are safe in local dev.
-    Production deployments MUST set database_url and github_token explicitly.
+    Production deployments MUST override local defaults and set a strong
+    ``api_token`` explicitly.
     """
 
     model_config = SettingsConfigDict(
@@ -216,6 +387,23 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+
+def validate_production_settings(
+    settings: Settings,
+    *,
+    database_url: str | None = None,
+) -> None:
+    """Raise structured diagnostics when production settings are unsafe."""
+
+    diagnostics = settings_guardrails(
+        env=settings.env,
+        database_url=database_url or settings.database_url,
+        api_token=settings.api_token,
+        callbacks_enabled=settings.callbacks_enabled,
+    )
+    if diagnostics:
+        raise ProductionSettingsError(diagnostics)
 
 
 @lru_cache(maxsize=1)
