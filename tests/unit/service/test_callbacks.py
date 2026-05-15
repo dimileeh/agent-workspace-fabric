@@ -835,6 +835,34 @@ async def test_validated_address_fallback_reuses_one_delivery_timeout_budget(
 
 
 @pytest.mark.unit
+async def test_validated_address_delivery_timeout_before_first_attempt_raises_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    poster = _RecordingPoster(status_code=202)
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    with pytest.raises(TimeoutError, match="before any validated target address"):
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=0.0,
+            connect_ip_addresses=("1.1.1.1",),
+        )
+
+    assert poster.calls == []
+
+
+@pytest.mark.unit
 async def test_validated_address_fallback_stops_when_timeout_budget_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

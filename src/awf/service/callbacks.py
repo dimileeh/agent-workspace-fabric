@@ -384,9 +384,11 @@ async def _post_to_validated_callback_addresses(
     failed_addresses: list[str] = []
     monotonic_clock = asyncio.get_running_loop().time
     deadline = monotonic_clock() + timeout
+    timed_out_before_attempt = False
     for connect_ip_address in connect_ip_addresses:
         remaining_timeout = deadline - monotonic_clock()
         if remaining_timeout <= 0:
+            timed_out_before_attempt = True
             break
         try:
             return await poster(
@@ -411,6 +413,10 @@ async def _post_to_validated_callback_addresses(
         raise ExceptionGroup(
             f"callback request failed for all validated target addresses: {failure_summary}",
             failures,
+        )
+    if timed_out_before_attempt:
+        raise TimeoutError(
+            "callback request timed out before any validated target address could be attempted"
         )
     raise RuntimeError("validated callback target has no connect IP addresses")
 
