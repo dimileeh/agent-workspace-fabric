@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
+from awf.control.quality_gates import QualityGateViolation
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace
 from awf.db.repositories import (
@@ -77,6 +78,7 @@ from awf.runtime.pr_monitor_runner import (
     _non_check_reviewer_settle_state_for_runtime,
     _NonCheckReviewerSettleDecision,
     _notify_human_reason,
+    _ProtectedScopePushBlock,
     _redact_and_truncate_github_error,
     _remote_push_url_for_workspace,
     _review_comment_body_state_key,
@@ -4020,6 +4022,52 @@ async def test_execute_ci_fix_retries_when_local_commit_touches_protected_scope(
     assert succeeded_event.payload is not None
     assert succeeded_event.payload["action"] == "ci_repair_push"
     assert succeeded_event.payload["outcome"] == "succeeded"
+
+
+@pytest.mark.unit
+async def test_protected_scope_commit_repair_policy_block_uses_specific_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted protected-scope repair")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _policy_blocked_commit(**_kwargs: object) -> bool:
+        raise _MonitorPolicyBlockedError("Supply-chain policy blocked")
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _policy_blocked_commit)
+
+    push_result = await runner._repair_protected_scope_commits_before_push(
+        workspace_id=workspace_id,
+        pr_number=42,
+        protected_scope_block=_ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            violations=(
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                ),
+            ),
+        ),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.stderr == "Supply-chain policy blocked"
+    assert push_result.reason_code == "MONITOR_POLICY_BLOCKED"
 
 
 @pytest.mark.unit
