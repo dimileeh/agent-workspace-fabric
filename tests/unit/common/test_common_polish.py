@@ -151,6 +151,32 @@ class TestSettings:
         )
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (
+                " Operator.EXAMPLE.com.:8443,backup.example.com:443 ",
+                ("operator.example.com", "backup.example.com"),
+            ),
+            (
+                ["Operator.EXAMPLE.com.:8443", "[2606:4700:4700::1111]:443"],
+                ("operator.example.com", "2606:4700:4700::1111"),
+            ),
+        ],
+    )
+    def test_callback_allowed_hosts_strips_port_suffixes(
+        self,
+        value: str | list[str],
+        expected: tuple[str, ...],
+    ) -> None:
+        settings = Settings(
+            _env_file=None,
+            callbacks_allowed_hosts=value,
+        )
+
+        assert settings.callbacks_allowed_hosts == expected
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("value", [None, ""])
     def test_callback_allowed_hosts_treats_empty_values_as_unset(
         self,

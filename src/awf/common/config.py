@@ -25,6 +25,20 @@ DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS = 3600
 DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT = 50
 
 
+def _normalize_callback_allowed_host(value: Any) -> str:
+    host = str(value).strip().rstrip(".").lower()
+    if not host:
+        return ""
+    if host.startswith("["):
+        bracketed_host, bracket, _suffix = host[1:].partition("]")
+        if bracket:
+            return bracketed_host.rstrip(".")
+    if host.count(":") == 1:
+        host_without_port, _separator, _port = host.partition(":")
+        return host_without_port.rstrip(".")
+    return host
+
+
 class Settings(BaseSettings):
     """Single source of truth for runtime configuration.
 
@@ -74,7 +88,8 @@ class Settings(BaseSettings):
         default_factory=tuple,
         description=(
             "Optional allowlist of callback target hostnames (normalized to lowercase "
-            "without trailing dots). Empty means no callback host restriction."
+            "without trailing dots or port suffixes). Empty means no callback host "
+            "restriction."
         ),
     )
     callback_delivery_timeout_seconds: int = Field(default=10, ge=1, le=120)
@@ -223,7 +238,8 @@ class Settings(BaseSettings):
                 "callbacks_allowed_hosts must be a comma-separated string, list, or tuple"
             )
 
-        return tuple(str(host).strip().rstrip(".").lower() for host in values if str(host).strip())
+        normalized_hosts = (_normalize_callback_allowed_host(host) for host in values)
+        return tuple(host for host in normalized_hosts if host)
 
     @field_validator(
         "local_capacity_cpu_cores",
