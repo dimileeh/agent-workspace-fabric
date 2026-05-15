@@ -1151,7 +1151,14 @@ def _setup_dependency_network_diagnostic(*, stdout: str, stderr: str) -> str:
     )
 
 
-def _setup_dependency_retry_output_prefix(*, retry_number: int) -> str:
+def _setup_dependency_retry_output_prefix(
+    *,
+    retry_number: int,
+    elapsed_seconds: float | None = None,
+) -> str:
+    if elapsed_seconds is not None:
+        elapsed = _format_seconds(elapsed_seconds)
+        return f"\n[setup dependency network retry {retry_number} at {elapsed}s]\n"
     return f"\n[setup dependency network retry {retry_number}]\n"
 
 
@@ -1487,6 +1494,7 @@ class ValidationRunner:
             setup_retry_count = 0
             setup_dependency_attempts: list[dict[str, object]] = []
             last_setup_dependency_classification: SetupDependencyNetworkClassification | None = None
+            setup_dependency_started = time.monotonic()
             setup_dependency_output_prefix: str | None = None
             while True:
                 total_retry_count = setup_retry_count + flaky_retry_count
@@ -1543,9 +1551,6 @@ class ValidationRunner:
                     last_setup_dependency_classification = setup_dependency_classification
                     if can_retry:
                         setup_retry_count += 1
-                        setup_dependency_output_prefix = _setup_dependency_retry_output_prefix(
-                            retry_number=setup_retry_count
-                        )
                         _log.info(
                             "validation.setup_dependency_network_retry",
                             workspace_id=workspace_id,
@@ -1562,6 +1567,10 @@ class ValidationRunner:
                         delay = self._setup_dependency_retry_delay(setup_retry_count)
                         if delay > 0:
                             await asyncio.sleep(delay)
+                        setup_dependency_output_prefix = _setup_dependency_retry_output_prefix(
+                            retry_number=setup_retry_count,
+                            elapsed_seconds=time.monotonic() - setup_dependency_started,
+                        )
                         continue
 
                     total_retry_count = setup_retry_count + flaky_retry_count

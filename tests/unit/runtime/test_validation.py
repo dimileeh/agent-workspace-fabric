@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1055,8 +1056,13 @@ async def test_setup_dependency_network_failure_retries_and_succeeds_on_cache_hi
     assert retry_metadata["retry_exhausted"] is False
     assert retry_metadata["package"] == "docker==7.1.0"
     assert retry_metadata["host"] == "files.pythonhosted.org"
-    assert _uv_pypi_dns_failure() in command.stderr_path.read_text(encoding="utf-8")
-    assert "Using cached docker==7.1.0" in command.stdout_path.read_text(encoding="utf-8")
+    stderr_text = command.stderr_path.read_text(encoding="utf-8")
+    stdout_text = command.stdout_path.read_text(encoding="utf-8")
+    retry_prefix_pattern = r"\[setup dependency network retry 1 at \d+(?:\.\d+)?s\]"
+    assert re.search(retry_prefix_pattern, stdout_text)
+    assert re.search(retry_prefix_pattern, stderr_text)
+    assert _uv_pypi_dns_failure() in stderr_text
+    assert "Using cached docker==7.1.0" in stdout_text
 
 
 @pytest.mark.unit

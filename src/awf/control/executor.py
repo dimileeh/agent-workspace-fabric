@@ -1007,6 +1007,9 @@ def _setup_dependency_network_event_payload(
 ) -> dict[str, Any]:
     payload = dict(details)
     payload["reason_code"] = reason_code
+    # This identifies the transient setup-dependency classifier that caused the
+    # retry event. When retry_exhausted=false and recovered=false, the command
+    # can still terminate on a later deterministic setup failure.
     payload["failure_reason_code"] = SETUP_DEPENDENCY_NETWORK_FAILURE
     return payload
 
