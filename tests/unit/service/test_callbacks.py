@@ -1137,6 +1137,38 @@ def test_callback_target_validation_executor_is_lazy_at_import() -> None:
 
 
 @pytest.mark.unit
+def test_callback_target_validation_executor_shutdown_does_not_keep_process_alive() -> None:
+    script = "\n".join(
+        [
+            "import threading",
+            "import time",
+            "from awf.service import callbacks",
+            "started = threading.Event()",
+            "def block():",
+            "    started.set()",
+            "    time.sleep(60)",
+            "executor = callbacks._new_callback_target_validation_executor()",
+            "executor.submit(block)",
+            "if not started.wait(timeout=2):",
+            "    raise SystemExit('callback DNS worker did not start')",
+            "callbacks._CALLBACK_TARGET_VALIDATION_EXECUTOR = executor",
+            "callbacks.shutdown_callback_target_validation_executor(wait=False)",
+            "print('shutdown-returned')",
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.stdout.strip() == "shutdown-returned"
+
+
+@pytest.mark.unit
 def test_callback_target_validation_executor_shutdown_closes_and_resets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

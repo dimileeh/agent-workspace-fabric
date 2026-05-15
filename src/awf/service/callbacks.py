@@ -8,6 +8,7 @@ import functools
 import hashlib
 import ipaddress
 import json as json_module
+import queue
 import socket
 import threading
 import traceback
@@ -47,8 +48,111 @@ _CALLBACK_EXCEPTION_TRACEBACK_LIMIT = 4000
 _CALLBACK_TARGET_VALIDATION_WORKERS = 4
 
 
+@dataclass(frozen=True)
+class _CallbackTargetValidationWorkItem:
+    future: concurrent.futures.Future[Any]
+    function: Callable[..., Any]
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+class _CallbackTargetValidationExecutor(concurrent.futures.Executor):
+    """Small daemon-worker executor for blocking callback DNS validation."""
+
+    def __init__(self, *, max_workers: int, thread_name_prefix: str) -> None:
+        if max_workers <= 0:
+            raise ValueError("max_workers must be greater than 0")
+        self._max_workers = max_workers
+        self._thread_name_prefix = thread_name_prefix
+        self._work_queue: queue.Queue[_CallbackTargetValidationWorkItem | None] = queue.Queue()
+        self._shutdown = False
+        self._shutdown_lock = threading.Lock()
+        self._threads: set[threading.Thread] = set()
+        self._thread_index = 0
+
+    def submit(
+        self,
+        fn: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> concurrent.futures.Future[Any]:
+        with self._shutdown_lock:
+            if self._shutdown:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+            self._work_queue.put(
+                _CallbackTargetValidationWorkItem(
+                    future=future,
+                    function=fn,
+                    args=args,
+                    kwargs=kwargs,
+                )
+            )
+            self._start_worker_locked()
+            return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        with self._shutdown_lock:
+            self._shutdown = True
+            if cancel_futures:
+                self._cancel_pending_work_items_locked()
+            threads = tuple(self._threads)
+            for _thread in threads:
+                self._work_queue.put(None)
+        if wait:
+            for thread in threads:
+                thread.join()
+
+    def _start_worker_locked(self) -> None:
+        if len(self._threads) >= self._max_workers:
+            return
+        self._thread_index += 1
+        thread = threading.Thread(
+            target=self._run_worker,
+            name=f"{self._thread_name_prefix}_{self._thread_index}",
+            daemon=True,
+        )
+        self._threads.add(thread)
+        thread.start()
+
+    def _cancel_pending_work_items_locked(self) -> None:
+        while True:
+            try:
+                work_item = self._work_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if work_item is not None:
+                    work_item.future.cancel()
+            finally:
+                self._work_queue.task_done()
+
+    def _run_worker(self) -> None:
+        try:
+            while True:
+                work_item = self._work_queue.get()
+                try:
+                    if work_item is None:
+                        return
+                    if not work_item.future.set_running_or_notify_cancel():
+                        continue
+                    try:
+                        result = work_item.function(*work_item.args, **work_item.kwargs)
+                    except BaseException as exc:
+                        work_item.future.set_exception(exc)
+                    else:
+                        work_item.future.set_result(result)
+                finally:
+                    self._work_queue.task_done()
+        finally:
+            current_thread = threading.current_thread()
+            with self._shutdown_lock:
+                self._threads.discard(current_thread)
+
+
 def _new_callback_target_validation_executor() -> concurrent.futures.Executor:
-    return concurrent.futures.ThreadPoolExecutor(
+    return _CallbackTargetValidationExecutor(
         max_workers=_CALLBACK_TARGET_VALIDATION_WORKERS,
         thread_name_prefix="awf-callback-dns",
     )
@@ -56,8 +160,10 @@ def _new_callback_target_validation_executor() -> concurrent.futures.Executor:
 
 # `getaddrinfo` cannot be interrupted portably once running. Keep callback DNS
 # work out of asyncio's shared default executor so timed-out resolutions can
-# only occupy this callback-specific pool. Create it lazily so import-only
-# scripts do not start callback DNS workers without a lifespan to stop them.
+# only occupy this callback-specific pool. Use daemon workers so a stuck
+# resolver cannot keep process shutdown alive after wait=False shutdown.
+# Create it lazily so import-only scripts do not start callback DNS workers
+# without a lifespan to stop them.
 _CALLBACK_TARGET_VALIDATION_EXECUTOR: concurrent.futures.Executor | None = None
 _CALLBACK_TARGET_VALIDATION_EXECUTOR_LOCK = threading.Lock()
 _log = get_logger(__name__)
