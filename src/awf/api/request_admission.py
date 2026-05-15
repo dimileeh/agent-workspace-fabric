@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ class RequestAdmissionLimiter:
         self._clock = clock or time.monotonic
         self._buckets: dict[tuple[str, str, str, int, int], int] = {}
         self._last_pruned_windows: dict[int, int] = {}
+        self._lock = threading.Lock()
 
     def admit(
         self,
@@ -75,27 +77,47 @@ class RequestAdmissionLimiter:
         if window_seconds < 1:
             raise ValueError("request admission window must be at least 1 second")
 
-        now = self._clock()
-        window_index = int(now // window_seconds)
-        key = (
-            endpoint_family,
-            identity.identity_type,
-            identity.identity_digest,
-            window_seconds,
-            window_index,
-        )
-        self._prune(window_seconds=window_seconds, current_window=window_index)
+        with self._lock:
+            now = self._clock()
+            window_index = int(now // window_seconds)
+            key = (
+                endpoint_family,
+                identity.identity_type,
+                identity.identity_digest,
+                window_seconds,
+                window_index,
+            )
+            self._prune_locked(window_seconds=window_seconds, current_window=window_index)
 
-        current_count = self._buckets.get(key, 0)
-        if current_count >= limit:
+            current_count = self._buckets.get(key, 0)
+            if current_count >= limit:
+                return RequestAdmissionDecision(
+                    allowed=False,
+                    metadata=_metadata(
+                        endpoint_family=endpoint_family,
+                        identity=identity,
+                        limit=limit,
+                        window_seconds=window_seconds,
+                        remaining=0,
+                        retry_after_seconds=_retry_after_seconds(
+                            now=now,
+                            window_seconds=window_seconds,
+                            window_index=window_index,
+                        ),
+                        reason_code=reason_code,
+                    ),
+                )
+
+            next_count = current_count + 1
+            self._buckets[key] = next_count
             return RequestAdmissionDecision(
-                allowed=False,
+                allowed=True,
                 metadata=_metadata(
                     endpoint_family=endpoint_family,
                     identity=identity,
                     limit=limit,
                     window_seconds=window_seconds,
-                    remaining=0,
+                    remaining=max(limit - next_count, 0),
                     retry_after_seconds=_retry_after_seconds(
                         now=now,
                         window_seconds=window_seconds,
@@ -105,26 +127,11 @@ class RequestAdmissionLimiter:
                 ),
             )
 
-        next_count = current_count + 1
-        self._buckets[key] = next_count
-        return RequestAdmissionDecision(
-            allowed=True,
-            metadata=_metadata(
-                endpoint_family=endpoint_family,
-                identity=identity,
-                limit=limit,
-                window_seconds=window_seconds,
-                remaining=max(limit - next_count, 0),
-                retry_after_seconds=_retry_after_seconds(
-                    now=now,
-                    window_seconds=window_seconds,
-                    window_index=window_index,
-                ),
-                reason_code=reason_code,
-            ),
-        )
-
     def _prune(self, *, window_seconds: int, current_window: int) -> None:
+        with self._lock:
+            self._prune_locked(window_seconds=window_seconds, current_window=current_window)
+
+    def _prune_locked(self, *, window_seconds: int, current_window: int) -> None:
         last_pruned_window = self._last_pruned_windows.get(window_seconds)
         if last_pruned_window is not None and current_window <= last_pruned_window:
             return

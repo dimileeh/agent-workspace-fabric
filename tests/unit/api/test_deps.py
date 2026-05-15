@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +35,23 @@ class _CountingAdmissionBuckets(dict[tuple[str, str, str, int, int], int]):
         for key in super().__iter__():
             self.iterated_keys += 1
             yield key
+
+
+class _RaceAmplifyingAdmissionBuckets(dict[tuple[str, str, str, int, int], int]):
+    def __init__(self, *, concurrent_readers: int) -> None:
+        super().__init__()
+        self._read_barrier = threading.Barrier(concurrent_readers)
+
+    def get(
+        self,
+        key: tuple[str, str, str, int, int],
+        default: int | None = None,
+    ) -> int | None:
+        value = super().get(key, default)
+        if value == 0:
+            with suppress(threading.BrokenBarrierError):
+                self._read_barrier.wait(timeout=0.1)
+        return value
 
 
 def _bearer_credentials(token: str, *, scheme: str = "Bearer") -> HTTPAuthorizationCredentials:
@@ -241,6 +261,34 @@ def test_request_admission_limiter_separates_endpoint_families() -> None:
         window_seconds=60,
         reason_code="CALLBACK_REGISTER_RATE_LIMITED",
     ).allowed
+
+
+@pytest.mark.unit
+def test_request_admission_limiter_serializes_concurrent_admissions() -> None:
+    concurrent_requests = 8
+    limiter = RequestAdmissionLimiter(clock=lambda: 10.0)
+    limiter._buckets = _RaceAmplifyingAdmissionBuckets(concurrent_readers=concurrent_requests)
+    identity = extract_request_identity(
+        _request(client_host="203.0.113.40"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+    start_barrier = threading.Barrier(concurrent_requests)
+
+    def admit_concurrently() -> bool:
+        start_barrier.wait(timeout=1)
+        return limiter.admit(
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+            identity=identity,
+            limit=1,
+            window_seconds=60,
+            reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+        ).allowed
+
+    with ThreadPoolExecutor(max_workers=concurrent_requests) as executor:
+        results = list(executor.map(lambda _: admit_concurrently(), range(concurrent_requests)))
+
+    assert results.count(True) == 1
+    assert results.count(False) == concurrent_requests - 1
 
 
 @pytest.mark.unit
