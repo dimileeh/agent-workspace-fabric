@@ -4023,6 +4023,78 @@ async def test_execute_ci_fix_retries_when_local_commit_touches_protected_scope(
 
 
 @pytest.mark.unit
+async def test_ci_fix_commits_verified_protected_revert_during_scope_repair(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=".github/workflows/ci.yml\nsrc/fix.py\n")
+    cmd.queue_result(
+        returncode=0,
+        stdout=" M .github/workflows/ci.yml\n M src/fix.py\n",
+    )
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for protected revert check
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0)  # workflow file now matches the remote PR branch baseline
+    cmd.queue_result(returncode=0)  # git add -A
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=0)  # git commit
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stderr="pushed")  # git push
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed locally.")
+    adapter.queue(stdout="Restored protected workflow edit and fixed source.")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="ci", conclusion="FAILURE", log_excerpt="failing check"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.pushed is True
+    assert push_result.failed is False
+    assert len(adapter.calls) == 2
+    call_args = [call.args for call in cmd.calls]
+    assert [
+        "git",
+        "-C",
+        str(worktree),
+        "diff",
+        "--quiet",
+        "merge-base-sha",
+        "--",
+        ".github/workflows/ci.yml",
+    ] in call_args
+    assert any(args[:1] == ["git"] and "commit" in args for args in call_args)
+    assert any(args[:1] == ["git"] and "push" in args for args in call_args)
+
+
+@pytest.mark.unit
 async def test_execute_ci_fix_diff_baseline_unavailable_terminates_with_diff_reason(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -5724,6 +5796,47 @@ async def test_commit_dirty_worktree_stops_when_protected_scope_repair_fails(
         compose_file=tmp_path / "compose.yml",
     )
     assert len(cmd.calls) == 1
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_fails_closed_when_protected_revert_check_errors(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await session.commit()
+
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=128, stderr="bad revision")
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert not await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: repair protected scope",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        protected_scope_revert_remote_branch=f"awf/{workspace_id}",
+    )
+    assert adapter.calls == []
+    call_args = [call.args for call in cmd.calls]
+    assert not any(args[:1] == ["git"] and "add" in args for args in call_args)
+    assert not any(args[:1] == ["git"] and "commit" in args for args in call_args)
 
 
 @pytest.mark.unit

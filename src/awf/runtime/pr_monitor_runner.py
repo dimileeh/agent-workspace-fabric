@@ -4403,6 +4403,8 @@ class PullRequestMonitorRunner:
         compose_file: Path | None = None,
         state: MonitorState | None = None,
         command_evidence: Sequence[str] = (),
+        protected_scope_revert_remote_branch: str | None = None,
+        remote_push_url: str | None = None,
     ) -> bool:
         """Commit dirty monitor-agent edits so PR feedback is not stranded.
 
@@ -4444,6 +4446,8 @@ class PullRequestMonitorRunner:
                 compose_project=compose_project,
                 compose_file=compose_file,
                 state=state,
+                protected_scope_revert_remote_branch=protected_scope_revert_remote_branch,
+                remote_push_url=remote_push_url,
             )
             if repaired_status is None:
                 return False
@@ -4572,6 +4576,8 @@ class PullRequestMonitorRunner:
                 compose_file=compose_file,
                 state=state,
                 command_evidence=command_evidence,
+                protected_scope_revert_remote_branch=remote_branch,
+                remote_push_url=remote_push_url,
             )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(
@@ -4617,6 +4623,8 @@ class PullRequestMonitorRunner:
         compose_project: str,
         compose_file: Path,
         state: MonitorState | None = None,
+        protected_scope_revert_remote_branch: str | None = None,
+        remote_push_url: str | None = None,
     ) -> CommandResult | None:
         """Give the agent one chance to remove protected out-of-scope edits.
 
@@ -4630,6 +4638,19 @@ class PullRequestMonitorRunner:
             workspace_id=workspace_id,
             status_stdout=status_stdout,
         )
+        if violations and protected_scope_revert_remote_branch is not None:
+            filtered_violations = (
+                await self._protected_scope_violations_not_restored_to_remote_branch(
+                    workspace_id=workspace_id,
+                    status_stdout=status_stdout,
+                    violations=violations,
+                    remote_branch=protected_scope_revert_remote_branch,
+                    remote_push_url=remote_push_url,
+                )
+            )
+            if filtered_violations is None:
+                return None
+            violations = filtered_violations
         if not violations:
             return CommandResult(returncode=0, stdout=status_stdout, stderr="")
 
@@ -4667,6 +4688,19 @@ class PullRequestMonitorRunner:
             workspace_id=workspace_id,
             status_stdout=repaired_status.stdout,
         )
+        if remaining and protected_scope_revert_remote_branch is not None:
+            filtered_remaining = (
+                await self._protected_scope_violations_not_restored_to_remote_branch(
+                    workspace_id=workspace_id,
+                    status_stdout=repaired_status.stdout,
+                    violations=remaining,
+                    remote_branch=protected_scope_revert_remote_branch,
+                    remote_push_url=remote_push_url,
+                )
+            )
+            if filtered_remaining is None:
+                return None
+            remaining = filtered_remaining
         if remaining:
             _log.warning(
                 "monitor.protected_scope_repair_failed",
@@ -4697,6 +4731,95 @@ class PullRequestMonitorRunner:
             paths=[violation.path for violation in violations],
         )
         return repaired_status
+
+    async def _protected_scope_violations_not_restored_to_remote_branch(
+        self,
+        *,
+        workspace_id: str,
+        status_stdout: str,
+        violations: list[QualityGateViolation],
+        remote_branch: str,
+        remote_push_url: str | None = None,
+    ) -> list[QualityGateViolation] | None:
+        """Filter out protected dirty paths that restore the remote PR branch tree."""
+
+        untracked_paths = set(_untracked_paths_from_porcelain(status_stdout))
+        remaining = [violation for violation in violations if violation.path in untracked_paths]
+        tracked_violations = [
+            violation for violation in violations if violation.path not in untracked_paths
+        ]
+        if not tracked_violations:
+            return remaining
+
+        worktree_path = self._worktrees_root / workspace_id
+        remote = remote_push_url or "origin"
+        fetch_result = await self._deps.runner.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "fetch",
+                remote,
+                f"refs/heads/{remote_branch}",
+            ]
+        )
+        if not fetch_result.ok:
+            _log.warning(
+                "monitor.protected_scope_revert_baseline_fetch_failed",
+                workspace_id=workspace_id,
+                stderr=fetch_result.stderr[:400],
+            )
+            return None
+
+        try:
+            local_base = await self._merge_base_with_head(
+                worktree_path=worktree_path,
+                ref="FETCH_HEAD",
+                error_context="against the remote PR branch",
+            )
+        except ProtectedScopeDiffError as exc:
+            _log.warning(
+                "monitor.protected_scope_revert_baseline_failed",
+                workspace_id=workspace_id,
+                error=str(exc)[:400],
+            )
+            return None
+
+        restored_paths: list[str] = []
+        for violation in tracked_violations:
+            diff_result = await self._deps.runner.run(
+                [
+                    "git",
+                    "-C",
+                    str(worktree_path),
+                    "diff",
+                    "--quiet",
+                    local_base,
+                    "--",
+                    violation.path,
+                ]
+            )
+            if diff_result.returncode == 0:
+                restored_paths.append(violation.path)
+                continue
+            if diff_result.returncode == 1:
+                remaining.append(violation)
+                continue
+            _log.warning(
+                "monitor.protected_scope_revert_diff_failed",
+                workspace_id=workspace_id,
+                path=violation.path,
+                stderr=diff_result.stderr[:400],
+            )
+            return None
+
+        if restored_paths:
+            _log.info(
+                "monitor.protected_scope_revert_verified",
+                workspace_id=workspace_id,
+                paths=restored_paths,
+            )
+        return remaining
 
     async def _protected_scope_violations_for_status(
         self,
@@ -7069,6 +7192,21 @@ def _changed_paths_from_porcelain(status_stdout: str) -> list[str]:
         if " -> " in path:
             old_path, new_path = path.split(" -> ", 1)
             paths.extend([old_path, new_path])
+        else:
+            paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
+def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
+    """Extract untracked paths from ``git status --porcelain`` output."""
+    paths: list[str] = []
+    for line in status_stdout.splitlines():
+        if not line.startswith("?? "):
+            continue
+        path = line[3:]
+        if " -> " in path:
+            _old_path, new_path = path.split(" -> ", 1)
+            paths.append(new_path)
         else:
             paths.append(path)
     return list(dict.fromkeys(paths))
