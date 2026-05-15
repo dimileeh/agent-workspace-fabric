@@ -2186,6 +2186,67 @@ class TestCoverageEnforcement:
         assert result.command_result.reason_code == "PYTEST_TEST_FAILURE"
 
     @pytest.mark.unit
+    async def test_run_profile_coverage_classifies_xdist_errors_when_percent_passes(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=1,
+            stdout=(
+                "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+                "test_parallel_fixture_timeout\n"
+                "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+                "test_parallel_fixture_failure - AssertionError: boom\n"
+                "Name                                      Stmts   Miss  Cover\n"
+                "-------------------------------------------------------------\n"
+                "TOTAL                                     28144    167    99.02%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "final-coverage-xdist-pytest-failure",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term-missing",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_coverage(
+            workspace_id="ws_final_coverage_xdist_pytest_failure",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase="final_coverage",
+        )
+
+        assert result is not None
+        assert result.percent == 99.02
+        assert result.status == "passed"
+        assert result.reason_code == "COVERAGE_OK"
+        assert result.failing_test_node_ids == [
+            "tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout",
+            "tests/unit/control/test_executor.py::test_parallel_fixture_failure",
+        ]
+        assert result.failing_test_evidence == [
+            "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+            "test_parallel_fixture_timeout",
+            "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+            "test_parallel_fixture_failure - AssertionError: boom",
+        ]
+        assert not result.ok
+        assert result.command_result is not None
+        assert result.command_result.reason_code == "PYTEST_TEST_FAILURE"
+        assert result.command_result.metadata["coverage_reason_code"] == "COVERAGE_OK"
+        assert result.command_result.metadata["failing_test_node_ids"] == [
+            "tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout",
+            "tests/unit/control/test_executor.py::test_parallel_fixture_failure",
+        ]
+
+    @pytest.mark.unit
     async def test_run_profile_coverage_rejects_provider_fail_under_even_when_rounded_percent_passes(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:

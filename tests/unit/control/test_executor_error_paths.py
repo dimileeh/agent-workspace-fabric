@@ -2382,7 +2382,7 @@ class TestPullRequestUnexpectedError:
             source="test",
             phases={"validate": ["pytest -q"]},
             validation={
-                "strategy": {"baseline_coverage": "skip"},
+                "strategy": {"baseline_coverage": "skip", "final_gate": "coverage"},
                 "coverage": {
                     "minimum_percent": 99,
                     "command": "pytest --cov=awf",
@@ -2448,6 +2448,7 @@ class TestPullRequestUnexpectedError:
             validation={
                 "strategy": {
                     "baseline_coverage": "skip",
+                    "final_gate": "coverage",
                     "reuse_evidence": True,
                     "freshness_max_age_seconds": 3600,
                 },
@@ -2528,7 +2529,7 @@ class TestPullRequestUnexpectedError:
             source="test",
             phases={"validate": ["pytest -q"]},
             validation={
-                "strategy": {"baseline_coverage": "skip"},
+                "strategy": {"baseline_coverage": "skip", "final_gate": "coverage"},
                 "coverage": {
                     "minimum_percent": 99,
                     "command": "pytest --cov=awf",

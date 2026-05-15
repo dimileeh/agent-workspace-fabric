@@ -69,7 +69,8 @@ _COVERAGE_FILE_LINE_RE = re.compile(
 )
 _COVERAGE_HEADER_RE = re.compile(r"(?i)Name\s+Stmts\s+Miss\s+Cover")
 _PYTEST_FAILURE_SUMMARY_RE = re.compile(r"^(?P<kind>FAILED|ERROR)\s+(?P<rest>.+)$")
-_PYTEST_NODE_ID_RE = re.compile(r"^[^\s]+\.py::\S+")
+_PYTEST_PROGRESS_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s+)+(?=(?:FAILED|ERROR)\s+)")
+_PYTEST_NODE_ID_RE = re.compile(r"(?P<node>[^\s]+\.py::[^\s,:;]+)")
 _PYTEST_EVIDENCE_LIMIT = 20
 _PYTEST_NODE_ID_LIMIT = 20
 _PYTEST_EVIDENCE_MAX_CHARS = 500
@@ -1753,18 +1754,21 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
                 if not line:
                     continue
                 summary_line = line.lstrip()
-                summary_match = _PYTEST_FAILURE_SUMMARY_RE.match(summary_line)
+                normalized_summary_line = _normalize_pytest_summary_line(summary_line)
+                summary_match = _PYTEST_FAILURE_SUMMARY_RE.match(normalized_summary_line)
                 if summary_match is not None:
                     _append_unique_capped(
                         evidence,
                         _truncate_pytest_evidence_line(summary_line),
                         limit=_PYTEST_EVIDENCE_LIMIT,
                     )
-                    target = _pytest_summary_target(summary_match.group("rest"))
-                    if _looks_like_pytest_node_id(target):
+                    rest = summary_match.group("rest")
+                    target = _pytest_summary_target(rest)
+                    node_id = _pytest_node_id_from_text(target) or _pytest_node_id_from_text(rest)
+                    if node_id is not None:
                         _append_unique_capped(
                             node_ids,
-                            target,
+                            node_id,
                             limit=_PYTEST_NODE_ID_LIMIT,
                         )
                     continue
@@ -1780,13 +1784,24 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
     return PytestFailureEvidence(node_ids=node_ids, evidence=evidence)
 
 
+def _normalize_pytest_summary_line(line: str) -> str:
+    return _PYTEST_PROGRESS_PREFIX_RE.sub("", line)
+
+
 def _pytest_summary_target(rest: str) -> str:
     target, _, _details = rest.partition(" - ")
     return target.strip()
 
 
 def _looks_like_pytest_node_id(value: str) -> bool:
-    return bool(_PYTEST_NODE_ID_RE.match(value))
+    return _pytest_node_id_from_text(value) is not None
+
+
+def _pytest_node_id_from_text(value: str) -> str | None:
+    match = _PYTEST_NODE_ID_RE.search(value)
+    if match is None:
+        return None
+    return match.group("node").rstrip(".,:;")
 
 
 def _looks_like_pytest_fallback_evidence(line: str) -> bool:

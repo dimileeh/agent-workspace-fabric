@@ -7530,7 +7530,7 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
 def _validation_command_count(ws: Workspace) -> int:
     if ws.resolved_profile:
         profile = WorkspaceProfile.model_validate(ws.resolved_profile)
-        coverage_count = 1 if profile.validation.coverage.command is not None else 0
+        coverage_count = 1 if _should_run_local_coverage(profile) else 0
         return (
             len(profile.phases.post_agent)
             + len(profile.database.pre_validation_refresh)
@@ -7600,10 +7600,11 @@ def _validation_run_command_records(
         ordered.append(record)
     if pending_healthchecks:
         ordered.extend(_healthcheck_command_records(pending_healthchecks))
-    if "validate" in phase_names and profile.validation.coverage.command is not None:
+    coverage_command = profile.validation.coverage.command
+    if "validate" in phase_names and _should_run_local_coverage(profile) and coverage_command:
         coverage_record = {
             "phase": "coverage",
-            "command": profile.validation.coverage.command.command,
+            "command": coverage_command.command,
         }
         if coverage_evidence_status is not None:
             coverage_record["evidence_status"] = coverage_evidence_status
@@ -7660,7 +7661,10 @@ def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfi
 
 
 def _should_run_local_coverage(profile: WorkspaceProfile) -> bool:
-    return profile.validation.coverage.command is not None
+    return (
+        profile.validation.strategy.final_gate == "coverage"
+        and profile.validation.coverage.command is not None
+    )
 
 
 def _validation_run_log_stream_refs(
