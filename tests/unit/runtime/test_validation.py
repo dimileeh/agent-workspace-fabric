@@ -590,6 +590,29 @@ def test_setup_dependency_network_classifier_accepts_npm_workspace_flags_before_
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "command",
+    [
+        "pnpm --filter apps/console install",
+        "pnpm -F apps/console install",
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_pnpm_filter_flags_before_subcommand(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("command", "stderr", "expected_category", "expected_package", "expected_host"),
     [
         (
