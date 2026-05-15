@@ -158,11 +158,11 @@ Production must set:
 - `AWF_API_TOKEN` to a deployment-specific high-entropy bearer token. Missing
   values, short values, and local placeholders such as `local-dev-token`,
   `changeme`, or `default` are rejected.
-- `AWF_CALLBACKS_ENABLED=false` unless callback registration should be exposed.
-  When callbacks are enabled in production, a strong `AWF_API_TOKEN` is
-  required. Future callback SSRF hardening will add HTTPS and allowlist policy
-  validation; do not treat this token guard as a complete outbound callback
-  security model.
+- `AWF_CALLBACKS_ENABLED=false`. Production startup rejects enabled callbacks
+  until callback routes enforce bearer-token authentication and the callback
+  SSRF hardening slice adds HTTPS and allowlist policy validation. A strong
+  `AWF_API_TOKEN` is still required for production, but it is not sufficient to
+  expose callback registration safely.
 
 Production validation diagnostics name the unsafe setting and remediation, but
 they do not print raw tokens, database passwords, or full secret-bearing
