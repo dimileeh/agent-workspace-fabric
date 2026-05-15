@@ -453,9 +453,30 @@ class TestPullRequestMonitorAdoptionService:
         assert fetcher.calls == [("dimileeh/aira-web", 277)]
 
     @pytest.mark.unit
-    async def test_replay_omitting_agent_policy_attaches_to_policy_bearing_adoption(
+    @pytest.mark.parametrize(
+        ("initial_kwargs", "expected_detail"),
+        [
+            (
+                {"model": "gpt-5.3-codex"},
+                {
+                    "existing_agent_model": "gpt-5.3-codex",
+                    "requested_agent_model": None,
+                },
+            ),
+            (
+                {"effort": "high"},
+                {
+                    "existing_agent_effort": "high",
+                    "requested_agent_effort": None,
+                },
+            ),
+        ],
+    )
+    async def test_replay_omitting_agent_policy_conflicts_with_policy_bearing_adoption(
         self,
         factory: async_sessionmaker[AsyncSession],
+        initial_kwargs: dict[str, object],
+        expected_detail: dict[str, object],
     ) -> None:
         metadata = _metadata()
         fetcher = _MetadataFetcher(metadata)
@@ -466,18 +487,22 @@ class TestPullRequestMonitorAdoptionService:
                 PullRequestMonitorAdoptionRequest(
                     repo_slug="dimileeh/aira-web",
                     pr_number=277,
-                    model="gpt-5.3-codex",
+                    **initial_kwargs,
                 )
             )
-            second = await service.adopt(
-                PullRequestMonitorAdoptionRequest(
-                    pr_url="https://github.com/dimileeh/aira-web/pull/277"
-                )
-            )
-            await session.commit()
 
-        assert second.attached_existing is True
-        assert second.workspace_id == first.workspace_id
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        pr_url="https://github.com/dimileeh/aira-web/pull/277"
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": first.workspace_id,
+            **expected_detail,
+        }
         assert fetcher.calls == [("dimileeh/aira-web", 277)]
 
     @pytest.mark.unit
