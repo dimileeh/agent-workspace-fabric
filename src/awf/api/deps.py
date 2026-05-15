@@ -198,10 +198,11 @@ async def websocket_authorization_denial_handler(
             headers=failure.headers,
         )
         await websocket.send_denial_response(response)
-        return
-
-    fallback = _websocket_authorization_failure(failure)
-    await websocket.close(code=fallback.code, reason=fallback.reason)
+    else:  # pragma: no cover - defensive for direct handler callers.
+        # require_websocket_api_token raises WebSocketException before this handler
+        # when the denial-response extension is unavailable.
+        fallback = _websocket_authorization_failure(failure)
+        await websocket.close(code=fallback.code, reason=fallback.reason)
 
 
 def _authorization_header_value(
