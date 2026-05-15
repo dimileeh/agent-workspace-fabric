@@ -1,40 +1,34 @@
 # Review Issue 4460873446 Plan
 
-## Problem Statement And Scope
+## Problem Statement and Scope
 
-Address the review-level Greptile comment for PR #256. The comment raises three quality concerns in the request admission hardening slice:
+Address PR review-level comment `issue:4460873446` covering two request-admission edge cases:
 
-- direct-call paths without `Request.app.state` can share process-global limiter/cache state;
-- callback replay cache conflicts currently promote an entry before the payload hash guard;
-- v1 and v2 workspace creation share the same `workspace_create` admission bucket without an explicit regression test or operator-facing documentation.
+- A real Starlette/FastAPI `Request` without `app.state` currently falls back to a request-local limiter, which can silently disable cross-request admission accounting.
+- A request marked as bearer-auth verified can silently downgrade to client-host identity if the `Authorization` header is no longer readable.
 
-Scope is limited to request admission helpers, callback replay-cache behavior, workspace admission tests, configuration documentation, and this plan/validation pair.
+Scope is limited to request-admission behavior, focused regression tests, and this plan/validation record.
 
 ## Requirements Checklist
 
-- [ ] Remove or avoid process-global fallback state accumulation for direct-call request admission and callback replay-cache paths that lack app state.
-- [ ] Preserve normal FastAPI app-state scoped limiter/cache behavior.
-- [ ] Move callback replay-cache LRU promotion so conflicting payloads do not refresh eviction priority.
-- [ ] Add regression coverage for conflict non-promotion.
-- [ ] Add regression coverage proving `request=None` admission calls do not accumulate shared quota across tests/direct calls.
-- [ ] Confirm the shared v1/v2 workspace-create bucket as intentional with focused coverage and configuration documentation.
-- [ ] Run the narrow tests and lint/type checks needed for the touched area.
+- Add a regression proving real `Request` objects without app state fail loudly instead of using a request-local limiter.
+- Preserve direct-call compatibility for `None` and non-Starlette test objects.
+- Add a regression proving verified-bearer downgrade emits a structured warning without exposing raw tokens.
+- Implement the smallest request-admission change that satisfies the regressions.
+- Run the focused unit tests for the touched area.
 
 ## Implementation Steps
 
-1. Add failing tests for:
-   - `admit_request(None, ...)` not sharing a limiter between calls;
-   - callback replay-cache conflicts not promoting an entry;
-   - v1 and v2 workspace creates sharing the configured workspace-create quota.
-2. Update `request_admission_limiter()` to use app state when available, request-object-local state when possible, and a fresh fallback when `request is None`.
-3. Update callback replay-cache lookup similarly for direct calls without app state, and move `move_to_end()` after the request hash comparison.
-4. Clarify the workspace-create rate-limit setting description to say it covers both v1 and v2 create routes together.
-5. Run targeted tests first, then the configured ruff/mypy commands for the touched Python surface.
+1. Add failing tests in `tests/unit/api/test_deps.py` for the two review observations.
+2. Update `src/awf/api/request_admission.py` to raise on missing app state for real Starlette `Request` instances.
+3. Add structured logging for verified-bearer fallback to client-host identity.
+4. Run the focused test module.
+5. Record validation evidence in `plans/review_issue_4460873446_VALIDATION.md`.
 
-## Verification Commands And Pass Criteria
+## Verification Commands and Pass Criteria
 
-- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_deps.py tests/unit/api/test_callbacks.py tests/unit/api/test_workspaces.py -q`
-- `uv run --python 3.12 --extra dev ruff check src/awf tests`
-- `uv run --python 3.12 --extra dev mypy src/awf`
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/api/test_deps.py -q
+```
 
-Pass criteria: all listed commands complete successfully, and the validation doc records any remaining gaps.
+Pass criteria: the focused unit module passes, including the new regressions, and no raw bearer token is logged in the downgrade path.

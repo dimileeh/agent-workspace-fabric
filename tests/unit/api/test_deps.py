@@ -127,6 +127,32 @@ def test_request_admission_invalid_bearer_falls_back_to_client_host() -> None:
 
 
 @pytest.mark.unit
+def test_request_admission_logs_verified_bearer_header_downgrade() -> None:
+    raw_token = "secret-token-value"
+    request = SimpleNamespace(
+        scope={VERIFIED_BEARER_AUTH_SCOPE_KEY: True},
+        headers=SimpleNamespace(get=lambda _name: f"Bearer {raw_token}".encode("latin-1")),
+        client=SimpleNamespace(host="203.0.113.25"),
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        identity = extract_request_identity(
+            request,
+            endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        )
+
+    assert identity.identity_type == "client_host"
+    assert any(
+        entry.get("event") == "request_admission.verified_bearer_identity_downgraded"
+        and entry.get("log_level") == "warning"
+        and entry.get("endpoint_family") == WORKSPACE_CREATE_ENDPOINT_FAMILY
+        and entry.get("fallback_identity_type") == "client_host"
+        for entry in captured
+    )
+    assert raw_token not in str(captured)
+
+
+@pytest.mark.unit
 def test_request_admission_limiter_shares_unverified_bearers_by_client_host() -> None:
     limiter = RequestAdmissionLimiter(clock=lambda: 10.0)
     first = extract_request_identity(
@@ -372,6 +398,20 @@ def test_request_admission_reuses_limiter_without_app_state() -> None:
     assert first.allowed is True
     assert rejected.allowed is False
     assert rejected.metadata["reason_code"] == "STATELESS_REQUEST_RATE_LIMITED"
+
+
+@pytest.mark.unit
+def test_request_admission_real_request_without_app_state_fails_loudly() -> None:
+    request = _request(client_host="203.0.113.251")
+
+    with pytest.raises(RuntimeError, match=r"request\.app\.state"):
+        admit_request(
+            request,
+            endpoint_family="missing_app_state_request_test",
+            limit=1,
+            window_seconds=60,
+            reason_code="MISSING_APP_STATE_RATE_LIMITED",
+        )
 
 
 @pytest.mark.unit

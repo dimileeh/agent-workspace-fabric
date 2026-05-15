@@ -13,6 +13,7 @@ from typing import Final
 from starlette.requests import Request
 
 from awf.api.auth_context import request_has_verified_bearer_auth
+from awf.common.logging import get_logger
 
 WORKSPACE_CREATE_ENDPOINT_FAMILY: Final = "workspace_create"
 CALLBACK_REGISTER_ENDPOINT_FAMILY: Final = "callback_register"
@@ -23,6 +24,7 @@ CLIENT_HOST_IDENTITY_TYPE: Final = "client_host"
 _UNKNOWN_CLIENT_HOST: Final = "unknown-client"
 _LIMITER_STATE_KEY: Final = "request_admission_limiter"
 _DIRECT_LIMITER_ATTR: Final = "_awf_request_admission_limiter"
+_log = get_logger(__name__)
 
 Clock = Callable[[], float]
 AdmissionMetadata = dict[str, str | int]
@@ -159,6 +161,11 @@ def extract_request_identity(
                 identity_type=BEARER_TOKEN_IDENTITY_TYPE,
                 identity_digest=_digest("bearer-token", token),
             )
+        _log.warning(
+            "request_admission.verified_bearer_identity_downgraded",
+            endpoint_family=endpoint_family,
+            fallback_identity_type=CLIENT_HOST_IDENTITY_TYPE,
+        )
 
     client_host = _client_host(request)
     return RequestAdmissionIdentity(
@@ -188,6 +195,11 @@ def admit_request(
 def request_admission_limiter(request: Request | object | None) -> RequestAdmissionLimiter:
     state = request_app_state(request)
     if state is None:
+        if isinstance(request, Request):
+            raise RuntimeError(
+                "request admission limiter requires request.app.state; "
+                "direct callers must pass None or a non-Starlette test object."
+            )
         return _direct_request_admission_limiter(request)
 
     existing = getattr(state, _LIMITER_STATE_KEY, None)
