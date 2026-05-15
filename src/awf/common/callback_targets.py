@@ -6,6 +6,9 @@ import ipaddress
 
 _NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 _NAT64_LOCAL_USE_PREFIX = ipaddress.IPv6Network("64:ff9b:1::/48")
+# Only the well-known /96 translation prefix is decoded today. The RFC 6052
+# extractor keeps non-/96 support for future explicitly opted-in prefixes;
+# the local-use /48 namespace is blocked outright instead of decoded.
 _NAT64_TRANSLATION_PREFIXES = (_NAT64_WELL_KNOWN_PREFIX,)
 _SIX_TO_FOUR_PREFIX = ipaddress.IPv6Network("2002::/16")
 
