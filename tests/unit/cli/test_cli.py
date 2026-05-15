@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import click
 import httpx
 import pytest
 from typer.testing import CliRunner
@@ -29,6 +30,12 @@ def _mock_response(*, status_code: int = 202, payload: object = None, text: str 
     response.text = text or (json.dumps(payload) if payload is not None else "")
     response.json.return_value = payload
     return response
+
+
+def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
+    visible_help = click.unstyle(stdout)
+    assert "--model" in visible_help
+    assert "--effort" in visible_help
 
 
 def _assert_control_headers(
@@ -1155,6 +1162,93 @@ class TestWorkspaceAdoptPr:
             "reason": "recover existing PR",
         }
         assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
+
+    @pytest.mark.unit
+    def test_posts_model_and_effort_when_requested(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                    "--model",
+                    "gpt-5.3-codex",
+                    "--effort",
+                    "high",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["model"] == "gpt-5.3-codex"
+        assert body["effort"] == "high"
+
+    @pytest.mark.unit
+    def test_posts_model_without_effort_for_server_side_defaulting(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                    "--model",
+                    "gpt-5.3-codex",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["model"] == "gpt-5.3-codex"
+        assert "effort" not in body
+
+    @pytest.mark.unit
+    def test_adopt_pr_help_exposes_model_and_effort_flags(self) -> None:
+        result = _runner.invoke(app, ["workspace", "adopt-pr", "--help"])
+
+        assert result.exit_code == 0
+        _assert_adopt_pr_help_exposes_model_and_effort(result.stdout)
+
+    @pytest.mark.unit
+    def test_adopt_pr_help_exposes_model_and_effort_flags_when_color_is_forced(self) -> None:
+        result = _runner.invoke(
+            app,
+            ["workspace", "adopt-pr", "--help"],
+            env={
+                "TERM": "xterm-256color",
+                "FORCE_COLOR": "1",
+                "CLICOLOR_FORCE": "1",
+                "GITHUB_ACTIONS": "true",
+                "CI": "true",
+            },
+        )
+
+        assert result.exit_code == 0
+        assert "\x1b[" in result.stdout
+        _assert_adopt_pr_help_exposes_model_and_effort(result.stdout)
+
+    @pytest.mark.unit
+    def test_adopt_pr_help_exposes_model_and_effort_flags_when_terminal_is_narrow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import typer.rich_utils as typer_rich_utils
+
+        monkeypatch.setattr(typer_rich_utils, "MAX_WIDTH", 30)
+
+        result = _runner.invoke(app, ["workspace", "adopt-pr", "--help"])
+
+        assert result.exit_code == 0
+        _assert_adopt_pr_help_exposes_model_and_effort(result.stdout)
+        assert typer_rich_utils.MAX_WIDTH == 30
 
     @pytest.mark.unit
     def test_posts_pr_url_without_repo_fields(self) -> None:

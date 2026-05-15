@@ -3818,6 +3818,19 @@
             "title": "Auto Merge",
             "type": "boolean"
           },
+          "effort": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effort"
+          },
           "initial_review_grace_period_seconds": {
             "anyOf": [
               {
@@ -3830,6 +3843,19 @@
               }
             ],
             "title": "Initial Review Grace Period Seconds"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
           },
           "pr_number": {
             "anyOf": [
