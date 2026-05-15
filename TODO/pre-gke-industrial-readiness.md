@@ -73,8 +73,8 @@ Status values:
 
 ### Active Slices
 
-Active slices are currently recorded below. The previous active PRs #242, #243,
-#245, and #246 were reconciled as merged during the 2026-05-14 readiness pass.
+Active slices are currently recorded below. The previous active PRs `#242`, `#243`,
+`#245`, and `#246` were reconciled as merged during the 2026-05-14 readiness pass.
 
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
