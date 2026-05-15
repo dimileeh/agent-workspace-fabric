@@ -137,10 +137,14 @@ policies. If the first request omitted the grace override, later REST or MCP
 retries must also omit it or send `null`; if the first request set `900`,
 retries must set `900`.
 
-The same raw policy rule applies to agent overrides: omitting `model` or
-`effort` requests the default/no-override policy, so a replay that omits those
-fields conflicts with an existing live adoption pinned to explicit
-`agent_model` or `agent_effort` values.
+The same raw policy rule applies to agent selection and agent overrides, but
+`agent` has a default rather than null/no-override semantics. For retries,
+omitting `agent` requests the default `codex` agent policy; it is not a no-op
+for conflict detection, and conflicts with an existing live adoption for another
+agent. For overrides, omitting `model` or `effort` requests the
+default/no-override policy, so a replay that omits those fields conflicts with
+an existing live adoption pinned to explicit `agent_model` or `agent_effort`
+values.
 
 Terminal adoption retries: destroyed, destroying, cancelled, failed, completed,
 and superseded adoption rows are not reused as live monitor attachments. AWF
