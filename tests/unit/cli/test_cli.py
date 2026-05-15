@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import click
 import httpx
 import pytest
 from typer.testing import CliRunner
@@ -29,6 +30,12 @@ def _mock_response(*, status_code: int = 202, payload: object = None, text: str 
     response.text = text or (json.dumps(payload) if payload is not None else "")
     response.json.return_value = payload
     return response
+
+
+def _assert_adopt_pr_help_exposes_model_and_effort(stdout: str) -> None:
+    visible_help = click.unstyle(stdout)
+    assert "--model" in visible_help
+    assert "--effort" in visible_help
 
 
 def _assert_control_headers(
@@ -1209,8 +1216,25 @@ class TestWorkspaceAdoptPr:
         result = _runner.invoke(app, ["workspace", "adopt-pr", "--help"])
 
         assert result.exit_code == 0
-        assert "--model" in result.stdout
-        assert "--effort" in result.stdout
+        _assert_adopt_pr_help_exposes_model_and_effort(result.stdout)
+
+    @pytest.mark.unit
+    def test_adopt_pr_help_exposes_model_and_effort_flags_when_color_is_forced(self) -> None:
+        result = _runner.invoke(
+            app,
+            ["workspace", "adopt-pr", "--help"],
+            env={
+                "TERM": "xterm-256color",
+                "FORCE_COLOR": "1",
+                "CLICOLOR_FORCE": "1",
+                "GITHUB_ACTIONS": "true",
+                "CI": "true",
+            },
+        )
+
+        assert result.exit_code == 0
+        assert "\x1b[" in result.stdout
+        _assert_adopt_pr_help_exposes_model_and_effort(result.stdout)
 
     @pytest.mark.unit
     def test_adopt_pr_help_exposes_model_and_effort_flags_when_terminal_is_narrow(
@@ -1223,8 +1247,7 @@ class TestWorkspaceAdoptPr:
         result = _runner.invoke(app, ["workspace", "adopt-pr", "--help"])
 
         assert result.exit_code == 0
-        assert "--model" in result.stdout
-        assert "--effort" in result.stdout
+        _assert_adopt_pr_help_exposes_model_and_effort(result.stdout)
         assert typer_rich_utils.MAX_WIDTH == 30
 
     @pytest.mark.unit
