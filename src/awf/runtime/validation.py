@@ -1801,6 +1801,8 @@ def _pytest_node_id_from_text(value: str) -> str | None:
 
 def _strip_pytest_node_id_suffix(node_id: str) -> str:
     stripped = node_id.rstrip(".,;")
+    # _PYTEST_NODE_ID_RE requires a component after each "::", so only a single
+    # trailing ":" can be a pytest/xdist message separator.
     if stripped.endswith(":") and not stripped.endswith("::"):
         stripped = stripped[:-1]
     return stripped
