@@ -66,3 +66,48 @@ The repository-documented plain `python scripts/generate_openapi.py --check`
 failed in this workspace because the ambient Python interpreter did not have
 FastAPI installed. The equivalent `uv run --python 3.12 --extra dev` command
 was used for generation and final drift validation.
+
+## Attempt 1 Validation Repair
+
+The AWF full validation pass found one stale surface contract registry row:
+`adopt_pr_monitor` REST metadata did not include the newly added `model` and
+`effort` body fields. The registry row now declares those fields for REST and
+MCP request metadata, and the matching `--model` / `--effort` CLI options.
+
+Repair validation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_surface_metadata_alignment.py::test_rest_route_metadata_matches_registry tests/unit/contracts/test_surface_metadata_alignment.py::test_cli_command_shape_matches_registry tests/unit/contracts/test_surface_metadata_alignment.py::test_mcp_tool_schema_matches_registry -q
+```
+
+Result: Passed, 101 tests.
+
+```bash
+uv run --python 3.12 --extra dev ruff check src/awf/cli tests/unit/cli tests/unit/contracts/_capabilities.py
+```
+
+Result: Passed.
+
+```bash
+uv run --python 3.12 --extra dev mypy src/awf/cli
+```
+
+Result: Passed.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/cli -q
+```
+
+Result: Passed, 227 tests.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/control/test_test_quality_guardrails_self.py -q
+```
+
+Result: Passed, 1 test.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/api/test_pr_monitor_adoption.py tests/unit/service/test_pr_monitor_adoption.py tests/unit/cli/test_cli.py tests/unit/mcp/test_mcp_server.py -q
+```
+
+Result: Passed, 302 tests.
