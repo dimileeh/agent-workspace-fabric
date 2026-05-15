@@ -297,6 +297,23 @@ class TestPullRequestMonitorAdoptionService:
                 assert "agent_model" not in workspace.task_policy
 
     @pytest.mark.unit
+    def test_model_only_policy_omits_effort_when_agent_default_has_no_effort(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(adoption_module, "defaults_with_model_overrides", lambda _models: {})
+
+        policy = adoption_module._requested_agent_policy(
+            PullRequestMonitorAdoptionRequest(
+                repo_slug="dimileeh/aira-web",
+                pr_number=277,
+                model="local-model-without-effort-policy",
+            )
+        )
+
+        assert policy == {"agent_model": "local-model-without-effort-policy"}
+
+    @pytest.mark.unit
     async def test_persists_head_repo_identity_for_fork_pr(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -2598,6 +2615,100 @@ class TestPullRequestMonitorAdoptionService:
                 workspace_id=workspace.id,
             )
             assert await _count(session, TaskAttempt) == 0
+
+    @pytest.mark.unit
+    async def test_supersede_previous_adoption_preserves_nonmatching_task_fields(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        logical_key = _canonical_key()
+        adoption_external_id = adoption_module._adoption_external_id(
+            repo_slug="dimileeh/aira-web",
+            pr_number=277,
+        )
+        already_superseded_external_id = adoption_module._superseded_adoption_external_id(
+            external_id=adoption_external_id,
+            workspace_id="prior-generation",
+        )
+        task_generation_key = f"{logical_key}:g1"
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            result = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            assert result.task_id is not None
+            task = await TaskRepository(session).get(result.task_id)
+            assert task is not None
+            workspace.status = WorkspaceStatus.destroyed.value
+            workspace.task_external_id = already_superseded_external_id
+            task.idempotency_key = task_generation_key
+            task.external_id = already_superseded_external_id
+            await session.flush()
+
+            await service._supersede_previous_adoption(
+                workspace=workspace,
+                idempotency_key=logical_key,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+            await session.commit()
+
+        async with factory() as session:
+            superseded = await WorkspaceRepository(session).get(result.workspace_id)
+            assert superseded is not None
+            assert superseded.task_external_id == already_superseded_external_id
+            assert result.task_id is not None
+            task = await TaskRepository(session).get(result.task_id)
+            assert task is not None
+            assert task.idempotency_key == task_generation_key
+            assert task.external_id == already_superseded_external_id
+
+    @pytest.mark.unit
+    async def test_supersede_previous_adoption_tolerates_missing_task_row(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        logical_key = _canonical_key()
+
+        async def _missing_task(_repo: TaskRepository, _task_id: str) -> None:
+            return None
+
+        monkeypatch.setattr(TaskRepository, "get", _missing_task)
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            result = await service.adopt(
+                PullRequestMonitorAdoptionRequest(repo_slug="dimileeh/aira-web", pr_number=277)
+            )
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            workspace.status = WorkspaceStatus.destroyed.value
+
+            payload = await service._supersede_previous_adoption(
+                workspace=workspace,
+                idempotency_key=logical_key,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+            await session.commit()
+
+        assert payload["previous_workspace_id"] == result.workspace_id
+        assert payload["previous_idempotency_key"] == logical_key
+
+        async with factory() as session:
+            superseded = await WorkspaceRepository(session).get(result.workspace_id)
+            assert superseded is not None
+            assert superseded.idempotency_key is not None
+            assert superseded.idempotency_key.startswith(f"{logical_key}:superseded:")
 
     @pytest.mark.unit
     async def test_create_adoption_workspace_reraises_unexpected_task_conflict(

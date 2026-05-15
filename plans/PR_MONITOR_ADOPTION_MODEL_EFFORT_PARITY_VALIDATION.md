@@ -111,3 +111,39 @@ uv run --python 3.12 --extra dev pytest tests/unit/api/test_pr_monitor_adoption.
 ```
 
 Result: Passed, 302 tests.
+
+## Attempt 2 Coverage Repair
+
+The next validation pass reported local full-suite combined statement/branch
+coverage at 98.55% against the configured 99% threshold. The coverage report
+showed the largest remaining debt in pre-existing executor and validation
+branches outside this adoption slice. This repair keeps the threshold unchanged
+and adds focused coverage for the adoption model/effort branches that remained
+uncovered, plus the MCP artifact binary scan branch exercised by the same
+surface validation bundle.
+
+Changed files:
+
+- `plans/PR_MONITOR_ADOPTION_MODEL_EFFORT_PARITY_PLAN.md`
+- `plans/PR_MONITOR_ADOPTION_MODEL_EFFORT_PARITY_VALIDATION.md`
+- `tests/unit/service/test_pr_monitor_adoption.py`
+- `tests/unit/mcp/test_mcp_server.py`
+
+Repair validation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_pr_monitor_adoption.py::TestPullRequestMonitorAdoptionService::test_model_only_policy_omits_effort_when_agent_default_has_no_effort tests/unit/service/test_pr_monitor_adoption.py::TestPullRequestMonitorAdoptionService::test_supersede_previous_adoption_preserves_nonmatching_task_fields tests/unit/service/test_pr_monitor_adoption.py::TestPullRequestMonitorAdoptionService::test_supersede_previous_adoption_tolerates_missing_task_row tests/unit/mcp/test_mcp_server.py::TestReadWorkspaceArtifact::test_binary_artifact_containing_provider_env_secret_is_blocked -q
+```
+
+Result: Passed, 4 tests.
+
+```bash
+uv run --python 3.12 --extra dev ruff check src/awf/cli tests/unit/cli
+uv run --python 3.12 --extra dev mypy src/awf/cli
+uv run --python 3.12 --extra dev pytest tests/unit/cli -q
+uv run --python 3.12 --extra dev pytest tests/unit/control/test_test_quality_guardrails_self.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/api/test_pr_monitor_adoption.py tests/unit/service/test_pr_monitor_adoption.py tests/unit/cli/test_cli.py tests/unit/mcp/test_mcp_server.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/service/test_pr_monitor_adoption.py tests/unit/mcp/test_mcp_server.py
+```
+
+Result: Passed. The adoption/API/MCP bundle now runs 306 tests.

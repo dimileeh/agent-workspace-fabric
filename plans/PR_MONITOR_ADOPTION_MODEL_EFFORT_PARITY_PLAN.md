@@ -71,3 +71,18 @@ artifacts only through the repository workflow:
 ```bash
 python scripts/generate_openapi.py --check
 ```
+
+## Attempt 2 Coverage Repair
+
+The full local xdist coverage run reported the repository below the configured
+99% combined statement/branch threshold, with the largest debt outside this
+slice. For this repair, keep the coverage policy unchanged and add focused
+regression coverage for the remaining uncovered PR adoption model/effort
+branches plus one MCP artifact secret-scan branch exercised by the same
+next-pass validation surface.
+
+Additional verification:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/api/test_pr_monitor_adoption.py tests/unit/service/test_pr_monitor_adoption.py tests/unit/cli/test_cli.py tests/unit/mcp/test_mcp_server.py -q
+```

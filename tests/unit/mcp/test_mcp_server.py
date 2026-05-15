@@ -3316,6 +3316,45 @@ class TestReadWorkspaceArtifact:
         assert result["error_code"] == "ARTIFACT_BLOCKED"
 
     @pytest.mark.unit
+    async def test_binary_artifact_containing_provider_env_secret_is_blocked(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        secret = "env-secret-token-abc"
+        monkeypatch.setenv("OPENAI_API_KEY", secret)
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact binary env secret blocked",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = b"\x00" + f"prefix {secret} suffix".encode() + b"\x00\xff"
+        (artifact_dir / "secret-env.bin").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "secret-env.bin",
+                "limit_bytes": 1024,
+            },
+        )
+        assert isinstance(result, dict)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"
+
+    @pytest.mark.unit
     async def test_clean_binary_artifact_is_not_redacted(
         self,
         factory: async_sessionmaker[AsyncSession],
