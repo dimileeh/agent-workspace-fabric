@@ -71,7 +71,9 @@ _COVERAGE_FILE_LINE_RE = re.compile(
 )
 _COVERAGE_HEADER_RE = re.compile(r"(?i)Name\s+Stmts\s+Miss\s+Cover")
 _PYTEST_FAILURE_SUMMARY_RE = re.compile(r"^(?P<kind>FAILED|ERROR)\s+(?P<rest>.+)$")
-_PYTEST_NODE_ID_RE = re.compile(r"^[^\s]+\.py::\S+")
+_PYTEST_PROGRESS_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s+)+(?=(?:FAILED|ERROR)\s+)")
+_PYTEST_NODE_COMPONENT = r"(?:[^\s:\[]+|\[[^\]]*\])+"
+_PYTEST_NODE_ID_RE = re.compile(rf"^(?P<node>[^\s:]+\.py(?:::{_PYTEST_NODE_COMPONENT})*)")
 _PYTEST_EVIDENCE_LIMIT = 20
 _PYTEST_NODE_ID_LIMIT = 20
 _PYTEST_EVIDENCE_MAX_CHARS = 500
@@ -2649,18 +2651,23 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
                 if not line:
                     continue
                 summary_line = line.lstrip()
-                summary_match = _PYTEST_FAILURE_SUMMARY_RE.match(summary_line)
+                normalized_summary_line = _normalize_pytest_summary_line(summary_line)
+                summary_match = _PYTEST_FAILURE_SUMMARY_RE.match(normalized_summary_line)
                 if summary_match is not None:
                     _append_unique_capped(
                         evidence,
                         _truncate_pytest_evidence_line(summary_line),
                         limit=_PYTEST_EVIDENCE_LIMIT,
                     )
-                    target = _pytest_summary_target(summary_match.group("rest"))
-                    if _looks_like_pytest_node_id(target):
+                    rest = summary_match.group("rest")
+                    node_id = _pytest_node_id_from_text(
+                        rest,
+                        allow_file_level=summary_match.group("kind") == "ERROR",
+                    )
+                    if node_id is not None:
                         _append_unique_capped(
                             node_ids,
-                            target,
+                            node_id,
                             limit=_PYTEST_NODE_ID_LIMIT,
                         )
                     continue
@@ -2676,13 +2683,31 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
     return PytestFailureEvidence(node_ids=node_ids, evidence=evidence)
 
 
-def _pytest_summary_target(rest: str) -> str:
-    target, _, _details = rest.partition(" - ")
-    return target.strip()
+def _normalize_pytest_summary_line(line: str) -> str:
+    return _PYTEST_PROGRESS_PREFIX_RE.sub("", line)
 
 
-def _looks_like_pytest_node_id(value: str) -> bool:
-    return bool(_PYTEST_NODE_ID_RE.match(value))
+def _pytest_node_id_from_text(value: str, *, allow_file_level: bool = False) -> str | None:
+    text = value.lstrip()
+    match = _PYTEST_NODE_ID_RE.match(text)
+    if match is None:
+        return None
+    node_id = _strip_pytest_node_id_suffix(match.group("node"))
+    if "::" not in node_id:
+        if text[match.end() :].startswith("::"):
+            return None
+        if not allow_file_level:
+            return None
+    return node_id
+
+
+def _strip_pytest_node_id_suffix(node_id: str) -> str:
+    stripped = node_id.rstrip(".,;")
+    # A matched "::" segment always requires a component, so only a single
+    # trailing ":" can be a pytest/xdist message separator.
+    if stripped.endswith(":") and not stripped.endswith("::"):
+        stripped = stripped[:-1]
+    return stripped
 
 
 def _looks_like_pytest_fallback_evidence(line: str) -> bool:

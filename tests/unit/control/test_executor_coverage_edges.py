@@ -1441,6 +1441,7 @@ def test_validation_run_command_records_include_healthchecks_and_coverage() -> N
             },
             "validation": {
                 "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+                "strategy": {"final_gate": "coverage"},
                 "coverage": {"command": "pytest --cov=awf --cov-report=term"},
             },
         }
@@ -1557,19 +1558,28 @@ def test_validation_command_records_omit_coverage_when_no_local_command_is_decla
 
 
 @pytest.mark.unit
-def test_local_coverage_runs_only_when_profile_declares_coverage_command() -> None:
+def test_local_coverage_runs_only_for_explicit_final_gate_with_coverage_command() -> None:
     no_local_coverage = WorkspaceProfile.model_validate(
         {
             "name": "awf-self",
-            "validation": {"strategy": {"edit_gate": "targeted"}},
+            "validation": {
+                "strategy": {"edit_gate": "targeted"},
+                "coverage": {"command": "uv run pytest --cov=awf"},
+            },
             "phases": {"validate": ["uv run pytest tests/unit/cli -q"]},
+        }
+    )
+    final_gate_without_command = WorkspaceProfile.model_validate(
+        {
+            "name": "final-gate-without-command",
+            "validation": {"strategy": {"final_gate": "coverage"}},
         }
     )
     profile = WorkspaceProfile.model_validate(
         {
             "name": "explicit-local-coverage",
             "validation": {
-                "strategy": {"edit_gate": "targeted"},
+                "strategy": {"edit_gate": "targeted", "final_gate": "coverage"},
                 "coverage": {
                     "minimum_percent": 99,
                     "enforce": True,
@@ -1581,7 +1591,32 @@ def test_local_coverage_runs_only_when_profile_declares_coverage_command() -> No
     )
 
     assert _should_run_local_coverage(no_local_coverage) is False
+    assert _should_run_local_coverage(final_gate_without_command) is False
     assert _should_run_local_coverage(profile) is True
+
+
+@pytest.mark.unit
+def test_validation_command_records_omit_coverage_without_local_final_gate() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-coverage-disabled-final-gate",
+            "validation": {
+                "strategy": {"edit_gate": "targeted", "final_gate": "none"},
+                "coverage": {"command": "pytest --cov=awf"},
+            },
+            "phases": {"validate": ["pytest tests/unit/cli -q"]},
+        }
+    )
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("validate",),
+        run_healthchecks=False,
+    )
+
+    assert [(record["phase"], record["command"]) for record in records] == [
+        ("validate", "pytest tests/unit/cli -q")
+    ]
 
 
 @pytest.mark.unit
@@ -1589,7 +1624,10 @@ def test_validation_command_records_can_mark_coverage_reused() -> None:
     profile = WorkspaceProfile.model_validate(
         {
             "name": "records",
-            "validation": {"coverage": {"command": "pytest --cov=awf"}},
+            "validation": {
+                "strategy": {"final_gate": "coverage"},
+                "coverage": {"command": "pytest --cov=awf"},
+            },
         }
     )
 
@@ -1607,6 +1645,27 @@ def test_validation_command_records_can_mark_coverage_reused() -> None:
 
 
 @pytest.mark.unit
+def test_validation_command_records_raise_when_coverage_predicate_loses_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-missing-coverage-command",
+            "validation": {"strategy": {"final_gate": "coverage"}},
+            "phases": {"validate": ["pytest tests/unit -q"]},
+        }
+    )
+    monkeypatch.setattr(executor_mod, "_should_run_local_coverage", lambda _: True)
+
+    with pytest.raises(RuntimeError, match="coverage.command is None"):
+        _validation_run_command_records(
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=False,
+        )
+
+
+@pytest.mark.unit
 def test_validation_command_count_includes_database_refresh_hooks_and_coverage() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -1616,7 +1675,10 @@ def test_validation_command_count_includes_database_refresh_hooks_and_coverage()
                 "validate": ["pytest -q"],
             },
             "database": {"pre_validation_refresh": ["python scripts/db_refresh.py"]},
-            "validation": {"coverage": {"command": "pytest --cov=awf"}},
+            "validation": {
+                "strategy": {"final_gate": "coverage"},
+                "coverage": {"command": "pytest --cov=awf"},
+            },
         }
     )
 
@@ -1626,6 +1688,27 @@ def test_validation_command_count_includes_database_refresh_hooks_and_coverage()
     )
 
     assert _validation_command_count(workspace) == 4
+
+
+@pytest.mark.unit
+def test_validation_command_count_ignores_coverage_without_local_final_gate() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "count-targeted-with-coverage-command",
+            "phases": {"validate": ["pytest -q"]},
+            "validation": {
+                "strategy": {"edit_gate": "targeted", "final_gate": "none"},
+                "coverage": {"command": "pytest --cov=awf"},
+            },
+        }
+    )
+
+    workspace = SimpleNamespace(
+        resolved_profile=profile.model_dump(mode="json", by_alias=True),
+        test_commands=[],
+    )
+
+    assert _validation_command_count(workspace) == 1
 
 
 @pytest.mark.unit
@@ -1747,6 +1830,42 @@ def test_validation_tier_for_workspace_uses_task_class_floor() -> None:
         )
         == 1
     )
+
+
+@pytest.mark.unit
+def test_validation_tier_for_workspace_uses_successful_validate_operation_tier() -> None:
+    profile = WorkspaceProfile.model_validate({"name": "tier", "validation": {"requested_tier": 1}})
+    workspace = SimpleNamespace(
+        task_class=None,
+        operations=[
+            SimpleNamespace(
+                type=OperationType.validate.value,
+                status=OperationStatus.failed.value,
+                payload={"requested_tier": 3},
+                result={"requested_tier": 3},
+            ),
+            SimpleNamespace(
+                type=OperationType.refresh.value,
+                status=OperationStatus.succeeded.value,
+                payload={"requested_tier": 3},
+                result={"requested_tier": 3},
+            ),
+            SimpleNamespace(
+                type=OperationType.validate.value,
+                status=OperationStatus.succeeded.value,
+                payload={"requested_tier": "3"},
+                result={"requested_tier": "3"},
+            ),
+            SimpleNamespace(
+                type=OperationType.validate.value,
+                status=OperationStatus.succeeded.value,
+                payload={"requested_tier": 2},
+                result={"validation": {"requested_tier": 3}},
+            ),
+        ],
+    )
+
+    assert _validation_tier_for_workspace(workspace, profile) == 3  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
@@ -3559,6 +3678,73 @@ def test_coverage_helpers_handle_failing_pytest_evidence(tmp_path: Path) -> None
     )
     assert "fix the failing test first" in _coverage_wrapped_pytest_failure_message(coverage)
     assert "top uncovered areas" in _coverage_wrapped_pytest_failure_message(coverage)
+
+
+@pytest.mark.unit
+def test_validation_result_prioritizes_pytest_failure_when_coverage_met(
+    tmp_path: Path,
+) -> None:
+    stdout = tmp_path / "coverage.stdout"
+    stderr = tmp_path / "coverage.stderr"
+    stdout.write_text("TOTAL 100 1 99.02%\n", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+    command = ValidationCommandResult(
+        command="pytest --cov=awf --cov-report=term-missing",
+        returncode=1,
+        duration_seconds=12.0,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        phase="coverage",
+        reason_code="PYTEST_TEST_FAILURE",
+        policy_failed=False,
+        metadata={
+            "coverage_reason_code": "COVERAGE_OK",
+            "failing_test_node_ids": [
+                "tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout"
+            ],
+            "failing_test_evidence": [
+                "ERROR tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout"
+            ],
+        },
+    )
+    coverage = ValidationCoverageResult(
+        provider="python",
+        percent=99.02,
+        minimum_percent=99,
+        enforce=True,
+        status="passed",
+        reason_code="COVERAGE_OK",
+        command_result=command,
+        failing_test_node_ids=[
+            "tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout"
+        ],
+        failing_test_evidence=[
+            "ERROR tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout"
+        ],
+        parallel_workers_requested=3,
+        parallel_workers_effective=3,
+        parallel_distribution="loadscope",
+    )
+    result = ValidationResult(commands=[command], coverage=coverage)
+
+    assert not result.all_passed
+    assert _validation_run_reason_code(result) == "PYTEST_TEST_FAILURE"
+    assert _failure_reason_for_phase(result.first_failure) == FailureReason.validation_failure
+    message = _validation_failure_message(result)
+    assert "pytest reported failing tests" in message
+    assert "coverage met the 99.0% requirement at 99.0%" in message
+    metadata = _validation_run_coverage_metadata(result)
+    assert metadata is not None
+    assert metadata["reason_code"] == "COVERAGE_OK"
+    assert metadata["failing_test_node_ids"] == [
+        "tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout"
+    ]
+    assert metadata["failing_test_evidence"] == [
+        "ERROR tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout"
+    ]
+    assert metadata["parallel_workers_requested"] == 3
+    assert metadata["parallel_workers_effective"] == 3
+    assert metadata["parallel_distribution"] == "loadscope"
 
 
 @pytest.mark.unit

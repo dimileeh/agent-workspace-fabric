@@ -7648,7 +7648,7 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
 def _validation_command_count(ws: Workspace) -> int:
     if ws.resolved_profile:
         profile = WorkspaceProfile.model_validate(ws.resolved_profile)
-        coverage_count = 1 if profile.validation.coverage.command is not None else 0
+        coverage_count = 1 if _should_run_local_coverage(profile) else 0
         return (
             len(profile.phases.post_agent)
             + len(profile.database.pre_validation_refresh)
@@ -7718,10 +7718,15 @@ def _validation_run_command_records(
         ordered.append(record)
     if pending_healthchecks:
         ordered.extend(_healthcheck_command_records(pending_healthchecks))
-    if "validate" in phase_names and profile.validation.coverage.command is not None:
+    if "validate" in phase_names and _should_run_local_coverage(profile):
+        coverage_command = profile.validation.coverage.command
+        if coverage_command is None:
+            raise RuntimeError(
+                "_should_run_local_coverage returned True but coverage.command is None"
+            )
         coverage_record = {
             "phase": "coverage",
-            "command": profile.validation.coverage.command.command,
+            "command": coverage_command.command,
         }
         if coverage_evidence_status is not None:
             coverage_record["evidence_status"] = coverage_evidence_status
@@ -7774,11 +7779,52 @@ def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfi
         TaskClass.build_config_task.value,
     }:
         task_class_tier = 2
-    return max(profile_tier, task_class_tier)
+    operation_tier = _successful_validate_operation_tier(workspace) or 1
+    return max(profile_tier, task_class_tier, operation_tier)
+
+
+def _successful_validate_operation_tier(workspace: Workspace) -> int | None:
+    tiers: list[int] = []
+    operations = getattr(workspace, "operations", None) or []
+    for operation in operations:
+        if getattr(operation, "type", None) != OperationType.validate.value:
+            continue
+        if getattr(operation, "status", None) != OperationStatus.succeeded.value:
+            continue
+        operation_tiers = [
+            tier
+            for tier in (
+                _requested_tier_from_metadata(getattr(operation, "result", None)),
+                _requested_tier_from_metadata(getattr(operation, "payload", None)),
+            )
+            if tier is not None
+        ]
+        operation_max = max(operation_tiers, default=None)
+        if operation_max is not None:
+            tiers.append(operation_max)
+    return max(tiers, default=None)
+
+
+def _requested_tier_from_metadata(metadata: object) -> int | None:
+    if not isinstance(metadata, Mapping):
+        return None
+    requested_tier = metadata.get("requested_tier")
+    if type(requested_tier) is int and requested_tier > 0:
+        return requested_tier
+    validation = metadata.get("validation")
+    if not isinstance(validation, Mapping):
+        return None
+    requested_tier = validation.get("requested_tier")
+    if type(requested_tier) is int and requested_tier > 0:
+        return requested_tier
+    return None
 
 
 def _should_run_local_coverage(profile: WorkspaceProfile) -> bool:
-    return profile.validation.coverage.command is not None
+    return (
+        profile.validation.strategy.final_gate == "coverage"
+        and profile.validation.coverage.command is not None
+    )
 
 
 def _validation_run_log_stream_refs(
