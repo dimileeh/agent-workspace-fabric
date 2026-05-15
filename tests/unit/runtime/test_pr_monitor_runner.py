@@ -2688,6 +2688,66 @@ async def test_monitor_provider_failure_on_configured_default_retries_without_bu
 
 
 @pytest.mark.unit
+async def test_monitor_explicit_model_capacity_falls_back_to_configured_default(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    explicit_model = "gpt-5.3-codex-spark"
+    configured_default = "gpt-5.4-mini"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.agent = "codex"
+        workspace.task_policy = {
+            "agent_model": explicit_model,
+            "pr_monitor": {"review_grace_seconds": 75},
+        }
+        await session.commit()
+
+    adapter = FakeAdapter(default_model=configured_default)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    exc = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="Codex Spark MODEL_CAPACITY_EXHAUSTED",
+        ),
+        reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        details={"provider": "openai", "model": explicit_model},
+    )
+
+    action = await runner._record_provider_agent_run_error(workspace_id, exc)
+
+    source_policy, recovery_events, operations, requested_ids = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    state = source_policy["provider_recovery_state"]
+    retry_operations = [operation for operation in operations if operation.type == "retry"]
+
+    assert action == "retry"
+    assert source_policy["agent_model"] == configured_default
+    assert isinstance(state, dict)
+    assert state["action"] == "fallback"
+    assert state["target_agent"] == "codex"
+    assert state["target_provider"] == "openai"
+    assert state["target_model"] == configured_default
+    assert retry_operations == []
+    assert requested_ids == []
+    assert len(recovery_events) == 1
+    assert recovery_events[0]["provider_recovery"]["action"] == "fallback"
+    assert recovery_events[0]["provider_recovery"]["target_model"] == configured_default
+
+
+@pytest.mark.unit
 async def test_sync_base_provider_failure_records_recovery_and_source_cooldown(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
