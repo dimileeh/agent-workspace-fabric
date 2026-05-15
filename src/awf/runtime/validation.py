@@ -70,7 +70,8 @@ _COVERAGE_FILE_LINE_RE = re.compile(
 _COVERAGE_HEADER_RE = re.compile(r"(?i)Name\s+Stmts\s+Miss\s+Cover")
 _PYTEST_FAILURE_SUMMARY_RE = re.compile(r"^(?P<kind>FAILED|ERROR)\s+(?P<rest>.+)$")
 _PYTEST_PROGRESS_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s+)+(?=(?:FAILED|ERROR)\s+)")
-_PYTEST_NODE_ID_RE = re.compile(r"(?P<node>[^\s]+\.py::[^\s]+)")
+_PYTEST_NODE_COMPONENT = r"(?:[^\s:\[]+|\[[^\]]*\])+"
+_PYTEST_NODE_ID_RE = re.compile(rf"(?P<node>[^\s:]+\.py(?:::{_PYTEST_NODE_COMPONENT})+)")
 _PYTEST_EVIDENCE_LIMIT = 20
 _PYTEST_NODE_ID_LIMIT = 20
 _PYTEST_EVIDENCE_MAX_CHARS = 500
@@ -1764,7 +1765,7 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
                     )
                     rest = summary_match.group("rest")
                     target = _pytest_summary_target(rest)
-                    node_id = _pytest_node_id_from_text(target) or _pytest_node_id_from_text(rest)
+                    node_id = _pytest_node_id_from_text(rest) or _pytest_node_id_from_text(target)
                     if node_id is not None:
                         _append_unique_capped(
                             node_ids,

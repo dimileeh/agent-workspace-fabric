@@ -2830,6 +2830,26 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
+    def test_pytest_failure_parser_preserves_param_ids_with_spaces(self, tmp_path: Path) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "FAILED tests/unit/test_widget.py::test_handles[bad value] "
+            "- AssertionError: boom\n"
+            "FAILED tests/unit/test_widget.py::test_handles[a - b] "
+            "- AssertionError: boom\n"
+            "ERROR tests/unit/test_widget.py::test_setup[param: slow]: setup failed\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == [
+            "tests/unit/test_widget.py::test_handles[bad value]",
+            "tests/unit/test_widget.py::test_handles[a - b]",
+            "tests/unit/test_widget.py::test_setup[param: slow]",
+        ]
+
+    @pytest.mark.unit
     def test_pytest_failure_parser_ignores_indented_fallback_evidence(self, tmp_path: Path) -> None:
         output = tmp_path / "pytest.txt"
         output.write_text(
