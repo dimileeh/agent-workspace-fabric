@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -783,7 +784,7 @@ def test_awf_self_profile_uses_targeted_edit_validation_with_local_final_coverag
     assert profile.validation.coverage.provider == "python"
     assert profile.validation.coverage.parallel_workers == 3
     assert profile.validation.coverage.command is not None
-    tokens = profile.validation.coverage.command.command.split()
+    tokens = shlex.split(profile.validation.coverage.command.command)
     assert not any(
         token == "-n"
         or (token.startswith("-n") and len(token) > 2)
