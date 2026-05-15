@@ -783,9 +783,17 @@ def test_awf_self_profile_uses_targeted_edit_validation_with_local_final_coverag
     assert profile.validation.coverage.provider == "python"
     assert profile.validation.coverage.parallel_workers == 3
     assert profile.validation.coverage.command is not None
-    assert "-n" not in profile.validation.coverage.command.command.split()
-    assert "--dist=loadscope" not in profile.validation.coverage.command.command.split()
-    assert "--cov-fail-under=99" in profile.validation.coverage.command.command.split()
+    tokens = profile.validation.coverage.command.command.split()
+    assert not any(
+        token == "-n"
+        or (token.startswith("-n") and len(token) > 2)
+        or token == "--numprocesses"
+        or token.startswith("--numprocesses=")
+        or token == "--dist"
+        or token.startswith("--dist=")
+        for token in tokens
+    )
+    assert "--cov-fail-under=99" in tokens
 
 
 @pytest.mark.unit
