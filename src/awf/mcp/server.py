@@ -1375,6 +1375,18 @@ def build_mcp_server(
             default=AgentRuntime.codex,
             description="Coding agent runtime used later by the PR monitor for repair work.",
         ),
+        model: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=128,
+            description="Optional model override for the selected agent runtime.",
+        ),
+        effort: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=64,
+            description="Optional reasoning effort override for the selected agent runtime.",
+        ),
         profile_ref: str | None = Field(
             default="auto",
             max_length=128,
@@ -1421,6 +1433,8 @@ def build_mcp_server(
                     pr_number=pr_number,
                     pr_url=pr_url,
                     agent=agent,
+                    model=model,
+                    effort=effort,
                     profile_ref=profile_ref,
                     profile=profile,
                     auto_merge=auto_merge,

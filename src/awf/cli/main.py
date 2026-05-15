@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -29,6 +30,7 @@ from uuid import uuid4
 import click
 import httpx
 import typer
+import typer.rich_utils as typer_rich_utils
 from click.core import ParameterSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -62,6 +64,18 @@ _CONTROL_IDEMPOTENCY_KEY_HELP = (
     "printed to stderr before the request; pass the same value again to safely "
     "retry after a timeout or dropped response."
 )
+_MIN_RICH_HELP_WIDTH = 80
+
+
+class _MinRichHelpWidthCommand(typer.core.TyperCommand):
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        configured_width = typer_rich_utils.MAX_WIDTH
+        terminal_width = shutil.get_terminal_size(fallback=(_MIN_RICH_HELP_WIDTH, 24)).columns
+        typer_rich_utils.MAX_WIDTH = max(configured_width or terminal_width, _MIN_RICH_HELP_WIDTH)
+        try:
+            super().format_help(ctx, formatter)
+        finally:
+            typer_rich_utils.MAX_WIDTH = configured_width
 
 
 app = typer.Typer(
@@ -1910,7 +1924,7 @@ def workspace_rebase(
     _handle_response(response, fmt)
 
 
-@workspace_app.command("adopt-pr")
+@workspace_app.command("adopt-pr", cls=_MinRichHelpWidthCommand)
 def workspace_adopt_pr(
     repo: str | None = typer.Option(
         None,
@@ -1929,6 +1943,16 @@ def workspace_adopt_pr(
         help="Full GitHub pull request URL.",
     ),
     agent: str = typer.Option("codex", "--agent"),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Optional model override for the adopted PR monitor's selected agent.",
+    ),
+    effort: str | None = typer.Option(
+        None,
+        "--effort",
+        help="Optional reasoning effort override for the adopted PR monitor.",
+    ),
     profile_ref: str | None = typer.Option("auto", "--profile"),
     auto_merge: bool = typer.Option(
         True,
@@ -1964,6 +1988,10 @@ def workspace_adopt_pr(
         "task_prompt": task_prompt,
         "reason": reason,
     }
+    if model is not None:
+        body["model"] = model
+    if effort is not None:
+        body["effort"] = effort
     response = _call(
         "POST",
         "/v1/workspaces/adopt-pr",
