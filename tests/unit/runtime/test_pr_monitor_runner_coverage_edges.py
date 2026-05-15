@@ -3909,6 +3909,7 @@ async def test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed(
 
     assert push_result.failed is True
     assert "Supply-chain policy blocked" in push_result.stderr
+    assert push_result.reason_code == "MONITOR_POLICY_BLOCKED"
     assert [call.args[3] for call in cmd.calls if len(call.args) > 3] == ["status"]
     assert {finding.reason_code for finding in findings} == {
         "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION",

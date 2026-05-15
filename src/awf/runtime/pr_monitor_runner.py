@@ -4383,6 +4383,7 @@ class PullRequestMonitorRunner:
                 failed=True,
                 returncode=1,
                 stderr=str(exc),
+                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
             )
 
         if agent_run_err is not None:
