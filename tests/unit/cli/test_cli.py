@@ -1063,6 +1063,62 @@ class TestWorkspaceAdoptPr:
         assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
 
     @pytest.mark.unit
+    def test_posts_model_and_effort_when_requested(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                    "--model",
+                    "gpt-5.3-codex",
+                    "--effort",
+                    "high",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["model"] == "gpt-5.3-codex"
+        assert body["effort"] == "high"
+
+    @pytest.mark.unit
+    def test_posts_model_without_effort_for_server_side_defaulting(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--pr",
+                    "277",
+                    "--model",
+                    "gpt-5.3-codex",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["model"] == "gpt-5.3-codex"
+        assert "effort" not in body
+
+    @pytest.mark.unit
+    def test_adopt_pr_help_exposes_model_and_effort_flags(self) -> None:
+        result = _runner.invoke(app, ["workspace", "adopt-pr", "--help"])
+
+        assert result.exit_code == 0
+        assert "--model" in result.stdout
+        assert "--effort" in result.stdout
+
+    @pytest.mark.unit
     def test_posts_pr_url_without_repo_fields(self) -> None:
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:

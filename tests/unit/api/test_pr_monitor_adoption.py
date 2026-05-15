@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.app import configure_database, create_app
+from awf.api.schemas import PullRequestMonitorAdoptionRequest
 from awf.common.config import Settings, get_settings
 from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.enums import WorkspaceStatus
@@ -85,6 +86,40 @@ async def adoption_client(
         yield client, fetcher
 
 
+def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
+    any_of = schema.get("anyOf")
+    assert isinstance(any_of, list)
+    string_schema = next(
+        (item for item in any_of if isinstance(item, dict) and item.get("type") == "string"),
+        None,
+    )
+    assert string_schema is not None, f"Could not find string schema in anyOf: {any_of}"
+    assert isinstance(string_schema, dict)
+    return string_schema
+
+
+@pytest.mark.unit
+def test_adoption_request_schema_accepts_model_effort_and_openapi_exposes_fields() -> None:
+    payload = PullRequestMonitorAdoptionRequest(
+        repo_slug="dimileeh/aira-web",
+        pr_number=277,
+        model="gpt-5.3-codex",
+        effort="high",
+    )
+
+    assert payload.model == "gpt-5.3-codex"
+    assert payload.effort == "high"
+
+    schema = create_app(use_lifespan=False).openapi()
+    props = schema["components"]["schemas"]["PullRequestMonitorAdoptionRequest"]["properties"]
+    model_schema = _optional_string_schema(props["model"])
+    effort_schema = _optional_string_schema(props["effort"])
+    assert model_schema["minLength"] == 1
+    assert model_schema["maxLength"] == 128
+    assert effort_schema["minLength"] == 1
+    assert effort_schema["maxLength"] == 64
+
+
 @pytest.mark.unit
 async def test_adopt_pr_requires_api_token(
     adoption_client: tuple[AsyncClient, _MetadataFetcher],
@@ -136,6 +171,32 @@ async def test_adopt_pr_accepts_repo_slug_and_pr_number(
         workspace = (await session.execute(select(Workspace))).scalar_one()
     assert workspace.monitor_last_commit_sha == "h" * 40
     assert workspace.base_commit == "b" * 40
+
+
+@pytest.mark.unit
+async def test_adopt_pr_persists_requested_model_and_effort(
+    adoption_client: tuple[AsyncClient, _MetadataFetcher],
+    engine: AsyncEngine,
+) -> None:
+    client, _fetcher = adoption_client
+
+    response = await client.post(
+        "/v1/workspaces/adopt-pr",
+        headers={"Authorization": "Bearer secret"},
+        json={
+            "repo_slug": "dimileeh/aira-web",
+            "pr_number": 277,
+            "model": "gpt-5.3-codex",
+            "effort": "high",
+        },
+    )
+
+    assert response.status_code == 202
+    session_factory = make_session_factory(engine)
+    async with session_factory() as session:
+        workspace = (await session.execute(select(Workspace))).scalar_one()
+    assert workspace.task_policy["agent_model"] == "gpt-5.3-codex"
+    assert workspace.task_policy["agent_effort"] == "high"
 
 
 @pytest.mark.unit

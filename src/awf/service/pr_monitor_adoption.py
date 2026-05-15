@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.adapters.defaults import defaults_with_model_overrides
 from awf.api.schemas import (
     PullRequestMonitorAdoptionRequest,
     PullRequestMonitorAdoptionResponse,
@@ -827,6 +828,21 @@ def _adoption_task_policy(
     }
     if lineage is not None:
         policy["pr_adoption"]["lineage"] = lineage
+    policy.update(_requested_agent_policy(request))
+    return policy
+
+
+def _requested_agent_policy(request: PullRequestMonitorAdoptionRequest) -> dict[str, str]:
+    policy: dict[str, str] = {}
+    if request.model is not None:
+        policy["agent_model"] = request.model
+    if request.effort is not None:
+        policy["agent_effort"] = request.effort
+    elif request.model is not None:
+        defaults = defaults_with_model_overrides({request.agent: request.model})
+        agent_defaults = defaults.get(request.agent)
+        if agent_defaults is not None and agent_defaults.effort is not None:
+            policy["agent_effort"] = agent_defaults.effort
     return policy
 
 
@@ -973,6 +989,7 @@ def _raise_if_policy_conflicts(
                 "requested_agent": requested_agent,
             },
         )
+    _raise_if_agent_policy_conflicts(workspace, request)
     if workspace.profile_ref != request.profile_ref:
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",
@@ -1015,6 +1032,40 @@ def _raise_if_policy_conflicts(
                 "requested_initial_review_grace_period_seconds": requested_grace,
             },
         )
+
+
+def _raise_if_agent_policy_conflicts(
+    workspace: Workspace,
+    request: PullRequestMonitorAdoptionRequest,
+) -> None:
+    existing_policy = _workspace_agent_policy(workspace)
+    requested_policy = _requested_agent_policy(request)
+    for key in ("agent_model", "agent_effort"):
+        existing_value = existing_policy.get(key)
+        requested_value = requested_policy.get(key)
+        if existing_value == requested_value:
+            continue
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message=f"Existing adopted PR monitor uses a different {key} policy.",
+            detail={
+                "workspace_id": workspace.id,
+                f"existing_{key}": existing_value,
+                f"requested_{key}": requested_value,
+            },
+        )
+
+
+def _workspace_agent_policy(workspace: Workspace) -> dict[str, str]:
+    policy = workspace.task_policy
+    agent_policy: dict[str, str] = {}
+    model = _optional_str(policy.get("agent_model"))
+    effort = _optional_str(policy.get("agent_effort"))
+    if model is not None:
+        agent_policy["agent_model"] = model
+    if effort is not None:
+        agent_policy["agent_effort"] = effort
+    return agent_policy
 
 
 def _requested_inline_profile_policy(

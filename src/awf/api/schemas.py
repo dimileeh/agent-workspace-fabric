@@ -258,6 +258,8 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
     pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
 
     agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
+    effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     profile_ref: Annotated[str | None, Field(default="auto", max_length=128)] = "auto"
     profile: WorkspaceProfile | None = None
     auto_merge: bool = True

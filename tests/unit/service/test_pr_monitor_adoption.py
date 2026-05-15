@@ -218,6 +218,8 @@ class TestPullRequestMonitorAdoptionService:
             assert workspace.monitor_last_commit_sha == "h" * 40
             assert workspace.auto_merge is False
             assert workspace.initial_review_grace_period_seconds == 12
+            assert "agent_model" not in workspace.task_policy
+            assert "agent_effort" not in workspace.task_policy
             assert workspace.task_policy["pr_adoption"] == {
                 "repo_slug": "dimileeh/aira-web",
                 "pr_number": 277,
@@ -247,6 +249,52 @@ class TestPullRequestMonitorAdoptionService:
 
             task = (await session.execute(select(Task))).scalar_one()
             assert task.title == "feature: ready"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("request_kwargs", "expected_policy"),
+        [
+            (
+                {"model": "gpt-5.3-codex", "effort": "high"},
+                {"agent_model": "gpt-5.3-codex", "agent_effort": "high"},
+            ),
+            (
+                {"model": "gpt-5.3-codex"},
+                {"agent_model": "gpt-5.3-codex", "agent_effort": "xhigh"},
+            ),
+            (
+                {"effort": "low"},
+                {"agent_effort": "low"},
+            ),
+        ],
+    )
+    async def test_persists_requested_agent_policy(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        request_kwargs: dict[str, object],
+        expected_policy: dict[str, str],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    **request_kwargs,
+                )
+            )
+            await session.commit()
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            for key, value in expected_policy.items():
+                assert workspace.task_policy[key] == value
+            if "agent_model" not in expected_policy:
+                assert "agent_model" not in workspace.task_policy
 
     @pytest.mark.unit
     async def test_persists_head_repo_identity_for_fork_pr(
@@ -357,6 +405,104 @@ class TestPullRequestMonitorAdoptionService:
             assert await _count(session, Workspace) == 1
             assert await _count(session, TaskAttempt) == 1
             assert await _count(session, Operation) == 1
+
+    @pytest.mark.unit
+    async def test_replay_with_same_model_only_policy_attaches_to_live_adoption(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        metadata = _metadata()
+        fetcher = _MetadataFetcher(metadata)
+
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    model="gpt-5.3-codex",
+                )
+            )
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    pr_url="https://github.com/dimileeh/aira-web/pull/277",
+                    model="gpt-5.3-codex",
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is True
+        assert second.workspace_id == first.workspace_id
+        assert fetcher.calls == [("dimileeh/aira-web", 277)]
+
+    @pytest.mark.unit
+    async def test_replay_with_different_model_policy_conflicts(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    model="gpt-5.3-codex",
+                )
+            )
+
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        model="gpt-5.4",
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": first.workspace_id,
+            "existing_agent_model": "gpt-5.3-codex",
+            "requested_agent_model": "gpt-5.4",
+        }
+
+    @pytest.mark.unit
+    async def test_replay_with_different_effort_policy_conflicts_after_model_defaulting(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=_MetadataFetcher(_metadata()),
+            )
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    model="gpt-5.3-codex",
+                )
+            )
+
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        model="gpt-5.3-codex",
+                        effort="high",
+                    )
+                )
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": first.workspace_id,
+            "existing_agent_effort": "xhigh",
+            "requested_agent_effort": "high",
+        }
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

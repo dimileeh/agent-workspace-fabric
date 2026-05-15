@@ -1920,6 +1920,16 @@ def workspace_adopt_pr(
         help="Full GitHub pull request URL.",
     ),
     agent: str = typer.Option("codex", "--agent"),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Optional model override for the adopted PR monitor's selected agent.",
+    ),
+    effort: str | None = typer.Option(
+        None,
+        "--effort",
+        help="Optional reasoning effort override for the adopted PR monitor.",
+    ),
     profile_ref: str | None = typer.Option("auto", "--profile"),
     auto_merge: bool = typer.Option(
         True,
@@ -1955,6 +1965,10 @@ def workspace_adopt_pr(
         "task_prompt": task_prompt,
         "reason": reason,
     }
+    if model is not None:
+        body["model"] = model
+    if effort is not None:
+        body["effort"] = effort
     response = _call(
         "POST",
         "/v1/workspaces/adopt-pr",
