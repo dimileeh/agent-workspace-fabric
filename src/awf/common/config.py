@@ -116,18 +116,18 @@ def settings_guardrails(
     if token_diagnostic is not None:
         diagnostics.append(token_diagnostic)
 
-    if callbacks_enabled and not _is_strong_api_token(api_token):
+    if callbacks_enabled:
         diagnostics.append(
             ProductionSettingsDiagnostic(
-                code="production_callbacks_require_api_token",
+                code="production_callbacks_disabled_until_auth",
                 field="AWF_CALLBACKS_ENABLED",
                 message=(
-                    "Callback registration is enabled, so production requires "
-                    "a strong AWF API bearer token before exposing the API."
+                    "Callback registration is enabled, but callback routes do not "
+                    "yet enforce AWF API bearer token authentication."
                 ),
                 remediation=(
-                    "Set a strong AWF_API_TOKEN or disable AWF_CALLBACKS_ENABLED "
-                    "until callback delivery policy hardening is configured."
+                    "Disable AWF_CALLBACKS_ENABLED in production until callback "
+                    "route authentication is implemented."
                 ),
             )
         )
@@ -152,10 +152,6 @@ def _api_token_diagnostic(api_token: str | None) -> ProductionSettingsDiagnostic
             remediation="Generate and set a deployment-specific high-entropy AWF_API_TOKEN.",
         )
     return None
-
-
-def _is_strong_api_token(api_token: str | None) -> bool:
-    return _api_token_diagnostic(api_token) is None
 
 
 def _is_weak_api_token(api_token: str) -> bool:

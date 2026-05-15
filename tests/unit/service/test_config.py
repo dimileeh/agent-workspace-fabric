@@ -141,7 +141,27 @@ def test_production_guardrails_reject_callback_posture_without_api_token() -> No
         validate_production_settings(settings)
 
     error = exc_info.value
-    assert "production_callbacks_require_api_token" in _diagnostic_codes(error)
+    assert "production_callbacks_disabled_until_auth" in _diagnostic_codes(error)
+    assert "AWF_CALLBACKS_ENABLED" in _diagnostic_fields(error)
+
+
+@pytest.mark.unit
+def test_production_guardrails_reject_callback_posture_with_strong_api_token_until_route_auth() -> (
+    None
+):
+    settings = Settings(
+        _env_file=None,
+        env="prod",
+        database_url=_NON_DEFAULT_DATABASE_URL,
+        api_token=_STRONG_PRODUCTION_API_TOKEN,
+        callbacks_enabled=True,
+    )
+
+    with pytest.raises(ProductionSettingsError) as exc_info:
+        validate_production_settings(settings)
+
+    error = exc_info.value
+    assert "production_callbacks_disabled_until_auth" in _diagnostic_codes(error)
     assert "AWF_CALLBACKS_ENABLED" in _diagnostic_fields(error)
 
 
