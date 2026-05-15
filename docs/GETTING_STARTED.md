@@ -139,6 +139,35 @@ AWF_WORKSPACE_CLEANUP_BATCH_LIMIT=50
 AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
 ```
 
+### Local vs Production Configuration
+
+The bundled defaults are for `AWF_ENV=local` and `AWF_ENV=ci`. In those modes,
+the local Compose database URL, missing `AWF_API_TOKEN`, and callback defaults
+remain usable for development and tests.
+
+For a network-facing deployment, set `AWF_ENV=prod`. AWF validates production
+settings during service configuration and API startup, then fails fast with
+structured diagnostics before opening the database or admitting work if local
+development defaults are still active.
+
+Production must set:
+
+- `AWF_DATABASE_URL` to a production PostgreSQL database with
+  deployment-specific credentials. Do not use the bundled local
+  `awf` / `awf_dev` credentials.
+- `AWF_API_TOKEN` to a deployment-specific high-entropy bearer token. Missing
+  values, short values, and local placeholders such as `local-dev-token`,
+  `changeme`, or `default` are rejected.
+- `AWF_CALLBACKS_ENABLED=false`. Production startup rejects enabled callbacks
+  until callback routes enforce bearer-token authentication and the callback
+  SSRF hardening slice adds HTTPS and allowlist policy validation. A strong
+  `AWF_API_TOKEN` is still required for production, but it is not sufficient to
+  expose callback registration safely.
+
+Production validation diagnostics name the unsafe setting and remediation, but
+they do not print raw tokens, database passwords, or full secret-bearing
+database URLs.
+
 Agent watchdogs are conservative by default: AWF terminates a coding CLI after
 7200 seconds of wall-clock runtime or 900 seconds without stdout/stderr output.
 Partial stdout/stderr is kept in workspace logs for salvage and diagnosis.

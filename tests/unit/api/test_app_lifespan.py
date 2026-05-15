@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from awf.api.app import create_app
+from awf.common.config import DEFAULT_LOCAL_DATABASE_URL, ProductionSettingsError
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +27,31 @@ def _clear_settings_cache() -> None:
 
 
 class TestLifespan:
+    @pytest.mark.unit
+    def test_lifespan_validates_production_settings_before_engine_creation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.api import app as app_mod
+
+        def _fail_make_engine(_url: str) -> None:
+            raise AssertionError("make_engine should not run for invalid production settings")
+
+        monkeypatch.setattr(app_mod, "make_engine", _fail_make_engine)
+        monkeypatch.setenv("AWF_ENV", "prod")
+        monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_DATABASE_URL)
+        monkeypatch.setenv("AWF_API_TOKEN", "local-dev-token")
+
+        with (
+            pytest.raises(ProductionSettingsError) as exc_info,
+            TestClient(create_app(use_lifespan=True)),
+        ):
+            pass
+
+        assert "production_default_database_url" in {
+            diagnostic.code for diagnostic in exc_info.value.diagnostics
+        }
+
     @pytest.mark.unit
     def test_lifespan_wires_factory_without_create_all(
         self,
@@ -64,6 +90,7 @@ class TestLifespan:
         engine.dispose = _track_dispose  # type: ignore[method-assign]
         monkeypatch.setattr(app_mod, "make_engine", lambda _url: engine)
         monkeypatch.setattr(app_mod, "make_session_factory", lambda _e: lambda: None)
+        monkeypatch.setenv("AWF_ENV", "local")
         monkeypatch.setenv("AWF_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
 
         app = create_app(use_lifespan=True)
@@ -90,6 +117,7 @@ class TestLifespan:
         replacement_engine = _FakeEngine()
         monkeypatch.setattr(app_mod, "make_engine", lambda _url: original_engine)
         monkeypatch.setattr(app_mod, "make_session_factory", lambda _e: lambda: None)
+        monkeypatch.setenv("AWF_ENV", "local")
         monkeypatch.setenv("AWF_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
 
         app = create_app(use_lifespan=True)
