@@ -85,6 +85,7 @@ from awf.runtime.pr_monitor_runner import (
     _stale_pending_check_warnings,
     _target_reconcile_failure_payload,
     _target_reconcile_payload,
+    _untracked_paths_from_porcelain,
     _with_ci_failures,
 )
 from awf.service.alembic_resolver import AlembicResolveResult, AlembicResolveStatus
@@ -4075,6 +4076,65 @@ async def test_protected_scope_commit_repair_policy_block_uses_specific_reason(
 
 
 @pytest.mark.unit
+async def test_protected_scope_commit_repair_logs_when_dirty_commit_not_created(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted protected-scope repair")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _no_commit_created(**_kwargs: object) -> bool:
+        return False
+
+    async def _clean_after_recheck(**_kwargs: object) -> None:
+        return None
+
+    async def _pushed_after_clean_recheck(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _no_commit_created)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _clean_after_recheck)
+    monkeypatch.setattr(runner, "_git_push_result", _pushed_after_clean_recheck)
+
+    with structlog.testing.capture_logs() as captured:
+        push_result = await runner._repair_protected_scope_commits_before_push(
+            workspace_id=workspace_id,
+            pr_number=42,
+            protected_scope_block=_ProtectedScopePushBlock(
+                message="protected scope blocked",
+                reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+                violations=(
+                    QualityGateViolation(
+                        path=".github/workflows/ci.yml",
+                        protected_pattern=".github/**",
+                    ),
+                ),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    assert push_result.pushed is True
+    assert any(
+        event.get("event") == "monitor.protected_scope_committed_repair_commit_not_created"
+        and event.get("log_level") == "warning"
+        and event.get("workspace_id") == workspace_id
+        and event.get("paths") == [".github/workflows/ci.yml"]
+        for event in captured
+    )
+
+
+@pytest.mark.unit
 async def test_protected_scope_revert_verifies_tracked_restore_against_fetch_head(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -5632,6 +5692,9 @@ def test_git_push_and_porcelain_helpers_cover_clean_rename_and_invalid_lines() -
         "old/name.py",
         "src/name.py",
     ]
+    assert _untracked_paths_from_porcelain(
+        "?? old/name.py -> src/name.py\n?? docs/new.md\n?? docs/new.md\n M tracked.py\n"
+    ) == ["old/name.py -> src/name.py", "docs/new.md"]
 
 
 @pytest.mark.unit

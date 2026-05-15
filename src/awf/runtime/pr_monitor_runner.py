@@ -4596,7 +4596,7 @@ class PullRequestMonitorRunner:
             await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
 
         try:
-            await self._commit_dirty_worktree(
+            committed_dirty_changes = await self._commit_dirty_worktree(
                 workspace_id=workspace_id,
                 message=f"fix: remove protected-scope edits for PR #{pr_number}",
                 compose_project=compose_project,
@@ -4606,6 +4606,14 @@ class PullRequestMonitorRunner:
                 protected_scope_revert_remote_branch=remote_branch,
                 remote_push_url=remote_push_url,
             )
+            if not committed_dirty_changes:
+                _log.warning(
+                    "monitor.protected_scope_committed_repair_commit_not_created",
+                    workspace_id=workspace_id,
+                    paths=paths,
+                    remote_branch=remote_branch,
+                    reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+                )
         except ProtectedScopeDiffError as exc:
             return await self._protected_scope_diff_unavailable_push_result(
                 workspace_id=workspace_id,
@@ -7305,12 +7313,7 @@ def _untracked_paths_from_porcelain(status_stdout: str) -> list[str]:
     for line in status_stdout.splitlines():
         if not line.startswith("?? "):
             continue
-        path = line[3:]
-        if " -> " in path:
-            _old_path, new_path = path.split(" -> ", 1)
-            paths.append(new_path)
-        else:
-            paths.append(path)
+        paths.append(line[3:])
     return list(dict.fromkeys(paths))
 
 
