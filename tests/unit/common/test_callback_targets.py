@@ -55,8 +55,9 @@ def test_callback_target_ip_publicness_policy(address: str, expected: bool) -> N
 
 @pytest.mark.unit
 def test_locally_assigned_nat64_callback_targets_unmask_embedded_ipv4() -> None:
-    assert callback_targets.is_public_callback_target_ip("64:ff9b:1::0808:0808") is True
-    assert callback_targets.is_public_callback_target_ip("64:ff9b:1::c0a8:0101") is False
+    assert callback_targets.is_public_callback_target_ip("64:ff9b:1:808:8:800::") is True
+    assert callback_targets.is_public_callback_target_ip("64:ff9b:1:a00:0:100:808:808") is False
+    assert callback_targets.is_public_callback_target_ip("64:ff9b:1:c0a8:1:100::") is False
 
 
 @pytest.mark.unit

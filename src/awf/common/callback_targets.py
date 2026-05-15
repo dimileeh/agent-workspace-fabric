@@ -71,11 +71,34 @@ def _callback_target_public_address(
     ipv4_mapped = getattr(address, "ipv4_mapped", None)
     if isinstance(ipv4_mapped, ipaddress.IPv4Address):
         return ipv4_mapped
-    if isinstance(address, ipaddress.IPv6Address) and any(
-        address in prefix for prefix in _NAT64_TRANSLATION_PREFIXES
-    ):
-        return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+    if isinstance(address, ipaddress.IPv6Address):
+        nat64_embedded_ipv4 = _nat64_embedded_ipv4_address(address)
+        if nat64_embedded_ipv4 is not None:
+            return nat64_embedded_ipv4
     return address
+
+
+def _nat64_embedded_ipv4_address(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    for prefix in _NAT64_TRANSLATION_PREFIXES:
+        if address in prefix:
+            return _extract_nat64_embedded_ipv4_address(address, prefix.prefixlen)
+    return None
+
+
+def _extract_nat64_embedded_ipv4_address(
+    address: ipaddress.IPv6Address,
+    prefix_length: int,
+) -> ipaddress.IPv4Address:
+    if prefix_length == 96:
+        return ipaddress.IPv4Address(address.packed[-4:])
+
+    if prefix_length not in {32, 40, 48, 56, 64}:
+        raise ValueError(f"unsupported NAT64 prefix length: {prefix_length}")
+
+    # RFC 6052 inserts the reserved "u" octet at bits 64-71 for non-/96 prefixes.
+    address_without_reserved_octet = address.packed[:8] + address.packed[9:]
+    ipv4_start = prefix_length // 8
+    return ipaddress.IPv4Address(address_without_reserved_octet[ipv4_start : ipv4_start + 4])
 
 
 def _is_blocked_callback_target_address(

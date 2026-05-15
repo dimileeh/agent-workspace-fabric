@@ -1426,9 +1426,17 @@ async def test_drain_due_rejects_callbacks_with_private_delivery_target_includes
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "translated_private_ip",
+    [
+        "64:ff9b::a9fe:a9fe",
+        "64:ff9b:1:a00:0:100:808:808",
+    ],
+)
 async def test_drain_due_rejects_nat64_delivery_target_that_embeds_private_ipv4(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
+    translated_private_ip: str,
 ) -> None:
     async with factory() as session:
         await _register_subscription(session, event_types=["workspace.*"])
@@ -1438,11 +1446,10 @@ async def test_drain_due_rejects_nat64_delivery_target_that_embeds_private_ipv4(
     deliveries = await CallbackDeliveryService(factory).enqueue_workspace_event(event_id)
     assert len(deliveries) == 1
 
-    translated_metadata_ip = "64:ff9b::a9fe:a9fe"
     monkeypatch.setattr(
         callback_service_module,
         "_resolve_callback_target_ip_addresses",
-        lambda _hostname: (translated_metadata_ip,),
+        lambda _hostname: (translated_private_ip,),
     )
     poster = _RecordingPoster()
 
@@ -1455,7 +1462,7 @@ async def test_drain_due_rejects_nat64_delivery_target_that_embeds_private_ipv4(
     assert stored.response_status_code is None
     assert stored.attempt_count == 1
     assert stored.envelope["delivery"]["attempt_count"] == 1
-    assert f"target_url resolved host is not public: {translated_metadata_ip}" in (
+    assert f"target_url resolved host is not public: {translated_private_ip}" in (
         stored.error_message or ""
     )
 
