@@ -1764,8 +1764,7 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
                         limit=_PYTEST_EVIDENCE_LIMIT,
                     )
                     rest = summary_match.group("rest")
-                    target = _pytest_summary_target(rest)
-                    node_id = _pytest_node_id_from_text(rest) or _pytest_node_id_from_text(target)
+                    node_id = _pytest_node_id_from_text(rest)
                     if node_id is not None:
                         _append_unique_capped(
                             node_ids,
@@ -1787,11 +1786,6 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
 
 def _normalize_pytest_summary_line(line: str) -> str:
     return _PYTEST_PROGRESS_PREFIX_RE.sub("", line)
-
-
-def _pytest_summary_target(rest: str) -> str:
-    target, _, _details = rest.partition(" - ")
-    return target.strip()
 
 
 def _looks_like_pytest_node_id(value: str) -> bool:
