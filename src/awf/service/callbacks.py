@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import hashlib
 import ipaddress
 import json as json_module
@@ -41,6 +43,16 @@ from awf.db.repositories import (
 
 CALLBACK_USER_AGENT = "AWF-Callback-Delivery/1.0"
 _CALLBACK_EXCEPTION_TRACEBACK_LIMIT = 4000
+_CALLBACK_TARGET_VALIDATION_WORKERS = 4
+# `getaddrinfo` cannot be interrupted portably once running. Keep callback DNS
+# work out of asyncio's shared default executor so timed-out resolutions can
+# only occupy this callback-specific pool.
+_CALLBACK_TARGET_VALIDATION_EXECUTOR: concurrent.futures.Executor = (
+    concurrent.futures.ThreadPoolExecutor(
+        max_workers=_CALLBACK_TARGET_VALIDATION_WORKERS,
+        thread_name_prefix="awf-callback-dns",
+    )
+)
 _log = get_logger(__name__)
 
 
@@ -403,22 +415,45 @@ async def _post_to_validated_callback_addresses(
             failures.append(exc)
             failed_addresses.append(connect_ip_address)
 
+    if timed_out_before_attempt:
+        if failures:
+            failure_summary = _callback_address_failure_summary(
+                failed_addresses=failed_addresses,
+                failures=failures,
+            )
+            raise TimeoutError(
+                "callback request timed out before remaining validated target "
+                "addresses could be attempted"
+            ) from ExceptionGroup(
+                f"callback request had prior validated target address failures: {failure_summary}",
+                failures,
+            )
+        raise TimeoutError(
+            "callback request timed out before any validated target address could be attempted"
+        )
     if len(failures) == 1:
         raise failures[0]
     if failures:
-        failure_summary = ", ".join(
-            f"{address} ({type(exc).__name__})"
-            for address, exc in zip(failed_addresses, failures, strict=True)
+        failure_summary = _callback_address_failure_summary(
+            failed_addresses=failed_addresses,
+            failures=failures,
         )
         raise ExceptionGroup(
             f"callback request failed for all validated target addresses: {failure_summary}",
             failures,
         )
-    if timed_out_before_attempt:
-        raise TimeoutError(
-            "callback request timed out before any validated target address could be attempted"
-        )
     raise RuntimeError("validated callback target has no connect IP addresses")
+
+
+def _callback_address_failure_summary(
+    *,
+    failed_addresses: list[str],
+    failures: list[Exception],
+) -> str:
+    return ", ".join(
+        f"{address} ({type(exc).__name__})"
+        for address, exc in zip(failed_addresses, failures, strict=True)
+    )
 
 
 def _delivery_headers(delivery: CallbackDelivery) -> dict[str, str]:
@@ -538,8 +573,7 @@ async def _validate_callback_target_with_timeout(
         raise ValueError("Callback target validation timed out before it started.")
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(
-                _validate_callback_target,
+            _run_callback_target_validation(
                 target_url,
                 settings=settings,
             ),
@@ -547,6 +581,23 @@ async def _validate_callback_target_with_timeout(
         )
     except TimeoutError as exc:
         raise ValueError(f"Callback target validation timed out after {timeout:g}s.") from exc
+
+
+async def _run_callback_target_validation(
+    target_url: str,
+    *,
+    settings: Settings,
+) -> ValidatedCallbackTarget:
+    loop = asyncio.get_running_loop()
+    validate_target: Callable[[], ValidatedCallbackTarget] = functools.partial(
+        _validate_callback_target,
+        target_url,
+        settings=settings,
+    )
+    return await loop.run_in_executor(
+        _CALLBACK_TARGET_VALIDATION_EXECUTOR,
+        validate_target,
+    )
 
 
 def _validate_callback_target_dns(*, hostname: str) -> tuple[str, ...]:

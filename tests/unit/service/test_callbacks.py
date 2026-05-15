@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -142,6 +144,28 @@ class _AddressFailurePoster:
         if connect_ip_address in self.failures:
             raise self.failures[connect_ip_address]
         return CallbackPostResult(status_code=204)
+
+
+class _InlineExecutor:
+    def __init__(self) -> None:
+        self.submissions: list[
+            tuple[Callable[..., object], tuple[object, ...], dict[str, object]]
+        ] = []
+
+    def submit(
+        self,
+        function: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> concurrent.futures.Future[object]:
+        self.submissions.append((function, args, kwargs))
+        future: concurrent.futures.Future[object] = concurrent.futures.Future()
+        try:
+            future.set_result(function(*args, **kwargs))
+        except Exception as exc:  # noqa: BLE001 - mirrors executor result propagation.
+            future.set_exception(exc)
+        return future
 
 
 @dataclass
@@ -863,6 +887,59 @@ async def test_validated_address_delivery_timeout_before_first_attempt_raises_ti
 
 
 @pytest.mark.unit
+async def test_validated_address_timeout_after_failure_raises_timeout_with_prior_failure_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    calls: list[_PostCall] = []
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def poster(
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        calls.append(
+            _PostCall(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+                connect_ip_address=connect_ip_address,
+            )
+        )
+        loop.now += 10.0
+        raise ConnectionRefusedError("first address refused")
+
+    with pytest.raises(TimeoutError, match="remaining validated target address") as exc_info:
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=10.0,
+            connect_ip_addresses=("1.1.1.1", "2.2.2.2"),
+        )
+
+    assert [call.connect_ip_address for call in calls] == ["1.1.1.1"]
+    assert [call.timeout for call in calls] == [10.0]
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ExceptionGroup)
+    assert "1.1.1.1 (ConnectionRefusedError)" in str(cause)
+    assert "2.2.2.2" not in str(cause)
+
+
+@pytest.mark.unit
 async def test_validated_address_fallback_stops_when_timeout_budget_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -902,7 +979,7 @@ async def test_validated_address_fallback_stops_when_timeout_budget_is_exhausted
             raise TimeoutError("second address timed out")
         return CallbackPostResult(status_code=202)
 
-    with pytest.raises(ExceptionGroup) as exc_info:
+    with pytest.raises(TimeoutError, match="remaining validated target address") as exc_info:
         await callback_service_module._post_to_validated_callback_addresses(
             poster,
             "https://operator.example.com/events",
@@ -914,9 +991,11 @@ async def test_validated_address_fallback_stops_when_timeout_budget_is_exhausted
 
     assert [call.connect_ip_address for call in calls] == ["1.1.1.1", "2.2.2.2"]
     assert [call.timeout for call in calls] == [10.0, 6.0]
-    assert "1.1.1.1 (TimeoutError)" in str(exc_info.value)
-    assert "2.2.2.2 (TimeoutError)" in str(exc_info.value)
-    assert "3.3.3.3" not in str(exc_info.value)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, ExceptionGroup)
+    assert "1.1.1.1 (TimeoutError)" in str(cause)
+    assert "2.2.2.2 (TimeoutError)" in str(cause)
+    assert "3.3.3.3" not in str(cause)
 
 
 @pytest.mark.unit
@@ -931,18 +1010,23 @@ async def test_drain_due_offloads_callback_target_validation(
     delivery = (await CallbackDeliveryService(factory).enqueue_workspace_event(event_id))[0]
     settings = Settings(_env_file=None)
     poster = _RecordingPoster(status_code=202)
-    to_thread_calls: list[tuple[Callable[..., object], tuple[object, ...], dict[str, object]]] = []
+    executor = _InlineExecutor()
 
-    async def fake_to_thread(
-        function: Callable[..., object],
+    async def unexpected_to_thread(
+        _function: Callable[..., object],
         /,
-        *args: object,
-        **kwargs: object,
+        *_args: object,
+        **_kwargs: object,
     ) -> object:
-        to_thread_calls.append((function, args, kwargs))
-        return function(*args, **kwargs)
+        raise AssertionError("callback target validation should use its dedicated executor")
 
-    monkeypatch.setattr("asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        callback_service_module,
+        "_CALLBACK_TARGET_VALIDATION_EXECUTOR",
+        executor,
+        raising=False,
+    )
+    monkeypatch.setattr("asyncio.to_thread", unexpected_to_thread)
 
     await CallbackDeliveryService(
         factory,
@@ -950,11 +1034,14 @@ async def test_drain_due_offloads_callback_target_validation(
         settings=settings,
     ).drain_due(limit=10)
 
-    assert len(to_thread_calls) == 1
-    function, args, kwargs = to_thread_calls[0]
-    assert function is callback_service_module._validate_callback_target
-    assert args == ("https://operator.example.com/events",)
-    assert kwargs == {"settings": settings}
+    assert len(executor.submissions) == 1
+    function, args, kwargs = executor.submissions[0]
+    assert isinstance(function, functools.partial)
+    assert function.func is callback_service_module._validate_callback_target
+    assert function.args == ("https://operator.example.com/events",)
+    assert function.keywords == {"settings": settings}
+    assert args == ()
+    assert kwargs == {}
     assert [call.connect_ip_address for call in poster.calls] == ["1.1.1.1"]
     stored = await _get_delivery(factory, delivery.id)
     assert stored.status == CallbackDeliveryStatus.succeeded.value
@@ -1014,16 +1101,20 @@ async def test_drain_due_counts_callback_target_validation_against_delivery_time
     settings = Settings(_env_file=None)
     poster = _RecordingPoster(status_code=202)
 
-    async def delayed_to_thread(
-        function: Callable[..., object],
-        /,
-        *args: object,
-        **kwargs: object,
-    ) -> object:
+    async def delayed_validation(
+        target_url: str,
+        *,
+        settings: Settings,
+    ) -> callback_service_module.ValidatedCallbackTarget:
         await asyncio.sleep(0.05)
-        return function(*args, **kwargs)
+        return callback_service_module._validate_callback_target(target_url, settings=settings)
 
-    monkeypatch.setattr("asyncio.to_thread", delayed_to_thread)
+    monkeypatch.setattr(
+        callback_service_module,
+        "_run_callback_target_validation",
+        delayed_validation,
+        raising=False,
+    )
 
     await CallbackDeliveryService(
         factory,
