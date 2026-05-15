@@ -392,7 +392,7 @@ def validate_production_settings(
 
     diagnostics = settings_guardrails(
         env=settings.env,
-        database_url=database_url or settings.database_url,
+        database_url=database_url if database_url is not None else settings.database_url,
         api_token=settings.api_token,
         callbacks_enabled=settings.callbacks_enabled,
     )

@@ -102,6 +102,19 @@ def test_production_guardrails_reject_default_local_database_url() -> None:
 
 
 @pytest.mark.unit
+def test_production_guardrails_preserve_explicit_empty_database_url_override() -> None:
+    settings = Settings(
+        _env_file=None,
+        env="prod",
+        database_url=_DEFAULT_LOCAL_DATABASE_URL,
+        api_token=_STRONG_PRODUCTION_API_TOKEN,
+        callbacks_enabled=False,
+    )
+
+    validate_production_settings(settings, database_url="")
+
+
+@pytest.mark.unit
 def test_production_guardrails_let_malformed_database_url_port_bubble() -> None:
     settings = Settings(
         _env_file=None,
