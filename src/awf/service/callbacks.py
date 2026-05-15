@@ -66,6 +66,10 @@ class ValidatedCallbackTarget:
     connect_ip_addresses: tuple[str, ...]
 
 
+class CallbackTargetValidationTimeoutError(ValueError):
+    """Raised when callback target validation exhausts its delivery budget."""
+
+
 class CallbackHttpPoster(Protocol):
     async def __call__(
         self,
@@ -258,6 +262,31 @@ class CallbackDeliveryService:
                             settings=self._settings,
                             timeout=delivery_timeout,
                         )
+                    except CallbackTargetValidationTimeoutError as exc:
+                        _log.warning(
+                            "callback.delivery_target_validation_timeout",
+                            delivery_id=delivery.id,
+                            subscription_id=subscription.id,
+                            event_kind=delivery.event_kind,
+                            event_type=delivery.event_type,
+                            source_id=delivery.source_id,
+                            workspace_id=delivery.workspace_id,
+                            operation_id=delivery.operation_id,
+                            merge_candidate_id=delivery.merge_candidate_id,
+                            error_code="CALLBACK_TARGET_VALIDATION_TIMEOUT",
+                            error_message=redact_audit_text(str(exc), limit=256),
+                        )
+                        await repo.mark_failed_or_retry(
+                            delivery,
+                            error_code="CALLBACK_TARGET_VALIDATION_TIMEOUT",
+                            error_message=_bounded_error_message(
+                                f"Callback target validation timed out: {exc}"
+                            ),
+                            response_status_code=None,
+                            backoff_seconds=subscription.initial_backoff_seconds,
+                            now=self._clock(),
+                        )
+                        continue
                     except ValueError as exc:
                         _log.warning(
                             "callback.delivery_target_invalid",
@@ -570,7 +599,9 @@ async def _validate_callback_target_with_timeout(
     timeout: float,
 ) -> ValidatedCallbackTarget:
     if timeout <= 0:
-        raise ValueError("Callback target validation timed out before it started.")
+        raise CallbackTargetValidationTimeoutError(
+            "Callback target validation timed out before it started."
+        )
     try:
         return await asyncio.wait_for(
             _run_callback_target_validation(
@@ -580,7 +611,9 @@ async def _validate_callback_target_with_timeout(
             timeout=timeout,
         )
     except TimeoutError as exc:
-        raise ValueError(f"Callback target validation timed out after {timeout:g}s.") from exc
+        raise CallbackTargetValidationTimeoutError(
+            f"Callback target validation timed out after {timeout:g}s."
+        ) from exc
 
 
 async def _run_callback_target_validation(

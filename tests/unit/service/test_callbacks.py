@@ -1048,7 +1048,7 @@ async def test_drain_due_offloads_callback_target_validation(
 
 
 @pytest.mark.unit
-async def test_drain_due_marks_callback_target_validation_timeout_as_target_invalid(
+async def test_drain_due_marks_callback_target_validation_timeout_with_dedicated_code(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1075,12 +1075,14 @@ async def test_drain_due_marks_callback_target_validation_timeout_as_target_inva
     assert wait_for_timeouts == [10.0]
     assert poster.calls == []
     log_entry = next(
-        event for event in captured if event.get("event") == "callback.delivery_target_invalid"
+        event
+        for event in captured
+        if event.get("event") == "callback.delivery_target_validation_timeout"
     )
-    assert log_entry["error_code"] == "CALLBACK_TARGET_INVALID"
+    assert log_entry["error_code"] == "CALLBACK_TARGET_VALIDATION_TIMEOUT"
     stored = await _get_delivery(factory, delivery.id)
     assert stored.status == CallbackDeliveryStatus.pending.value
-    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert stored.error_code == "CALLBACK_TARGET_VALIDATION_TIMEOUT"
     assert "validation timed out" in (stored.error_message or "")
 
 
