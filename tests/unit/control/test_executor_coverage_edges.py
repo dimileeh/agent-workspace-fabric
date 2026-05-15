@@ -152,6 +152,9 @@ def test_read_ref_sha_falls_back_to_packed_refs_and_missing_ref(tmp_path: Path) 
 
 @pytest.mark.unit
 def test_recovery_conformance_gaps_accepts_string_and_empty_values() -> None:
+    assert executor_mod._recovery_conformance_gaps(  # noqa: SLF001
+        {"gaps": [" first gap ", "", 42]}
+    ) == ("first gap", "42")
     assert executor_mod._recovery_conformance_gaps({"gaps": " rerun AWF validation "}) == (  # noqa: SLF001
         "rerun AWF validation",
     )
@@ -205,6 +208,18 @@ def test_recovery_conformance_gaps_accepts_string_and_empty_values() -> None:
             None,
             True,
         ),
+        (
+            {"recovery_mode": "validate_only", "source_head_sha": "old"},
+            "   ",
+            None,
+            False,
+        ),
+        (
+            {"recovery_mode": "unexpected"},
+            "new",
+            None,
+            False,
+        ),
     ],
 )
 def test_recovery_needs_existing_pr_push_edges(
@@ -221,6 +236,16 @@ def test_recovery_needs_existing_pr_push_edges(
         )
         is expected
     )
+
+
+@pytest.mark.unit
+def test_ruff_check_autofix_repair_files_ignores_fixable_diagnostic_without_path() -> None:
+    assert executor_mod._ruff_check_autofix_repair_files(  # noqa: SLF001
+        "F401 [*] imported but unused\n"
+        "help: Remove unused import\n"
+        "F841 [*] local variable is assigned to but never used\n"
+        "--> src/awf/example.py:10:5\n"
+    ) == ("src/awf/example.py",)
 
 
 @pytest.mark.unit
@@ -658,6 +683,87 @@ def test_validation_evidence_json_enforces_limit_on_minimal_fallback() -> None:
 
 
 @pytest.mark.unit
+def test_validation_evidence_json_returns_after_coverage_compaction() -> None:
+    payload = {
+        "validation_run_id": "validation-run-1",
+        "status": "failed",
+        "reason_code": "COVERAGE_BELOW_THRESHOLD",
+        "coverage": {
+            "status": "failed",
+            "packages": {f"pkg_{index}": "x" * 1000 for index in range(100)},
+        },
+        "commands": [{"command": "pytest", "stdout": "x" * 120000}],
+        "log_stream_refs": {"stdout": "x" * 120000},
+    }
+
+    evidence = executor_mod._validation_evidence_json(payload)
+
+    decoded = json.loads(evidence)
+    assert decoded["evidence_truncated"] is True
+    assert decoded["coverage"]["status"] == "failed"
+    assert decoded["coverage"]["retained_keys"] == ["status", "packages"]
+    assert decoded["commands"]["original_type"] == "list"
+    assert len(evidence) <= executor_mod._VALIDATION_EVIDENCE_JSON_LIMIT
+
+
+@pytest.mark.unit
+def test_validation_evidence_json_returns_minimal_payload_when_compact_payload_is_large() -> None:
+    payload = {
+        "validation_run_id": "validation-run-1",
+        "status": "failed",
+        "reason_code": "VALIDATION_FAILED",
+        "commands": [{"command": "pytest", "stdout": "x" * 120000}],
+        "log_stream_refs": {"stdout": "x" * 120000},
+        **{f"extra_{index}": "x" * 50 for index in range(1000)},
+    }
+
+    evidence = executor_mod._validation_evidence_json(payload)
+
+    decoded = json.loads(evidence)
+    assert decoded == {
+        "validation_run_id": "validation-run-1",
+        "status": "failed",
+        "reason_code": "VALIDATION_FAILED",
+        "coverage": {
+            "truncated": True,
+            "original_type": "NoneType",
+        },
+        "evidence_truncated": True,
+        "commands": {
+            "truncated": True,
+            "original_type": "list",
+            "original_length": 1,
+        },
+        "log_stream_refs": {
+            "truncated": True,
+            "original_type": "mapping",
+            "original_entry_count": 1,
+            "retained_keys": ["stdout"],
+        },
+    }
+
+
+@pytest.mark.unit
+def test_validation_evidence_json_has_final_floor_when_limit_is_tiny(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(executor_mod, "_VALIDATION_EVIDENCE_JSON_LIMIT", 10)
+
+    evidence = executor_mod._validation_evidence_json(
+        {
+            "validation_run_id": "validation-run-1",
+            "status": "failed",
+            "reason_code": "VALIDATION_FAILED",
+            "commands": ["pytest"],
+            "log_stream_refs": {"stdout": "ref"},
+            "target_branch": "main",
+        }
+    )
+
+    assert evidence.endswith("...[truncated]")
+
+
+@pytest.mark.unit
 def test_validation_evidence_floor_payload_special_cases_coverage_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -691,6 +797,50 @@ def test_validation_evidence_floor_payload_special_cases_coverage_once(
 
     assert coverage not in floor_values
     assert floor_payload["coverage"] == executor_mod._validation_evidence_size_summary(coverage)
+
+
+@pytest.mark.unit
+def test_validation_evidence_floor_payload_handles_payload_without_coverage() -> None:
+    floor_payload = executor_mod._validation_evidence_floor_payload(  # noqa: SLF001
+        {
+            "validation_run_id": "validation-run-1",
+            "status": "failed",
+            "commands": ["pytest"],
+            "log_stream_refs": {"stdout": "ref"},
+        },
+        oversized_serialized_length=1234,
+    )
+
+    assert "coverage" not in floor_payload
+    assert floor_payload["validation_run_id"] == "validation-run-1"
+    assert floor_payload["commands"]["original_type"] == "list"
+
+
+@pytest.mark.unit
+def test_validation_evidence_summary_helpers_cover_scalar_and_oversized_values() -> None:
+    assert executor_mod._validation_evidence_coverage_summary("raw coverage") == {  # noqa: SLF001
+        "truncated": True,
+        "original_type": "string",
+        "original_length": len("raw coverage"),
+    }
+    assert executor_mod._validation_evidence_coverage_summary({"other": 1}) == {  # noqa: SLF001
+        "truncated": True,
+        "original_type": "mapping",
+        "original_entry_count": 1,
+        "retained_keys": ["other"],
+    }
+    assert executor_mod._validation_evidence_floor_value("short") == "short"  # noqa: SLF001
+    assert executor_mod._validation_evidence_floor_value(3) == 3  # noqa: SLF001
+    assert executor_mod._validation_evidence_floor_value(None) is None  # noqa: SLF001
+    assert executor_mod._validation_evidence_floor_value("x" * 600) == {  # noqa: SLF001
+        "truncated": True,
+        "original_type": "string",
+        "original_length": 600,
+    }
+    assert executor_mod._validation_evidence_floor_value(("tuple",)) == {  # noqa: SLF001
+        "truncated": True,
+        "original_type": "tuple",
+    }
 
 
 @pytest.mark.unit
@@ -742,6 +892,49 @@ def test_post_validation_conformance_fix_result_preserves_attempt_artifacts(
     assert not (
         tmp_path / "ws_post" / "post_validation_conformance" / "post_validation_conformance.stdout"
     ).exists()
+
+
+@pytest.mark.unit
+def test_post_validation_conformance_failure_text_renders_conformance_details() -> None:
+    text = executor_mod._post_validation_conformance_failure_text(  # noqa: SLF001
+        executor_mod._PlanningRunFailure(  # noqa: SLF001
+            message="Plan conformance still requires validation evidence.",
+            details={
+                "conformance": {
+                    "summary": "AWF validation evidence is missing.",
+                    "report_reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                    "gaps": ["rerun coverage", "", 42],
+                }
+            },
+        )
+    )
+
+    assert text == "\n".join(
+        [
+            "Plan conformance still requires validation evidence.",
+            "Summary: AWF validation evidence is missing.",
+            f"Report reason code: {CONFORMANCE_REQUIRES_AWF_VALIDATION}",
+            "Remaining conformance gaps:",
+            "- rerun coverage",
+            "- 42",
+        ]
+    )
+
+
+@pytest.mark.unit
+def test_existing_pr_remote_push_url_ignores_non_sync_or_invalid_repo_urls() -> None:
+    assert (
+        executor_mod._existing_pr_remote_push_url(  # noqa: SLF001
+            SimpleNamespace(task_kind="feature_branch_pr", repo_url="not a url")
+        )
+        is None
+    )
+    assert (
+        executor_mod._existing_pr_remote_push_url(  # noqa: SLF001
+            SimpleNamespace(task_kind="sync_feature_pr", repo_url="not a url")
+        )
+        is None
+    )
 
 
 @pytest.mark.unit

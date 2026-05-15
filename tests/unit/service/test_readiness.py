@@ -378,6 +378,104 @@ def test_slo_threshold_check_requires_creation_and_cleanup_evidence() -> None:
 
 
 @pytest.mark.unit
+def test_readiness_evidence_lines_render_slo_breaches_and_non_mapping_values() -> None:
+    check = CoreReadinessCheck(
+        name="prd_slo_thresholds",
+        status="fail",
+        reason_code="PRD_SLO_THRESHOLDS_FAILED",
+        message="SLOs failed",
+        evidence={
+            "since_hours": 168,
+            "breaches": {
+                "cleanup_success_rate": {
+                    "actual": 0.95,
+                    "threshold": {"operator": ">=", "value": 0.99},
+                },
+                "raw_breach": "unstructured",
+            },
+        },
+    )
+
+    assert readiness._readiness_evidence_lines(check) == [
+        "        window: 168h",
+        "        breaches:",
+        "          - cleanup_success_rate: 95.0% >= 99.0%",
+        "          - raw_breach: unstructured",
+    ]
+
+
+@pytest.mark.unit
+def test_readiness_evidence_lines_report_missing_breaches_for_non_ok_slo() -> None:
+    check = CoreReadinessCheck(
+        name="prd_slo_thresholds",
+        status="warn",
+        reason_code="PRD_SLO_THRESHOLDS_ALLOWLISTED",
+        message="SLOs allowlisted",
+        evidence={},
+    )
+
+    assert readiness._readiness_evidence_lines(check) == ["        breaches: none reported"]
+
+
+@pytest.mark.unit
+def test_readiness_evidence_lines_omit_empty_ok_slo_details() -> None:
+    check = CoreReadinessCheck(
+        name="prd_slo_thresholds",
+        status="ok",
+        reason_code="PRD_SLO_THRESHOLDS_OK",
+        message="SLOs ok",
+        evidence={},
+    )
+
+    assert readiness._readiness_evidence_lines(check) == []
+
+
+@pytest.mark.unit
+def test_readiness_evidence_lines_render_status_for_named_checks() -> None:
+    check = CoreReadinessCheck(
+        name="provider_readiness",
+        status="warn",
+        reason_code="PROVIDER_WARN",
+        message="provider warning",
+        evidence={"status": "warn"},
+    )
+
+    assert readiness._readiness_evidence_lines(check) == ["        evidence status: warn"]
+
+
+@pytest.mark.unit
+def test_readiness_evidence_lines_omit_status_when_named_check_has_no_status() -> None:
+    check = CoreReadinessCheck(
+        name="cleanup_posture",
+        status="ok",
+        reason_code="CLEANUP_OK",
+        message="cleanup ok",
+        evidence={},
+    )
+
+    assert readiness._readiness_evidence_lines(check) == []
+
+
+@pytest.mark.unit
+def test_readiness_evidence_lines_omit_unknown_check_details() -> None:
+    check = CoreReadinessCheck(
+        name="custom_check",
+        status="ok",
+        reason_code="CUSTOM_OK",
+        message="custom ok",
+        evidence={"status": "ok"},
+    )
+
+    assert readiness._readiness_evidence_lines(check) == []
+
+
+@pytest.mark.unit
+def test_format_readiness_rate_handles_missing_and_non_numeric_values() -> None:
+    assert readiness._format_readiness_rate(None) == "no data"
+    assert readiness._format_readiness_rate("raw") == "raw"
+
+
+@pytest.mark.unit
 async def test_core_readiness_allowlist_downgrades_prd_slo_breach(
     tmp_path: Path,
 ) -> None:

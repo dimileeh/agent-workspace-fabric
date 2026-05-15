@@ -7,16 +7,29 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.deps import get_db_session_factory
+from awf.api.deps import get_db_session_factory, require_api_token
 from awf.api.schemas import (
     CallbackSubscriptionCreateRequest,
     CallbackSubscriptionListResponse,
     CallbackSubscriptionResponse,
+    HTTPExceptionErrorResponse,
 )
 from awf.common.config import Settings, get_settings
-from awf.service.callbacks import CallbackIdempotencyConflictError, CallbackService
+from awf.service.callbacks import (
+    CallbackIdempotencyConflictError,
+    CallbackService,
+    CallbackTargetPolicyError,
+    CallbackTargetPolicyViolationError,
+)
 
-router = APIRouter(prefix="/v1/callbacks", tags=["callbacks"])
+router = APIRouter(
+    prefix="/v1/callbacks",
+    tags=["callbacks"],
+    responses={
+        401: {"model": HTTPExceptionErrorResponse, "description": "Unauthorized"},
+        503: {"model": HTTPExceptionErrorResponse, "description": "Service Unavailable"},
+    },
+)
 _IDEMPOTENCY_KEY_MAX_LENGTH = 128
 
 
@@ -24,6 +37,25 @@ _IDEMPOTENCY_KEY_MAX_LENGTH = 128
     "",
     response_model=CallbackSubscriptionResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_api_token)],
+    responses={
+        400: {"model": HTTPExceptionErrorResponse, "description": "Bad Request"},
+        409: {"model": HTTPExceptionErrorResponse, "description": "Conflict"},
+        422: {
+            "description": "Validation Error or Callback Target Policy Violation",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "title": "CallbackRegistrationUnprocessableEntityResponse",
+                        "oneOf": [
+                            {"$ref": "#/components/schemas/HTTPValidationError"},
+                            {"$ref": "#/components/schemas/HTTPExceptionErrorResponse"},
+                        ],
+                    }
+                }
+            },
+        },
+    },
 )
 async def register_callback(
     payload: CallbackSubscriptionCreateRequest,
@@ -34,10 +66,26 @@ async def register_callback(
     _ensure_callbacks_enabled(settings)
     key = _require_idempotency_key(idempotency_key)
     try:
-        subscription = await CallbackService(session_factory).register(
+        subscription = await CallbackService(session_factory, settings=settings).register(
             payload,
             idempotency_key=key,
         )
+    except CallbackTargetPolicyViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error_code": "CALLBACK_TARGET_POLICY_VIOLATION",
+                "message": str(exc),
+            },
+        ) from exc
+    except CallbackTargetPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error_code": "CALLBACK_TARGET_INVALID",
+                "message": str(exc),
+            },
+        ) from exc
     except CallbackIdempotencyConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -52,7 +100,11 @@ async def register_callback(
     return CallbackSubscriptionResponse.model_validate(subscription)
 
 
-@router.get("", response_model=CallbackSubscriptionListResponse)
+@router.get(
+    "",
+    response_model=CallbackSubscriptionListResponse,
+    dependencies=[Depends(require_api_token)],
+)
 async def list_callbacks(
     enabled: Annotated[bool | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,

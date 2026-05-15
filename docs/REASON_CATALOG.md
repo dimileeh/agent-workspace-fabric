@@ -23,6 +23,34 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#artifact_oversized](#artifact_oversized)
 
+### CALLBACK_DELIVERY_BUDGET_EXCEEDED
+**Problem:** AWF could not send an outbound callback because target validation consumed the full delivery timeout budget before the POST could start.
+**Likely Cause:** DNS resolution or target validation completed too slowly for the subscription's configured timeout.
+**Operator Fix:** Verify callback target DNS and network latency, increase the subscription timeout if appropriate, then let AWF retry pending deliveries.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#callback_delivery_budget_exceeded](#callback_delivery_budget_exceeded)
+
+### CALLBACK_TARGET_INVALID
+**Problem:** AWF refused to send an outbound callback because the stored callback target failed delivery-time validation.
+**Likely Cause:** The target URL no longer resolves to public addresses, uses a disallowed scheme or host, includes unsafe URL components, or violates the configured callback HTTPS/host allowlist policy.
+**Operator Fix:** Update or recreate the callback subscription with a public, policy-compliant target URL, then let AWF retry pending deliveries.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#callback_target_invalid](#callback_target_invalid)
+
+### CALLBACK_TARGET_POLICY_VIOLATION
+**Problem:** AWF refused to register or deliver an outbound callback because the target violated configured callback policy.
+**Likely Cause:** The target URL does not satisfy the HTTPS requirement or the configured callback host allowlist.
+**Operator Fix:** Update the callback subscription target or callback policy so the target is explicitly allowed, then let AWF retry pending deliveries.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#callback_target_policy_violation](#callback_target_policy_violation)
+
+### CALLBACK_TARGET_VALIDATION_TIMEOUT
+**Problem:** AWF could not validate an outbound callback target before the delivery timeout budget expired.
+**Likely Cause:** DNS resolution or callback target validation was too slow or blocked by network conditions.
+**Operator Fix:** Verify DNS and network reachability for the callback host, increase the subscription timeout if appropriate, then let AWF retry pending deliveries.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#callback_target_validation_timeout](#callback_target_validation_timeout)
+
 ### CI_TRANSIENT_RERUN_FAILED
 **Problem:** AWF could not request a GitHub rerun for CI failures classified as transient infrastructure failures.
 **Likely Cause:** GitHub rejected the rerun request, the workflow run no longer exists, or the token lacks permission to rerun workflow jobs.
