@@ -341,9 +341,9 @@ async def test_workspace_metadata_routes_require_authorization(
             sent_wrong_token = True
         if body is not None:
             kwargs["json"] = body
-        if not sent_wrong_token and default_authorization is not None:
-            del client.headers["Authorization"]
         try:
+            if not sent_wrong_token and default_authorization is not None:
+                del client.headers["Authorization"]
             response = await client.request(method, path, **kwargs)
         finally:
             if not sent_wrong_token and default_authorization is not None:

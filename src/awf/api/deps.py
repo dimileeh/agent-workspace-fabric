@@ -126,7 +126,8 @@ def _authorization_header_value(
 ) -> str | None:
     if credentials is None:
         return None
-    return _normalized_authorization_header(f"{credentials.scheme} {credentials.credentials}")
+    # HTTPBearer only yields credentials for the bearer scheme, case-insensitively.
+    return f"Bearer {credentials.credentials}"
 
 
 def _normalized_authorization_header(authorization: str | None) -> str | None:
