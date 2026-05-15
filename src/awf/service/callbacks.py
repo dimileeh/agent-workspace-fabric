@@ -70,8 +70,16 @@ class CallbackTargetValidationTimeoutError(ValueError):
     """Raised when callback target validation exhausts its delivery budget."""
 
 
+class CallbackDeliveryBudgetExceededError(ValueError):
+    """Raised when target validation leaves no remaining callback delivery budget."""
+
+
 class CallbackTargetPolicyError(ValueError):
     """Raised when a callback target violates static registration/delivery policy."""
+
+
+class CallbackTargetPolicyViolationError(CallbackTargetPolicyError):
+    """Raised when configurable callback target policy rejects an otherwise valid URL."""
 
 
 class CallbackHttpPoster(Protocol):
@@ -285,35 +293,32 @@ class CallbackDeliveryService:
                             now=self._clock,
                         )
                         continue
-                    except ValueError as exc:
-                        _log.warning(
-                            "callback.delivery_target_invalid",
-                            delivery_id=delivery.id,
-                            subscription_id=subscription.id,
-                            event_kind=delivery.event_kind,
-                            event_type=delivery.event_type,
-                            source_id=delivery.source_id,
-                            workspace_id=delivery.workspace_id,
-                            operation_id=delivery.operation_id,
-                            merge_candidate_id=delivery.merge_candidate_id,
-                            error_code="CALLBACK_TARGET_INVALID",
-                            error_message=redact_audit_text(str(exc), limit=256),
-                        )
-                        await repo.mark_failed_or_retry(
+                    except CallbackTargetPolicyViolationError as exc:
+                        await _record_callback_target_rejection(
+                            repo,
                             delivery,
+                            subscription,
+                            exc,
+                            error_code="CALLBACK_TARGET_POLICY_VIOLATION",
+                            log_event="callback.delivery_target_policy_violation",
+                            now=self._clock,
+                        )
+                        continue
+                    except ValueError as exc:
+                        await _record_callback_target_rejection(
+                            repo,
+                            delivery,
+                            subscription,
+                            exc,
                             error_code="CALLBACK_TARGET_INVALID",
-                            error_message=_bounded_error_message(
-                                f"Callback target rejected: {exc}"
-                            ),
-                            response_status_code=None,
-                            backoff_seconds=subscription.initial_backoff_seconds,
-                            now=self._clock(),
+                            log_event="callback.delivery_target_invalid",
+                            now=self._clock,
                         )
                         continue
 
                     remaining_timeout = delivery_deadline - monotonic_clock()
                     if remaining_timeout <= 0:
-                        raise CallbackTargetValidationTimeoutError(
+                        raise CallbackDeliveryBudgetExceededError(
                             "Callback delivery timeout expired after target validation."
                         )
                     result = await _post_to_validated_callback_addresses(
@@ -324,6 +329,15 @@ class CallbackDeliveryService:
                         timeout=remaining_timeout,
                         connect_ip_addresses=validated_target.connect_ip_addresses,
                     )
+                except CallbackDeliveryBudgetExceededError as exc:
+                    await _record_callback_delivery_budget_exceeded(
+                        repo,
+                        delivery,
+                        subscription,
+                        exc,
+                        now=self._clock,
+                    )
+                    continue
                 except CallbackTargetValidationTimeoutError as exc:
                     await _record_callback_target_validation_timeout(
                         repo,
@@ -375,6 +389,70 @@ class CallbackDeliveryService:
                 )
             await session.commit()
             return deliveries
+
+
+async def _record_callback_target_rejection(
+    repo: CallbackDeliveryRepository,
+    delivery: CallbackDelivery,
+    subscription: CallbackSubscription,
+    exc: ValueError,
+    *,
+    error_code: str,
+    log_event: str,
+    now: Clock,
+) -> None:
+    _log.warning(
+        log_event,
+        delivery_id=delivery.id,
+        subscription_id=subscription.id,
+        event_kind=delivery.event_kind,
+        event_type=delivery.event_type,
+        source_id=delivery.source_id,
+        workspace_id=delivery.workspace_id,
+        operation_id=delivery.operation_id,
+        merge_candidate_id=delivery.merge_candidate_id,
+        error_code=error_code,
+        error_message=redact_audit_text(str(exc), limit=256),
+    )
+    await repo.mark_failed_or_retry(
+        delivery,
+        error_code=error_code,
+        error_message=_bounded_error_message(f"Callback target rejected: {exc}"),
+        response_status_code=None,
+        backoff_seconds=subscription.initial_backoff_seconds,
+        now=now(),
+    )
+
+
+async def _record_callback_delivery_budget_exceeded(
+    repo: CallbackDeliveryRepository,
+    delivery: CallbackDelivery,
+    subscription: CallbackSubscription,
+    exc: CallbackDeliveryBudgetExceededError,
+    *,
+    now: Clock,
+) -> None:
+    _log.warning(
+        "callback.delivery_budget_exceeded",
+        delivery_id=delivery.id,
+        subscription_id=subscription.id,
+        event_kind=delivery.event_kind,
+        event_type=delivery.event_type,
+        source_id=delivery.source_id,
+        workspace_id=delivery.workspace_id,
+        operation_id=delivery.operation_id,
+        merge_candidate_id=delivery.merge_candidate_id,
+        error_code="CALLBACK_DELIVERY_BUDGET_EXCEEDED",
+        error_message=redact_audit_text(str(exc), limit=256),
+    )
+    await repo.mark_failed_or_retry(
+        delivery,
+        error_code="CALLBACK_DELIVERY_BUDGET_EXCEEDED",
+        error_message=_bounded_error_message(f"Callback delivery budget exceeded: {exc}"),
+        response_status_code=None,
+        backoff_seconds=subscription.initial_backoff_seconds,
+        now=now(),
+    )
 
 
 async def _record_callback_target_validation_timeout(
@@ -635,9 +713,9 @@ def _validate_callback_target_static_policy(
     hostname = parsed.hostname
     host = hostname.rstrip(".").lower()
     if settings.callbacks_require_https and parsed.scheme != "https":
-        raise CallbackTargetPolicyError("target_url must use https")
+        raise CallbackTargetPolicyViolationError("target_url must use https")
     if settings.callbacks_allowed_hosts and host not in settings.callbacks_allowed_hosts:
-        raise CallbackTargetPolicyError("target_url host is not allowlisted")
+        raise CallbackTargetPolicyViolationError("target_url host is not allowlisted")
     if not is_public_callback_target_host(hostname):
         raise CallbackTargetPolicyError("target_url must use a public host")
     return hostname
@@ -771,8 +849,10 @@ def _utc_now() -> datetime:
 __all__ = [
     "CallbackDeliveryService",
     "CallbackIdempotencyConflictError",
+    "CallbackDeliveryBudgetExceededError",
     "CallbackPostResult",
     "CallbackService",
     "CallbackTargetPolicyError",
+    "CallbackTargetPolicyViolationError",
     "callback_request_hash",
 ]

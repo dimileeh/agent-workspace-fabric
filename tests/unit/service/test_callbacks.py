@@ -570,7 +570,7 @@ async def test_default_httpx_poster_uses_no_extensions_for_pinned_http_request(
 
 
 @pytest.mark.unit
-async def test_drain_due_records_validation_timeout_when_validation_consumes_timeout_budget(
+async def test_drain_due_records_budget_exceeded_when_validation_consumes_timeout_budget(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -608,16 +608,14 @@ async def test_drain_due_records_validation_timeout_when_validation_consumes_tim
 
     assert poster.calls == []
     log_entry = next(
-        event
-        for event in captured
-        if event.get("event") == "callback.delivery_target_validation_timeout"
+        event for event in captured if event.get("event") == "callback.delivery_budget_exceeded"
     )
     assert log_entry["delivery_id"] == delivery.id
-    assert log_entry["error_code"] == "CALLBACK_TARGET_VALIDATION_TIMEOUT"
+    assert log_entry["error_code"] == "CALLBACK_DELIVERY_BUDGET_EXCEEDED"
     assert "timeout expired after target validation" in log_entry["error_message"]
     stored = await _get_delivery(factory, delivery.id)
     assert stored.status == CallbackDeliveryStatus.pending.value
-    assert stored.error_code == "CALLBACK_TARGET_VALIDATION_TIMEOUT"
+    assert stored.error_code == "CALLBACK_DELIVERY_BUDGET_EXCEEDED"
     assert "timeout expired after target validation" in (stored.error_message or "")
 
 
@@ -1783,7 +1781,7 @@ async def test_drain_due_enforces_https_only_callback_target_policy(
     assert poster.calls == []
     stored = await _get_delivery(factory, deliveries[0].id)
     assert stored.status == CallbackDeliveryStatus.pending.value
-    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert stored.error_code == "CALLBACK_TARGET_POLICY_VIOLATION"
     assert "target_url must use https" in (stored.error_message or "")
 
 
@@ -1816,5 +1814,5 @@ async def test_drain_due_enforces_callback_target_allowlist_policy(
     assert poster.calls == []
     stored = await _get_delivery(factory, deliveries[0].id)
     assert stored.status == CallbackDeliveryStatus.pending.value
-    assert stored.error_code == "CALLBACK_TARGET_INVALID"
+    assert stored.error_code == "CALLBACK_TARGET_POLICY_VIOLATION"
     assert "host is not allowlisted" in (stored.error_message or "")

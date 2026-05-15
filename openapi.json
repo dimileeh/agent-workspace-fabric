@@ -10851,11 +10851,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/HTTPExceptionErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Callback Target Policy Violation"
           },
           "503": {
             "content": {

@@ -562,13 +562,17 @@ is sent:
 - when `AWF_CALLBACKS_ALLOWED_HOSTS` is set, the callback host must be in the
   allowlist.
 
-Policy violations are recorded as delivery failures with
-`error_code = CALLBACK_TARGET_INVALID` and are retried according to normal retry
-settings; they are never sent as successful callbacks.
+Malformed targets and resolved private or non-public delivery addresses are
+recorded as delivery failures with `error_code = CALLBACK_TARGET_INVALID`.
+Configurable HTTPS and allowlist policy violations are recorded with
+`error_code = CALLBACK_TARGET_POLICY_VIOLATION`. Both paths are retried according
+to normal retry settings; they are never sent as successful callbacks.
 Target validation timeouts use
 `error_code = CALLBACK_TARGET_VALIDATION_TIMEOUT` so operators can distinguish
 transient validation latency from permanently invalid callback targets; retry
 settings are unchanged.
+When validation succeeds but consumes the full delivery timeout before the POST
+can start, delivery records use `error_code = CALLBACK_DELIVERY_BUDGET_EXCEEDED`.
 
 ---
 

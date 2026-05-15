@@ -40,6 +40,10 @@ _IDEMPOTENCY_KEY_MAX_LENGTH = 128
     responses={
         400: {"model": HTTPExceptionErrorResponse, "description": "Bad Request"},
         409: {"model": HTTPExceptionErrorResponse, "description": "Conflict"},
+        422: {
+            "model": HTTPExceptionErrorResponse,
+            "description": "Callback Target Policy Violation",
+        },
     },
 )
 async def register_callback(

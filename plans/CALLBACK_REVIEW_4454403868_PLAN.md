@@ -2,45 +2,53 @@
 
 ## Problem Statement And Scope
 
-Address the review-level PR comment for callback hardening. The actionable gap is
-the delivery path that exhausts its timeout immediately after callback target DNS
-validation: it currently falls through to the generic request failure handler
-instead of recording `CALLBACK_TARGET_VALIDATION_TIMEOUT`. The registration-time
-policy finding must be verified against existing code and tests before making
-any change.
+PR review comment `issue:4454403868` identifies three callback observability and API
+contract gaps:
+
+- `POST /v1/callbacks` can return a structured policy-enforcement `422` response,
+  but the route metadata does not declare that structured response shape.
+- Callback deliveries that exhaust the total delivery timeout after successful
+  target validation are stored as target validation timeouts, which hides that the
+  delivery budget was exhausted after validation.
+- Callback delivery policy violations from `callbacks_require_https` and
+  `callbacks_allowed_hosts` are stored with the same code as malformed URL and
+  unsafe resolved-target failures.
+
+Scope is limited to callback API metadata, delivery error-code differentiation,
+regression tests, OpenAPI artifact drift, and directly related REST docs.
 
 ## Requirements Checklist
 
-- Preserve AWF workspace constraints: stay on the current branch, do not push,
-  and keep changes scoped.
-- Add or update a regression test first for the post-validation timeout path so
-  it expects `CALLBACK_TARGET_VALIDATION_TIMEOUT`.
-- Change delivery behavior so a timeout budget exhausted by validation is
-  handled by the dedicated validation timeout logging and persistence path.
-- Verify whether `callbacks_require_https` and `callbacks_allowed_hosts` are
-  already enforced at registration; only change code if the finding is still
-  valid.
-- Run the narrow callback tests that prove the changed behavior and relevant
-  registration policy behavior.
-- Record validation evidence in
-  `plans/CALLBACK_REVIEW_4454403868_VALIDATION.md`.
+- [ ] Declare the structured `422` callback registration response in OpenAPI.
+- [ ] Preserve existing retry behavior for callback delivery failures.
+- [ ] Store a distinct code for delivery budget exhaustion after successful target
+  validation.
+- [ ] Store a distinct code for runtime callback target policy violations.
+- [ ] Keep structural malformed URL, private IP, DNS, NAT64, and 6to4 rejection
+  behavior under the existing invalid-target path unless tests prove otherwise.
+- [ ] Add or update focused regression tests before implementation where practical.
+- [ ] Regenerate or verify `openapi.json` when the spec changes.
 
 ## Implementation Steps
 
-1. Inspect callback service, callback route, and callback tests.
-2. Update the existing timeout-budget regression test to expect the dedicated
-   validation timeout event and error code.
-3. Run that targeted test and confirm it fails against the current
-   implementation.
-4. Replace the generic `TimeoutError` raised after validation consumes the
-   budget with `CallbackTargetValidationTimeoutError`.
-5. Run the targeted service test and the registration policy API tests.
-6. Create the validation document with requirement status and command evidence.
+1. Update callback API tests to require the structured `422` response schema for
+   `POST /v1/callbacks`.
+2. Update callback service tests to expect:
+   - `CALLBACK_DELIVERY_BUDGET_EXCEEDED` when validation completes but no POST
+     budget remains;
+   - `CALLBACK_TARGET_POLICY_VIOLATION` for delivery-time HTTPS/allowlist policy
+     mismatches.
+3. Update `src/awf/api/routes/callbacks.py` route metadata for the structured
+   callback registration `422`.
+4. Update `src/awf/service/callbacks.py` to differentiate the two delivery
+   error-code cases without changing retry scheduling.
+5. Update docs and regenerate `openapi.json`.
 
 ## Verification Commands And Pass Criteria
 
-- `uv run --python 3.12 --extra dev pytest tests/unit/service/test_callbacks.py::test_drain_due_records_request_failure_when_validation_consumes_timeout_budget -q`
-  - First run should fail after the test update and before implementation.
-  - Final run should pass after implementation.
-- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_callbacks.py::test_register_callback_rejects_http_target_when_https_required_without_insert tests/unit/api/test_callbacks.py::test_register_callback_rejects_non_allowlisted_target_without_insert -q`
-  - Must pass, proving the registration policy finding is already covered.
+- `uv run --python 3.12 --extra dev pytest tests/unit/api/test_callbacks.py tests/unit/api/test_openapi_artifact.py tests/unit/service/test_callbacks.py -q`
+  must pass.
+- `python scripts/generate_openapi.py --check` must pass after regenerating the
+  checked-in artifact.
+- `uv run --python 3.12 --extra dev ruff check src/awf tests` must pass for the
+  touched Python surface.

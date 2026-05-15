@@ -202,7 +202,7 @@ def test_callback_endpoints_document_structured_error_responses(
     path = openapi_spec["paths"]["/v1/callbacks"]
     expected_statuses_by_method = {
         "get": {"401", "503"},
-        "post": {"400", "401", "409", "503"},
+        "post": {"400", "401", "409", "422", "503"},
     }
 
     for method, expected_statuses in expected_statuses_by_method.items():
