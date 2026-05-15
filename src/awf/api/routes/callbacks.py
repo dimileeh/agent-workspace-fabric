@@ -16,6 +16,7 @@ from awf.api.request_admission import (
     RequestAdmissionDecision,
     admit_request,
 )
+from awf.api.responses import RATE_LIMITED_ERROR_RESPONSE
 from awf.api.schemas import (
     CallbackSubscriptionCreateRequest,
     CallbackSubscriptionListResponse,
@@ -86,7 +87,7 @@ _STATELESS_CALLBACK_REPLAY_CACHE = _CallbackIdempotencyReplayCache()
     "",
     response_model=CallbackSubscriptionResponse,
     status_code=status.HTTP_201_CREATED,
-    responses={429: {"model": ErrorResponse}},
+    responses={429: RATE_LIMITED_ERROR_RESPONSE},
 )
 async def register_callback(
     payload: CallbackSubscriptionCreateRequest,

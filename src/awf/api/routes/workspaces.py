@@ -34,6 +34,7 @@ from awf.api.responses import (
     API_TOKEN_AUTH_ERROR_RESPONSES,
     API_TOKEN_UNAUTHORIZED_RESPONSE,
     PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
+    RATE_LIMITED_ERROR_RESPONSE,
 )
 from awf.api.schemas import (
     EgressAuditRecordResponse,
@@ -141,7 +142,7 @@ def _current_request(request: Request) -> Request:
     "",
     response_model=WorkspaceAcceptedResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    responses={409: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
+    responses={409: {"model": ErrorResponse}, 429: RATE_LIMITED_ERROR_RESPONSE},
 )
 async def create_workspace(
     payload: WorkspaceCreateRequest,
@@ -201,7 +202,7 @@ async def create_workspace(
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         409: {"model": ErrorResponse},
-        429: {"model": ErrorResponse},
+        429: RATE_LIMITED_ERROR_RESPONSE,
         503: PROTECTED_SERVICE_UNAVAILABLE_ERROR_RESPONSE,
     },
 )

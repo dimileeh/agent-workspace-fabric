@@ -10937,7 +10937,15 @@
                 }
               }
             },
-            "description": "Too Many Requests"
+            "description": "Too Many Requests",
+            "headers": {
+              "Retry-After": {
+                "description": "Backoff value clients should use before retrying; either delta-seconds or an HTTP-date as defined by RFC 7231.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "summary": "Register Callback",
@@ -12448,7 +12456,15 @@
                 }
               }
             },
-            "description": "Too Many Requests"
+            "description": "Too Many Requests",
+            "headers": {
+              "Retry-After": {
+                "description": "Backoff value clients should use before retrying; either delta-seconds or an HTTP-date as defined by RFC 7231.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -14833,7 +14849,15 @@
                 }
               }
             },
-            "description": "Too Many Requests"
+            "description": "Too Many Requests",
+            "headers": {
+              "Retry-After": {
+                "description": "Backoff value clients should use before retrying; either delta-seconds or an HTTP-date as defined by RFC 7231.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "content": {
