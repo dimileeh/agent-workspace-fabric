@@ -13,11 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import unquote, urlsplit
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 RuntimeEnv = Literal["local", "ci", "staging", "prod"]
@@ -223,6 +223,20 @@ def _is_default_local_database_url_or_credentials(database_url: str) -> bool:
     return username == "awf" and password == "awf_dev"
 
 
+def _normalize_callback_allowed_host(value: Any) -> str:
+    host = str(value).strip().rstrip(".").lower()
+    if not host:
+        return ""
+    if host.startswith("["):
+        bracketed_host, bracket, _suffix = host[1:].partition("]")
+        if bracket:
+            return bracketed_host.rstrip(".")
+    if host.count(":") == 1:
+        host_without_port, _separator, _port = host.partition(":")
+        return host_without_port.rstrip(".")
+    return host
+
+
 class Settings(BaseSettings):
     """Single source of truth for runtime configuration.
 
@@ -264,6 +278,18 @@ class Settings(BaseSettings):
     callbacks_enabled: bool = Field(
         default=True,
         description="Whether local external callback delivery registration is enabled.",
+    )
+    callbacks_require_https: bool = Field(
+        default=False,
+        description="Require callback targets to use https:// scheme.",
+    )
+    callbacks_allowed_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
+        default_factory=tuple,
+        description=(
+            "Optional allowlist of callback target hostnames (normalized to lowercase "
+            "without trailing dots or port suffixes). Empty means no callback host "
+            "restriction."
+        ),
     )
     callback_delivery_timeout_seconds: int = Field(default=10, ge=1, le=120)
     callback_delivery_max_attempts: int = Field(default=3, ge=1, le=20)
@@ -396,6 +422,23 @@ class Settings(BaseSettings):
             "pressure reporting. When unset, DinD availability is reported as unknown."
         ),
     )
+
+    @field_validator("callbacks_allowed_hosts", mode="before")
+    @classmethod
+    def _normalize_callback_allowed_hosts(cls, value: Any) -> tuple[str, ...]:
+        if value is None or value == "":
+            return ()
+        if isinstance(value, str):
+            values = value.split(",")
+        elif isinstance(value, (list, tuple)):
+            values = list(value)
+        else:
+            raise ValueError(
+                "callbacks_allowed_hosts must be a comma-separated string, list, or tuple"
+            )
+
+        normalized_hosts = (_normalize_callback_allowed_host(host) for host in values)
+        return tuple(host for host in normalized_hosts if host)
 
     @field_validator(
         "local_capacity_cpu_cores",

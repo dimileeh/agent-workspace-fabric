@@ -7,7 +7,6 @@ REST + MCP stay in lockstep. Keep them narrow: business objects live in
 
 from __future__ import annotations
 
-import ipaddress
 from datetime import datetime
 from typing import Annotated, Any, ClassVar, Literal
 from urllib.parse import urlsplit
@@ -15,6 +14,10 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from awf.common.callback_events import is_valid_callback_subscription_event_type
+from awf.common.callback_targets import (
+    is_public_callback_target_host,
+    validate_callback_target_url_port,
+)
 from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStatus
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
@@ -57,49 +60,6 @@ CallbackEventType = Annotated[str, Field(min_length=1, max_length=64)]
 NetworkPosture = Literal["offline", "restricted", "open"]
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
-
-
-def _looks_like_legacy_ipv4_literal(hostname: str) -> bool:
-    labels = hostname.split(".")
-    if not labels:
-        return False
-
-    for label in labels:
-        if not label:
-            return False
-        lower_label = label.lower()
-        if lower_label.startswith("0x"):
-            hex_digits = lower_label[2:]
-            if not hex_digits or any(
-                character not in "0123456789abcdef" for character in hex_digits
-            ):
-                return False
-            continue
-        if not lower_label.isdigit():
-            return False
-
-    return True
-
-
-def _is_public_callback_target_host(hostname: str) -> bool:
-    normalized = hostname.rstrip(".").lower()
-    try:
-        address = ipaddress.ip_address(normalized)
-    except ValueError:
-        if normalized == "localhost" or normalized.endswith(
-            (".localhost", ".local", ".localdomain")
-        ):
-            return False
-        if "." not in normalized:
-            return False
-        return not _looks_like_legacy_ipv4_literal(normalized)
-
-    ipv4_mapped = getattr(address, "ipv4_mapped", None)
-    target_address: ipaddress.IPv4Address | ipaddress.IPv6Address = (
-        ipv4_mapped if isinstance(ipv4_mapped, ipaddress.IPv4Address) else address
-    )
-
-    return target_address.is_global and not target_address.is_multicast
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -1438,11 +1398,12 @@ class CallbackSubscriptionCreateRequest(BaseModel):
             raise ValueError("target_url must use http or https")
         if not parsed.hostname:
             raise ValueError("target_url must include a host")
+        validate_callback_target_url_port(parsed)
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("target_url must not include userinfo credentials")
         if parsed.fragment:
             raise ValueError("target_url must not include a fragment")
-        if not _is_public_callback_target_host(parsed.hostname):
+        if not is_public_callback_target_host(parsed.hostname):
             raise ValueError("target_url must use a public host")
         return value
 
@@ -1545,6 +1506,12 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
     detail: dict[str, Any] | None = None
+
+
+class HTTPExceptionErrorResponse(BaseModel):
+    """FastAPI ``HTTPException`` envelope for structured API errors."""
+
+    detail: ErrorResponse
 
 
 class HttpExceptionErrorResponse(BaseModel):

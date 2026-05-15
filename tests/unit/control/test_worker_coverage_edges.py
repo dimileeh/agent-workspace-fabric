@@ -34,6 +34,7 @@ from awf.control.worker import (
     _worker_exception_is_transient_db_connection,
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
     QueueDecisionRepository,
@@ -215,6 +216,111 @@ async def test_list_by_status_returns_empty_for_non_positive_limits() -> None:
 
     assert await worker._list_by_status(WorkspaceStatus.ready, limit=0) == []
     assert await worker._list_by_status(WorkspaceStatus.ready, limit=-1) == []
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_candidate_listing_returns_empty_for_non_positive_limits() -> None:
+    worker = ControlWorker(
+        session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+        provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+        config=WorkerConfig(),
+    )
+
+    assert await worker._list_terminal_runtime_candidates(limit=0) == []  # noqa: SLF001
+    assert await worker._list_terminal_runtime_candidates(limit=-1) == []  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_scheduler_filter_helpers_return_empty_for_empty_or_unknown_inputs(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    async with factory() as session:
+        assert (
+            await worker._filter_scheduler_candidate_workspaces(  # noqa: SLF001
+                session,
+                [],
+                limit=1,
+                scoring_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+            )
+            == []
+        )
+        assert await worker._filter_provider_recovery_suppressed(session, []) == []  # noqa: SLF001
+        assert (
+            await worker._filter_provider_recovery_suppressed(  # noqa: SLF001
+                session,
+                [object()],  # type: ignore[list-item]
+            )
+            == []
+        )
+
+
+@pytest.mark.unit
+def test_worker_claim_recheck_helpers_allow_non_claimed_statuses() -> None:
+    ws = Workspace(
+        id="ws_claim_recheck",
+        status=WorkspaceStatus.completed.value,
+        repo_url="git@example.com:repo/app.git",
+        branch_base="main",
+        task_title="claim recheck",
+        task_prompt="prompt",
+        agent="codex",
+    )
+
+    assert (
+        worker_module._claim_recheck_conditions(  # noqa: SLF001
+            WorkspaceStatus.completed,
+            datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        )
+        == ()
+    )
+    assert worker_module._workspace_claim_recheck_passes(  # noqa: SLF001
+        ws,
+        WorkspaceStatus.completed,
+        datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+    )
+
+
+@pytest.mark.unit
+async def test_terminal_runtime_release_groups_multiple_candidate_failures() -> None:
+    worker = ControlWorker(
+        session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+        provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+        runtime_cleaner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(),
+    )
+    candidates = [
+        worker_module._TerminalRuntimeCandidate(  # noqa: SLF001
+            workspace_id="ws_one",
+            status=WorkspaceStatus.failed,
+            repo_url="git@example.com:repo/app.git",
+            compose_project_name="awf_ws_one",
+            compose_file_path=None,
+        ),
+        worker_module._TerminalRuntimeCandidate(  # noqa: SLF001
+            workspace_id="ws_two",
+            status=WorkspaceStatus.cancelled,
+            repo_url="git@example.com:repo/app.git",
+            compose_project_name="awf_ws_two",
+            compose_file_path=None,
+        ),
+    ]
+
+    async def list_candidates(*, limit: int | None = None) -> list[object]:
+        assert limit is not None
+        return candidates
+
+    async def fail_candidate(candidate: object) -> None:
+        assert candidate in candidates
+        raise RuntimeError("release failed")
+
+    worker._list_terminal_runtime_candidates = list_candidates  # type: ignore[method-assign]  # noqa: SLF001
+    worker._release_terminal_runtime_for_candidate = fail_candidate  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(ExceptionGroup, match="terminal runtime release failed") as exc_info:
+        await worker._release_terminal_runtime_resources()  # noqa: SLF001
+
+    assert len(exc_info.value.exceptions) == 2
 
 
 @pytest.mark.unit

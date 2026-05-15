@@ -126,3 +126,35 @@ class TestLifespan:
 
         assert replacement_engine.dispose_count == 1
         assert original_engine.dispose_count == 1
+
+    @pytest.mark.unit
+    def test_lifespan_shuts_down_callback_target_validation_executor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.api import app as app_mod
+
+        class _FakeEngine:
+            async def dispose(self) -> None:
+                pass
+
+        shutdown_calls: list[bool] = []
+
+        def shutdown_callback_executor(*, wait: bool = False) -> None:
+            shutdown_calls.append(wait)
+
+        monkeypatch.setattr(app_mod, "make_engine", lambda _url: _FakeEngine())
+        monkeypatch.setattr(app_mod, "make_session_factory", lambda _e: lambda: None)
+        monkeypatch.setattr(
+            app_mod,
+            "shutdown_callback_target_validation_executor",
+            shutdown_callback_executor,
+            raising=False,
+        )
+        monkeypatch.setenv("AWF_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+
+        app = create_app(use_lifespan=True)
+        with TestClient(app):
+            pass
+
+        assert shutdown_calls == [False]

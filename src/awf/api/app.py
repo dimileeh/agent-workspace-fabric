@@ -43,6 +43,7 @@ from awf.api.routes import (
 )
 from awf.common.config import Settings, get_settings, validate_production_settings
 from awf.db.session import make_engine, make_session_factory
+from awf.service.callbacks import shutdown_callback_target_validation_executor
 
 
 def configure_database(
@@ -78,10 +79,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        current_engine = getattr(app.state, "db_engine", engine)
-        await current_engine.dispose()
-        if current_engine is not engine:
-            await engine.dispose()
+        try:
+            current_engine = getattr(app.state, "db_engine", engine)
+            await current_engine.dispose()
+            if current_engine is not engine:
+                await engine.dispose()
+        finally:
+            shutdown_callback_target_validation_executor(wait=False)
 
 
 def create_app(*, use_lifespan: bool = True) -> FastAPI:
