@@ -20,6 +20,7 @@ from awf.api.app import configure_database, create_app
 from awf.api.routes import callbacks as callbacks_route
 from awf.common import callback_targets
 from awf.common.config import Settings, get_settings
+from awf.db.repositories import CallbackSubscriptionRepository
 from awf.db.session import make_session_factory
 
 _CALLBACK_TOKEN = "callback-secret"
@@ -424,6 +425,115 @@ async def test_register_callback_db_replay_bypasses_limit_when_replay_caches_are
     assert replay.json()["id"] == first.json()["id"]
     _assert_callback_rate_limited(fresh, identity_type="bearer_token")
     assert await _subscription_count(engine) == 1
+
+
+@pytest.mark.unit
+async def test_register_callback_rate_limited_replay_locks_before_durable_lookup(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
+    headers = _authorized_headers(idempotency_key="callback-inflight-rate-limit-replay")
+
+    first = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+    assert first.status_code == 201
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayCache(),  # noqa: SLF001
+    )
+    setattr(
+        app.state,
+        callbacks_route._CALLBACK_REPLAY_KEY_CACHE_STATE_KEY,  # noqa: SLF001
+        callbacks_route._CallbackIdempotencyReplayKeyCache(),  # noqa: SLF001
+    )
+
+    calls: list[str] = []
+    original_lock = CallbackSubscriptionRepository.acquire_idempotency_key_lock
+    original_hash_lookup = CallbackSubscriptionRepository.get_idempotency_request_hash
+
+    async def tracked_lock(self: CallbackSubscriptionRepository, key: str) -> None:
+        calls.append(f"lock:{key}")
+        await original_lock(self, key)
+
+    async def tracked_hash_lookup(
+        self: CallbackSubscriptionRepository,
+        key: str,
+    ) -> str | None:
+        calls.append(f"hash:{key}")
+        return await original_hash_lookup(self, key)
+
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "acquire_idempotency_key_lock",
+        tracked_lock,
+    )
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "get_idempotency_request_hash",
+        tracked_hash_lookup,
+    )
+
+    replay = await client.post("/v1/callbacks", json=_VALID_BODY, headers=headers)
+
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    assert calls[:2] == [
+        "lock:callback-inflight-rate-limit-replay",
+        "hash:callback-inflight-rate-limit-replay",
+    ]
+
+
+@pytest.mark.unit
+async def test_callback_registration_locks_idempotency_key_before_lookup(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    idempotency_key = "callback-create-locks-before-lookup"
+    original_lock = CallbackSubscriptionRepository.acquire_idempotency_key_lock
+    original_lookup = CallbackSubscriptionRepository.get_by_idempotency_key
+
+    async def tracked_lock(self: CallbackSubscriptionRepository, key: str) -> None:
+        calls.append(f"lock:{key}")
+        await original_lock(self, key)
+
+    async def tracked_lookup(
+        self: CallbackSubscriptionRepository,
+        key: str,
+    ) -> object | None:
+        calls.append(f"lookup:{key}")
+        return await original_lookup(self, key)
+
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "acquire_idempotency_key_lock",
+        tracked_lock,
+    )
+    monkeypatch.setattr(
+        CallbackSubscriptionRepository,
+        "get_by_idempotency_key",
+        tracked_lookup,
+    )
+    service = callbacks_route.CallbackService(
+        make_session_factory(engine),
+        settings=_callback_request_admission_settings(limit=10),
+    )
+
+    subscription = await service.register(
+        _callback_payload(
+            name="callback-create-lock",
+            target_url="https://operator.example.com/awf/create-lock",
+        ),
+        idempotency_key=idempotency_key,
+    )
+
+    assert subscription.id.startswith("cb_")
+    assert calls[:2] == [
+        f"lock:{idempotency_key}",
+        f"lookup:{idempotency_key}",
+    ]
 
 
 @pytest.mark.unit

@@ -4458,6 +4458,14 @@ def _operation_idempotency_advisory_lock_key(key: str) -> int:
     return unsigned
 
 
+def _callback_subscription_idempotency_advisory_lock_key(key: str) -> int:
+    digest = hashlib.sha256(f"awf:callback-subscription-idempotency\x00{key}".encode()).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 1 << 63:
+        return unsigned - (1 << 64)
+    return unsigned
+
+
 def _workspace_idempotency_advisory_lock_key(key: str) -> int:
     digest = hashlib.sha256(f"awf:workspace-idempotency\x00{key}".encode()).digest()
     unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
@@ -4556,6 +4564,14 @@ class CallbackSubscriptionRepository:
         self._session = session
         self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
+    async def acquire_idempotency_key_lock(self, key: str) -> None:
+        """Serialize callback subscription idempotency decisions."""
+        lock_key = _callback_subscription_idempotency_advisory_lock_key(key)
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+
     async def create_idempotent(
         self,
         *,
@@ -4569,6 +4585,7 @@ class CallbackSubscriptionRepository:
         idempotency_key: str,
         request_hash: str,
     ) -> tuple[CallbackSubscription, bool]:
+        await self.acquire_idempotency_key_lock(idempotency_key)
         existing = await self.get_by_idempotency_key(idempotency_key)
         if existing is not None:
             if existing.request_hash != request_hash:

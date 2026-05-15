@@ -287,9 +287,9 @@ class CallbackService:
     ) -> CallbackSubscription | None:
         request_hash = callback_request_hash(payload)
         async with self._factory() as session:
-            existing = await CallbackSubscriptionRepository(session).get_by_idempotency_key(
-                idempotency_key
-            )
+            repo = CallbackSubscriptionRepository(session)
+            await repo.acquire_idempotency_key_lock(idempotency_key)
+            existing = await repo.get_by_idempotency_key(idempotency_key)
             if existing is None:
                 return None
             if existing.request_hash != request_hash:
@@ -300,9 +300,9 @@ class CallbackService:
 
     async def get_idempotency_request_hash(self, idempotency_key: str) -> str | None:
         async with self._factory() as session:
-            return await CallbackSubscriptionRepository(session).get_idempotency_request_hash(
-                idempotency_key
-            )
+            repo = CallbackSubscriptionRepository(session)
+            await repo.acquire_idempotency_key_lock(idempotency_key)
+            return await repo.get_idempotency_request_hash(idempotency_key)
 
     async def list_idempotency_replay_keys(self) -> list[tuple[str, str]]:
         async with self._factory() as session:
