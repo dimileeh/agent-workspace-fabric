@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -147,11 +148,19 @@ def _auth_required_operations(app: FastAPI) -> set[tuple[str, str]]:
     for route in app.routes:
         if not isinstance(route, APIRoute):
             continue
-        if not any(dependency.dependency is require_api_token for dependency in route.dependencies):
+        if not _dependant_requires_api_token(route.dependant):
             continue
         for method in route.methods:
             operations.add((route.path_format, method.lower()))
     return operations
+
+
+def _dependant_requires_api_token(dependant: Dependant) -> bool:
+    if dependant.call is require_api_token:
+        return True
+    return any(
+        _dependant_requires_api_token(child_dependant) for child_dependant in dependant.dependencies
+    )
 
 
 def _mark_authorization_header_parameters_required(

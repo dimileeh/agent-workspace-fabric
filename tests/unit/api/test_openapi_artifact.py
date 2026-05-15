@@ -16,6 +16,7 @@ import json
 from collections import Counter
 
 import pytest
+from fastapi import APIRouter, Depends, FastAPI
 
 import awf.api.app as app_module
 from awf.api.app import create_app
@@ -114,6 +115,41 @@ def test_callback_endpoints_expose_authorization_header_in_openapi(openapi_spec:
         assert all(param.get("required") is True for param in authorization_params), (
             f"{method.upper()} /v1/callbacks Authorization header must be required"
         )
+
+
+@pytest.mark.unit
+def test_openapi_auth_contract_detects_resolved_router_level_auth_dependencies() -> None:
+    app = FastAPI()
+
+    def nested_router_auth_guard(_: None = Depends(app_module.require_api_token)) -> None:
+        return None
+
+    router = APIRouter(
+        prefix="/router-auth",
+        dependencies=[Depends(nested_router_auth_guard)],
+    )
+
+    @router.get("")
+    async def router_protected_endpoint() -> dict[str, bool]:
+        return {"ok": True}
+
+    app.include_router(router)
+    app_module._install_openapi_auth_contract(app)
+
+    operation = app.openapi()["paths"]["/router-auth"]["get"]
+    authorization_params = [
+        param
+        for param in operation["parameters"]
+        if param.get("in") == "header" and param.get("name") == "authorization"
+    ]
+
+    assert authorization_params
+    assert authorization_params[0]["required"] is True
+    assert authorization_params[0]["schema"] == {
+        "minLength": 1,
+        "title": "Authorization",
+        "type": "string",
+    }
 
 
 @pytest.mark.unit
