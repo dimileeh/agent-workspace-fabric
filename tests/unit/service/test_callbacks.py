@@ -1065,6 +1065,52 @@ async def test_validated_address_fallback_reuses_one_delivery_timeout_budget(
 
 
 @pytest.mark.unit
+async def test_validated_address_post_attempt_uses_remaining_wall_clock_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class _FakeLoop:
+        now: float = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+    loop = _FakeLoop()
+    wait_for_timeouts: list[float | None] = []
+    monkeypatch.setattr(callback_service_module.asyncio, "get_running_loop", lambda: loop)
+
+    async def fake_wait_for(awaitable: Any, timeout: float | None) -> object:
+        wait_for_timeouts.append(timeout)
+        awaitable.close()
+        loop.now += float(timeout or 0.0)
+        raise TimeoutError("callback POST exceeded wall clock timeout")
+
+    async def poster(
+        _url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+        connect_ip_address: str | None = None,
+    ) -> CallbackPostResult:
+        return CallbackPostResult(status_code=202)
+
+    monkeypatch.setattr(callback_service_module.asyncio, "wait_for", fake_wait_for)
+
+    with pytest.raises(TimeoutError, match="callback POST exceeded wall clock timeout"):
+        await callback_service_module._post_to_validated_callback_addresses(
+            poster,
+            "https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=10.0,
+            connect_ip_addresses=("1.1.1.1",),
+        )
+
+    assert wait_for_timeouts == [10.0]
+
+
+@pytest.mark.unit
 async def test_validated_address_delivery_timeout_before_first_attempt_raises_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

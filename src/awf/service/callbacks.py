@@ -470,12 +470,15 @@ async def _post_to_validated_callback_addresses(
             timed_out_before_attempt = True
             break
         try:
-            return await poster(
-                url,
-                json=json,
-                headers=headers,
+            return await asyncio.wait_for(
+                poster(
+                    url,
+                    json=json,
+                    headers=headers,
+                    timeout=remaining_timeout,
+                    connect_ip_address=connect_ip_address,
+                ),
                 timeout=remaining_timeout,
-                connect_ip_address=connect_ip_address,
             )
         except Exception as exc:  # noqa: BLE001 - later validated addresses may still work.
             exc.add_note(f"callback connect_ip_address={connect_ip_address}")
