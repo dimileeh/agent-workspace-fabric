@@ -194,6 +194,61 @@ async def test_callbacks_endpoints_return_unavailable_when_disabled(
 
 
 @pytest.mark.unit
+async def test_register_callback_rejects_http_target_when_https_required_without_insert(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        api_token=_CALLBACK_TOKEN,
+        callbacks_require_https=True,
+    )
+
+    response = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "target_url": "http://operator.example.com/awf/events"},
+        headers=_authorized_headers(idempotency_key="callback-http-policy"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "error_code": "CALLBACK_TARGET_INVALID",
+        "message": "target_url must use https",
+    }
+    assert await _subscription_count(engine) == 0
+
+
+@pytest.mark.unit
+async def test_register_callback_rejects_non_allowlisted_target_without_insert(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        api_token=_CALLBACK_TOKEN,
+        callbacks_allowed_hosts=("operator.example.com",),
+    )
+
+    response = await client.post(
+        "/v1/callbacks",
+        json={
+            **_VALID_BODY,
+            "target_url": "https://callback-disallowed.example.com/awf/events",
+        },
+        headers=_authorized_headers(idempotency_key="callback-allowlist-policy"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "error_code": "CALLBACK_TARGET_INVALID",
+        "message": "target_url host is not allowlisted",
+    }
+    assert await _subscription_count(engine) == 0
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "target_url",
     [

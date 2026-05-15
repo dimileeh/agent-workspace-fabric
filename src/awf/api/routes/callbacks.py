@@ -15,7 +15,11 @@ from awf.api.schemas import (
     HTTPExceptionErrorResponse,
 )
 from awf.common.config import Settings, get_settings
-from awf.service.callbacks import CallbackIdempotencyConflictError, CallbackService
+from awf.service.callbacks import (
+    CallbackIdempotencyConflictError,
+    CallbackService,
+    CallbackTargetPolicyError,
+)
 
 router = APIRouter(
     prefix="/v1/callbacks",
@@ -47,10 +51,18 @@ async def register_callback(
     _ensure_callbacks_enabled(settings)
     key = _require_idempotency_key(idempotency_key)
     try:
-        subscription = await CallbackService(session_factory).register(
+        subscription = await CallbackService(session_factory, settings=settings).register(
             payload,
             idempotency_key=key,
         )
+    except CallbackTargetPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error_code": "CALLBACK_TARGET_INVALID",
+                "message": str(exc),
+            },
+        ) from exc
     except CallbackIdempotencyConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

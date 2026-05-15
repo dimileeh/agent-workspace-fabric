@@ -70,6 +70,10 @@ class CallbackTargetValidationTimeoutError(ValueError):
     """Raised when callback target validation exhausts its delivery budget."""
 
 
+class CallbackTargetPolicyError(ValueError):
+    """Raised when a callback target violates static registration/delivery policy."""
+
+
 class CallbackHttpPoster(Protocol):
     async def __call__(
         self,
@@ -88,8 +92,14 @@ Clock = Callable[[], datetime]
 class CallbackService:
     """Registration and listing operations for external callbacks."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        settings: Settings | None = None,
+    ) -> None:
         self._factory = session_factory
+        self._settings = settings or get_settings()
 
     async def register(
         self,
@@ -97,6 +107,10 @@ class CallbackService:
         *,
         idempotency_key: str,
     ) -> CallbackSubscription:
+        _validate_callback_target_static_policy(
+            payload.target_url,
+            settings=self._settings,
+        )
         request_hash = callback_request_hash(payload)
         async with self._factory() as session:
             subscription, _created = await CallbackSubscriptionRepository(
@@ -569,27 +583,37 @@ def _isoformat(value: datetime | None) -> str | None:
 
 
 def _validate_callback_target(target_url: str, *, settings: Settings) -> ValidatedCallbackTarget:
+    hostname = _validate_callback_target_static_policy(target_url, settings=settings)
+    connect_ip_addresses = _validate_callback_target_dns(hostname=hostname)
+    return ValidatedCallbackTarget(connect_ip_addresses=connect_ip_addresses)
+
+
+def _validate_callback_target_static_policy(
+    target_url: str,
+    *,
+    settings: Settings,
+) -> str:
     parsed = urlsplit(target_url)
     # Registration validates these too, but delivery may encounter legacy or
     # manually edited rows; keep them as defense-in-depth invariants before DNS.
     if parsed.scheme not in {"http", "https"}:
-        raise ValueError("target_url must use http or https")
+        raise CallbackTargetPolicyError("target_url must use http or https")
     if not parsed.hostname:
-        raise ValueError("target_url must include a host")
+        raise CallbackTargetPolicyError("target_url must include a host")
     if parsed.username is not None or parsed.password is not None:
-        raise ValueError("target_url must not include userinfo credentials")
+        raise CallbackTargetPolicyError("target_url must not include userinfo credentials")
     if parsed.fragment:
-        raise ValueError("target_url must not include a fragment")
+        raise CallbackTargetPolicyError("target_url must not include a fragment")
 
-    host = parsed.hostname.rstrip(".")
+    hostname = parsed.hostname
+    host = hostname.rstrip(".").lower()
     if settings.callbacks_require_https and parsed.scheme != "https":
-        raise ValueError("target_url must use https")
+        raise CallbackTargetPolicyError("target_url must use https")
     if settings.callbacks_allowed_hosts and host not in settings.callbacks_allowed_hosts:
-        raise ValueError("target_url host is not allowlisted")
-    if not is_public_callback_target_host(parsed.hostname):
-        raise ValueError("target_url must use a public host")
-    connect_ip_addresses = _validate_callback_target_dns(hostname=parsed.hostname)
-    return ValidatedCallbackTarget(connect_ip_addresses=connect_ip_addresses)
+        raise CallbackTargetPolicyError("target_url host is not allowlisted")
+    if not is_public_callback_target_host(hostname):
+        raise CallbackTargetPolicyError("target_url must use a public host")
+    return hostname
 
 
 async def _validate_callback_target_with_timeout(
@@ -722,5 +746,6 @@ __all__ = [
     "CallbackIdempotencyConflictError",
     "CallbackPostResult",
     "CallbackService",
+    "CallbackTargetPolicyError",
     "callback_request_hash",
 ]
