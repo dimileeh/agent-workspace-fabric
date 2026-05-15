@@ -6758,6 +6758,9 @@ def _ci_transient_rerun_attempt(
     )
     attempt = current + 1
     state.threads_addressed_ids[key] = str(attempt)
+    if legacy_failures is not None and legacy_failures != failures:
+        legacy_key = _ci_transient_rerun_state_key(head_sha, legacy_failures)
+        state.threads_addressed_ids.pop(legacy_key, None)
     return attempt
 
 

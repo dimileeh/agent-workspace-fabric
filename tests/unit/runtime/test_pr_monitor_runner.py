@@ -797,9 +797,9 @@ def test_ci_transient_rerun_attempt_carries_legacy_rollup_count_forward() -> Non
         run_id="25655330295",
     )
     state = MonitorState()
-    state.threads_addressed_ids[
-        _ci_transient_rerun_state_key("head", (failure, rollup_failure))
-    ] = "1"
+    legacy_key = _ci_transient_rerun_state_key("head", (failure, rollup_failure))
+    current_key = _ci_transient_rerun_state_key("head", (failure,))
+    state.threads_addressed_ids[legacy_key] = "1"
 
     attempt = _ci_transient_rerun_attempt(
         state,
@@ -809,7 +809,8 @@ def test_ci_transient_rerun_attempt_carries_legacy_rollup_count_forward() -> Non
     )
 
     assert attempt == 2
-    assert state.threads_addressed_ids[_ci_transient_rerun_state_key("head", (failure,))] == "2"
+    assert state.threads_addressed_ids[current_key] == "2"
+    assert legacy_key not in state.threads_addressed_ids
 
 
 def _provider_recovery_policy(
