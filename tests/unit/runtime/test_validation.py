@@ -630,6 +630,52 @@ def test_setup_dependency_network_classifier_accepts_pnpm_filter_flags_before_su
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "command",
+    [
+        "yarn --immutable",
+        "yarn --immutable --immutable-cache",
+        "yarn --cwd apps/console --immutable",
+    ],
+)
+def test_setup_dependency_network_classifier_accepts_yarn_option_only_installs(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is not None
+    assert classification.reason_code == SETUP_DEPENDENCY_NETWORK_FAILURE
+    assert classification.transient_category == "dns"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "command",
+    [
+        "yarn --version",
+        "yarn --help",
+        "yarn --immutable --help",
+    ],
+)
+def test_setup_dependency_network_classifier_skips_yarn_non_install_options(
+    command: str,
+) -> None:
+    classification = _classify_setup_dependency_network_failure(
+        command=command,
+        returncode=1,
+        stdout="",
+        stderr="setup command failed: temporary failure in name resolution",
+    )
+
+    assert classification is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("command", "stderr", "expected_category", "expected_package", "expected_host"),
     [
         (

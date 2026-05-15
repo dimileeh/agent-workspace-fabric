@@ -524,6 +524,10 @@ _SETUP_DEPENDENCY_COMMAND_VERBS: dict[str, frozenset[str]] = {
 _SETUP_DEPENDENCY_NESTED_COMMAND_VERBS: dict[str, dict[str, frozenset[str]]] = {
     "go": {"mod": frozenset({"download"})},
 }
+_SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS: dict[str, frozenset[str]] = {
+    "yarn": frozenset({"--immutable", "--immutable-cache"}),
+}
+_SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS = frozenset({"--help", "--version", "-h", "-v"})
 _SETUP_DEPENDENCY_OPTION_VALUE_FLAGS = frozenset(
     {
         "--cache",
@@ -905,7 +909,11 @@ def _direct_dependency_setup_command_match(tokens: list[str], *, start: int) -> 
         return True
     subcommand_index = _next_dependency_tool_subcommand_index(tokens, start=start + 1)
     if subcommand_index is None:
-        return False
+        return _option_only_dependency_install_command_match(
+            tokens,
+            command=command,
+            start=start + 1,
+        )
     subcommand = _command_token_name(tokens[subcommand_index]).lower()
     if subcommand in allowed_verbs:
         return True
@@ -920,6 +928,32 @@ def _direct_dependency_setup_command_match(tokens: list[str], *, start: int) -> 
         return False
     nested_subcommand = _command_token_name(tokens[nested_subcommand_index]).lower()
     return nested_subcommand in nested_allowed_verbs
+
+
+def _option_only_dependency_install_command_match(
+    tokens: list[str], *, command: str, start: int
+) -> bool:
+    install_flags = _SETUP_DEPENDENCY_OPTION_ONLY_INSTALL_FLAGS.get(command)
+    if install_flags is None:
+        return False
+    saw_install_flag = False
+    index = start
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--" or not token.startswith("-"):
+            return False
+        option_name = token.split("=", 1)[0]
+        if option_name in _SETUP_DEPENDENCY_NON_INSTALL_OPTION_FLAGS:
+            return False
+        if option_name in install_flags:
+            saw_install_flag = True
+        if option_name in _SETUP_DEPENDENCY_OPTION_VALUE_FLAGS and "=" not in token:
+            if index + 1 >= len(tokens):
+                return False
+            index += 2
+            continue
+        index += 1
+    return saw_install_flag
 
 
 def _python_module_pip_dependency_setup_command_match(
