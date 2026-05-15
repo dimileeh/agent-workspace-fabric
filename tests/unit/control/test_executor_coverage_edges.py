@@ -1646,12 +1646,12 @@ def test_validation_tier_for_workspace_uses_successful_validate_operation_tier()
                 type=OperationType.validate.value,
                 status=OperationStatus.succeeded.value,
                 payload={"requested_tier": 2},
-                result={"requested_tier": 2},
+                result={"validation": {"requested_tier": 3}},
             ),
         ],
     )
 
-    assert _validation_tier_for_workspace(workspace, profile) == 2  # type: ignore[arg-type]
+    assert _validation_tier_for_workspace(workspace, profile) == 3  # type: ignore[arg-type]
 
 
 @pytest.mark.unit

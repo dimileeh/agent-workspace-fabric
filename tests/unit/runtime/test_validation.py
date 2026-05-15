@@ -2862,6 +2862,23 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
+    def test_pytest_failure_parser_does_not_scan_error_details_for_node_ids(
+        self, tmp_path: Path
+    ) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "FAILED tests/unit/test_foo.py - Cannot import tests/unit/test_bar.py::SomeClass\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == []
+        assert evidence.evidence == [
+            "FAILED tests/unit/test_foo.py - Cannot import tests/unit/test_bar.py::SomeClass"
+        ]
+
+    @pytest.mark.unit
     def test_pytest_failure_parser_ignores_indented_fallback_evidence(self, tmp_path: Path) -> None:
         output = tmp_path / "pytest.txt"
         output.write_text(

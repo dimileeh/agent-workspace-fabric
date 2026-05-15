@@ -71,7 +71,7 @@ _COVERAGE_HEADER_RE = re.compile(r"(?i)Name\s+Stmts\s+Miss\s+Cover")
 _PYTEST_FAILURE_SUMMARY_RE = re.compile(r"^(?P<kind>FAILED|ERROR)\s+(?P<rest>.+)$")
 _PYTEST_PROGRESS_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s+)+(?=(?:FAILED|ERROR)\s+)")
 _PYTEST_NODE_COMPONENT = r"(?:[^\s:\[]+|\[[^\]]*\])+"
-_PYTEST_NODE_ID_RE = re.compile(rf"(?P<node>[^\s:]+\.py(?:::{_PYTEST_NODE_COMPONENT})+)")
+_PYTEST_NODE_ID_RE = re.compile(rf"^(?P<node>[^\s:]+\.py(?:::{_PYTEST_NODE_COMPONENT})+)")
 _PYTEST_EVIDENCE_LIMIT = 20
 _PYTEST_NODE_ID_LIMIT = 20
 _PYTEST_EVIDENCE_MAX_CHARS = 500
@@ -1793,7 +1793,7 @@ def _looks_like_pytest_node_id(value: str) -> bool:
 
 
 def _pytest_node_id_from_text(value: str) -> str | None:
-    match = _PYTEST_NODE_ID_RE.search(value)
+    match = _PYTEST_NODE_ID_RE.match(value.lstrip())
     if match is None:
         return None
     return _strip_pytest_node_id_suffix(match.group("node"))

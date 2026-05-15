@@ -7670,10 +7670,17 @@ def _successful_validate_operation_tier(workspace: Workspace) -> int | None:
             continue
         if getattr(operation, "status", None) != OperationStatus.succeeded.value:
             continue
-        for metadata in (getattr(operation, "result", None), getattr(operation, "payload", None)):
-            tier = _requested_tier_from_metadata(metadata)
-            if tier is not None:
-                tiers.append(tier)
+        operation_tiers = [
+            tier
+            for tier in (
+                _requested_tier_from_metadata(getattr(operation, "result", None)),
+                _requested_tier_from_metadata(getattr(operation, "payload", None)),
+            )
+            if tier is not None
+        ]
+        operation_max = max(operation_tiers, default=None)
+        if operation_max is not None:
+            tiers.append(operation_max)
     return max(tiers, default=None)
 
 
