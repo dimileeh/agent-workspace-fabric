@@ -70,10 +70,12 @@ class ProductionSettingsError(RuntimeError):
     diagnostics: tuple[ProductionSettingsDiagnostic, ...]
 
     def __init__(self, diagnostics: tuple[ProductionSettingsDiagnostic, ...]) -> None:
+        """Create an error carrying every unsafe production-setting diagnostic."""
         self.diagnostics = diagnostics
         super().__init__(self._message())
 
     def _message(self) -> str:
+        """Render diagnostics without including secret or connection-string values."""
         if not self.diagnostics:
             return "Production settings validation failed."
         rendered = "; ".join(
@@ -143,6 +145,7 @@ def settings_guardrails(
 
 
 def _api_token_diagnostic(api_token: str | None) -> ProductionSettingsDiagnostic | None:
+    """Return the production API-token diagnostic, if the token is missing or weak."""
     normalized = _normalized_secret(api_token)
     if normalized is None:
         return ProductionSettingsDiagnostic(
@@ -162,6 +165,7 @@ def _api_token_diagnostic(api_token: str | None) -> ProductionSettingsDiagnostic
 
 
 def _is_weak_api_token(api_token: str) -> bool:
+    """Return true when a normalized token is short or matches known placeholders."""
     normalized = api_token.lower()
     return (
         len(normalized) < _MIN_PRODUCTION_API_TOKEN_LENGTH
@@ -171,6 +175,7 @@ def _is_weak_api_token(api_token: str) -> bool:
 
 
 def _is_repeated_weak_api_token_value(api_token: str) -> bool:
+    """Detect placeholder tokens repeated with common separators."""
     for weak_value in _WEAK_API_TOKEN_VALUES:
         if len(weak_value) >= len(api_token):
             continue
@@ -181,6 +186,7 @@ def _is_repeated_weak_api_token_value(api_token: str) -> bool:
 
 
 def _is_repeated_token_value(api_token: str, value: str, separator: str) -> bool:
+    """Return true when ``api_token`` is composed only of repeated ``value`` parts."""
     count = 0
     remainder = api_token
     while remainder.startswith(value):
@@ -195,6 +201,7 @@ def _is_repeated_token_value(api_token: str, value: str, separator: str) -> bool
 
 
 def _normalized_secret(value: str | None) -> str | None:
+    """Trim a secret-like setting while preserving unset and blank as ``None``."""
     if value is None:
         return None
     normalized = value.strip()
@@ -202,6 +209,7 @@ def _normalized_secret(value: str | None) -> str | None:
 
 
 def _is_default_local_database_url_or_credentials(database_url: str) -> bool:
+    """Return true when a database URL uses bundled local development credentials."""
     if database_url.strip() == DEFAULT_LOCAL_DATABASE_URL:
         return True
     parsed = urlsplit(database_url)
@@ -404,6 +412,7 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _empty_local_capacity_values_are_unset(cls, value: Any) -> Any:
+        """Treat blank optional capacity values from environment variables as unset."""
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
@@ -411,6 +420,7 @@ class Settings(BaseSettings):
     @field_validator("network_posture_open_legacy_cutoff", mode="before")
     @classmethod
     def _empty_network_posture_open_legacy_cutoff_is_unset(cls, value: Any) -> Any:
+        """Treat a blank legacy-network-posture cutoff as an omitted value."""
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
