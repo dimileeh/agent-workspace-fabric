@@ -197,6 +197,8 @@ def _is_repeated_token_value(api_token: str, value: str, separator: str) -> bool
         if not remainder.startswith(separator):
             return False
         remainder = remainder[len(separator) :]
+        if not remainder:
+            return count > 1
     return False
 
 
@@ -210,9 +212,12 @@ def _normalized_secret(value: str | None) -> str | None:
 
 def _is_default_local_database_url_or_credentials(database_url: str) -> bool:
     """Return true when a database URL uses bundled local development credentials."""
-    if database_url.strip() == DEFAULT_LOCAL_DATABASE_URL:
+    normalized = database_url.strip()
+    if not normalized:
         return True
-    parsed = urlsplit(database_url)
+    if normalized == DEFAULT_LOCAL_DATABASE_URL:
+        return True
+    parsed = urlsplit(normalized)
     port = parsed.port
     username = unquote(parsed.username or "")
     password = unquote(parsed.password or "")

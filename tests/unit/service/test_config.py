@@ -102,7 +102,8 @@ def test_production_guardrails_reject_default_local_database_url() -> None:
 
 
 @pytest.mark.unit
-def test_production_guardrails_preserve_explicit_empty_database_url_override() -> None:
+@pytest.mark.parametrize("database_url", ["", "   "])
+def test_production_guardrails_reject_empty_database_url(database_url: str) -> None:
     settings = Settings(
         _env_file=None,
         env="prod",
@@ -111,7 +112,12 @@ def test_production_guardrails_preserve_explicit_empty_database_url_override() -
         callbacks_enabled=False,
     )
 
-    validate_production_settings(settings, database_url="")
+    with pytest.raises(ProductionSettingsError) as exc_info:
+        validate_production_settings(settings, database_url=database_url)
+
+    error = exc_info.value
+    assert "production_default_database_url" in _diagnostic_codes(error)
+    assert "AWF_DATABASE_URL" in _diagnostic_fields(error)
 
 
 @pytest.mark.unit
@@ -140,6 +146,7 @@ def test_production_guardrails_let_malformed_database_url_port_bubble() -> None:
         "default",
         "short",
         "secret-secret-secret-secret",
+        "secret-secret-secret-secret-",
         "admin-admin-admin-admin-admin",
         "apikey-apikey-apikey-apikey",
         "api-key-api-key-api-key-api-key",
