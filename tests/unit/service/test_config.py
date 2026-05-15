@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from awf.common.config import (
+    DEFAULT_LOCAL_DATABASE_URL,
     DEFAULT_MIN_FREE_DISK_BYTES,
     ProductionSettingsError,
     Settings,
@@ -26,7 +27,6 @@ from awf.service.config import (
     service_config_payload,
 )
 
-_DEFAULT_LOCAL_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 _NON_DEFAULT_DATABASE_URL = "postgresql+asyncpg://awf:prod-pass@db.internal:5432/awf"
 _STRONG_PRODUCTION_API_TOKEN = "prod-token-for-awf-operator-apis-32"
 
@@ -88,7 +88,7 @@ def test_production_guardrails_reject_default_local_database_url() -> None:
     settings = Settings(
         _env_file=None,
         env="prod",
-        database_url=_DEFAULT_LOCAL_DATABASE_URL,
+        database_url=DEFAULT_LOCAL_DATABASE_URL,
         api_token=_STRONG_PRODUCTION_API_TOKEN,
         callbacks_enabled=False,
     )
@@ -107,7 +107,7 @@ def test_production_guardrails_reject_empty_database_url(database_url: str) -> N
     settings = Settings(
         _env_file=None,
         env="prod",
-        database_url=_DEFAULT_LOCAL_DATABASE_URL,
+        database_url=DEFAULT_LOCAL_DATABASE_URL,
         api_token=_STRONG_PRODUCTION_API_TOKEN,
         callbacks_enabled=False,
     )
@@ -238,7 +238,7 @@ def test_production_guardrail_diagnostics_redact_sensitive_values() -> None:
     settings = Settings(
         _env_file=None,
         env="prod",
-        database_url=_DEFAULT_LOCAL_DATABASE_URL,
+        database_url=DEFAULT_LOCAL_DATABASE_URL,
         api_token="local-dev-token",
         callbacks_enabled=True,
     )
@@ -248,7 +248,7 @@ def test_production_guardrail_diagnostics_redact_sensitive_values() -> None:
 
     error = exc_info.value
     rendered = f"{error} {_diagnostic_text(error)}"
-    assert _DEFAULT_LOCAL_DATABASE_URL not in rendered
+    assert DEFAULT_LOCAL_DATABASE_URL not in rendered
     assert "awf_dev" not in rendered
     assert "local-dev-token" not in rendered
 

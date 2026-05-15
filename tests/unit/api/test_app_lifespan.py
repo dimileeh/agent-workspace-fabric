@@ -11,9 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from awf.api.app import create_app
-from awf.common.config import ProductionSettingsError
-
-_DEFAULT_LOCAL_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+from awf.common.config import DEFAULT_LOCAL_DATABASE_URL, ProductionSettingsError
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +39,7 @@ class TestLifespan:
 
         monkeypatch.setattr(app_mod, "make_engine", _fail_make_engine)
         monkeypatch.setenv("AWF_ENV", "prod")
-        monkeypatch.setenv("AWF_DATABASE_URL", _DEFAULT_LOCAL_DATABASE_URL)
+        monkeypatch.setenv("AWF_DATABASE_URL", DEFAULT_LOCAL_DATABASE_URL)
         monkeypatch.setenv("AWF_API_TOKEN", "local-dev-token")
 
         with (
