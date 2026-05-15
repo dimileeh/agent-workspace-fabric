@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -29,6 +30,7 @@ from uuid import uuid4
 import click
 import httpx
 import typer
+import typer.rich_utils as typer_rich_utils
 from click.core import ParameterSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -62,6 +64,16 @@ _CONTROL_IDEMPOTENCY_KEY_HELP = (
     "printed to stderr before the request; pass the same value again to safely "
     "retry after a timeout or dropped response."
 )
+_MIN_RICH_HELP_WIDTH = 80
+
+
+def _configure_rich_help_width() -> None:
+    configured_width = typer_rich_utils.MAX_WIDTH
+    terminal_width = shutil.get_terminal_size(fallback=(_MIN_RICH_HELP_WIDTH, 24)).columns
+    typer_rich_utils.MAX_WIDTH = max(configured_width or terminal_width, _MIN_RICH_HELP_WIDTH)
+
+
+_configure_rich_help_width()
 
 
 app = typer.Typer(

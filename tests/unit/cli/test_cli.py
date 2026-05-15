@@ -1213,6 +1213,23 @@ class TestWorkspaceAdoptPr:
         assert "--effort" in result.stdout
 
     @pytest.mark.unit
+    def test_adopt_pr_help_exposes_model_and_effort_flags_when_terminal_is_narrow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import typer.rich_utils as typer_rich_utils
+
+        from awf.cli.main import _configure_rich_help_width
+
+        monkeypatch.setattr(typer_rich_utils, "MAX_WIDTH", 30)
+        _configure_rich_help_width()
+
+        result = _runner.invoke(app, ["workspace", "adopt-pr", "--help"])
+
+        assert result.exit_code == 0
+        assert "--model" in result.stdout
+        assert "--effort" in result.stdout
+
+    @pytest.mark.unit
     def test_posts_pr_url_without_repo_fields(self) -> None:
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
         with patch("awf.cli.main.httpx.request", return_value=response) as mock:
