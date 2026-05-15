@@ -288,6 +288,7 @@ async def test_register_callback_rejects_non_allowlisted_target_without_insert(
         "http://[::1]/events",
         "http://[::ffff:127.0.0.1]/events",
         "http://[::ffff:169.254.169.254]/latest/meta-data",
+        "http://[::ffff:0:169.254.169.254]/latest/meta-data",
         "http://[2002:c0a8:0101::1]/events",
         "http://[fe80::1]/events",
     ],
