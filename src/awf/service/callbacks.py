@@ -699,7 +699,7 @@ async def _post_to_validated_callback_addresses(
                     timeout=remaining_timeout,
                     connect_ip_address=connect_ip_address,
                 ),
-                timeout=remaining_timeout + 1,
+                timeout=remaining_timeout,
             )
         except _CallbackPosterAttemptError as wrapped:
             exc = wrapped.exc

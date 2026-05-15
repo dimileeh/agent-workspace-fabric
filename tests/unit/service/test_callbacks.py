@@ -1115,7 +1115,7 @@ async def test_validated_address_post_attempt_uses_remaining_wall_clock_timeout(
             connect_ip_addresses=("1.1.1.1",),
         )
 
-    assert wait_for_timeouts == [11.0]
+    assert wait_for_timeouts == [10.0]
     assert isinstance(exc_info.value.__cause__, TimeoutError)
 
 
