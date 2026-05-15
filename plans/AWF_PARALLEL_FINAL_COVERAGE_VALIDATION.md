@@ -83,3 +83,46 @@ though pytest itself passed under xdist. AWF's coverage parser now treats a
 provider fail-under line as authoritative evidence, so a workspace-local final
 gate would record this as a coverage policy failure, not an infrastructure or
 stale execution failure.
+
+## Iteration 1: Pytest Node ID Extraction
+
+Status: Complete.
+
+The remaining conformance gap was narrower than the original plan: xdist
+`FAILED`/`ERROR` evidence lines containing class-style pytest node IDs were
+truncated at the class name because the node-id regex rejected `:` in the
+post-`.py::` segment. The parser now accepts valid `::` separators and strips
+only trailing punctuation from the captured token, so class-style and
+parametrized node IDs are preserved in validation evidence.
+
+Changed files:
+
+- `src/awf/runtime/validation.py`
+- `tests/unit/runtime/test_validation.py`
+
+Commands run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_validation.py::TestCoverageEnforcement::test_run_profile_coverage_classifies_xdist_errors_when_percent_passes tests/unit/runtime/test_validation.py::TestCoverageEnforcement::test_pytest_failure_parser_preserves_class_style_xdist_node_ids -q
+```
+
+Initial TDD result before implementation: 2 failed with node IDs truncated to
+the class segment. Final rerun: 2 passed.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_validation.py tests/unit/control/test_executor_coverage_edges.py tests/unit/control/test_executor_validation_fix_cycle.py -q
+```
+
+Result: 306 passed.
+
+```bash
+uv run --python 3.12 --extra dev ruff check src/awf tests
+uv run --python 3.12 --extra dev mypy src/awf
+```
+
+Result: ruff passed; mypy passed.
+
+The full local parallel coverage stress command was not rerun for this
+parser-only iteration. The previous validation run already documented the local
+Docker/Compose coverage caveat for this workspace, and GitHub Actions remains
+the authoritative PR full coverage gate.

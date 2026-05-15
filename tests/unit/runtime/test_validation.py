@@ -2194,9 +2194,10 @@ class TestCoverageEnforcement:
             returncode=1,
             stdout=(
                 "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
-                "test_parallel_fixture_timeout\n"
+                "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]\n"
                 "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
-                "test_parallel_fixture_failure - AssertionError: boom\n"
+                "TestFinalGate::test_parallel_fixture_failure[workspace:local] "
+                "- AssertionError: boom\n"
                 "Name                                      Stmts   Miss  Cover\n"
                 "-------------------------------------------------------------\n"
                 "TOTAL                                     28144    167    99.02%\n"
@@ -2228,22 +2229,27 @@ class TestCoverageEnforcement:
         assert result.status == "passed"
         assert result.reason_code == "COVERAGE_OK"
         assert result.failing_test_node_ids == [
-            "tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout",
-            "tests/unit/control/test_executor.py::test_parallel_fixture_failure",
+            "tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]",
+            "tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_parallel_fixture_failure[workspace:local]",
         ]
         assert result.failing_test_evidence == [
             "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
-            "test_parallel_fixture_timeout",
+            "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]",
             "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
-            "test_parallel_fixture_failure - AssertionError: boom",
+            "TestFinalGate::test_parallel_fixture_failure[workspace:local] "
+            "- AssertionError: boom",
         ]
         assert not result.ok
         assert result.command_result is not None
         assert result.command_result.reason_code == "PYTEST_TEST_FAILURE"
         assert result.command_result.metadata["coverage_reason_code"] == "COVERAGE_OK"
         assert result.command_result.metadata["failing_test_node_ids"] == [
-            "tests/unit/runtime/test_validation.py::test_parallel_fixture_timeout",
-            "tests/unit/control/test_executor.py::test_parallel_fixture_failure",
+            "tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_parallel_fixture_timeout[param:slow]",
+            "tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_parallel_fixture_failure[workspace:local]",
         ]
 
     @pytest.mark.unit
@@ -2794,6 +2800,33 @@ class TestCoverageEnforcement:
         assert evidence.node_ids == ["tests/unit/test_widget.py::test_handles_edges"]
         assert evidence.evidence == [
             "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
+        ]
+
+    @pytest.mark.unit
+    def test_pytest_failure_parser_preserves_class_style_xdist_node_ids(
+        self, tmp_path: Path
+    ) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_fixture_timeout[param:slow]: setup failed\n"
+            "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_case[workspace:local] - AssertionError: boom\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == [
+            "tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_fixture_timeout[param:slow]",
+            "tests/unit/control/test_executor.py::TestFinalGate::test_case[workspace:local]",
+        ]
+        assert evidence.evidence == [
+            "[gw1] [ 33%] ERROR tests/unit/runtime/test_validation.py::"
+            "TestParallelCoverage::test_fixture_timeout[param:slow]: setup failed",
+            "[gw2] [ 66%] FAILED tests/unit/control/test_executor.py::"
+            "TestFinalGate::test_case[workspace:local] - AssertionError: boom",
         ]
 
     @pytest.mark.unit
