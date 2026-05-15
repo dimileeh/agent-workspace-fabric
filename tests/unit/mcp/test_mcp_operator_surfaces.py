@@ -1369,6 +1369,7 @@ class TestMcpOperatorSurfaceParity:
         response = await operator_stack.client.get(
             "/v1/workspaces/overview",
             params={"status": "running"},
+            headers=operator_stack.auth_headers,
         )
         assert response.status_code == 200
         rest = response.json()
@@ -1393,7 +1394,10 @@ class TestMcpOperatorSurfaceParity:
     ) -> None:
         workspace_id = await _seed_validation(operator_stack.factory)
 
-        response = await operator_stack.client.get(f"/v1/workspaces/{workspace_id}/validation")
+        response = await operator_stack.client.get(
+            f"/v1/workspaces/{workspace_id}/validation",
+            headers=operator_stack.auth_headers,
+        )
         assert response.status_code == 200
         rest = response.json()
         mcp = await _call(
@@ -1416,6 +1420,7 @@ class TestMcpOperatorSurfaceParity:
         limited_response = await operator_stack.client.get(
             f"/v1/workspaces/{workspace_id}/validation",
             params={"limit": 1},
+            headers=operator_stack.auth_headers,
         )
         limited_mcp = await _call(
             operator_stack.mcp,
@@ -1435,11 +1440,13 @@ class TestMcpOperatorSurfaceParity:
         workspace_id = await _seed_stale_reasons(operator_stack.factory)
 
         active_response = await operator_stack.client.get(
-            f"/v1/workspaces/{workspace_id}/stale-reasons"
+            f"/v1/workspaces/{workspace_id}/stale-reasons",
+            headers=operator_stack.auth_headers,
         )
         resolved_response = await operator_stack.client.get(
             f"/v1/workspaces/{workspace_id}/stale-reasons",
             params={"include_resolved": "true"},
+            headers=operator_stack.auth_headers,
         )
 
         assert active_response.status_code == 200
@@ -1466,6 +1473,7 @@ class TestMcpOperatorSurfaceParity:
         limited_response = await operator_stack.client.get(
             f"/v1/workspaces/{workspace_id}/stale-reasons",
             params={"include_resolved": "true", "limit": 1},
+            headers=operator_stack.auth_headers,
         )
         limited_mcp = await _call(
             operator_stack.mcp,

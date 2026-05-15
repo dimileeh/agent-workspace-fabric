@@ -44,8 +44,9 @@ def _clear_settings_cache() -> None:
     get_settings.cache_clear()
 
 
-async def _create_workspace(client: AsyncClient) -> str:
-    response = await client.post("/v1/workspaces", json=_BODY)
+async def _create_workspace(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> str:
+    headers = _auth(monkeypatch)
+    response = await client.post("/v1/workspaces", json=_BODY, headers=headers)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
@@ -244,7 +245,7 @@ async def test_sensitive_controls_require_idempotency_key(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
-    workspace_id = await _create_workspace(client)
+    workspace_id = await _create_workspace(client, monkeypatch)
     headers = _auth(monkeypatch)
 
     response = await _call_control(client, workspace_id, action, headers=headers)
@@ -264,7 +265,7 @@ async def test_replay_same_key_returns_same_operation_without_duplicate_rows(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
-    workspace_id = await _create_workspace(client)
+    workspace_id = await _create_workspace(client, monkeypatch)
     stop_calls: list[str | None] = []
 
     async def fake_stop(compose_project_name: str | None) -> None:
@@ -302,7 +303,7 @@ async def test_same_key_with_different_payload_returns_idempotency_conflict(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
-    workspace_id = await _create_workspace(client)
+    workspace_id = await _create_workspace(client, monkeypatch)
     stop_calls: list[str | None] = []
 
     async def fake_stop(compose_project_name: str | None) -> None:
@@ -342,7 +343,7 @@ async def test_same_key_with_different_if_match_returns_idempotency_conflict(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
-    workspace_id = await _create_workspace(client)
+    workspace_id = await _create_workspace(client, monkeypatch)
     stop_calls: list[str | None] = []
 
     async def fake_stop(compose_project_name: str | None) -> None:
@@ -385,7 +386,7 @@ async def test_stale_if_match_rejects_without_mutating(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
-    workspace_id = await _create_workspace(client)
+    workspace_id = await _create_workspace(client, monkeypatch)
     before_counts = await _counts(engine, workspace_id)
     stop_calls: list[str | None] = []
 
