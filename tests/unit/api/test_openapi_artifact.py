@@ -30,9 +30,19 @@ _ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
 
 _API_TOKEN_PROTECTED_REST_OPERATIONS = frozenset(
     {
+        ("get", "/release-readiness"),
         ("get", "/v1/events"),
+        ("get", "/v1/locks"),
+        ("get", "/v1/locks/overlap-graph"),
+        ("get", "/v1/merge-queue"),
+        ("get", "/v1/metrics/failures/summary"),
+        ("get", "/v1/metrics/resources/saturation"),
+        ("get", "/v1/metrics/slo"),
+        ("get", "/v1/metrics/workspaces/summary"),
         ("get", "/v1/operations"),
         ("get", "/v1/operations/{operation_id}"),
+        ("get", "/v1/tasks"),
+        ("get", "/v1/tasks/{task_ref}/attempts"),
         ("get", "/v1/workspaces"),
         ("post", "/v1/workspaces"),
         ("post", "/v1/workspaces/adopt-pr"),

@@ -9,6 +9,7 @@ from fastapi import status as fastapi_status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
+from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import MergeQueueListResponse
 from awf.db.enums import WorkspaceStatus
 from awf.service.merge_queue import (
@@ -20,6 +21,7 @@ router = APIRouter(
     prefix="/v1/merge-queue",
     tags=["merge-queue"],
     dependencies=[Depends(require_api_token)],
+    responses=API_TOKEN_AUTH_ERROR_RESPONSES,
 )
 
 __all__ = ["list_merge_queue"]
