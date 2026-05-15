@@ -10851,11 +10851,19 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPExceptionErrorResponse"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HTTPExceptionErrorResponse"
+                    }
+                  ],
+                  "title": "CallbackRegistrationUnprocessableEntityResponse"
                 }
               }
             },
-            "description": "Callback Target Policy Violation"
+            "description": "Validation Error or Callback Target Policy Violation"
           },
           "503": {
             "content": {

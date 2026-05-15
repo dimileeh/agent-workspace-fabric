@@ -41,8 +41,18 @@ _IDEMPOTENCY_KEY_MAX_LENGTH = 128
         400: {"model": HTTPExceptionErrorResponse, "description": "Bad Request"},
         409: {"model": HTTPExceptionErrorResponse, "description": "Conflict"},
         422: {
-            "model": HTTPExceptionErrorResponse,
-            "description": "Callback Target Policy Violation",
+            "description": "Validation Error or Callback Target Policy Violation",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "title": "CallbackRegistrationUnprocessableEntityResponse",
+                        "oneOf": [
+                            {"$ref": "#/components/schemas/HTTPValidationError"},
+                            {"$ref": "#/components/schemas/HTTPExceptionErrorResponse"},
+                        ],
+                    }
+                }
+            },
         },
     },
 )

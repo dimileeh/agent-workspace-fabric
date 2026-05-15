@@ -202,7 +202,7 @@ def test_callback_endpoints_document_structured_error_responses(
     path = openapi_spec["paths"]["/v1/callbacks"]
     expected_statuses_by_method = {
         "get": {"401", "503"},
-        "post": {"400", "401", "409", "422", "503"},
+        "post": {"400", "401", "409", "503"},
     }
 
     for method, expected_statuses in expected_statuses_by_method.items():
@@ -212,6 +212,16 @@ def test_callback_endpoints_document_structured_error_responses(
         for status_code in expected_statuses:
             schema = responses[status_code]["content"]["application/json"]["schema"]
             assert schema == {"$ref": "#/components/schemas/HTTPExceptionErrorResponse"}
+
+    post_422 = path["post"]["responses"]["422"]
+    assert post_422["description"] == "Validation Error or Callback Target Policy Violation"
+    assert post_422["content"]["application/json"]["schema"] == {
+        "oneOf": [
+            {"$ref": "#/components/schemas/HTTPValidationError"},
+            {"$ref": "#/components/schemas/HTTPExceptionErrorResponse"},
+        ],
+        "title": "CallbackRegistrationUnprocessableEntityResponse",
+    }
 
     wrapper_schema = openapi_spec["components"]["schemas"]["HTTPExceptionErrorResponse"]
     assert wrapper_schema["required"] == ["detail"]

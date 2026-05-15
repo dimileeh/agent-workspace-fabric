@@ -162,6 +162,22 @@ async def test_register_callback_validates_url_events_and_extra_fields(
 
 
 @pytest.mark.unit
+async def test_register_callback_validation_errors_keep_fastapi_shape(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/v1/callbacks",
+        json={key: value for key, value in _VALID_BODY.items() if key != "name"},
+        headers=_authorized_headers(idempotency_key="callback-missing-name"),
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list)
+    assert any(item["loc"] == ["body", "name"] and item["type"] == "missing" for item in detail)
+
+
+@pytest.mark.unit
 async def test_callbacks_endpoints_return_unavailable_when_disabled(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     engine: AsyncEngine,
