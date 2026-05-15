@@ -375,6 +375,27 @@ def test_request_admission_reuses_limiter_without_app_state() -> None:
 
 
 @pytest.mark.unit
+def test_request_admission_none_request_uses_fresh_direct_limiter() -> None:
+    first = admit_request(
+        None,
+        endpoint_family="none_request_test",
+        limit=1,
+        window_seconds=60,
+        reason_code="NONE_REQUEST_RATE_LIMITED",
+    )
+    second = admit_request(
+        None,
+        endpoint_family="none_request_test",
+        limit=1,
+        window_seconds=60,
+        reason_code="NONE_REQUEST_RATE_LIMITED",
+    )
+
+    assert first.allowed is True
+    assert second.allowed is True
+
+
+@pytest.mark.unit
 def test_require_api_token_reports_missing_and_invalid_tokens() -> None:
     missing_settings = Settings(_env_file=None, api_token=None)
     with pytest.raises(HTTPException) as missing:

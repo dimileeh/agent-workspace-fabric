@@ -22,6 +22,7 @@ CLIENT_HOST_IDENTITY_TYPE: Final = "client_host"
 
 _UNKNOWN_CLIENT_HOST: Final = "unknown-client"
 _LIMITER_STATE_KEY: Final = "request_admission_limiter"
+_DIRECT_LIMITER_ATTR: Final = "_awf_request_admission_limiter"
 
 Clock = Callable[[], float]
 AdmissionMetadata = dict[str, str | int]
@@ -144,9 +145,6 @@ class RequestAdmissionLimiter:
         self._last_pruned_windows[window_seconds] = current_window
 
 
-_STATELESS_REQUEST_LIMITER: Final = RequestAdmissionLimiter()
-
-
 def extract_request_identity(
     request: Request | object | None,
     *,
@@ -190,7 +188,7 @@ def admit_request(
 def request_admission_limiter(request: Request | object | None) -> RequestAdmissionLimiter:
     state = request_app_state(request)
     if state is None:
-        return _STATELESS_REQUEST_LIMITER
+        return _direct_request_admission_limiter(request)
 
     existing = getattr(state, _LIMITER_STATE_KEY, None)
     if isinstance(existing, RequestAdmissionLimiter):
@@ -198,6 +196,24 @@ def request_admission_limiter(request: Request | object | None) -> RequestAdmiss
 
     limiter = RequestAdmissionLimiter()
     setattr(state, _LIMITER_STATE_KEY, limiter)
+    return limiter
+
+
+def _direct_request_admission_limiter(
+    request: Request | object | None,
+) -> RequestAdmissionLimiter:
+    if request is None:
+        return RequestAdmissionLimiter()
+
+    existing = getattr(request, _DIRECT_LIMITER_ATTR, None)
+    if isinstance(existing, RequestAdmissionLimiter):
+        return existing
+
+    limiter = RequestAdmissionLimiter()
+    try:
+        setattr(request, _DIRECT_LIMITER_ATTR, limiter)
+    except (AttributeError, TypeError):
+        return limiter
     return limiter
 
 

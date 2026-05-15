@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -95,6 +97,32 @@ def _authorized_headers(
     if idempotency_key is not None:
         headers["Idempotency-Key"] = idempotency_key
     return headers
+
+
+def _callback_payload(**overrides: object) -> api_schemas.CallbackSubscriptionCreateRequest:
+    return api_schemas.CallbackSubscriptionCreateRequest.model_validate(
+        {
+            **_VALID_BODY,
+            **overrides,
+        }
+    )
+
+
+def _callback_response(response_id: str) -> api_schemas.CallbackSubscriptionResponse:
+    now = datetime.now(UTC)
+    return api_schemas.CallbackSubscriptionResponse(
+        id=response_id,
+        name="operator-console",
+        target_url="https://operator.example.com/awf/events",
+        event_types=["workspace.*", "merge.*", "operation.*"],
+        enabled=True,
+        timeout_seconds=10,
+        max_attempts=3,
+        initial_backoff_seconds=5,
+        created_at=now,
+        updated_at=now,
+        disabled_at=None,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -732,6 +760,64 @@ async def test_register_callback_idempotent_replay_returns_original_without_dupl
     assert replay.status_code == 201
     assert replay.json()["id"] == first.json()["id"]
     assert after_count == before_count == 1
+
+
+@pytest.mark.unit
+def test_callback_replay_cache_without_app_state_is_request_local() -> None:
+    request = SimpleNamespace()
+
+    cache = callbacks_route._callback_idempotency_replay_cache(request)
+
+    assert callbacks_route._callback_idempotency_replay_cache(request) is cache
+    assert callbacks_route._callback_idempotency_replay_cache(SimpleNamespace()) is not cache
+    assert callbacks_route._callback_idempotency_replay_cache(None) is not (
+        callbacks_route._callback_idempotency_replay_cache(None)
+    )
+
+
+@pytest.mark.unit
+def test_callback_replay_conflict_does_not_promote_lru_entry() -> None:
+    cache = callbacks_route._CallbackIdempotencyReplayCache(max_entries=2)
+    first_payload = _callback_payload(
+        name="callback-lru-first",
+        target_url="https://operator.example.com/awf/lru-first",
+    )
+    second_payload = _callback_payload(
+        name="callback-lru-second",
+        target_url="https://operator.example.com/awf/lru-second",
+    )
+    cache.remember(
+        first_payload,
+        idempotency_key="callback-lru-first",
+        response=_callback_response("cb_lru_first"),
+    )
+    cache.remember(
+        second_payload,
+        idempotency_key="callback-lru-second",
+        response=_callback_response("cb_lru_second"),
+    )
+
+    with pytest.raises(callbacks_route.CallbackIdempotencyConflictError):
+        cache.replay(
+            _callback_payload(
+                name="callback-lru-first",
+                target_url="https://operator.example.com/awf/lru-conflict",
+            ),
+            idempotency_key="callback-lru-first",
+        )
+
+    third_payload = _callback_payload(
+        name="callback-lru-third",
+        target_url="https://operator.example.com/awf/lru-third",
+    )
+    cache.remember(
+        third_payload,
+        idempotency_key="callback-lru-third",
+        response=_callback_response("cb_lru_third"),
+    )
+
+    assert cache.replay(second_payload, idempotency_key="callback-lru-second") is not None
+    assert cache.replay(first_payload, idempotency_key="callback-lru-first") is None
 
 
 @pytest.mark.unit

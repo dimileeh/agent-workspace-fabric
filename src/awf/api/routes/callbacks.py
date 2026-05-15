@@ -68,11 +68,11 @@ class _CallbackIdempotencyReplayCache:
         cached = self._entries.get(idempotency_key)
         if cached is None:
             return None
-        self._entries.move_to_end(idempotency_key)
         if cached.request_hash != callback_request_hash(payload):
             raise CallbackIdempotencyConflictError(
                 "Idempotency-Key previously used with a different callback request."
             )
+        self._entries.move_to_end(idempotency_key)
         return cached.response.model_copy(deep=True)
 
     def remember(
@@ -89,9 +89,6 @@ class _CallbackIdempotencyReplayCache:
         self._entries.move_to_end(idempotency_key)
         while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
-
-
-_STATELESS_CALLBACK_REPLAY_CACHE = _CallbackIdempotencyReplayCache()
 
 
 @router.post(
@@ -252,7 +249,7 @@ def _callback_idempotency_replay_cache(
 ) -> _CallbackIdempotencyReplayCache:
     state = request_app_state(request)
     if state is None:
-        return _STATELESS_CALLBACK_REPLAY_CACHE
+        return _direct_callback_idempotency_replay_cache(request)
 
     existing = getattr(state, _CALLBACK_REPLAY_CACHE_STATE_KEY, None)
     if isinstance(existing, _CallbackIdempotencyReplayCache):
@@ -260,6 +257,24 @@ def _callback_idempotency_replay_cache(
 
     cache = _CallbackIdempotencyReplayCache()
     setattr(state, _CALLBACK_REPLAY_CACHE_STATE_KEY, cache)
+    return cache
+
+
+def _direct_callback_idempotency_replay_cache(
+    request: Request | object | None,
+) -> _CallbackIdempotencyReplayCache:
+    if request is None:
+        return _CallbackIdempotencyReplayCache()
+
+    existing = getattr(request, _CALLBACK_REPLAY_CACHE_STATE_KEY, None)
+    if isinstance(existing, _CallbackIdempotencyReplayCache):
+        return existing
+
+    cache = _CallbackIdempotencyReplayCache()
+    try:
+        setattr(request, _CALLBACK_REPLAY_CACHE_STATE_KEY, cache)
+    except (AttributeError, TypeError):
+        return cache
     return cache
 
 

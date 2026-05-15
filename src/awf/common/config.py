@@ -106,7 +106,9 @@ class Settings(BaseSettings):
         ge=1,
         description=(
             "Maximum fresh workspace creation requests admitted per request identity "
-            "within one request_admission_window_seconds window."
+            "within one request_admission_window_seconds window. This quota is "
+            "shared by POST /v1/workspaces and POST /v2/workspaces because both "
+            "routes create workspaces."
         ),
     )
     callback_register_rate_limit_count: int = Field(

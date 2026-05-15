@@ -787,6 +787,28 @@ class TestCreateWorkspace:
         _assert_workspace_rate_limited(rejected)
 
     @pytest.mark.unit
+    async def test_v1_and_v2_create_share_workspace_create_rate_limit_bucket(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _workspace_request_admission_settings(
+            limit=1
+        )
+
+        first = await client.post(
+            "/v1/workspaces",
+            json={**_MINIMAL_BODY, "task_title": "shared bucket first v1"},
+        )
+        rejected = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(title="shared bucket second v2"),
+        )
+
+        assert first.status_code == 202
+        _assert_workspace_rate_limited(rejected)
+
+    @pytest.mark.unit
     async def test_returns_202_with_workspace_id(self, client: AsyncClient) -> None:
         response = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
         assert response.status_code == 202
