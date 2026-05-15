@@ -11,6 +11,8 @@ from typing import Final
 
 from starlette.requests import Request
 
+from awf.api.auth_context import request_has_verified_bearer_auth
+
 WORKSPACE_CREATE_ENDPOINT_FAMILY: Final = "workspace_create"
 CALLBACK_REGISTER_ENDPOINT_FAMILY: Final = "callback_register"
 
@@ -142,12 +144,13 @@ def extract_request_identity(
 ) -> RequestAdmissionIdentity:
     """Return a stable, redacted identity for request admission."""
 
-    token = _bearer_token(request)
-    if token is not None:
-        return RequestAdmissionIdentity(
-            identity_type=BEARER_TOKEN_IDENTITY_TYPE,
-            identity_digest=_digest("bearer-token", token),
-        )
+    if request_has_verified_bearer_auth(request):
+        token = _bearer_token(request)
+        if token is not None:
+            return RequestAdmissionIdentity(
+                identity_type=BEARER_TOKEN_IDENTITY_TYPE,
+                identity_digest=_digest("bearer-token", token),
+            )
 
     client_host = _client_host(request)
     return RequestAdmissionIdentity(

@@ -12,6 +12,7 @@ from starlette.datastructures import Headers
 from starlette.requests import Request
 
 import awf.api.deps as deps
+from awf.api.auth_context import VERIFIED_BEARER_AUTH_SCOPE_KEY
 from awf.api.request_admission import (
     CALLBACK_REGISTER_ENDPOINT_FAMILY,
     WORKSPACE_CREATE_ENDPOINT_FAMILY,
@@ -56,10 +57,34 @@ def _request(
 
 
 @pytest.mark.unit
-def test_request_admission_bearer_identity_is_digest_only() -> None:
+def test_request_admission_unverified_bearer_falls_back_to_client_host() -> None:
     raw_token = "secret-token-value"
+    request = _request(authorization=f"Bearer {raw_token}", client_host="203.0.113.20")
+    fallback = _request(client_host="203.0.113.20")
+
     identity = extract_request_identity(
-        _request(authorization=f"Bearer {raw_token}"),
+        request,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+    fallback_identity = extract_request_identity(
+        fallback,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert identity.identity_type == "client_host"
+    assert identity.identity_digest == fallback_identity.identity_digest
+    assert raw_token not in identity.identity_digest
+    assert raw_token not in str(identity.redacted_metadata())
+
+
+@pytest.mark.unit
+def test_request_admission_verified_bearer_identity_is_digest_only() -> None:
+    raw_token = "secret-token-value"
+    request = _request(authorization=f"Bearer {raw_token}")
+    request.scope[VERIFIED_BEARER_AUTH_SCOPE_KEY] = True
+
+    identity = extract_request_identity(
+        request,
         endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
     )
 
@@ -81,14 +106,52 @@ def test_request_admission_invalid_bearer_falls_back_to_client_host() -> None:
 
 
 @pytest.mark.unit
-def test_request_admission_limiter_separates_bearer_tokens() -> None:
+def test_request_admission_limiter_shares_unverified_bearers_by_client_host() -> None:
     limiter = RequestAdmissionLimiter(clock=lambda: 10.0)
     first = extract_request_identity(
-        _request(authorization="Bearer token-a"),
+        _request(authorization="Bearer token-a", client_host="203.0.113.30"),
         endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
     )
     second = extract_request_identity(
-        _request(authorization="Bearer token-b"),
+        _request(authorization="Bearer token-b", client_host="203.0.113.30"),
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+
+    assert first.identity_type == "client_host"
+    assert first.identity_digest == second.identity_digest
+    assert limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=first,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    ).allowed
+    rejected = limiter.admit(
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+        identity=second,
+        limit=1,
+        window_seconds=60,
+        reason_code="WORKSPACE_CREATE_RATE_LIMITED",
+    )
+
+    assert rejected.allowed is False
+    assert rejected.metadata["identity_type"] == "client_host"
+    assert "token-b" not in str(rejected.metadata)
+
+
+@pytest.mark.unit
+def test_request_admission_limiter_separates_verified_bearer_tokens() -> None:
+    limiter = RequestAdmissionLimiter(clock=lambda: 10.0)
+    first_request = _request(authorization="Bearer token-a")
+    second_request = _request(authorization="Bearer token-b")
+    first_request.scope[VERIFIED_BEARER_AUTH_SCOPE_KEY] = True
+    second_request.scope[VERIFIED_BEARER_AUTH_SCOPE_KEY] = True
+    first = extract_request_identity(
+        first_request,
+        endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
+    )
+    second = extract_request_identity(
+        second_request,
         endpoint_family=WORKSPACE_CREATE_ENDPOINT_FAMILY,
     )
 
@@ -120,14 +183,18 @@ def test_request_admission_limiter_separates_bearer_tokens() -> None:
 
 
 @pytest.mark.unit
-def test_request_admission_limiter_separates_fallback_and_bearer_identity() -> None:
+def test_request_admission_limiter_separates_fallback_and_verified_bearer_identity() -> None:
     limiter = RequestAdmissionLimiter(clock=lambda: 10.0)
     fallback = extract_request_identity(
         _request(client_host="203.0.113.12"),
         endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
     )
+    bearer_request = _request(
+        authorization="Bearer token-for-same-host", client_host="203.0.113.12"
+    )
+    bearer_request.scope[VERIFIED_BEARER_AUTH_SCOPE_KEY] = True
     bearer = extract_request_identity(
-        _request(authorization="Bearer token-for-same-host", client_host="203.0.113.12"),
+        bearer_request,
         endpoint_family=CALLBACK_REGISTER_ENDPOINT_FAMILY,
     )
 
@@ -247,6 +314,16 @@ def test_require_api_token_reports_missing_and_invalid_tokens() -> None:
     assert unauthorized.value.headers == {"WWW-Authenticate": "Bearer"}
 
     deps.require_api_token(_bearer_credentials("secret"), settings=configured_settings)
+
+
+@pytest.mark.unit
+def test_require_api_token_marks_request_as_verified_on_success() -> None:
+    settings = Settings(_env_file=None, api_token="secret")
+    request = _request(authorization="Bearer secret")
+
+    deps.require_api_token(_bearer_credentials("secret"), settings=settings, request=request)
+
+    assert request.scope[VERIFIED_BEARER_AUTH_SCOPE_KEY] is True
 
 
 @pytest.mark.unit

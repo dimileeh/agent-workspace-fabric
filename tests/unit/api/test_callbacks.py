@@ -228,7 +228,7 @@ async def test_register_callback_idempotency_replay_bypasses_limit_but_fresh_key
 
 
 @pytest.mark.unit
-async def test_register_callback_separates_fallback_and_bearer_identity(
+async def test_register_callback_uses_client_host_for_unverified_bearer_identity(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
     engine: AsyncEngine,
 ) -> None:
@@ -254,13 +254,14 @@ async def test_register_callback_separates_fallback_and_bearer_identity(
     )
 
     assert fallback.status_code == 201
-    assert bearer.status_code == 201
-    assert await _subscription_count(engine) == 2
+    _assert_callback_rate_limited(bearer, identity_type="client_host")
+    assert await _subscription_count(engine) == 1
 
 
 @pytest.mark.unit
-async def test_register_callback_separates_tokens_and_redacts_rejection_metadata(
+async def test_register_callback_bounds_rotated_unverified_bearers_by_client_host(
     callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
 ) -> None:
     app, client = callback_app_and_client
     app.dependency_overrides[get_settings] = lambda: _callback_request_admission_settings(limit=1)
@@ -286,24 +287,12 @@ async def test_register_callback_separates_tokens_and_redacts_rejection_metadata
             "Idempotency-Key": "callback-token-b-first",
         },
     )
-    rejected = await client.post(
-        "/v1/callbacks",
-        json={
-            **_VALID_BODY,
-            "name": "token-a-second",
-            "target_url": "https://operator.example.com/awf/token-a-second",
-        },
-        headers={
-            "Authorization": f"Bearer {secret_token}",
-            "Idempotency-Key": "callback-token-a-second",
-        },
-    )
 
     assert first.status_code == 201
-    assert second_token.status_code == 201
-    _assert_callback_rate_limited(rejected, identity_type="bearer_token")
-    assert secret_token not in json.dumps(rejected.json())
-    assert f"Bearer {secret_token}" not in json.dumps(rejected.json())
+    _assert_callback_rate_limited(second_token, identity_type="client_host")
+    assert await _subscription_count(engine) == 1
+    assert secret_token not in json.dumps(second_token.json())
+    assert f"Bearer {secret_token}" not in json.dumps(second_token.json())
 
 
 @pytest.mark.unit
