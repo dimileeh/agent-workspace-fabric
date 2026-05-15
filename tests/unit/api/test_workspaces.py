@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,19 +93,43 @@ _PROVIDER_AUTH_ENV_KEYS = (
 _WORKSPACE_API_TOKEN = "unit-test-workspace-api-token"
 _WORKSPACE_AUTH_HEADER = f"Bearer {_WORKSPACE_API_TOKEN}"
 
+_INTERNAL_ERROR_FIELD_KEYS = (
+    "task_external_id",
+    "task_kind",
+    "idempotency_key",
+    "request_hash",
+    "payload_hash",
+    "body_hash",
+)
+
+
+def _iter_response_keys(payload: object) -> Iterator[str]:
+    if isinstance(payload, Mapping):
+        for key, value in payload.items():
+            if isinstance(key, str):
+                yield key
+            yield from _iter_response_keys(value)
+    elif isinstance(payload, (list, tuple)):
+        for item in payload:
+            yield from _iter_response_keys(item)
+
 
 def _assert_no_internal_error_fields(payload: object) -> None:
-    serialized = json.dumps(payload, sort_keys=True)
+    response_keys = set(_iter_response_keys(payload))
 
-    for internal_field in (
-        "task_external_id",
-        "task_kind",
-        "idempotency_key",
-        "request_hash",
-        "payload_hash",
-        "body_hash",
-    ):
-        assert internal_field not in serialized
+    for internal_field in _INTERNAL_ERROR_FIELD_KEYS:
+        assert internal_field not in response_keys
+
+
+@pytest.mark.unit
+def test_internal_error_field_assertion_allows_message_values() -> None:
+    _assert_no_internal_error_fields(
+        {
+            "error_code": "IDEMPOTENCY_CONFLICT",
+            "message": "Retry with the original idempotency_key.",
+            "detail": {"external_id": "WAVE-1"},
+        }
+    )
 
 
 @pytest.fixture(autouse=True)
