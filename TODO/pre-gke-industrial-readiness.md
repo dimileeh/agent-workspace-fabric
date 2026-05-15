@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-15
+Last updated: 2026-05-16
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -79,7 +79,6 @@ Active slices are currently recorded below. The previous active PRs `#242`, `#24
 | TODO area | Slice | Workspace | Agent / model | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
 | P1 Security, Secrets, And Egress Policy | Add bounded request admission for workspace creation and callback registration | `ws_8b76839898f1400abc16ad08` | Codex / `gpt-5.5` | monitoring_pr | Clean retry opened PR [#256](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/256) on 2026-05-15. GitHub checks are rerunning after earlier full-coverage failure evidence; leave the monitor active so it can finish repair/merge. This retry replaced cancelled `ws_b7017872938042129fd09d33`, whose stale worker image ignored `validation.strategy.final_gate: none`. |
-| P1 Security, Secrets, And Egress Policy | Complete low-risk security cleanup audit | `ws_7bad4fd57a2b4995acc9292a` | Codex / `gpt-5.5` | monitoring_pr | Opened PR [#257](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/257) on 2026-05-15; GitHub full coverage is in progress and Greptile is green so far. Scope is intentionally narrow: replace fragile SQL interval interpolation, reduce selected 409/error internal field leakage, and prove doctor known-secret sets are redaction-only. AWF reported advisory owned-path overlap with `ws_163f54bbf14e4ad18f8bc16a` on `src/awf/api/schemas.py` and with `ws_8b76839898f1400abc16ad08` on workspace route/API tests; prompt instructs this workspace not to duplicate auth, callback, rate-limit, or production-config work. |
 
 ### Reschedule Required Slices
 
@@ -89,14 +88,14 @@ local service has been pulled/rebuilt/restarted. The `awf init` / smoke guidance
 slice from PR #161 has merged and is recorded under Completed Slices, so it is
 not listed here.
 
-| TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
-| --- | --- | --- | --- | --- | --- |
-| _none_ | _none_ | _none_ | _none_ | _none_ | `ws_6c3a1f289fe040dfb32cc8d0` was retried after DNS recovered; the first retry `ws_82b51b498cd044d2b4646d67` is superseded, and active retry `ws_716851d0d48f4ff69bcc41ad` now owns the slice. Keep the failed setup attempt recorded under Failed / Superseded for root-cause history. |
+No slices currently require rescheduling. Historical failed attempts are kept
+under Failed / Superseded Slices for root-cause history.
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Security, Secrets, And Egress Policy | Complete low-risk security cleanup audit | `ws_7bad4fd57a2b4995acc9292a` | [#257](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/257) | merged | Completed and merged 2026-05-15 with GitHub CI green. Scope was intentionally narrow: replace fragile SQL interval interpolation, reduce selected 409/error internal field leakage, and prove doctor known-secret sets are redaction-only. |
 | P1 Security, Secrets, And Egress Policy | Add production configuration footgun guardrails | `ws_084580a1fa544b95bcbcab98` | [#255](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/255) | merged | Clean retry completed and merged 2026-05-15 with GitHub CI green. Replaced cancelled `ws_6f426618098f4361be6e4354`, whose stale worker image ignored `validation.strategy.final_gate: none` and entered repeated local full-coverage repair loops. |
 | P1 Security, Secrets, And Egress Policy | Callback auth and SSRF delivery hardening | `ws_60589ae904754135b70e6e9f` | [#249](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/249) | merged | Monitor-only adoption completed and merged 2026-05-15 with GitHub CI green. Replaced failed Spark workspace `ws_e56b535618c649cdb5a60999`, which hit Codex Spark capacity during PR comment repair and stale-active terminalization before the local provider-recovery guard. |
 | P1 MCP And Project Onboarding Client Parity | Expose `adopt-pr` model and effort selection | `ws_163f54bbf14e4ad18f8bc16a` | [#254](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/254) | merged | Completed and merged 2026-05-15 with GitHub CI green. Adds optional model/effort selection for PR monitor adoption and defaults effort to the highest appropriate setting for the chosen model. |
@@ -647,11 +646,13 @@ and production configuration footguns.
   insecure policy, and missing/weak API-token posture in production mode.
   Evidence: PR [#255](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/255)
   merged 2026-05-15 via clean retry workspace `ws_084580a1fa544b95bcbcab98`.
-- [ ] Complete low-risk security cleanup audit from the 2026-05-14 architecture
+- [x] Complete low-risk security cleanup audit from the 2026-05-14 architecture
   review. Acceptance: fragile SQL interval string interpolation is replaced by a
   typed/parameterized SQLAlchemy expression; selected 409/error responses avoid
   unnecessary internal field leakage; and doctor known-secret sets are covered
   by tests proving they are used only for redaction and never emitted.
+  Evidence: PR [#257](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/257)
+  merged 2026-05-15 via workspace `ws_7bad4fd57a2b4995acc9292a`.
 - [x] Add a public AWF Core trust model document covering Docker daemon access,
   local internet egress, secrets, provider auth, GitHub credentials, untrusted
   external text, package installs, and what deterministic Core does and does
