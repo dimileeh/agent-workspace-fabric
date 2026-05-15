@@ -769,7 +769,7 @@ def test_validation_strategy_defaults_preserve_legacy_behavior() -> None:
 
 
 @pytest.mark.unit
-def test_awf_self_profile_uses_targeted_edit_validation_with_local_final_coverage_gate() -> None:
+def test_awf_self_profile_keeps_final_coverage_non_blocking_locally() -> None:
     profile_path = Path(__file__).resolve().parents[3] / ".awf" / "workspace.yml"
     profile = WorkspaceProfile.model_validate(
         yaml.safe_load(profile_path.read_text(encoding="utf-8"))["awf"]
@@ -777,7 +777,7 @@ def test_awf_self_profile_uses_targeted_edit_validation_with_local_final_coverag
 
     assert profile.validation.strategy.baseline_coverage == "skip"
     assert profile.validation.strategy.edit_gate == "targeted"
-    assert profile.validation.strategy.final_gate == "coverage"
+    assert profile.validation.strategy.final_gate == "none"
     assert profile.validation.strategy.reuse_evidence is False
     assert profile.validation.strategy.full_gate_concurrency == 0
     assert profile.validation.coverage.minimum_percent == 99

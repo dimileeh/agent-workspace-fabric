@@ -40,7 +40,7 @@ awf:
     strategy:
       baseline_coverage: skip
       edit_gate: targeted
-      final_gate: coverage
+      final_gate: none
     coverage:
       minimum_percent: 99
       enforce: true

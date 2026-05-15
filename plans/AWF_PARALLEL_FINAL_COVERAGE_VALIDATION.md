@@ -10,12 +10,15 @@ Plan: `plans/AWF_PARALLEL_FINAL_COVERAGE_PLAN.md`
 - Complete: Executor reason codes, failure messages, metadata, and failure
   reason preserve `PYTEST_TEST_FAILURE` when coverage met the requirement but
   pytest failed.
-- Complete: Local full coverage now runs only for
+- Complete: Local full coverage still runs only for
   `validation.strategy.final_gate: coverage` plus a declared coverage command.
   Targeted edit validation still runs with `include_coverage=False`.
-- Complete: AWF self-profile keeps `baseline_coverage: skip` and
-  `edit_gate: targeted`, adds explicit local final coverage at 99%, and uses
-  `parallel_workers: 3` without embedding xdist args in the command.
+- Complete: AWF self-profile keeps `baseline_coverage: skip`,
+  `edit_gate: targeted`, a declared 99% coverage policy, and
+  `parallel_workers: 3` without embedding xdist args in the command. Review
+  iteration `PRRT_kwDOSJAM6s6CPIt5` disables the local final gate for this
+  self-profile because the documented Docker-unavailable workspace run reaches
+  98.82% locally while GitHub Actions remains authoritative.
 - Complete: GitHub Actions full coverage semantics were preserved; CI workflow
   regression tests still pass.
 - Complete: No serial/shared-state grouping was added. The full xdist rerun
@@ -38,7 +41,7 @@ Changed files:
 Commands run:
 
 ```bash
-uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_validation.py::TestCoverageEnforcement::test_run_profile_coverage_classifies_xdist_errors_when_percent_passes tests/unit/control/test_executor_coverage_edges.py::test_local_coverage_runs_only_for_explicit_final_gate_with_coverage_command tests/unit/control/test_executor_coverage_edges.py::test_validation_command_records_omit_coverage_without_local_final_gate tests/unit/control/test_executor_coverage_edges.py::test_validation_command_count_ignores_coverage_without_local_final_gate tests/unit/profiles/test_profiles.py::test_awf_self_profile_uses_targeted_edit_validation_with_local_final_coverage_gate -q
+uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_validation.py::TestCoverageEnforcement::test_run_profile_coverage_classifies_xdist_errors_when_percent_passes tests/unit/control/test_executor_coverage_edges.py::test_local_coverage_runs_only_for_explicit_final_gate_with_coverage_command tests/unit/control/test_executor_coverage_edges.py::test_validation_command_records_omit_coverage_without_local_final_gate tests/unit/control/test_executor_coverage_edges.py::test_validation_command_count_ignores_coverage_without_local_final_gate tests/unit/profiles/test_profiles.py::test_awf_self_profile_keeps_final_coverage_non_blocking_locally -q
 ```
 
 Initial TDD result: 5 failed. Final rerun: 5 passed.
@@ -126,3 +129,28 @@ The full local parallel coverage stress command was not rerun for this
 parser-only iteration. The previous validation run already documented the local
 Docker/Compose coverage caveat for this workspace, and GitHub Actions remains
 the authoritative PR full coverage gate.
+
+## Iteration 2: Non-Blocking Local Final Coverage
+
+Status: Complete.
+
+Review thread `PRRT_kwDOSJAM6s6CPIt5` identified that enabling the AWF
+self-profile local final coverage gate would make local PR creation/monitoring
+fail in the same Docker-unavailable workspace where the recorded full xdist run
+reached only 98.82%. The self-profile now sets `validation.strategy.final_gate:
+none` while preserving the 99% coverage target, coverage command, and
+`parallel_workers: 3` metadata. Generic explicit local final coverage gate
+support is unchanged for profiles that opt into `final_gate: coverage`.
+
+Changed files:
+
+- `.awf/workspace.yml`
+- `tests/unit/profiles/test_profiles.py`
+- `docs/awf-plans/ws_716851d0d48f4ff69bcc41ad.validation.md`
+- `docs/awf-plans/ws_716851d0d48f4ff69bcc41ad.conformance.json`
+- `plans/AWF_PARALLEL_FINAL_COVERAGE_VALIDATION.md`
+- `plans/PRRT_kwDOSJAM6s6CPIt5_LOCAL_COVERAGE_GATE_PLAN.md`
+- `plans/PRRT_kwDOSJAM6s6CPIt5_LOCAL_COVERAGE_GATE_VALIDATION.md`
+
+Commands run are recorded in
+`plans/PRRT_kwDOSJAM6s6CPIt5_LOCAL_COVERAGE_GATE_VALIDATION.md`.
