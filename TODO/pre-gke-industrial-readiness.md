@@ -93,7 +93,7 @@ not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| _none_ | _none_ | _none_ | _none_ | _none_ | `ws_6c3a1f289fe040dfb32cc8d0` was retried as active `ws_82b51b498cd044d2b4646d67` after DNS recovered; keep the failed setup attempt recorded under Failed / Superseded for root-cause history. |
+| _none_ | _none_ | _none_ | _none_ | _none_ | `ws_6c3a1f289fe040dfb32cc8d0` was retried after DNS recovered; the first retry `ws_82b51b498cd044d2b4646d67` is superseded, and active retry `ws_716851d0d48f4ff69bcc41ad` now owns the slice. Keep the failed setup attempt recorded under Failed / Superseded for root-cause history. |
 
 ### Completed Slices
 
